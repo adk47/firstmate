@@ -26,10 +26,23 @@
       `--all-refused` covers only rows whose evidence is a writer REFUSAL (provably pre-send, so one shared reason
       is honest); anything else needs `--force` and an individual `--row`. Dry run unless `--apply`.
   gdpr-pipeline.py watchdog [--page]                    due_at - 3 d without confirmation; ASK > 7 d unanswered
+  gdpr-pipeline.py dsar plan|author|send|clock|trail|states      the DSAR ladder (gdpr_pipeline/dsar.py)
+      plan    the acknowledgement / status update each open statutory request is owed, with its exact body (reads only)
+      author  freeze those bodies and put each up for review; sends nothing
+      send    author, then send every message whose exact body carries the reviewer's approval [--limit N]
+      clock   every statutory request inside 7 d of its date or past it, oldest first [--json | --line | --watch]
+              --line --read-by firstmate is what the firstmate check runs (scripts/gdpr-dsar-clock-check.sh);
+              --watch is the hourly unit on the host (gdpr-dsar-clock.timer): it puts the line in the journal and
+              pages when requests are inside the window and firstmate has not read the clock for 26 h
+      trail   --request N: everything on record for one request (received, checked, messages + hashes + verdicts)
+      states  record each request's derived state (received -> identity_check -> in_progress -> responded -> closed)
+      No --approved-by: what authorises a ladder message is a reviewer verdict bound to its sha256, checked in
+      send.deliver. No verdict, or a gate that cannot run, is a hold. `tick --ladder` runs author + send each hour.
 
 Never deletes: there is no DELETE /api/v3/admin/profile and no muso-cli delete in this pipeline. Store:
 GDPR_STORE (default /var/lib/hydra-gdpr/erasure.sqlite). Exit 2 when any read failed (fail closed).
 Kill switch: /etc/hydra/gdpr-pipeline.disabled (every step that writes or pages refuses to run).
+The ladder has its own as well: /etc/hydra/gdpr-dsar-ladder.disabled (nothing is authored or sent; the clock still reads).
 """
 from __future__ import annotations
 
@@ -45,13 +58,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from gdpr_pipeline import approval, copy, hide_batch, send, sources  # noqa: E402
+from gdpr_pipeline import approval, copy, copy_gate, dsar, hide_batch, send, sources  # noqa: E402
 from gdpr_pipeline import intake as intake_core  # noqa: E402
 from gdpr_pipeline.run import JAN, Run, backfill_table, page_chunks, page_text, SLACK_CHANNEL  # noqa: E402
 from gdpr_pipeline import store  # noqa: E402
 from gdpr_pipeline.store import DEFAULT_PATH, Store  # noqa: E402
 
 KILL = "/etc/hydra/gdpr-pipeline.disabled"
+DSAR_KILL = "/etc/hydra/gdpr-dsar-ladder.disabled"
+DSAR_TICK_LIMIT = 25        # ladder messages that may reach a writer in one tick
 GMAIL_LEDGER = "/root/fmc1-intake/ledger.json"
 SUPPORT_LEDGER = "/root/fmc1-intake/support-ledger.json"
 
@@ -407,6 +422,63 @@ def watchdog(run: Run, page: bool) -> None:
         run.errors.append("watchdog page failed")
 
 
+CLOCK_READS = "clock-reads.json"         # sidecar: {reader: last read}, written by `dsar clock --read-by`
+
+
+CLOCK_CHECK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gdpr-dsar-clock-check.sh")
+READER_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def clock_check_sha() -> str:
+    """sha256 of the firstmate check as it is DEPLOYED beside this file, '' when it cannot be read."""
+    try:
+        with open(CLOCK_CHECK, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return ""
+
+
+def clock_read_stamp(store_path: str, reader: str, now, sha: str = "") -> None:
+    """Record that `reader` read the clock, and with which bytes (`sha`: the check's own sha256, '' when it sent
+    none). A sidecar, never the register, and no run lock: a read must not wait on a tick. Written whole and
+    renamed, so a reader never sees half a file."""
+    if store_path == ":memory:":
+        return
+    path = _state_path(store_path, CLOCK_READS)
+    reads = _load_json(path)
+    reads[reader] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    reads[reader + "_sha"] = sha if READER_SHA_RE.match(sha or "") else ""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(reads, f, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def clock_reader_watch(run: Run, now, page: bool) -> str:
+    """Say so, once a day, when requests are inside the window and the firstmate check is not reading the clock, or
+    the check that is reading it is not the one deployed (`dsar.clock_unread`). The check is registered in a
+    firstmate home by `scripts/gdpr-dsar-clock-register.sh`, on a box no deploy of this repository reaches; this is
+    the half that does deploy, and it makes a missing, dead or out-of-date check loud instead of silent."""
+    reads = _load_json(_state_path(run.store.path, CLOCK_READS))
+    line = dsar.clock_unread(str(reads.get("firstmate") or ""), run.dsar_clock(now), now,
+                             read_sha=str(reads.get("firstmate_sha") or ""), deployed_sha=clock_check_sha())
+    if not line:
+        return ""
+    print("  " + line)
+    if not page:
+        return line
+    last = _state_path(run.store.path, "clock-unread-last.json")
+    today = now.strftime("%Y-%m-%d")
+    if _load_json(last).get("day") == today:
+        return line
+    if slack_post(line):
+        with open(last, "w") as f:
+            json.dump({"day": today}, f)
+    else:
+        run.errors.append("clock-unread page failed")
+    return line
+
+
 APPROVERS = ("U7RP6HKUZ", "U038BM16T7W", "U0AL36NADEY")      # Aaron / Jan / Nick
 
 
@@ -679,6 +751,125 @@ def refuse_send(a, kind: str, items: list[dict]) -> None:
         raise SystemExit(1)
 
 
+def dsar_ladder(run: Run, now, limit: int, send_them: bool) -> None:
+    """Author the ladder messages owed and (with `send_them`) send the approved ones. Prints one line per message.
+
+    Non-fatal, like the scheduled send: a held message is the normal state while a verdict is pending, and a copy
+    file that cannot be read stops the ladder for this run without losing the tick's other work."""
+    if os.path.exists(DSAR_KILL):
+        print(f"dsar ladder: disabled ({DSAR_KILL})")
+        return
+    if not copy_gate.GATE.exists():
+        # No gate on this host: nothing could ever be approved, so nothing is authored. Authoring would make the
+        # older ask stand down for the request (`Run.asks`) and leave it with no first message from anyone. The
+        # ladder starts by itself the first tick the gate is there.
+        print(f"dsar ladder: held, the copy gate is not installed ({copy_gate.GATE})")
+        return
+    try:
+        results = run.dsar_send(now, limit=limit) if send_them else run.dsar_author(now)
+    except dsar.CopyError as exc:
+        run.fail("dsar ladder copy", exc)
+        return
+    tally: dict[str, int] = {}
+    for x in results:
+        state = x.get("state") or ("approved" if x.get("approved") else "held")
+        tally[state] = tally.get(state, 0) + 1
+        print(f"  #{x['register_no']} {x['slot']} {x['variant']} sha256={x['body_sha'][:16]} -> {state} "
+              f"{x.get('why') or x.get('ref') or x.get('verdict_id') or x.get('gate_reason') or ''}")
+    print(f"dsar ladder: {len(results)} message(s) owed: "
+          + (", ".join(f"{n} {s}" for s, n in sorted(tally.items())) or "none"))
+
+
+def cmd_dsar(run: Run, a, now) -> int:
+    if a.action == "plan":
+        items = run.dsar_owed(now)
+        for x in items:
+            print(f"===== #{x['register_no']} {x['class']} {x['slot']} variant={x['variant']} due {x['due_at'][:10]} "
+                  f"need={x['need']}" + (f"  PROBLEM: {x['problem']}" if x["problem"] else
+                                         f" sha256={hashlib.sha256(x['text'].encode()).hexdigest()}"))
+            if a.bodies and x["text"]:
+                print(x["text"] + "\n")
+        print(f"dsar plan: {len(items)} message(s) owed, {sum(1 for x in items if x['problem'])} with a problem")
+    elif a.action == "author":
+        dsar_ladder(run, now, 0, send_them=False)
+        run.dsar_states()
+    elif a.action == "send":
+        dsar_ladder(run, now, a.limit, send_them=True)
+        run.dsar_states()
+    elif a.action == "states":
+        print(f"dsar states: {run.dsar_states()} request(s) changed state")
+    elif a.action == "extend":
+        # Records the NEED for an Art. 12(3) extension against one request. It sends nothing and moves no date: the
+        # ladder selects the notice only when every other condition also holds (`dsar.owed`), the notice is gated
+        # like any message, and the date moves when the notice has been sent.
+        row = next((r for r in run.store.all() if r["register_no"] == a.request), None)
+        why = ""
+        if not row:
+            why = f"no request #{a.request} in the register"
+        elif row["class"] not in dsar.STATUTORY or row["status"] != "open":
+            why = "not an open erasure or access request"
+        elif not a.evidence.strip() or not a.ruling.strip():
+            why = "--evidence (why more time is necessary for THIS request) and --ruling (who ruled so) are both needed"
+        elif now >= dsar.due(row):
+            why = "the date has passed: an extension never covers lateness already incurred"
+        elif row.get("extended_until"):
+            why = "this request's date has already been moved once"
+        if why:
+            print(f"dsar extend: refused, {why}")
+            return 1
+        run.store.update(row["id"], "extension_need", extension_need=a.evidence.strip(),
+                         extension_need_ruling=a.ruling.strip())
+        print(f"dsar extend: need recorded for #{a.request} under {a.ruling.strip()}; nothing sent, no date moved")
+    elif a.action == "clock":
+        clock = run.dsar_clock(now)
+        if a.json:
+            print(json.dumps(clock, sort_keys=True))
+        elif a.line:
+            # The firstmate page (scripts/gdpr-dsar-clock-check.sh): one line, or nothing when no request is inside
+            # the window. Nothing printed is a READ that found nothing; a clock that cannot be read exits non-zero.
+            line = dsar.clock_line(clock)
+            if line:
+                print(line)
+            if a.read_by:
+                clock_read_stamp(run.store.path, a.read_by, now, a.reader_sha)
+        elif a.watch:
+            # The hourly unit (gdpr-dsar-clock.timer, scripts/install-aux-units.sh). It is NOT a writing run: it takes
+            # no run lock, so an hour-long tick cannot make the clock skip, and it is not `--page`, which would. The
+            # line goes to the journal every hour, so what the clock said and when can be read back. The page is the
+            # one about the reader, and the pipeline kill file silences pages as it does everywhere else; the line
+            # firstmate reads is a read, and no kill file stops it.
+            print(dsar.clock_line(clock) or f"GDPR clock: nothing inside {clock['alarm_days']} d of its date "
+                                           f"({clock['open']} open)")
+            clock_reader_watch(run, now, page=not os.path.exists(KILL))
+        else:
+            print(dsar.clock_line(clock) or f"GDPR clock: nothing inside {clock['alarm_days']} d "
+                                                             f"of its date ({clock['open']} open)")
+            for x in clock["alarm"]:
+                print(f"  #{x['register_no']} {x['class']} {x['state']} received {x['received_at'][:10]} due "
+                      f"{x['due_at'][:10]} ({x['days_left']:+.1f} d) need={x['need']} last message "
+                      f"{x['last_message_at'][:10] or 'none'}" + (f" held: {x['held']}" if x["held"] else ""))
+    elif a.action == "trail":
+        trail = run.dsar_trail(a.request)
+        if trail is None:
+            print(f"no request #{a.request} in the register")
+            return 1
+        print(json.dumps(trail, indent=2, sort_keys=True))
+    return 2 if run.errors else 0
+
+
+def cmd_access(run: Run, a, now) -> int:
+    """Prints counts, hashes and reasons only: never a value from the copy, and never an address."""
+    if a.action == "build":
+        out = run.access_build(a.request, record=a.record)
+    else:
+        if os.path.exists(DSAR_KILL):
+            print(f"access deliver: disabled ({DSAR_KILL})")
+            return 0
+        out = run.access_deliver(a.request, now, dry_run=a.dry_run)
+    print(json.dumps(out, indent=2, sort_keys=True))
+    return 2 if run.errors else (0 if out["state"] in ("built", "sent", "would_send", "skipped") else 1)
+
+
 def hold_lock(store_path: str):
     """One run at a time, or two hourly ticks stack up. Every decide pass is ~5 network reads per stale row (each
     Trino query is a `kubectl exec`), so the tick is minutes long by design; a second run starting on top of it
@@ -718,6 +909,12 @@ def main() -> int:
                            help="send at most N letters per kind, OLDEST deadline first (0 = no cap)")
             p.add_argument("--manifest", default="",
                            help="send EXACTLY these requests (the pinned batch file), instead of oldest-first")
+            # The DSAR ladder. Off unless asked for, like --send; what authorises each message is its reviewer
+            # verdict, so there is no --approved-by for it.
+            p.add_argument("--ladder", action="store_true",
+                           help="also author the acknowledgements / status updates owed and send the approved ones")
+            p.add_argument("--ladder-limit", type=int, default=DSAR_TICK_LIMIT,
+                           help=f"send at most N ladder messages this tick (default {DSAR_TICK_LIMIT})")
         p.add_argument("--out")
         p.add_argument("--page", action="store_true")
     p = sub.add_parser("intake", help="record one request pushed by another pipeline (ids only, no bodies)")
@@ -763,6 +960,28 @@ def main() -> int:
     p.add_argument("--apply", action="store_true", help="write (default: dry run)")
     p = sub.add_parser("watchdog")
     p.add_argument("--page", action="store_true")
+    p = sub.add_parser("dsar", help="the DSAR ladder: acknowledgement, status updates, the clock and the trail")
+    p.add_argument("action", choices=("plan", "author", "send", "clock", "trail", "states", "extend"))
+    p.add_argument("--evidence", default="", help="extend: why more time is necessary for this request")
+    p.add_argument("--ruling", default="", help="extend: the id of the ruling that found the need")
+    p.add_argument("--limit", type=int, default=0, help="send: at most N messages (0 = no cap)")
+    p.add_argument("--bodies", action="store_true", help="plan: print each exact body")
+    p.add_argument("--json", action="store_true", help="clock: one JSON object")
+    p.add_argument("--line", action="store_true", help="clock: the one-line page, or nothing when the window is empty")
+    p.add_argument("--read-by", default="", choices=("", "firstmate"),
+                   help="clock --line: record that this reader read the clock (the tick pages when nobody has)")
+    p.add_argument("--reader-sha", default="",
+                   help="clock --read-by: sha256 of the check doing the reading (the unit pages when it is not the "
+                        "deployed scripts/gdpr-dsar-clock-check.sh)")
+    p.add_argument("--watch", action="store_true",
+                   help="clock: the hourly unit - print the line, page when firstmate has stopped reading the clock")
+    p.add_argument("--request", type=int, default=0, help="trail: the register number")
+    p = sub.add_parser("access", help="the Art. 15 answer: build the copy of one account's data, and deliver it")
+    p.add_argument("action", choices=("build", "deliver"))
+    p.add_argument("--request", type=int, required=True, help="the register number")
+    p.add_argument("--record", action="store_true",
+                   help="build: write the copy beside the register (0600) and put its hash on the trail")
+    p.add_argument("--dry-run", action="store_true", help="deliver: say what would be sent, send nothing")
     p = sub.add_parser("dedupe", help="report (or --apply) the same customer event opened under two row keys")
     p.add_argument("--apply", action="store_true")
     p = sub.add_parser("reconcile", help="report (or --apply) the `unknown` letters the writer refused BEFORE posting")
@@ -773,7 +992,9 @@ def main() -> int:
     a = ap.parse_args()
 
     writes = a.cmd in ("backfill", "tick", "decide", "mark-hidden", "intake") or getattr(a, "open_prs", False) or \
-        getattr(a, "page", False) or getattr(a, "send", False) or getattr(a, "apply", False)
+        getattr(a, "page", False) or getattr(a, "send", False) or getattr(a, "apply", False) or \
+        (a.cmd == "dsar" and a.action in ("author", "send", "states", "extend")) or \
+        (a.cmd == "access" and (a.action == "deliver" or getattr(a, "record", False)))
     if writes and os.path.exists(KILL):
         print(f"gdpr-pipeline disabled ({KILL})")
         return 0
@@ -787,6 +1008,10 @@ def main() -> int:
 
     if a.cmd == "intake":
         return cmd_intake(run, a)
+    if a.cmd == "dsar":
+        return cmd_dsar(run, a, now)
+    if a.cmd == "access":
+        return cmd_access(run, a, now)
 
     if a.cmd in ("backfill", "tick"):
         # backfill is the bootstrap: it searches the WHOLE lookback (a first run has no cursor, so a 3-hour window
@@ -797,6 +1022,12 @@ def main() -> int:
         if a.cmd == "tick":
             run.mark_hidden()
             watchdog(run, a.page)
+            clock_reader_watch(run, now, a.page)
+            # BEFORE the scheduled send: a statutory request the ladder has authored a message for gets no legacy ask
+            # (Run.asks), so the ladder has to have looked at the hour's new requests first.
+            if getattr(a, "ladder", False):
+                dsar_ladder(run, now, a.ladder_limit, send_them=True)
+            run.dsar_states()
             # AFTER the read-back: `mark_hidden` is what turns a landed hide into hidden_at, so a confirmation
             # materialised before it would miss the rows this tick just landed. A send never changes that ordering.
             if getattr(a, "send", False):
@@ -970,6 +1201,7 @@ def main() -> int:
         return cmd_resolve(run, a)
     elif a.cmd == "watchdog":
         watchdog(run, a.page)
+        clock_reader_watch(run, now, a.page)
 
     if run.errors:
         print(f"{len(run.errors)} read(s) failed; exit 2 (nothing was recorded for those rows)")

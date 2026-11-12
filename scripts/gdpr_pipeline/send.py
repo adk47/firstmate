@@ -42,7 +42,7 @@ import re
 import shutil
 import subprocess
 
-from . import copy
+from . import copy, copy_gate, dsar
 from .store import now_iso
 
 INTERCOM_WRITER = "intercom-ops-write.sh"      # resolved next to the CLI (scripts/), never hand-typed
@@ -435,6 +435,37 @@ def _mail_send_new_thread(email: str, text: str, approved_by: str, dry_run: bool
     return (out.stdout.strip().splitlines() or ["sent"])[-1][:300]
 
 
+def _mail_send_attachment(email: str, text: str, key: str, subject: str, attach: str,
+                          mailbox: str = MAIL_ACCOUNT) -> str:
+    """A new thread to ONE address with ONE file attached: the Art. 15 copy (Run.access_deliver). No dry-run arm
+    and no reply-all: the caller has already decided, and the only recipient is the account's own address."""
+    missing = _env_missing(GOG_ENV)
+    if missing:
+        raise Unknown(f"{missing} is not set: gog cannot unlock its keyring")
+    gog = shutil.which("gog")
+    if not gog:
+        raise Unknown("gog is not on PATH: no mail leaves this host without it")
+    if not (email and subject and attach and os.path.isfile(attach)):
+        raise Unknown("a copy needs an address, a subject and a file that exists")
+    cmd = [gog, "gmail", "send", "--account", mailbox, "--to", email, "--subject", subject, "--body", text,
+           "--attach", attach]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=_with_key(key))
+    except subprocess.TimeoutExpired as exc:
+        raise Ambiguous(f"gog gmail send timed out after {exc.timeout}s with the message built: it may be sent, "
+                        f"so this is never a retry") from exc
+    if out.returncode != 0:
+        raise Ambiguous(f"gog gmail send exited rc {out.returncode} after being invoked: "
+                        f"{(out.stderr or out.stdout).strip()[:300]}")
+    return (out.stdout.strip().splitlines() or ["sent"])[-1][:300]
+
+
+def is_gated(kind: str, slot: str) -> bool:
+    """A DSAR ladder message: it sends only on a reviewer verdict bound to its exact body. The SLOT is read as well
+    as the kind, so a caller cannot move a ladder message past the gate by naming another kind."""
+    return kind in dsar.GATED_KINDS or slot in dsar.GATED_KINDS or slot.startswith("status-")
+
+
 def adapter(name: str):
     """Resolved at CALL time (not a module-level dict) so a test can patch one writer and the real code path
     still runs; a module-level dict freezes the function object and makes that patch a no-op."""
@@ -525,6 +556,16 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
         return {"state": "skipped", "why": f"claimed {prior['at']} and {prior['state']} - unfinished, a letter may "
                                           f"be out", "ledger": prior}
 
+    if kind == "ask":
+        # The older ask is only the fallback behind the ladder's reviewed message (`dsar.older_ask`). The batch was
+        # listed earlier, perhaps approved an hour ago; the row is read again here, so an ask never goes beside a
+        # ladder message that was approved or sent in between. Not ledgered: nothing was refused, the slot stays free.
+        from datetime import datetime, timezone
+        held = run.older_ask_held(run.store.get(rid) or {}, item.get("kind") or "", datetime.now(timezone.utc))
+        if held:
+            run.log(f"{who} row {rid}: ask not sent ({held})")
+            return {"state": "skipped", "why": held}
+
     if item.get("refuse"):
         # A letter the register knows it must not send yet (unapproved copy the ruling requires). Ledgered as
         # `refused`, so it is retryable - once the copy is approved the same slot sends it - and never a silent skip.
@@ -541,6 +582,25 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
                              idem=idem_key(rid, slot, item["text"]))
         run.log(f"{who} row {rid}: not sent ({exc})")
         return {"state": "refused", "why": str(exc)}
+
+    gated = is_gated(kind, slot)
+    if gated:
+        # A ladder message is the body FROZEN in `dsar_messages` when it was authored: that row is what the reviewer
+        # saw and what the evidence trail shows. Text that is not that body has no review to point at.
+        frozen = run.store.message(rid, slot)
+        why = ""
+        if not frozen or frozen["body_sha"] != body_sha(item["text"]):
+            why = (f"the {slot} text is not the authored body on record for this request: a ladder message is sent "
+                   f"only as the exact bytes that were put up for review")
+        elif channel == "mail_new_thread":
+            # A new thread carries a lead line and a subject of our own, and neither is part of the reviewed body.
+            why = ("this request can only be answered by opening a new mail thread, whose lead line and subject are "
+                   "not reviewed copy: held until a reviewed form exists for that route")
+        if why:
+            run.store.claim_send(rid, slot, "none", "", body_sha(item["text"]), "gate:none", "refused", detail=why,
+                                 idem=idem_key(rid, slot, item["text"]))
+            run.log(f"{who} row {rid}: not sent ({why})")
+            return {"state": "refused", "why": why}
 
     # OPTION 2 (firstmate 073): a new thread from support@. The mandatory first line is part of the BODY, so it must be
     # in the text BEFORE the body sha and the idem key are computed: a changed body is a different letter, and the
@@ -586,6 +646,25 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
     if dry_run:
         return {"state": "dry-run", "channel": channel, "target": target}
 
+    if gated:
+        # THE GATE. Asked here, on the exact bytes, after every other refusal and immediately before the claim: there
+        # is no path from a ladder message to a writer that does not pass this line. Anything but a verified
+        # approval of this body is a hold - a pending verdict, a refusal, a rewrite, a gate that is missing or
+        # cannot run - ledgered `refused` (retryable on the same slot once the verdict lands), never a send.
+        # The campaign is the AUTHORED message's kind, read from the frozen row, never the caller's argument.
+        ans = copy_gate.check(frozen["kind"], item["text"], variant=frozen["variant"], slot=slot)
+        changed = (frozen["gate_result"], frozen["verdict_id"]) != (ans.result, ans.verdict_id)
+        run.store.update_message(rid, slot, "dsar_gate" if changed else "",
+                                 state="approved" if ans.ok else "held", **ans.as_cols())
+        if not ans.ok:
+            why = f"copy gate {ans.result}: {ans.reason}"[:400]
+            run.store.claim_send(rid, slot, "none", "", body_sha(item["text"]), "gate:none", "refused", detail=why,
+                                 idem=idem_key(rid, slot, item["text"]))
+            run.log(f"{who} row {rid}: held ({why})")
+            return {"state": "held", "why": why, "gate": ans.result}
+        # The authorisation on the ledger row IS the verdict: no person approves this copy.
+        approved_by = f"gate:{ans.verdict_id}"
+
     key = idem_key(rid, slot, item["text"])
     # CLAIM BEFORE SEND, carrying the letter's id: from here on a second attempt sees a claim and stands down.
     run.store.claim_send(rid, slot, channel, target, body_sha(item["text"]), approved_by, "sending", idem=key)
@@ -608,6 +687,11 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
     # records itself and nothing else, because `confirmed_at` is what takes the row out of the confirmation queue and
     # only the FINAL letter may do that.
     run.store.stamp_sent(rid, kind, slot, ref)
+    if gated:
+        run.store.update_message(rid, slot, "dsar_sent", state="sent")
+        if frozen.get("next_contact_at"):
+            # The date this message promised the requester. The ladder times the next message from it.
+            run.store.update(rid, "next_contact", next_contact_at=frozen["next_contact_at"])
     return {"state": "sent", "channel": channel, "target": target, "ref": ref, "idem": key, "slot": slot}
 
 

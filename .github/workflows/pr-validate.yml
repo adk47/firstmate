@@ -2228,6 +2228,15 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_gdpr_pipeline
+      - name: Run GDPR DSAR ladder tests
+        # scripts/gdpr_pipeline/dsar.py + copy_gate.py: the statutory date (never later than either reading
+        # of one month), the identity chain (a name match is not a tie; no variant asks for an identity
+        # document), acknowledgement / status updates, and NO VERDICT NO SEND: a ladder message reaches a
+        # writer only on a reviewer approval of its exact bytes under the GDPR rubric; a pending, refused,
+        # missing or unrunnable gate holds. Stdlib unittest, targeted by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_gdpr_dsar
       - name: Run Caroline billing and hide boundary tests
         # policies/caroline-billing-and-hide.json states, per billing shape, whether Caroline answers from a
         # read, performs one bounded write, or hands off, plus the refund caps and every undo. This pins it to

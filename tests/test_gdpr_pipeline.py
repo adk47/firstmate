@@ -57,24 +57,37 @@ def page(**kw):
 
 
 class Identity(unittest.TestCase):
-    def test_arpad_is_path_c(self):
+    def test_a_name_match_alone_is_not_a_tie_to_the_page(self):
+        """Captain 2026-11-12: a name proves who is writing at most, not that the page is theirs. The old path C
+        (the requester's name equals the page name) asks for the tie itself, verified sender or not."""
         r = Requester(name="Arpad Laczkovszki", email="arpad.laczkovszki@pm.me", verified=True)
         d = identity.decide([page()], r, "privacy_erasure")
-        self.assertEqual((d.verdict, d.basis), ("PASS_C", "C"))
-        # ...and the SAME name/email from an unverified ticket is an ASK, never a hide
+        self.assertEqual((d.verdict, d.basis), ("ASK_IDENTITY", ""))
+        self.assertIn("not a tie", d.pages[0].why)
         d2 = identity.decide([page()], Requester(name="Arpad Laczkovszki",
                                                  email="arpad.laczkovszki@pm.me"), "privacy_erasure")
         self.assertEqual(d2.verdict, "ASK_IDENTITY")
-        self.assertIn("not verified", d2.pages[0].why)
 
-    def test_email_local_part_alone_counts_for_c(self):
+    def test_email_local_part_alone_is_not_a_tie_either(self):
         r = Requester(name="", email="laczkovszkiarpad@pm.me", verified=True)
-        self.assertEqual(identity.decide([page()], r, "privacy_erasure").verdict, "PASS_C")
+        self.assertEqual(identity.decide([page()], r, "privacy_erasure").verdict, "ASK_IDENTITY")
 
-    def test_big_name_goes_to_jan_not_c(self):
+    def test_a_name_match_on_a_big_name_page_is_an_ask_not_a_persons_queue(self):
         r = Requester(name="Arpad Laczkovszki")
-        self.assertEqual(identity.decide([page(popularity=61)], r, "privacy_erasure").verdict, "JAN_BIGNAME")
-        self.assertEqual(identity.decide([page(credit_count=50)], r, "privacy_erasure").verdict, "JAN_BIGNAME")
+        self.assertEqual(identity.decide([page(popularity=61)], r, "privacy_erasure").verdict, "ASK_IDENTITY")
+        self.assertEqual(identity.decide([page(credit_count=50)], r, "privacy_erasure").verdict, "ASK_IDENTITY")
+
+    def test_no_code_path_returns_a_name_match_pass(self):
+        """PASS_B / PASS_C stay defined for rows decided before the ruling; nothing produces them now."""
+        reqs = [Requester(name="Arpad Laczkovszki", verified=True), Requester(email="laczkovszkiarpad@pm.me",
+                                                                              verified=True),
+                Requester(account_id=9, account_names=("Arpad Laczkovszki",), verified=True),
+                Requester(account_id=9, account_names=("Arpad Laczkovszki",), name="Arpad Laczkovszki",
+                          email="arpad.laczkovszki@pm.me", verified=True)]
+        for cls in ("privacy_erasure", "dmca_takedown", "legal_threat"):
+            for r in reqs:
+                for p in (page(), page(popularity=61), page(website="https://pm.me")):
+                    self.assertNotIn(identity.decide_page(p, r, cls).verdict, ("PASS_B", "PASS_C"), (cls, r, p))
 
     def test_claim_is_a_path_not_a_requirement(self):
         claimed = page(is_claimed=True, claim_user_ids=frozenset({42}))
@@ -83,9 +96,10 @@ class Identity(unittest.TestCase):
         self.assertEqual(identity.decide([claimed], Requester(name="Arpad Laczkovszki", account_id=7),
                                          "privacy_erasure").verdict, "ASK_IDENTITY")
 
-    def test_path_b_needs_the_accounts_name_to_match(self):
-        self.assertEqual(identity.decide([page()], Requester(account_id=9, account_names=("Arpad Laczkovszki",)),
-                                         "privacy_erasure").verdict, "PASS_B")
+    def test_an_account_whose_name_matches_is_asked_to_claim_the_page(self):
+        d = identity.decide([page()], Requester(account_id=9, account_names=("Arpad Laczkovszki",)), "privacy_erasure")
+        self.assertEqual(d.verdict, "ASK_IDENTITY")
+        self.assertIn("not a tie", d.pages[0].why)
         self.assertEqual(identity.decide([page()], Requester(account_id=9, account_names=("Someone Else",)),
                                          "privacy_erasure").verdict, "ASK_IDENTITY")
 
@@ -150,8 +164,13 @@ class Identity(unittest.TestCase):
 
     def test_an_item_passes_only_through_its_one_artist_and_on_the_same_path(self):
         ok = Requester(name="Arpad Laczkovszki", email="arpad.laczkovszki@pm.me", verified=True)
+        # a name match on the artist is not a tie (captain 2026-11-12), and an item never asks: a person's call
         d = identity.decide([self.item(page())], ok, "privacy_erasure")
-        self.assertEqual((d.verdict, d.basis), ("PASS_C", "C"))
+        self.assertEqual((d.verdict, d.basis), ("JAN_REVIEW", ""))
+        # the own-site path: the artist's catalog website host is the verified sender's host
+        site = page(website="https://www.arpad.example/")
+        d = identity.decide([self.item(site)], Requester(email="me@arpad.example", verified=True), "privacy_erasure")
+        self.assertEqual((d.verdict, d.basis), ("PASS_D", "D"))
         self.assertIn(ARPAD, d.pages[0].why)
         # the claim path, and it is the artist's claim that counts
         claimed = page(is_claimed=True, claim_user_ids=frozenset({42}))
@@ -241,7 +260,7 @@ class Identity(unittest.TestCase):
         d = identity.decide([page(), page(entity_id=OTHER, found=False)],
                             Requester(name="Arpad Laczkovszki", verified=True), "privacy_erasure")
         self.assertEqual(d.verdict, "UNKNOWN")
-        self.assertEqual([p.verdict for p in d.pages], ["PASS_C", "UNKNOWN"])
+        self.assertEqual([p.verdict for p in d.pages], ["ASK_IDENTITY", "UNKNOWN"])
 
     def test_gone_and_hidden(self):
         self.assertEqual(identity.decide([page(gone=True)], Requester(), "privacy_erasure").verdict, "GONE")
@@ -331,7 +350,11 @@ class Identity(unittest.TestCase):
         d = identity.decide([page(), page(entity_id=OTHER, name="Somebody Else")],
                             Requester(name="Arpad Laczkovszki", verified=True), "privacy_erasure")
         self.assertEqual(d.verdict, "ASK_IDENTITY")
-        self.assertEqual({p.entity_id: p.verdict for p in d.pages}, {ARPAD: "PASS_C", OTHER: "ASK_IDENTITY"})
+        self.assertEqual({p.entity_id: p.verdict for p in d.pages}, {ARPAD: "ASK_IDENTITY", OTHER: "ASK_IDENTITY"})
+        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}))
+        d = identity.decide([claimed, page(entity_id=OTHER, name="Somebody Else")], Requester(account_id=42),
+                            "privacy_erasure")
+        self.assertEqual({p.entity_id: p.verdict for p in d.pages}, {ARPAD: "PASS_A", OTHER: "ASK_IDENTITY"})
 
     def test_no_requester_on_file_is_unknown_not_ask(self):
         self.assertEqual(identity.decide([page()], Requester(), "privacy_erasure").verdict, "UNKNOWN")
@@ -1152,7 +1175,9 @@ class Watchdog(unittest.TestCase):
         lines = Run(s, log=lambda *_: None).watchdog(datetime(2026, 11, 1, 17, 0, tzinfo=timezone.utc))
         self.assertEqual(len(lines), 1)
         self.assertIn("in 2 d", lines[0])
-        self.assertIn("<@U038BM16T7W>", page_text(lines))
+        # the due-date page names no person: a statutory date is an alarm, not somebody's queue (captain 2026-11-12)
+        self.assertNotIn("<@", page_text(lines))
+        self.assertIn("GDPR erasure register: 1 request(s)", page_text(lines))
         self.assertIn("| 40 |", backfill_table(s.all("open"), datetime(2026, 11, 1, tzinfo=timezone.utc)))
 
 
@@ -3372,7 +3397,8 @@ class SendPath(unittest.TestCase):
         the letter's content depends on when you look at it."""
         from datetime import timedelta
         rid, r = self.row(keys=["register:90"], gmail_thread="", conversation_id="1")
-        self.s.update(rid, "decide", identity_verdict="ASK_IDENTITY", due_at="2026-11-04T10:00:00Z")
+        # ASK_LINK: the identity step is refused for its words for a statutory request (dsar.ASK_WORDING_SUPERSEDED)
+        self.s.update(rid, "decide", identity_verdict="ASK_LINK", due_at="2026-11-04T10:00:00Z")
         before = self.run.asks(datetime(2026, 11, 4, 9, 59, tzinfo=timezone.utc))
         after = self.run.asks(datetime(2026, 11, 4, 10, 1, tzinfo=timezone.utc))
         self.assertEqual(len(before), 1); self.assertEqual(len(after), 1)

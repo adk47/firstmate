@@ -1,0 +1,372 @@
+{
+  "_comment": "Customer copy for the GDPR / DSAR ladder (scripts/gdpr_pipeline/dsar.py). A message is the variant's blocks joined by a blank line, with only the date slots {received}, {due} and {next} filled by code. No name, no link, no free text: the body carries no personal data, so the exact bytes can be reviewed off the sending host. Nothing here sends on its own: every body needs a reviewer verdict bound to its sha256 (scripts/gdpr_pipeline/copy_gate.py). A variant with \"enabled\": false is never selected by code; turning one on is a decision recorded in the PR that does it. Decisions of 2026-11-12 (firstmate inbox 004; data/gdpr-ai-handling-v1/report.md finding 5): an update to a request past its date says we are late and that we are sorry, gives no reason, and where we need nothing from the requester states the date they get the answer; an Art. 12(3) extension notice is sent only on a recorded need for the extra time and on a ground the rule names that is a fact (the number of requests), states that ground and the new date; no refusal is sent.",
+  "v": 3,
+  "authored_by": "claude-fable-5-2 (crewmate gdpr-ai-handling-v1)",
+  "authored_at": "2026-11-12",
+  "review_rounds": [
+    {
+      "at": "2026-11-12T04:01Z",
+      "reviewer_model": "mac-pool/claude-fable-5-1",
+      "rubric": "policies/outbound-copy-rubric-gdpr.md",
+      "result": "8 approve, 10 rewrite of 18 bodies; every rewrite adopted here at block level",
+      "evidence": "data/gdpr-ai-handling-v1/copy-review-round1.json"
+    },
+    {
+      "at": "2026-11-12T04:03Z",
+      "reviewer_model": "mac-pool/claude-fable-5-1",
+      "rubric": "policies/outbound-copy-rubric-gdpr.md",
+      "result": "16 approve, 2 rewrite of 18; both rewrites adopted here at block level",
+      "evidence": "data/gdpr-ai-handling-v1/copy-review-round2.json"
+    },
+    {
+      "at": "2026-11-12T04:06Z",
+      "reviewer_model": "mac-pool/claude-fable-5-1",
+      "rubric": "policies/outbound-copy-rubric-gdpr.md",
+      "result": "18 approve of 18: the wording as it stands in this file",
+      "evidence": "data/gdpr-ai-handling-v1/copy-review-round3.json"
+    },
+    {
+      "at": "2026-11-12T08:25Z",
+      "reviewer_model": "mac-pool/claude-fable-5-1",
+      "rubric": "policies/outbound-copy-rubric-gdpr.md",
+      "result": "21 approve of 21: the wording as it stands in this file (v3: late updates, extension_number, access_answer, late_none_no_date). One rewrite on the way, of access_answer, adopted.",
+      "evidence": "data/gdpr-ai-handling-v1/copy-review-round4.json"
+    }
+  ],
+  "blocks": {
+    "greeting": "Hello,",
+    "sign": "Muso.AI Support",
+    "ack_open": "We received your request on {received}. It is logged and we are working on it.",
+    "deadline": "The law gives us one month from the day we received it to answer, so you will have our answer by {due} at the latest.",
+    "need_none": "There is nothing you need to send us right now. If that changes, we will tell you here.",
+    "need_unknown": "We are checking what we hold about this request. There is nothing you need to send us right now. If that changes, we will ask you here.",
+    "need_claim_or_authority": "Before we can act on a Muso page, we need to connect that page to you. Either of these is enough:\n\n1. Claim the page. Sign in to the Muso app (or create an account), open the page and claim it. When the claim has been processed, reply here and we will continue.\n\n2. Reply here with a document from the artist's label or management that names you as authorised to act for the page.\n\nYou do not need to send a passport or any other identity document.",
+    "need_link": "So we act on the right pages, please reply with the link(s) to the Muso page(s) your request is about.\n\nWe will also need to connect each page to you. You can do that now: sign in to the Muso app and claim the page, or reply here with a document from the artist's label or management that names you.\n\nYou do not need to send a passport or any other identity document.",
+    "need_authority": "You are writing on behalf of someone else. Either of these is enough:\n\n1. The person you are writing for claims their page in the Muso app and writes to us from their own account.\n\n2. You reply to this message with a document from that person's label or management that names you as authorised to act for them.\n\nYou do not need to send a passport or any other identity document.",
+    "need_account": "To link your request to the account it concerns, please reply from the email address on your Muso account, or sign in to the Muso app and message us from there.\n\nYou do not need to send a passport or any other identity document.",
+    "keep_open": "Your request stays open while you do this.",
+    "status_open": "This is an update on the request you made on {received}. Your request is still open.",
+    "late_open": "The request you made on {received} is still open. We are late in answering it, and we are sorry.",
+    "doing_none": "What we are doing: we are working on your request.",
+    "doing_unknown": "What we are doing: we are still checking what we hold about this request.",
+    "doing_waiting": "What we are doing: your request is open, and we need something from you before we can act on it.",
+    "need_head": "What we need from you:",
+    "need_nothing": "What we need from you: nothing.",
+    "need_later": "What we need from you: nothing right now. If that changes, we will ask you here.",
+    "next_due": "When you will hear from us next: by {next} at the latest.",
+    "next_late": "When you will hear from us next: by {next} at the latest.",
+    "ext_open": "We need more time to answer the request you made on {received}.",
+    "ext_rule": "Article 12(3) of the GDPR says the one-month period \"may be extended by two further months where necessary, taking into account the complexity and number of the requests\".",
+    "ext_due": "The new date: you will have our answer by {due} at the latest.",
+    "denial_open": "We have not been able to act on the request you made on {received}.",
+    "denial_rule": "Article 12(4) of the GDPR requires us to tell you \"the reasons for not taking action\" and about \"the possibility of lodging a complaint with a supervisory authority and seeking a judicial remedy\".",
+    "denial_reason": "The reason: from what we received, we could not connect the Muso page to you.",
+    "denial_again": "You can make the request again at any time. Claim the page in the Muso app, or send us a document from the artist's label or management that names you, and we will act on it.",
+    "denial_remedy": "You can also lodge a complaint with your data protection authority, or seek a judicial remedy.",
+    "late_answer": "When you will have our answer: by {next} at the latest.",
+    "ext_ground_number": "The reason: we have more than one open request from you, and we need the extra time to answer them.",
+    "ext_ground_complexity": "The reason: your request is complex, and we need the extra time to answer it in full.",
+    "ext_need": "There is nothing you need to send us.",
+    "access_open": "On {received} you asked for a copy of the personal data we hold about you. This message is our answer to that request.",
+    "access_file": "The copy is attached to this message as one file.",
+    "access_withheld": "Some fields are left out. The file lists each one and gives the reason.",
+    "access_close": "If something you expected is missing from the file, reply here and tell us what."
+  },
+  "variants": {
+    "ack_none": {
+      "kind": "ack",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "ack_open",
+        "deadline",
+        "need_none",
+        "sign"
+      ]
+    },
+    "ack_unknown": {
+      "kind": "ack",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "ack_open",
+        "deadline",
+        "need_unknown",
+        "sign"
+      ]
+    },
+    "ack_claim_or_authority": {
+      "kind": "ack",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "ack_open",
+        "deadline",
+        "need_claim_or_authority",
+        "keep_open",
+        "sign"
+      ]
+    },
+    "ack_link": {
+      "kind": "ack",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "ack_open",
+        "deadline",
+        "need_link",
+        "keep_open",
+        "sign"
+      ]
+    },
+    "ack_authority": {
+      "kind": "ack",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "ack_open",
+        "deadline",
+        "need_authority",
+        "keep_open",
+        "sign"
+      ]
+    },
+    "ack_account": {
+      "kind": "ack",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "ack_open",
+        "deadline",
+        "need_account",
+        "keep_open",
+        "sign"
+      ]
+    },
+    "status_none": {
+      "kind": "status",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "status_open",
+        "doing_none",
+        "need_nothing",
+        "next_due",
+        "sign"
+      ]
+    },
+    "status_unknown": {
+      "kind": "status",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "status_open",
+        "doing_unknown",
+        "need_later",
+        "next_due",
+        "sign"
+      ]
+    },
+    "status_claim_or_authority": {
+      "kind": "status",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "status_open",
+        "doing_waiting",
+        "need_head",
+        "need_claim_or_authority",
+        "next_due",
+        "sign"
+      ]
+    },
+    "status_link": {
+      "kind": "status",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "status_open",
+        "doing_waiting",
+        "need_head",
+        "need_link",
+        "next_due",
+        "sign"
+      ]
+    },
+    "status_authority": {
+      "kind": "status",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "status_open",
+        "doing_waiting",
+        "need_head",
+        "need_authority",
+        "next_due",
+        "sign"
+      ]
+    },
+    "status_account": {
+      "kind": "status",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "status_open",
+        "doing_waiting",
+        "need_head",
+        "need_account",
+        "next_due",
+        "sign"
+      ]
+    },
+    "late_none": {
+      "kind": "status",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "late_open",
+        "doing_none",
+        "need_nothing",
+        "late_answer",
+        "sign"
+      ]
+    },
+    "late_none_no_date": {
+      "kind": "status",
+      "enabled": true,
+      "note": "Late, nothing needed from the requester, and no answer date we could keep (an access request while no complete copy can be built). States the next contact, never an answer date.",
+      "blocks": [
+        "greeting",
+        "late_open",
+        "doing_none",
+        "need_nothing",
+        "next_late",
+        "sign"
+      ]
+    },
+    "late_unknown": {
+      "kind": "status",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "late_open",
+        "doing_unknown",
+        "need_later",
+        "next_late",
+        "sign"
+      ]
+    },
+    "late_claim_or_authority": {
+      "kind": "status",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "late_open",
+        "doing_waiting",
+        "need_head",
+        "need_claim_or_authority",
+        "next_late",
+        "sign"
+      ]
+    },
+    "late_link": {
+      "kind": "status",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "late_open",
+        "doing_waiting",
+        "need_head",
+        "need_link",
+        "next_late",
+        "sign"
+      ]
+    },
+    "late_authority": {
+      "kind": "status",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "late_open",
+        "doing_waiting",
+        "need_head",
+        "need_authority",
+        "next_late",
+        "sign"
+      ]
+    },
+    "late_account": {
+      "kind": "status",
+      "enabled": true,
+      "blocks": [
+        "greeting",
+        "late_open",
+        "doing_waiting",
+        "need_head",
+        "need_account",
+        "next_late",
+        "sign"
+      ]
+    },
+    "extension_number": {
+      "kind": "extension",
+      "enabled": true,
+      "ground": "number",
+      "decision": "firstmate inbox 004, 2026-11-12T07:09:30Z: send only where the extension is genuinely needed, state which ground applies and the new date, never to cover lateness already incurred. Selected by dsar.owed only when a need for the extra time is recorded against the request with the ruling that found it (gdpr-pipeline.py dsar extend), code cannot send the answer today, the requester has two or more open statutory requests, and the first month is still running. A count of requests near the date is not a need (QA review of #1908).",
+      "blocks": [
+        "greeting",
+        "ext_open",
+        "ext_rule",
+        "ext_ground_number",
+        "ext_due",
+        "ext_need",
+        "sign"
+      ]
+    },
+    "extension_complexity": {
+      "kind": "extension",
+      "enabled": false,
+      "ground": "complexity",
+      "locked": "Complexity is the other ground Art. 12(3) names. No code can measure it, so nothing selects this variant; saying a request is complex is a judgement someone has to make and record.",
+      "blocks": [
+        "greeting",
+        "ext_open",
+        "ext_rule",
+        "ext_ground_complexity",
+        "ext_due",
+        "ext_need",
+        "sign"
+      ]
+    },
+    "denial": {
+      "kind": "denial",
+      "enabled": false,
+      "locked": "No refusal is sent (firstmate inbox 004, 2026-11-12T07:09:30Z): the default is to comply. A refusal is possible only where a request is manifestly unfounded or excessive AND the evidence for that is recorded against the request. Nothing records such evidence, so nothing selects this variant. A request we cannot yet connect to a page is not refused: it stays open and the requester is told what is needed.",
+      "blocks": [
+        "greeting",
+        "denial_open",
+        "denial_rule",
+        "denial_reason",
+        "denial_again",
+        "denial_remedy",
+        "sign"
+      ]
+    },
+    "access_answer": {
+      "kind": "access",
+      "enabled": true,
+      "note": "The cover message of an Art. 15 answer. Sent only with a COMPLETE copy attached, to the sign-in address on the account (Run.access_deliver).",
+      "blocks": [
+        "greeting",
+        "access_open",
+        "access_file",
+        "access_withheld",
+        "access_close",
+        "sign"
+      ]
+    }
+  },
+  "subjects": {
+    "access_answer": "The copy of your personal data you asked Muso for"
+  }
+}

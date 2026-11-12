@@ -1,0 +1,596 @@
+{
+  "_comment": "What a GDPR Art. 15 answer is built from (scripts/gdpr_pipeline/access.py). `sources` are the tables of the core database that hold rows keyed to an account, read on the read-only replica. Every column of a source is included unless it is listed under `withheld`. A table the replica shows with an account key that is listed neither here nor under `ignored`, a source whose key column has gone, and a column whose name looks like a secret and is neither `withheld` nor `reviewed`, each make the answer INCOMPLETE: it is recorded and never presented as the full copy. `systems` are the places outside the core database that hold personal data; one that is not covered makes the answer incomplete too. Adding a source, or marking a system covered, is a reviewed change to this file.",
+  "v": 1,
+  "row_ceiling": 20000,
+  "discovery_columns": [
+    "userid",
+    "user_id",
+    "accountid",
+    "account_id",
+    "ownerid",
+    "owner_id",
+    "createdby",
+    "created_by",
+    "email",
+    "requesterid",
+    "claimantid"
+  ],
+  "secret_like": "pass|token|secret|twofactor|hash|key|salt|otp|credential|arn",
+  "withheld_reasons": {
+    "credential": "A sign-in secret or an access token. It is held in a protected form and is not included, so that this file cannot be used to get into the account.",
+    "another_person": "This field identifies another person (for example a member of staff). Article 15(4) of the GDPR says the right to obtain a copy \"shall not adversely affect the rights and freedoms of others\".",
+    "unreviewed": "This field has not been reviewed for inclusion. It is left out of this file."
+  },
+  "ignored": {
+    "pg_stat_statements": "a database statistics view; its userid is a database role, not an account"
+  },
+  "information_notice": {
+    "text": "",
+    "why_empty": "Article 15(1)(a) to (h) requires the purposes of the processing, the categories of data, the recipients, the storage period, the rights of the data subject, the right to complain, the source of the data and any automated decision-making to be given with the copy. That text is a legal statement. No approved text exists, so none is written here and every answer is incomplete until one is recorded in this field by a reviewed change."
+  },
+  "column_review": {
+    "reviewed": false,
+    "why_not": "The withheld list was written from column NAMES (a column named like a secret, or like a reference to another user). Nobody has read what the included columns hold. A free-text or JSON column can carry another person's data, and Article 15(4) says the copy \"shall not adversely affect the rights and freedoms of others\". Every answer is incomplete until this is set to true by a reviewed change that names who read the columns."
+  },
+  "systems": [
+    {
+      "id": "core",
+      "holds": "the Muso account and everything keyed to it in the core database",
+      "covered": true
+    },
+    {
+      "id": "erasure_register",
+      "holds": "the record of this request and of earlier privacy requests from the same person",
+      "covered": true
+    },
+    {
+      "id": "intercom",
+      "holds": "support conversations and the support contact record",
+      "covered": false
+    },
+    {
+      "id": "support_mail",
+      "holds": "email threads with support@, notices@ and legal@",
+      "covered": false
+    },
+    {
+      "id": "payments",
+      "holds": "the payment processor's customer and card record (the core database holds the order and payment history, which is covered)",
+      "covered": false
+    },
+    {
+      "id": "sign_in",
+      "holds": "the sign-in provider's user record and sign-in log",
+      "covered": false
+    },
+    {
+      "id": "marketing_mail",
+      "holds": "the marketing email profile and send history",
+      "covered": false
+    },
+    {
+      "id": "messaging",
+      "holds": "direct messages sent in the app",
+      "covered": false
+    },
+    {
+      "id": "proof_documents",
+      "holds": "documents uploaded as proof for a credit or a claim, and the verdicts on them",
+      "covered": false
+    },
+    {
+      "id": "tickets",
+      "holds": "internal tickets that carry a copy of a support request",
+      "covered": false
+    },
+    {
+      "id": "analytics",
+      "holds": "product usage events",
+      "covered": false
+    }
+  ],
+  "systems_note": "This list was written from the repository, not from a data map. It is not verified to be exhaustive.",
+  "sources": [
+    {
+      "table": "action_log",
+      "keys": [
+        {
+          "column": "email",
+          "by": "account_email"
+        }
+      ],
+      "withheld": {
+        "requestedby": "another_person",
+        "approvedby": "another_person",
+        "executedby": "another_person"
+      }
+    },
+    {
+      "table": "activations",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "ad_account_members",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ],
+      "withheld": {
+        "invitedby": "another_person"
+      }
+    },
+    {
+      "table": "ad_events",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "ad_sets",
+      "keys": [
+        {
+          "column": "createdby",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "ads",
+      "keys": [
+        {
+          "column": "createdby",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "campaigns",
+      "keys": [
+        {
+          "column": "createdby",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "chat_prefs",
+      "keys": [
+        {
+          "column": "user_id",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "checklist_actions",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "claiming",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "credit_requests",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "credit_submissions",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "email_hash",
+      "keys": [
+        {
+          "column": "email",
+          "by": "account_email"
+        }
+      ]
+    },
+    {
+      "table": "feature_flag_grants",
+      "keys": [
+        {
+          "column": "user_id",
+          "by": "account_id"
+        }
+      ],
+      "reviewed": [
+        "flag_key"
+      ]
+    },
+    {
+      "table": "matrix_device_issuances",
+      "keys": [
+        {
+          "column": "user_id",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "messaging_erasure_pending",
+      "keys": [
+        {
+          "column": "user_id",
+          "by": "account_id"
+        },
+        {
+          "column": "email",
+          "by": "account_email"
+        }
+      ]
+    },
+    {
+      "table": "nfc_card",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "notification",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "orders",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "partner_access_events",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "partner_member_grants",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ],
+      "withheld": {
+        "revokedby": "another_person"
+      }
+    },
+    {
+      "table": "partner_pro_grants",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        },
+        {
+          "column": "email",
+          "by": "account_email"
+        }
+      ],
+      "withheld": {
+        "revokedby": "another_person",
+        "extendedby": "another_person"
+      },
+      "reviewed": [
+        "emailhash"
+      ]
+    },
+    {
+      "table": "payment_history",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "profile_new_credits_notification_deliveries",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ],
+      "reviewed": [
+        "creditkey",
+        "notificationkey"
+      ]
+    },
+    {
+      "table": "resolved_user_ad_profiles",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "spotify_accounts",
+      "keys": [
+        {
+          "column": "email",
+          "by": "account_email"
+        }
+      ],
+      "withheld": {
+        "clientkey": "credential",
+        "clientsecret": "credential",
+        "refreshtoken": "credential"
+      }
+    },
+    {
+      "table": "status_notice_days",
+      "keys": [
+        {
+          "column": "user_id",
+          "by": "account_id"
+        }
+      ],
+      "reviewed": [
+        "email_idempotency_key"
+      ]
+    },
+    {
+      "table": "status_notices",
+      "keys": [
+        {
+          "column": "user_id",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "subscription_history",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ],
+      "withheld": {
+        "googlepurchasetoken": "credential"
+      }
+    },
+    {
+      "table": "subscriptions",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "team_users",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "teams",
+      "keys": [
+        {
+          "column": "email",
+          "by": "account_email"
+        }
+      ]
+    },
+    {
+      "table": "user_action_log",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "user_consents",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "user_identity_resolution",
+      "keys": [
+        {
+          "column": "user_id",
+          "by": "account_id"
+        }
+      ],
+      "withheld": {
+        "reviewed_by": "another_person"
+      }
+    },
+    {
+      "table": "user_identity_resolution_ambiguous_users",
+      "keys": [
+        {
+          "column": "user_id",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "user_identity_resolution_primary_backup",
+      "keys": [
+        {
+          "column": "user_id",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "user_identity_resolution_primary_plan",
+      "keys": [
+        {
+          "column": "user_id",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "user_images",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        },
+        {
+          "column": "createdby",
+          "by": "account_id"
+        }
+      ],
+      "withheld": {
+        "updatedby": "another_person"
+      }
+    },
+    {
+      "table": "user_messaging_restrictions",
+      "keys": [
+        {
+          "column": "user_id",
+          "by": "account_id"
+        }
+      ],
+      "withheld": {
+        "created_by_user_id": "another_person",
+        "lifted_by_user_id": "another_person"
+      }
+    },
+    {
+      "table": "user_playlist",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "user_push_devices",
+      "keys": [
+        {
+          "column": "user_id",
+          "by": "account_id"
+        }
+      ],
+      "withheld": {
+        "token": "credential"
+      }
+    },
+    {
+      "table": "user_terms_acceptances",
+      "keys": [
+        {
+          "column": "user_id",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "user_to_role",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "user_workspace_profile_notify_prefs",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "users",
+      "keys": [
+        {
+          "column": "id",
+          "by": "account_id"
+        }
+      ],
+      "withheld": {
+        "password": "credential",
+        "twofactor": "credential",
+        "referredbyuserid": "another_person"
+      },
+      "reviewed": [
+        "snstargetarns"
+      ]
+    },
+    {
+      "table": "users_articles",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    },
+    {
+      "table": "verifications",
+      "keys": [
+        {
+          "column": "userid",
+          "by": "account_id"
+        }
+      ]
+    }
+  ]
+}

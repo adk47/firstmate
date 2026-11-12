@@ -99,9 +99,49 @@ CREATE TABLE IF NOT EXISTS erasure_events (
   detail     TEXT DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS erasure_requests_due ON erasure_requests(status, due_at);
+-- The DSAR ladder's authored messages (gdpr_pipeline/dsar.py). A body is FROZEN here the moment it is authored, so
+-- the sha256 under review is the sha256 that is later sent; the reviewer's verdict is recorded next to it. One row
+-- per (request, slot): a superseded body is replaced in place and the replacement is an `erasure_events` row.
+CREATE TABLE IF NOT EXISTS access_answers (
+  id           INTEGER PRIMARY KEY,
+  request_id   INTEGER NOT NULL REFERENCES erasure_requests(id),
+  account_id   INTEGER NOT NULL,
+  sha256       TEXT NOT NULL,                  -- of the exact bytes in `path`
+  bytes        INTEGER NOT NULL,
+  complete     INTEGER NOT NULL,               -- 1 only when nothing is missing; an incomplete copy is never the answer
+  summary      TEXT NOT NULL,                  -- counts only (access.summary): never a value
+  manifest_sha TEXT NOT NULL,
+  path         TEXT NOT NULL,                  -- beside the register, mode 0600; '' when built without writing
+  produced_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS dsar_messages (
+  id              INTEGER PRIMARY KEY,
+  request_id      INTEGER NOT NULL REFERENCES erasure_requests(id),
+  slot            TEXT NOT NULL,               -- ack | status | status-2 | ...  (the erasure_sends slot)
+  kind            TEXT NOT NULL,               -- ack | status
+  variant         TEXT NOT NULL,               -- the copy variant in policies/gdpr-dsar-copy.json
+  body            TEXT NOT NULL,               -- the exact bytes; dates and fixed wording only, no personal data
+  body_sha        TEXT NOT NULL,               -- sha256 of body (utf-8)
+  copy_sha        TEXT NOT NULL,               -- sha256 of the copy file the body was rendered from
+  facts           TEXT DEFAULT '{}',           -- the slot values code filled
+  next_contact_at TEXT DEFAULT '',             -- the next-contact date this body commits us to
+  effects         TEXT DEFAULT '{}',           -- register columns this body commits us to; written when it is sent
+  state           TEXT NOT NULL,               -- held | approved | sent
+  gate_result     TEXT DEFAULT '',             -- the reviewer gate's last answer: approved|pending|refused|error
+  gate_reason     TEXT DEFAULT '',
+  verdict_id      TEXT DEFAULT '',
+  verdict_sha256  TEXT DEFAULT '',             -- sha256 of the signed verdict statement
+  reviewer_model  TEXT DEFAULT '',
+  reviewed_at     TEXT DEFAULT '',
+  rubric          TEXT DEFAULT '',
+  authored_at     TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  UNIQUE(request_id, slot)
+);
 """
 
-JSON_COLS = ("clickup_ids", "pages", "verdict_detail", "hide_pr", "removed_outside_process", "hidden_pages")
+JSON_COLS = ("clickup_ids", "pages", "verdict_detail", "hide_pr", "removed_outside_process", "hidden_pages", "gates")
+JSON_OBJECT_COLS = ("hide_pr", "gates")       # these decode to {} when empty; every other JSON column is a list
 
 # Columns added after the first deploy: CREATE TABLE IF NOT EXISTS never alters an existing store, so a live
 # erasure.sqlite is migrated instead of being recreated (the rows are the legal record).
@@ -109,7 +149,25 @@ MIGRATIONS = (("removed_outside_process", "TEXT DEFAULT '[]'"), ("hidden_pages",
               ("rev", "INTEGER DEFAULT 0"), ("decided_rev", "INTEGER DEFAULT 0"),
               # The interim confirmation is its own letter: recording it here keeps the fact visible on the row
               # without consuming `confirmed_at`, which only the FINAL letter may set (r5 finding 2).
-              ("interim_confirm_at", "TEXT DEFAULT ''"), ("interim_confirm_ref", "TEXT DEFAULT ''"))
+              ("interim_confirm_at", "TEXT DEFAULT ''"), ("interim_confirm_ref", "TEXT DEFAULT ''"),
+              # The DSAR ladder (gdpr_pipeline/dsar.py). `dsar_state` is DERIVED and recorded, never an input;
+              # the register's own `status` column is untouched because every other reader selects on it.
+              ("dsar_state", "TEXT DEFAULT ''"), ("dsar_state_at", "TEXT DEFAULT ''"),
+              ("gates", "TEXT DEFAULT '{}'"),
+              ("ack_sent_at", "TEXT DEFAULT ''"), ("ack_ref", "TEXT DEFAULT ''"),
+              ("status_sent_at", "TEXT DEFAULT ''"), ("status_ref", "TEXT DEFAULT ''"),
+              ("next_contact_at", "TEXT DEFAULT ''"),
+              # An Art. 12(3) extension. Written only by a SENT extension notice (`Store.apply_effects`): the date
+              # moves when the requester has been told, never before.
+              ("extended_until", "TEXT DEFAULT ''"), ("extension_reason", "TEXT DEFAULT ''"),
+              ("extension_ruling", "TEXT DEFAULT ''"),
+              # The recorded NEED for an extension, and the ruling that found it (`dsar extend`). Without both no
+              # extension notice is ever selected: a count of requests is a ground, not a need.
+              ("extension_need", "TEXT DEFAULT ''"), ("extension_need_ruling", "TEXT DEFAULT ''"),
+              # The answer date a sent late update stated. The clock names it when it passes with no answer out.
+              ("answer_promised_at", "TEXT DEFAULT ''"))
+# What a sent ladder message may write to its request, and nothing else.
+MESSAGE_EFFECT_COLS = ("extended_until", "extension_reason", "extension_ruling", "answer_promised_at")
 
 
 SENDS_MIGRATIONS = (("idem", "TEXT DEFAULT ''"),     # the letter's id; the ledger is the double-send guard
@@ -129,6 +187,9 @@ def migrate(db: sqlite3.Connection) -> None:
     for col, ddl in SENDS_MIGRATIONS:
         if col not in have_sends:
             db.execute(f"ALTER TABLE erasure_sends ADD COLUMN {col} {ddl}")
+    have_msgs = {r[1] for r in db.execute("PRAGMA table_info(dsar_messages)")}
+    if have_msgs and "effects" not in have_msgs:
+        db.execute("ALTER TABLE dsar_messages ADD COLUMN effects TEXT DEFAULT '{}'")
     have = {r[1] for r in db.execute("PRAGMA table_info(erasure_requests)")}
     added = set()
     for col, ddl in MIGRATIONS:
@@ -238,7 +299,7 @@ class Store:
             return None
         d = dict(r)
         for c in JSON_COLS:
-            d[c] = json.loads(d.get(c) or ("{}" if c == "hide_pr" else "[]"))
+            d[c] = json.loads(d.get(c) or ("{}" if c in JSON_OBJECT_COLS else "[]"))
         d["keys"] = [k for (k,) in self.db.execute("SELECT key FROM erasure_keys WHERE request_id=? ORDER BY key",
                                                      (d["id"],))]
         return d
@@ -535,6 +596,93 @@ class Store:
         r = self.db.execute("SELECT * FROM erasure_sends WHERE request_id=? AND kind=?", (rid, kind)).fetchone()
         return self._row(r)
 
+    def sends(self, rid: int) -> list[dict]:
+        """Every ledger row for this request, oldest first (plain dicts; no JSON columns to decode)."""
+        return [dict(r) for r in self.db.execute("SELECT * FROM erasure_sends WHERE request_id=? ORDER BY id", (rid,))]
+
+    # ---- the DSAR ladder's authored messages (`dsar_messages`)
+    # ---- Art. 15 answers (gdpr_pipeline/access.py). Append-only: every build is a row, the newest is current.
+    def put_access_answer(self, rid: int, account_id: int, raw: bytes, sha: str, summary: dict) -> dict:
+        """Write the copy beside the register (0600, in a 0700 directory) and record it. The file holds personal
+        data and never leaves this directory by this method; the ledger row and the event hold counts only."""
+        path = ""
+        if self.path != ":memory:":
+            folder = os.path.join(os.path.dirname(self.path) or ".", "access")
+            os.makedirs(folder, mode=0o700, exist_ok=True)
+            path = os.path.join(folder, f"{rid}-{sha[:16]}.json")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(raw)
+        now = now_iso()
+        self.db.execute(
+            "INSERT INTO access_answers (request_id, account_id, sha256, bytes, complete, summary, manifest_sha, path, "
+            "produced_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (rid, int(account_id), sha, len(raw), 1 if summary.get("complete") else 0,
+             json.dumps(summary, sort_keys=True), summary.get("manifest_sha256", ""), path, now))
+        self.event(rid, "access_built", sha256=sha, bytes=len(raw), complete=bool(summary.get("complete")),
+                   rows=summary.get("rows", 0), incomplete=len(summary.get("incomplete", [])))
+        self.db.commit()
+        return self.access_answers(rid)[-1]
+
+    def access_answers(self, rid: int) -> list[dict]:
+        out = []
+        for r in self.db.execute("SELECT * FROM access_answers WHERE request_id = ? ORDER BY id", (rid,)):
+            d = dict(r)
+            d["summary"] = json.loads(d["summary"] or "{}")
+            d["complete"] = bool(d["complete"])
+            out.append(d)
+        return out
+
+    def message(self, rid: int, slot: str) -> dict | None:
+        r = self.db.execute("SELECT * FROM dsar_messages WHERE request_id=? AND slot=?", (rid, slot)).fetchone()
+        return _message(r)
+
+    def messages(self, rid: int | None = None) -> list[dict]:
+        q = "SELECT * FROM dsar_messages" + (" WHERE request_id=?" if rid is not None else "") + " ORDER BY id"
+        return [_message(r) for r in self.db.execute(q, (rid,) if rid is not None else ())]
+
+    def put_message(self, rid: int, slot: str, kind: str, variant: str, body: str, body_sha: str, copy_sha: str,
+                    facts: dict, next_contact_at: str, effects: dict | None = None) -> dict:
+        """Freeze an authored body for (request, slot) as `held`. Replaces a body that was never sent; a `sent`
+        one is the record of what the requester read and is never overwritten."""
+        prior = self.message(rid, slot)
+        if prior and prior["state"] == "sent":
+            raise sqlite3.IntegrityError(f"the {slot} message for row {rid} was sent and cannot be re-authored")
+        now = now_iso()
+        fx = json.dumps({k: v for k, v in (effects or {}).items() if k in MESSAGE_EFFECT_COLS}, sort_keys=True)
+        if prior:
+            self.db.execute(
+                "UPDATE dsar_messages SET kind=?, variant=?, body=?, body_sha=?, copy_sha=?, facts=?, "
+                "next_contact_at=?, effects=?, state='held', gate_result='', gate_reason='', verdict_id='', "
+                "verdict_sha256='', reviewer_model='', reviewed_at='', rubric='', authored_at=?, updated_at=? WHERE id=?",
+                (kind, variant, body, body_sha, copy_sha, json.dumps(facts, sort_keys=True), next_contact_at, fx, now,
+                 now, prior["id"]))
+        else:
+            self.db.execute(
+                "INSERT INTO dsar_messages(request_id, slot, kind, variant, body, body_sha, copy_sha, facts, "
+                "next_contact_at, effects, state, authored_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (rid, slot, kind, variant, body, body_sha, copy_sha, json.dumps(facts, sort_keys=True),
+                 next_contact_at, fx, "held", now, now))
+        self.event(rid, "dsar_authored", slot=slot, variant=variant, body_sha=body_sha, copy_sha=copy_sha,
+                   replaced=(prior or {}).get("body_sha", ""))
+        self.db.commit()
+        return self.message(rid, slot)
+
+    def update_message(self, rid: int, slot: str, event: str = "", **cols) -> None:
+        """Record a gate answer or a state change on an authored message. `event` names the audit row to write;
+        an unchanged gate answer (still pending) is recorded on the row without a new event every tick."""
+        allowed = {"state", "gate_result", "gate_reason", "verdict_id", "verdict_sha256", "reviewer_model",
+                   "reviewed_at", "rubric"}
+        bad = set(cols) - allowed
+        if bad:
+            raise ValueError(f"not a dsar_messages column a caller may set: {sorted(bad)}")
+        cols["updated_at"] = now_iso()
+        sets = ", ".join(f"{k}=?" for k in cols)
+        self.db.execute(f"UPDATE dsar_messages SET {sets} WHERE request_id=? AND slot=?", (*cols.values(), rid, slot))
+        if event:
+            self.event(rid, event, slot=slot, **{k: v for k, v in cols.items() if k != "updated_at"})
+        self.db.commit()
+
     def begin_send(self, rid: int, kind: str, channel: str, target: str, body_sha: str, approved_by: str,
                    state: str = "sending", detail: str = "", idem: str = "") -> None:
         """Claim the one send slot for this request+kind. Raises sqlite3.IntegrityError if it is already claimed:
@@ -598,10 +746,33 @@ class Store:
         stamp = now_iso()
         if kind == "ask":
             self.update(rid, "ask", commit=commit, ask_sent_at=stamp, ask_ref=ref)
-        elif slot == "confirm":
+        elif kind == "ack" or slot == "ack":
+            self.update(rid, "ack", commit=commit, ack_sent_at=stamp, ack_ref=ref)
+        elif kind == "status" or slot == "status" or slot.startswith("status-"):
+            # The LATEST status update: a request past its date gets one per slot (status, status-2, ...), and the
+            # ladder times the next one from this stamp. Without this branch a status update fell through to the
+            # interim-confirmation stamp below and the register recorded a letter that was never sent.
+            self.update(rid, "status", commit=commit, status_sent_at=stamp, status_ref=ref)
+        elif slot == "confirm" or kind == "access":
+            # The copy of the data IS the final response to an access request, exactly as the confirmation is to an
+            # erasure request: nothing else can take the request to `responded`.
             self.update(rid, "confirmed", commit=commit, confirmed_at=stamp, confirm_ref=ref)
+        elif kind == "extension" or slot == "extension":
+            pass        # no stamp of its own: what an extension notice changes is the date, written just below
         else:
             self.update(rid, "confirmed", commit=commit, interim_confirm_at=stamp, interim_confirm_ref=ref)
+        self.apply_effects(rid, slot, commit=commit)
+
+    def apply_effects(self, rid: int, slot: str, commit: bool = True) -> dict:
+        """Write what the SENT ladder message in `slot` committed us to (a moved date, a stated answer date).
+
+        Called from `stamp_sent`, so a letter resolved to `sent` by hand writes the same columns as one the pipeline
+        sent. Only `MESSAGE_EFFECT_COLS` can be written, whatever the message row says."""
+        msg = self.message(rid, slot)
+        cols = {k: v for k, v in ((msg or {}).get("effects") or {}).items() if k in MESSAGE_EFFECT_COLS and v}
+        if cols:
+            self.update(rid, "dsar_effect", commit=commit, **cols)
+        return cols
 
     def resolve_send(self, rid: int, kind: str, state: str, why: str, by: str, evidence: str = "",
                      ref: str = "", expect: tuple[str, str, int] | None = None) -> dict:
@@ -854,6 +1025,11 @@ class Store:
     def _fold(self, keep: dict, drop: dict) -> None:
         """The body of `merge_duplicate`, inside its savepoint. Never commits."""
         self._merge_sends(keep, drop, commit=False)
+        # The duplicate's authored ladder messages follow its ledger rows: a slot the kept row does not have is
+        # re-pointed, a slot both have stays on the closed row as history (the kept row's own body stands).
+        self.db.execute(
+            "UPDATE dsar_messages SET request_id=? WHERE request_id=? AND slot NOT IN "
+            "(SELECT slot FROM dsar_messages WHERE request_id=?)", (keep["id"], drop["id"], keep["id"]))
         earlier = _earlier_receipt(keep, drop)
         stamps = _merge_stamps(keep, drop)
         for k in drop["keys"]:
@@ -928,7 +1104,20 @@ class SendNotResolvable(Exception):
 
 # The row-level stamps `send.deliver` writes NEXT TO the ledger record, with the ref that came with each.
 STAMP_COLUMNS = (("ask_sent_at", "ask_ref"), ("confirmed_at", "confirm_ref"),
-                 ("interim_confirm_at", "interim_confirm_ref"))
+                 ("interim_confirm_at", "interim_confirm_ref"), ("ack_sent_at", "ack_ref"),
+                 ("status_sent_at", "status_ref"))
+# A status update is sent more than once in a request's life, and the ladder times the next one from the LAST: for
+# this stamp the later of two rows is the true one.
+LATEST_STAMPS = ("status_sent_at",)
+
+
+def _message(r) -> dict | None:
+    if r is None:
+        return None
+    d = dict(r)
+    d["facts"] = json.loads(d.get("facts") or "{}")
+    d["effects"] = json.loads(d.get("effects") or "{}")
+    return d
 
 
 def _merge_stamps(keep: dict, drop: dict) -> dict:
@@ -942,7 +1131,10 @@ def _merge_stamps(keep: dict, drop: dict) -> dict:
     out = {}
     for at, ref in STAMP_COLUMNS:
         a, b = str(keep.get(at) or ""), str(drop.get(at) or "")
-        if not b or (a and a <= b):
+        if at in LATEST_STAMPS:
+            if not b or (a and a >= b):
+                continue
+        elif not b or (a and a <= b):
             continue
         out[at] = b
         out[ref] = drop.get(ref) or ""

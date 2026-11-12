@@ -10,12 +10,12 @@ big-name / safety cases, and (with the captain) anything irreversible. Runs on n
 | confirmation replay | once a row carries a written confirmation the row is closed: the open ClickUp ticket and the Intercom conversation keep being re-ingested, so a replay with nothing new opens NOTHING. New pages are judged against EVERY row of that conversation (a reply that already opened its own row is not re-registered by a later "thanks"), and the new request is dated at the FIRST customer message that names one of its pages (`introducing_part_at`), never at the latest message — carrying only the pages no row of this conversation already covers. Never the original deadline, never an already-confirmed page. | `run.intake_clickup`, `run.merge_reply` |
 | intake | row key per channel = the idempotence test (`intercom:<conv>`, `gmail:<alias>:<thread>`, `clickup:<task>`, `register:<n>`, `notice:<hash>`); ClickUp is a secondary index: a candidate joins a request on a shared key, or on a shared catalog id + requester email (never on ticket id alone); a merge only ever moves a due date earlier | `gdpr_pipeline/intake.py` |
 | class | the customer's own words through legal-intake's `RULES` (read from `scripts/legal-intake.py`'s AST, never copied); a `cancel_intent` escalation filed as data-deletion is `not_erasure` (or Jan when it mentions deletion); data-export tickets are Art. 15 `privacy_access` rows (due date tracked, no hide) | `intake.ticket_class` |
-| identity | per page, from the core replica (claims, users), the admin catalog (name, claimed, popularity, credits, website) and the Intercom contact (identity_resolver r5 on `external_id`; the account email only when the address was delivered by mail or is an identified user): A claim · B account whose name matches · C unclaimed + name-fold match (sender name or email local part; at least two name tokens) **only for a VERIFIED sender — a ticket's requester-typed email is metadata, not proof, so an unverified ticket goes to ASK** unless popularity >= 60 or >= 50 credits (Jan) · D sender domain = the page's own website domain in our catalog (no freemail) · E representative -> ASK for authorisation · legal_threat -> hide first (captain) unless big-name · DMCA stays claim-first · a track / album passes only through its ONE catalog artist's profile on these same paths (`decide_item`; never an ASK, big item -> Jan). An 8-char prefix is resolved ONLY against the catalog (`resolve_prefixes`): a full id that happens to be in our rows/hide lists does not prove the prefix is unique, so an ambiguous prefix stays UNKNOWN and its pages are never attributed by guess | `gdpr_pipeline/identity.py`, `sources.resolve_prefixes` |
+| identity | **(2026-11-12: paths B and C below no longer pass. A name match is not a tie to the page; both answer `ASK_IDENTITY`. See the DSAR ladder.)** per page, from the core replica (claims, users), the admin catalog (name, claimed, popularity, credits, website) and the Intercom contact (identity_resolver r5 on `external_id`; the account email only when the address was delivered by mail or is an identified user): A claim · B account whose name matches · C unclaimed + name-fold match (sender name or email local part; at least two name tokens) **only for a VERIFIED sender — a ticket's requester-typed email is metadata, not proof, so an unverified ticket goes to ASK** unless popularity >= 60 or >= 50 credits (Jan) · D sender domain = the page's own website domain in our catalog (no freemail) · E representative -> ASK for authorisation · legal_threat -> hide first (captain) unless big-name · DMCA stays claim-first · a track / album passes only through its ONE catalog artist's profile on these same paths (`decide_item`; never an ASK, big item -> Jan). An 8-char prefix is resolved ONLY against the catalog (`resolve_prefixes`): a full id that happens to be in our rows/hide lists does not prove the prefix is unique, so an ambiguous prefix stays UNKNOWN and its pages are never attributed by guess | `gdpr_pipeline/identity.py`, `sources.resolve_prefixes` |
 | hide | `hide-batch` plans identity-PASS profile pages, most overdue first, skips ids already in an open PR, and opens ONE H-DevOps PR (`HIDDEN_ENTITY_IDS`, prod + dev: 410 + noindex) and ONE platform-data-processing PR (`LEGAL_HIDDEN_ENTITY_IDS` + the strict-equality test's `ERASURE_PROFILES`, ref `gdpr-erasure-register-<n>`). A person merges. Only the anonymous 410 + noindex read-back (`mark-hidden`, every tick) sets `hidden_at`, per ELIGIBLE page (`hidden_pages`): a row that carries a PASS page next to an ASK / Jan page records its hide as soon as the PASS page is down, while a letter still waits for the whole row | `gdpr_pipeline/hide_batch.py`, `checks.public_gone` |
 | confirm | for rows due within 3 d (or hidden): the approved letter (`erasure-confirmation-template.md`), lines S/P/M only from THIS run's checks (S: public autocomplete exact/lower/prefix; a FULL results page without the id is "cannot verify here" → `Unknown`, never "absent" — the endpoint has no paging, so a name with more matches than its cap can hide the target; P: 410 + noindex on /profile and /credits; M: every sitemap file walked, one unreadable file = no M line), `[D-no]` always, G never | `gdpr_pipeline/copy.py`, `checks.py` |
 | asks | the approved lines only, verbatim: link line (no page), v2 step 1 (identity), authorisation line (representative). A row ALREADY past its statutory date carries the past-due opening line first ("the deletion request you made on {date} is in progress ...") because the ruling requires the letter to acknowledge the delay instead of reading as a fresh promise — and while `copy.PROGRESS_LINE_APPROVED` is False a past-due ask is **REFUSED** (ledgered, retryable), never sent missing that sentence and never sent with wording nobody reviewed | `copy.ASK`, `copy.progress_line` |
 | **send** | ONE ledgered letter per request through the approved writers: `intercom-ops-write.sh reply --customer-facing --purpose gdpr-erasure` for a conversation, `gog gmail send --thread-id … --reply-all` from `support@muso.ai` for a support@ thread. The body is the approved copy byte for byte; `erasure_sends` holds `body_sha` + the writer's receipt, `UNIQUE(request_id, kind)` is the double-send guard, and the row is written `sending` BEFORE the writer runs | `gdpr_pipeline/send.py`, `erasure_sends` |
-| watchdog | hourly tick pages #cs_priority (Jan) every open request at or past `due_at - 3 d` without `confirmed_at`, and identity ASKs unanswered > 7 d. The page fires per REQUEST, not per day-count: it is suppressed only for register numbers already paged today, so a request that becomes due the hour another one is confirmed is still paged. Each line carries the SEND FACT as well as the date (`no letter sent`, `no letter sent, N d past the deadline`, `letter failed`, `letter sent <date>`): "overdue" and "a letter went out" are two different claims, and on 2026-11-03 the line made only the first while 97 decided requests had no letter at all. When a row has no route at all, or the pipeline TRIED and the writer refused, the line names that and its reason (`no route for a letter (…thread is in a mailbox gog cannot write…)` / `the ask letter is refused (…)`): on 2026-11-04, 24 of the 141 approved letters were unroutable, and without the reason they read exactly like a broken pipeline instead of a missing mailbox auth. The route check is a pure capability test (`send.route`), so it names the blocker before anything has been attempted — the ledger only knows about attempts that happened | `run.watchdog_rows`, `erasure_sends` |
+| watchdog | hourly tick pages #cs_priority (no person is named since 2026-11-12; the statutory clock goes to firstmate, see the DSAR ladder below) every open request at or past `due_at - 3 d` without `confirmed_at`, and identity ASKs unanswered > 7 d. The page fires per REQUEST, not per day-count: it is suppressed only for register numbers already paged today, so a request that becomes due the hour another one is confirmed is still paged. Each line carries the SEND FACT as well as the date (`no letter sent`, `no letter sent, N d past the deadline`, `letter failed`, `letter sent <date>`): "overdue" and "a letter went out" are two different claims, and on 2026-11-03 the line made only the first while 97 decided requests had no letter at all. When a row has no route at all, or the pipeline TRIED and the writer refused, the line names that and its reason (`no route for a letter (…thread is in a mailbox gog cannot write…)` / `the ask letter is refused (…)`): on 2026-11-04, 24 of the 141 approved letters were unroutable, and without the reason they read exactly like a broken pipeline instead of a missing mailbox auth. The route check is a pure capability test (`send.route`), so it names the blocker before anything has been attempted — the ledger only knows about attempts that happened | `run.watchdog_rows`, `erasure_sends` |
 | gone pages | a page that answers 404 in the catalog AND publicly, with no merge record, was removed by something other than the hide process (the class of markdown register #36). `removed_outside_process` records those ids per row so the Jan item can cite the store instead of re-deriving it from the markdown; such a row is never hidden again and its letter waits for a person to say what was done | `run.decide_row`, `identity.GONE` |
 | half-hidden pages | a hide needs BOTH lists — `HIDDEN_ENTITY_IDS` in H-DevOps drives the app-side hide, the PDP sitemap `legal_hidden` drives the 410 — and the two halves ship in **separate PRs**, so there is a window where the page answers 404 to the catalog and the public read while only one list holds it. `HIDDEN_PENDING` records that window and names which list is missing. Reading it as `GONE` files our own half-finished work as somebody else's deletion and sends it to Jan to explain; reading it as `ALREADY_HIDDEN` claims a hide that has not happened. It owes no letter either way. Measured live 2026-11-04: 9 open rows, all PDP-only, all waiting on the H-DevOps counterpart PR | `identity.HIDDEN_PENDING`, `sources.half_hidden`, `page_facts(..., half=)` |
 
@@ -315,6 +315,148 @@ class**, not a fourth human: `reply --purpose gdpr-erasure`.
   subset — the 101 extra are 79 Intercom tickets older than the lookback, 19 notices@/legal@ tickets, and 3
   register rows. Anyone treating backfill as the source of truth would therefore drop 101 statutory requests
   silently. The register is the record; the sources are only how rows arrive.
+
+## The DSAR ladder: acknowledgement, status updates, the clock (`gdpr_pipeline/dsar.py`)
+
+Captain, 2026-11-12: a GDPR request is handled end to end by the machine, never routed to a named person. Measured
+baseline and the findings behind this section: `data/gdpr-ai-handling-v1/baseline.md`, `report.md`.
+
+Scope: `privacy_erasure` and `privacy_access` only. A `legal_threat` or `dmca_takedown` row gets no ladder message
+(captain 2026-11-10: no legal letters).
+
+| piece | what it is | where |
+|---|---|---|
+| state | `received -> identity_check -> in_progress -> responded -> closed`, DERIVED from recorded facts on every run and written to `dsar_state` with a `dsar_state` event on each change. Nothing sets it by hand, so it cannot drift from the record. `responded`/`closed` exist only once the final response is recorded: the row's `confirmed_at`, or a `sent` final letter (`confirm`, `access`) in the send ledger (`dsar.final_response_at`; 7 open requests on the live register had the ledger row and no stamp, and each would have been told "we are late" for an answer it already had). A request cannot close without one. A register row closed by hand with no response is listed by the clock as an anomaly | `dsar.state_of`, `Run.dsar_states` |
+| the date | the EARLIER of one calendar month (clamped to the month's end) and receipt + 30 days, so the stated date is never later than either reading of "one month". `extended_until` moves it, bounded at three calendar months from receipt; only a SENT extension notice writes it (`Store.apply_effects`; see "The three decisions" below). The register's `due_at` column is unchanged | `dsar.statutory_due`, `dsar.due` |
+| identity chain | captain's ruling 2026-11-12, recorded per row in `gates`: (1) account control: signed in, or controls the account's email; (2) a tie to the page: the page is claimed by that account, or the verified sender's host is the page's own catalog website; (3) an authority document only where 1 and 2 leave a real doubt. **A name match is not a tie** (paths B and C no longer pass; they answer `ASK_IDENTITY`), and **no message asks for a passport or any identity document** (GDPR Art. 12(6) allows asking for more only on reasonable doubt). A page that is already hidden or gone ties nobody: it is recorded as `hidden` / `gone`, never as a gate-2 pass (the first live dry run counted 40 passes of which 12 were claims). An 8-char id prefix that no page carries is a link to ask for only when the catalog lookup ANSWERED; a lookup that failed is `unknown` and is re-read. The chain yields ONE `need`: `none`, `claim_or_authority`, `link`, `authority`, `account`, `unknown`. A request not yet through the chain (`gates.v` absent) is owed no message: nothing claims to know what it needs, and the clock still names it | `dsar.gates`, `run.decide_row`, `identity.decide_page` |
+| acknowledgement | one per request, while the date is at least 3 days ahead (`ACK_MIN_RUNWAY_DAYS`: live request #52 would have been promised an answer "by 12 November" one hour before that date; nearer than that it gets NOTHING until the date itself, because "we are late" is not true yet; the clock names it throughout and the late update is owed the moment the date passes): the date we received it, the date we answer by, and the one thing needed. Claim-then-request is stated here: "claim the page, or send a document from the artist's label or management". It replaces the older identity ask for a statutory request (`Run.asks` stands down once the ladder has authored a message for the row), so nobody is asked twice for two different things. Whether a first message already went is read from the send ledger as well as the row's stamp (23 live rows carry a `sent` ask and no `ask_sent_at`), and a letter that may be out (`sending`/`unknown`) counts | `dsar.owed`, `dsar.first_contact_made`, `policies/gdpr-dsar-copy.json` |
+| status update | at the halfway point (if nothing was said in the last 7 d), and for a request past its date: every 14 d, promised by date in the message itself (`next_contact_at`), sent a day before the promise runs out. A late update says we are late and sorry, once, and gives no reason. Where we need nothing from the requester it states the date they will have the answer (today + `LATE_ANSWER_DAYS`, 14), recorded as `answer_promised_at` when the message is sent. That date is stated only for an answer code alone can produce today (`run.answerable_now`: an erasure whose every named page is already hidden; an access request only while `access.standing_gaps` is empty). Any other late request with nothing needed gets `late_none_no_date`, which states the next contact date and no answer date (firstmate: "no promise we cannot hold"); the clock names any request whose stated date has passed (`promises_missed`). Where we are waiting on the requester it states the next contact date only. Slots `status`, `status-2`, ... keep one letter per slot | `dsar.owed`, `dsar.next_status_slot` |
+| copy | written by the model, committed with its provenance, and FIXED per variant: code fills three dates and nothing else. No name, no link, no free text reaches a body, so the text under review carries no personal data. A code lint (barred words, unfilled slots, the deadline present, the requester's name or email absent) runs before a body is ever queued | `policies/gdpr-dsar-copy.json`, `dsar.render`, `dsar.lint` |
+| the copy gate | **no verdict, no send.** Each authored body is frozen in `dsar_messages` with its sha256, and `send.deliver` reaches a writer only when `scripts/outbound_copy/gate.py check` answers rc 0 `approved` for exactly those bytes and exactly that subject line (empty or not), under the `gdpr` rubric family, with a verdict id and statement hash to record. Pending, refused, rewrite, a wrong rubric, a hash that differs, a gate that is not installed, times out or prints nonsense: all a hold, ledgered `refused` with the reason and retried next tick. The gate's path is derived from this file's location; there is no flag and no environment variable that skips it. `approved_by` on the send row is `gate:<verdict id>` | `gdpr_pipeline/copy_gate.py`, `send.deliver`, `policies/outbound-copy-rubric-gdpr.md` |
+| the clock | every statutory request inside 7 d of its date or past it, oldest first, with its state, what it needs, the last message and why a message is held; and every statutory request nobody has written to 48 h after it arrived (`NO_FIRST_MESSAGE_HOURS`), whatever the reason. The line names EVERY one of them, however many (it once named 12 and said "and N more"); a request in both lists is named once. Two things run it. `gdpr-dsar-clock.timer` on node-8 (installed by the deploy) reads it every hour (`dsar clock --watch`: the line goes to the journal). Firstmate's check `scripts/gdpr-dsar-clock-check.sh` pulls it every 5 minutes (`dsar clock --line --read-by firstmate --reader-sha <its own sha256>`) and wakes firstmate with the line when the set of named requests changes, and once a day while it is not empty. node-8 has no route into the firstmate box, so the read is a pull, and the check is put into a firstmate home by this repository's own `scripts/gdpr-dsar-clock-register.sh` (install + bind to its bytes; `--check` says whether a home has THESE bytes; `--unregister` retires it; the id `a0-gdpr-dsar-clock` sorts first because the watcher runs checks in name order and ends a sweep at the first with a line). Each read leaves a mark and the sha256 of the check that made it, and the hourly unit pages, once a day, when requests are named and either the mark is over 26 h old or the reading check is not the one deployed (`dsar.clock_unread`): a home never registered, stopped, or registered before the check changed is loud on the other side within the hour. The Slack due-date page (`Run.watchdog_rows`, `tick --page`) carries a statutory request from the same 7 days out, once a day; it is a record, not the alarm. None of them names a person | `dsar.clock_rows`, `dsar clock --line`, `dsar clock --watch` |
+| the trail | `dsar trail --request N` rebuilds, from the store alone: what was received and when, the identity chain as decided, every authored body with its sha256, copy-file hash, gate result, verdict id, statement hash, reviewer and time, every send attempt with the writer's receipt, and every event | `Run.dsar_trail` |
+
+```
+gdpr-pipeline.py dsar plan --bodies          # what each open statutory request is owed, exact bodies; reads only
+gdpr-pipeline.py dsar author                 # freeze the bodies and put each up for review; sends nothing
+gdpr-pipeline.py dsar send --limit 5         # author, then send what the reviewer approved
+gdpr-pipeline.py dsar clock [--json|--line]  # the statutory clock
+gdpr-pipeline.py dsar clock --watch          # what gdpr-dsar-clock.timer runs: the line, and the unread page
+gdpr-pipeline.py dsar extend --request 216 --evidence "..." --ruling ID   # record the NEED for an extension
+gdpr-pipeline.py dsar trail --request 468    # one request's whole record
+gdpr-pipeline.py tick ... --ladder --ladder-limit 25    # what the hourly unit runs
+```
+
+Kill switch for the ladder alone: `/etc/hydra/gdpr-dsar-ladder.disabled` (nothing is authored or sent; the clock and
+the rest of the tick keep running). `/etc/hydra/gdpr-pipeline.disabled` still stops everything.
+
+**The three decisions (firstmate, 2026-11-12T07:09Z; recorded in the rubric and in `dsar.EXTENSION_RULING`).**
+
+- *Lateness.* A request past its date is told so: late, sorry, the date. No reason, no cause, no admission
+  (`late_*` variants; `dsar.lint(late=True)` refuses a late update with no apology and an apology anywhere else).
+- *Extension (Art. 12(3)).* `extension_number` is selected only when ALL hold: a NEED for the extra time is
+  recorded against the request with the ruling that found it (`dsar extend --request N --evidence "..." --ruling ID`
+  writes `extension_need` and `extension_need_ruling`; it sends nothing and moves no date), code cannot send the
+  answer today (where it can, the answer goes and no time is needed), the requester has at least
+  `EXTENSION_MIN_REQUESTS` (2) open statutory requests, we need nothing from them, no extension is recorded, and the
+  date is still ahead and inside 7 days. How many requests a person has and how near the date is are a ground and
+  a timing, not a need: on those alone no date moves (QA review of #1908 found two already-answerable requests
+  would have been sent notices). The new date is one further month, never past three calendar months from
+  receipt. It quotes the rule and names the ground. A request already past its date never gets one: an extension
+  must not cover lateness. The date moves only when the notice has been SENT. `extension_complexity` is
+  `"enabled": false`: complexity is the rule's other ground and no code can measure it.
+- *Refusal (Art. 12(4)).* `denial` is `"enabled": false` and nothing selects it. The default is to comply. A
+  request we cannot yet connect to a page is asked for what is missing, never refused.
+
+A host with no copy gate holds the ladder (`dsar ladder: held, the copy gate is not installed`): authoring would
+make the older ask stand down and leave a new request with no first message. It resumes when the gate appears.
+
+The older ask stands down ONLY where the copy gate holds a letter that is going to THAT request. One table decides
+it, `dsar.OLDER_ASK_STANDS_DOWN`, keyed by what `dsar.ladder_letter(row, sends, msgs)` finds for the one request
+(asked when the batch is listed and again by `send.deliver` on the row as it is at send time). Every answer the
+gate can give is a row, the ask kind is not an input, and there is no run-wide flag (it once stood down for every
+statutory request whenever the ladder had run):
+
+| the ladder's letter for this request | the older ask | why |
+|---|---|---|
+| `sent` (out, or `sending` / `unknown`: may be out) | stands down | it would be a second first message |
+| `approved` (the gate approved these exact bytes) | stands down | the letter goes on this send |
+| `pending` (in the review queue) | stands down for at most 24 h (`FALLBACK_HOURS`) from the request's first authoring, then proceeds | the one case where the gate holds a letter not yet decided; a queue nobody is working delays first contact by a day, it does not end it |
+| `refused` (the reviewer said no) | proceeds at once | no letter is coming |
+| `error` (the gate could not answer: not installed, timed out, unreadable, or an answer this code does not know) | proceeds at once | the gate holds nothing for this request |
+| `missing` (authored, no gate answer on record) | proceeds at once | nobody is reviewing it |
+| none (the ladder owes it nothing now, or is held or killed on this host) | proceeds, exactly as before the ladder existed | other requests' letters change nothing for it |
+
+With several held letters for one request, it waits only while one of its own is `pending`. Once an ask has gone,
+no acknowledgement is owed (`dsar.owed`): one first message, not two. One test per row: `OlderAsk` in
+`tests/test_gdpr_dsar.py`, and `test_each_gate_verdict_decides_the_older_ask_for_the_request_it_is_about` through
+the store.
+
+"Proceeds" means the ask is LISTED and takes its existing approval path, where its words are a separate question
+with its own recorded answer (`run.ask_refusal`, a `refused` row in `erasure_sends`, never a row left off the
+list): a class with no approved ask copy is refused there, past-due copy was until it was approved, and so is the
+identity step (`ASK_IDENTITY`, `dsar.ASK_WORDING_SUPERSEDED`) for a statutory request. Its approved sentence says a
+name "as it appears on your ID ... is enough"; under the 2026-11-12 ruling a name match ties nobody to a page and
+no code path passes one, so the letter would promise what the next step refuses. The sentence is part of
+`copy.fingerprint()`: changing it voids every standing ruling, so new words arrive with their own ruling, not in a
+fix. Until then such a request's first message is the ladder's reviewed acknowledgement
+(`ack_claim_or_authority`), it is named in the clock line after 48 h with no message from us, and the refusal is
+on its trail. A statutory request with no ask kind at all (an identity PASS, and every access request: the ask copy
+is erasure copy) has only the ladder's letter, and that one never sends without the gate's approval.
+
+A held body is kept while it is still TRUE, so the hash under review is the hash sent (`dsar.stale`). It is
+authored again, and reviewed again, when the message owed is a different one, when a date it states has moved (a
+request folded into an earlier one, an extension), when the wording in the copy file changed, or when a late
+update's promised date is under 3 days away.
+
+**Not built here.** (1) A store and a coded check for an authority
+document (gate 3): one that arrives is read by nobody in code, and the request stays named by the clock. (2) A track or album page that
+does not pass through its one artist's profile stays `JAN_REVIEW`, which the chain reads as `unknown`: there is no
+coded ask for an item page, so that request gets the "we are checking" wording and stays named by the clock. (3) The
+erasure confirmation and the older ask keep their existing approval path: the confirmation's body carries the
+requester's name and page links, so a reviewer outside node-8 cannot be shown its exact bytes without moving personal
+data off the box. That needs the reviewer reachable inside OVH.
+
+**Where the reviewer runs.** node-8 has no route to the reviewer model (`data/gdpr-ai-handling-v1/report.md`,
+finding 1). The gate (lane `outbound-copy-fable-gate-v1`) holds each body on node-8 as pending; a reviewer host pulls
+the pending bodies, signs a verdict over the body hash and the rubric hash, and node-8 verifies the signature against
+`policies/outbound-copy-reviewer.allowed_signers`. Until that gate is deployed, every ladder message holds.
+
+## The Art. 15 answer: the copy of the data (`gdpr_pipeline/access.py`)
+
+GDPR Art. 15(3): "The controller shall provide a copy of the personal data undergoing processing." For an access
+request the copy IS the final response; nothing else takes the request to `responded`.
+
+| piece | what it is | where |
+|---|---|---|
+| whose data | the account the requester controls NOW (gate 1, re-read at build and again at send: `sources.resolve_account`). No account control, or written on someone else's behalf: nothing is built, and the reason is returned | `Run._access_account`, `run.requester_of` |
+| what is read | every row keyed to that account (by account id, or by the sign-in address for the tables that hold only an address) from each table in the manifest, on the read-only replica. One query per table, bound to the one account | `policies/gdpr-access-sources.json`, `access.read_source` |
+| what is left out | columns the manifest withholds, each with a stated reason: `credential` (sign-in secrets and tokens) and `another_person` (a field that identifies someone else; the reason quotes Art. 15(4)). A withheld column is never read at all. A secret-looking column nobody has ruled on is withheld as `unreviewed` and makes the copy incomplete | `access.columns_of` |
+| complete, or not the answer | the copy is `complete` only when every source read, the replica shows no account-keyed table the manifest does not know (`access.unclassified`), every system in `systems` is covered, the Art. 15(1) information has recorded text, and the included columns have been reviewed (`column_review`). A source that did not read is `unknown`, never an empty list. An incomplete copy names each gap and is never sent | `access.collect` |
+| the bytes | canonical JSON (sorted keys, no clock, no run id): the same data gives the same sha256. `--record` writes it beside the register (`access/`, 0600 in a 0700 directory) and puts the hash and counts on the trail. Counts only reach a log, the trail or stdout; never a value, never an address | `access.package`, `Store.put_access_answer` |
+| delivery | sent only when ALL hold: the newest recorded copy is complete, the file is the recorded bytes, it is under 24 h old, it is no larger than a mail attachment takes (`access.ATTACH_MAX_BYTES`, 18 MB; a larger copy is held with that reason, and no other delivery route is built), the requester controls that account now, and the cover message has a verdict on its exact bytes (campaign `gdpr-access`). The only recipient is the sign-in address ON THE ACCOUNT, never the address the request was written from, and it is READ AGAIN at send (`sources.account_email`): the copy carries the address as it was at build, up to 24 h earlier, so an address that has changed since, or one that cannot be read now, holds the copy until it is rebuilt. One send per request, claimed before the mailer runs; an ambiguous failure is `unknown` and never retried. The send stamps `confirmed_at` | `Run.access_deliver`, `access.undeliverable` |
+
+```
+gdpr-pipeline.py access build --request 222             # reads only; prints counts, the hash and every gap
+gdpr-pipeline.py access build --request 222 --record    # also writes the copy beside the register
+gdpr-pipeline.py access deliver --request 222 --dry-run # every reason it is held, or what would be sent
+gdpr-pipeline.py access deliver --request 222           # send it (held by the ladder kill file too)
+```
+
+**Every copy is incomplete today, on purpose, and so none can be sent.** Three things in the manifest are open:
+
+1. `information_notice.text` is empty. Art. 15(1)(a)-(h) requires the purposes, the recipients, the retention
+   period, the rights and the source to be stated with the copy. That text is a legal statement; it is recorded by
+   a reviewed change to the manifest, not written by this code.
+2. `systems` lists nine systems that hold personal data and are not read yet (support conversations, support
+   mail, the payment processor, the sign-in provider, marketing mail, in-app messages, proof documents, tickets,
+   analytics). The list was written from the repository, not from a data map, and is not verified to be complete.
+
+3. `column_review.reviewed` is false. The withheld list was written from column NAMES; nobody has read what the
+   included columns hold, and a free-text or JSON column can carry another person's data (Art. 15(4)).
+
+Nothing runs this on a timer: `access build` and `access deliver` are per request. A new account-keyed table in the
+core schema makes every copy incomplete until the manifest reads it or sets it aside with a reason.
 
 ## Commands
 

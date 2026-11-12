@@ -217,18 +217,18 @@ def decide_page(p: Page, r: Requester, cls: str) -> PageVerdict:
         return v(PASS_A, f"A: account {r.account_id} holds the processed claim on the page")
     if p.is_claimed or p.claim_user_ids:
         return v(ASK_IDENTITY, "the page is claimed by an account that is not the requester's: mismatch = ASK")
+    # A NAME MATCH IS NOT A TIE (captain 2026-11-12: "a passport proves the person, not that the profile is theirs").
+    # Paths B (the account's name equals the page name) and C (the requester's name or address equals it) used to
+    # pass here. A name proves who is writing at most; it does not prove the page is theirs, and two people share
+    # a name. Both now ask for the tie itself: claim the page, or send evidence of authority. PASS_B / PASS_C stay
+    # defined because rows decided before this ruling carry them; no code path returns them any more.
     if r.account_id is not None and any(names_equal(n, p.name) for n in r.account_names):
-        return v(PASS_B, f"B: the contact resolves to account {r.account_id}, whose name matches the page")
+        return v(ASK_IDENTITY, f"the contact resolves to account {r.account_id}, whose name matches the page, but a "
+                               f"name match is not a tie to the page: ask them to claim it or send evidence of "
+                               f"authority")
     if names_equal(r.name, p.name) or local_part_equals(r.email, p.name):
-        if big_name(p):
-            return v(JAN_BIGNAME, f"C would pass, but a big-name page (popularity {p.popularity}, "
-                                  f"{p.credit_count} credits) goes to Jan")
-        # The name/email on a ticket without a conversation is requester-typed metadata: without verified sender
-        # provenance an unrelated unclaimed profile could be named and hidden. Verify before C can pass.
-        if not r.verified:
-            return v(ASK_IDENTITY, "C would pass on the requester's name/email, but the sender is not verified: "
-                                   "ask for a written authorisation from that address")
-        return v(PASS_C, "C: unclaimed page whose display name equals the requester's name (name-fold)")
+        return v(ASK_IDENTITY, "the requester's name or address matches the page name, but a name match is not a tie "
+                               "to the page: ask them to claim it or send evidence of authority")
     sd, wd = host_of(r.email), host_of(p.website)
     if sd and wd and sd not in FREEMAIL and sd == wd:
         if r.verified:

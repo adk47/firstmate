@@ -84,6 +84,14 @@ GDPR_SENDER_SEAT=U0AN41ZBTRU" ]
   [[ "$output" == *" tick --page --send --limit 25 "* ]]
 }
 
+@test "the tick runs the DSAR ladder, capped, and with no approver of its own" {
+  _render "$UNITS"
+  run _values "$SVC" Service.ExecStart
+  [[ "$output" == *" --ladder --ladder-limit 25" ]]
+  # what authorises a ladder message is a reviewer verdict on its hash, never a seat: exactly one --approved-by
+  [ "$(grep -o -- '--approved-by' <<<"$output" | wc -l)" -eq 1 ]
+}
+
 @test "the timer is hourly and starts this service" {
   _render "$UNITS"
   [ "$(_values "$TMR" Timer.OnUnitActiveSec)" = "60min" ]

@@ -1,0 +1,450 @@
+{
+ "_comment": "Round 4: every enabled variant of policies/gdpr-dsar-copy.json (v3: the late updates that say we are late and sorry, the Art. 12(3) extension notice on the number-of-requests ground, the Art. 15 cover message, the late update that states no answer date) through this lane's adapter (gdpr_pipeline.copy_gate.check) and the gate lane's gate.py (check -> pending -> review -> check) in a scratch mirror. Bodies carry example dates (received 11 November 2026, due 11 December 2026, next 26 November 2026): fixed wording, no personal data. The statements were signed with a THROWAWAY key that exists only in the scratch mirror, so none of these is a verdict the production gate accepts. The mirror's gate.py differs from the gate lane's commit in two lines: the store path, and one added table row \"gdpr-access\": \"gdpr\" that the gate lane has been asked for and does not carry yet. Three reviewer passes: the first ruled 12 bodies (11 approve, 1 rewrite: the access cover message) and the reviewer was unavailable for 8; the rewrite was adopted at block level and the second pass ruled 9 (9 approve); the third ruled late_none_no_date, added after the second (1 approve). `superseded` is the access cover message as first written.",
+ "round": 4,
+ "gate_commit": "c7f2af95c78bc5161672a85a199f1aa89a12154b",
+ "gdpr_commit_base": "03d05174bbe36cf7bd799d3080b28e25d5cd6270",
+ "gdpr_tree": "the working tree that became the commit carrying this file",
+ "copy_sha256": "17478c483c2262e6094d7a92181b92d0436f9b95c9ee7012a3f2e3eca0b7159c",
+ "rubric_file_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+ "counts": {
+  "approve": 21,
+  "rewrite": 0,
+  "refuse": 0
+ },
+ "adapter_would_send": 21,
+ "items": [
+  {
+   "variant": "access_answer",
+   "campaign": "gdpr-access",
+   "body_sha256": "f7b2d15d5c5d57069e0c5924c75f7ea585161070be2be38ad84c2bfa59e898e7",
+   "subject_sha256": "0dbc7eb69639d977a3585e598d95f694d21a22aa502d9f368a835d63f3026bbf",
+   "verdict": "approve",
+   "note": "Access cover names the request and its date, one attached file, omitted fields explained in the file, way to report gaps; no other date, article or content described.",
+   "verdict_id": "ocv-50c725255373029d",
+   "statement_sha256": "211a5d2394a9a135c803d8b1ef5bee6527acba5ec9d7306039ea3e964a0dbef9",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:18:55Z",
+   "response_sha256": "2f3c1c6bbf725ef9a060034da10b8f660641da1ffce524426c9138873c459465",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "ack_account",
+   "campaign": "gdpr-ack",
+   "body_sha256": "7a30de379249fff79521eb3098c7564867b809b5e66e778589a20757945bef86",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Ack with receipt and answer dates, asks only account email or app sign-in, request stays open.",
+   "verdict_id": "ocv-ee3cfd0c4e63ee7a",
+   "statement_sha256": "634f2cd2d9c8e6bedc024008c0a404c94047e8561593dbc49875262120e0435d",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:17:31Z",
+   "response_sha256": "d395c46371ac9fbb9244f5b7ed1030ed3b23efb88b191ed02c79876193959c62",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "ack_authority",
+   "campaign": "gdpr-ack",
+   "body_sha256": "86b3e6476ec06eaafaa0428eeadf5822c25bc87eec1c0acf0be959c5a0c9df53",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Ack with dates; on-behalf asks match rule 2, no accusation, request stays open.",
+   "verdict_id": "ocv-d49993742a4ed793",
+   "statement_sha256": "c29aa85fdf78c744037e4968035ed333b40db9984c838c00aefc674c69186727",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:17:31Z",
+   "response_sha256": "d395c46371ac9fbb9244f5b7ed1030ed3b23efb88b191ed02c79876193959c62",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "ack_claim_or_authority",
+   "campaign": "gdpr-ack",
+   "body_sha256": "d95462561a09d61d72d662cab396aad21beb6523a9afc82c74198963348dcbda",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Acknowledgement states receipt and answer dates, asks only permitted claim or document, says request stays open, no article.",
+   "verdict_id": "ocv-c140eccb548de8b9",
+   "statement_sha256": "c6ed5de241f159372d9ad10f12dfad8bd703dbf5f5f4cf32d4ebabe0871f8b1e",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:18:55Z",
+   "response_sha256": "2f3c1c6bbf725ef9a060034da10b8f660641da1ffce524426c9138873c459465",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "ack_link",
+   "campaign": "gdpr-ack",
+   "body_sha256": "799ea681e56e051e11f101f1e542f42b00f8afedd9d4254555bf68837260cf21",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Ack states receipt date, one-month fact and answer date, asks only allowed items, says request stays open.",
+   "verdict_id": "ocv-ffe274f0e0f5cc5b",
+   "statement_sha256": "597c3c142689b957a7bdd6edfb690208b32d324ee537506e5f95b84b7a74fb6f",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:17:31Z",
+   "response_sha256": "d395c46371ac9fbb9244f5b7ed1030ed3b23efb88b191ed02c79876193959c62",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "ack_none",
+   "campaign": "gdpr-ack",
+   "body_sha256": "b9f41a679d94fbd116a978ca028a18e69fbb8f99dbc65f5ce9b13744b37cd57e",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Acknowledgement states receipt date, answer date as a fact of the one-month rule, nothing needed, no article named.",
+   "verdict_id": "ocv-f96ebd02ea5b773c",
+   "statement_sha256": "9b36d63d349e417604fea23d2601e03ded66cc6e18b806769df1ff93e80008d3",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:18:55Z",
+   "response_sha256": "2f3c1c6bbf725ef9a060034da10b8f660641da1ffce524426c9138873c459465",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "ack_unknown",
+   "campaign": "gdpr-ack",
+   "body_sha256": "8c6550d38c57bbe4893b4ec76493bcd325c628f769ac61ed8d8ba606c7b40ac5",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Ack states receipt and answer dates, says nothing is needed, no article named.",
+   "verdict_id": "ocv-ac317b75981b09d0",
+   "statement_sha256": "7f281ae6322e412bed97b5c1e84c4c8bc643030ccf15bd238a74b608a9f00f3f",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:17:31Z",
+   "response_sha256": "d395c46371ac9fbb9244f5b7ed1030ed3b23efb88b191ed02c79876193959c62",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "extension_number",
+   "campaign": "gdpr-extension",
+   "body_sha256": "9c33fd899c9d9e955ef9980b0da10128560626b3bb719a886a871c4dff247fc4",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Extension quotes Article 12(3) in its own words, states the number-of-requests ground as fact, gives the new date, no lateness implied; date arithmetic is for code.",
+   "verdict_id": "ocv-1794d67970553351",
+   "statement_sha256": "b549a09463ea78e9be3826f8a4ee3ded5160b655fad64d9792703dc756389f69",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:18:55Z",
+   "response_sha256": "2f3c1c6bbf725ef9a060034da10b8f660641da1ffce524426c9138873c459465",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "late_account",
+   "campaign": "gdpr-status",
+   "body_sha256": "57818a57af99310f9a82cfdde0f84447aa09f0e9d526ee0a3451119acc2db344",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Late and sorry once with no reason, asks only account email or app sign-in, open, next date given.",
+   "verdict_id": "ocv-14cb68168fc789a9",
+   "statement_sha256": "90e001582b1cf7b0cc1ca3d1432d85e4b153141d0202fd890e4ad0e3864e44dd",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:17:31Z",
+   "response_sha256": "d395c46371ac9fbb9244f5b7ed1030ed3b23efb88b191ed02c79876193959c62",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "late_authority",
+   "campaign": "gdpr-status",
+   "body_sha256": "61582a81339592efa52ecdaa63b0a98500e7da70a28c7b78802f55873e429a19",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "On-behalf asks match rule 2 exactly, no accusation, late and sorry once, next date given.",
+   "verdict_id": "ocv-3436fa7457b1ba03",
+   "statement_sha256": "5383725614de4441fa8f83150bcd6750ad4d3508eb8ca196af38990105b39ae1",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:17:31Z",
+   "response_sha256": "d395c46371ac9fbb9244f5b7ed1030ed3b23efb88b191ed02c79876193959c62",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "late_claim_or_authority",
+   "campaign": "gdpr-status",
+   "body_sha256": "b5517d9ab315fc51362b391943db166f37179b02db5b8e47c4cb24f576e1dd94",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Late status: open, late and sorry once, no reason, asks only claim or label/management document, next date stated.",
+   "verdict_id": "ocv-e62ca5cb29cb242d",
+   "statement_sha256": "18b405fa6012c0c9aa990ca68cc9a8b6ede3b6c9e62fb124b00d4846eb85fad4",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:18:55Z",
+   "response_sha256": "2f3c1c6bbf725ef9a060034da10b8f660641da1ffce524426c9138873c459465",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "late_link",
+   "campaign": "gdpr-status",
+   "body_sha256": "966350b59170a0788682d69c5e3e0f7a23f0652d87212e37ca3a37d2bf11c144",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Late status: says open, late and sorry once, no reason given, asks only for page link and claim/label document, next date stated.",
+   "verdict_id": "ocv-16df935fb069e3e7",
+   "statement_sha256": "701cadfd099db8e9feb7669909d0240cd70f060dbd9d05902e78d33e45e95803",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:18:55Z",
+   "response_sha256": "2f3c1c6bbf725ef9a060034da10b8f660641da1ffce524426c9138873c459465",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "late_none",
+   "campaign": "gdpr-status",
+   "body_sha256": "71f8a031fe0f832643ba625417f1735ccc043a3954fa297303354ba7dabf2aa6",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Late and sorry once, no reason, needs nothing, answer date given.",
+   "verdict_id": "ocv-f0cd5ad04fd09d85",
+   "statement_sha256": "3d1b155a72a9e8629518efcb40c7d71774caff7886ad60d781c213a2fcbef34a",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:17:31Z",
+   "response_sha256": "d395c46371ac9fbb9244f5b7ed1030ed3b23efb88b191ed02c79876193959c62",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "late_none_no_date",
+   "campaign": "gdpr-status",
+   "body_sha256": "1b89699b2afa6e6e62c8fdb55ff7b94259c517f255f7ced4392e6359704a8046",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Late status update: says open, late and sorry once with no reason, what we are doing, needs nothing, next date given, no article, no accusation, no personal data.",
+   "verdict_id": "ocv-8c715f490d1e245e",
+   "statement_sha256": "2fc3e92d081b851ba0f14469877a172696ade66f806502c6aa245bdda2c2f7ce",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:24:29Z",
+   "response_sha256": "396e3ac763d07d583e9ddac8f77b0a02aadf25e69f12cb0b6c0496e52f40682d",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "late_unknown",
+   "campaign": "gdpr-status",
+   "body_sha256": "18dd40dcd5fcd23109b93d1596927ccb86cf4903e1877bb3004bf6e8d3f4b5c7",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Open, late and sorry once with no reason, needs nothing, next date given; all hard rules hold.",
+   "verdict_id": "ocv-8f37ef27028f7e1b",
+   "statement_sha256": "49154db7f81221dd9cd78f4756b8904cb98f64d388bbac298a8b01ea1fa1a563",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:17:31Z",
+   "response_sha256": "d395c46371ac9fbb9244f5b7ed1030ed3b23efb88b191ed02c79876193959c62",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "status_account",
+   "campaign": "gdpr-status",
+   "body_sha256": "8bbd2944222cbf8e08f618c1c9c800f7c39929cab460c158e53a76c8401df654",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Open, asks only account email or app sign-in, next date given, no apology.",
+   "verdict_id": "ocv-1213d9f812bba9f4",
+   "statement_sha256": "06add47c366dd8568ac9bc5a0df6034041b895e4d86d34e32b2dc53e0df54d92",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:17:31Z",
+   "response_sha256": "d395c46371ac9fbb9244f5b7ed1030ed3b23efb88b191ed02c79876193959c62",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "status_authority",
+   "campaign": "gdpr-status",
+   "body_sha256": "c61b64a8eace05d3b7cd35bd2887d7e3911802b045aa1c1903b34816e96c6831",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Status on behalf of another: open, asks only the permitted claim-and-write or label/management document, no identity document, next date stated.",
+   "verdict_id": "ocv-b103f5fcca5fc98a",
+   "statement_sha256": "73b2c8ab5bda5f1cce6630fa34173c8dd7d97423418e40f1d343b18d0eb08c02",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:18:55Z",
+   "response_sha256": "2f3c1c6bbf725ef9a060034da10b8f660641da1ffce524426c9138873c459465",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "status_claim_or_authority",
+   "campaign": "gdpr-status",
+   "body_sha256": "cd3f9706e2e0fd0273eef320313a3cdcdf0ef7537cacf2e8b96dd674709e7f66",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Status: open, asks only claim or label/management document, says request stays open, next date stated.",
+   "verdict_id": "ocv-d11b1685a0cf1922",
+   "statement_sha256": "fdb2a82767cac030709d8a55394081c839b5202eea58c8743ee77f9b61b6f78b",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:18:55Z",
+   "response_sha256": "2f3c1c6bbf725ef9a060034da10b8f660641da1ffce524426c9138873c459465",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "status_link",
+   "campaign": "gdpr-status",
+   "body_sha256": "3d13c37992d35d20489fb124e6f34b968e9621800a3cd1d87dd989178a029b5c",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Asks only allowed things (link, claim, label document), says open and how to reply, gives next date, no apology.",
+   "verdict_id": "ocv-d05b48000b5f8914",
+   "statement_sha256": "2fcc6ffb8582945a32bfd3358259ccc423cee64bc11102f513eeb1146281bd03",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:17:31Z",
+   "response_sha256": "d395c46371ac9fbb9244f5b7ed1030ed3b23efb88b191ed02c79876193959c62",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "status_none",
+   "campaign": "gdpr-status",
+   "body_sha256": "7a6be30173eca4a6e1c3ef791a155ad7876a600f88c86e4e3b1b53b78636d8d1",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Open, working on it, needs nothing, next date given, no apology.",
+   "verdict_id": "ocv-8f1ea8dc39938185",
+   "statement_sha256": "7bad9cbbccb3c5df6e101c477f20dead9a8d27a6549f5df8eec3116a40d1e092",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:17:31Z",
+   "response_sha256": "d395c46371ac9fbb9244f5b7ed1030ed3b23efb88b191ed02c79876193959c62",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "status_unknown",
+   "campaign": "gdpr-status",
+   "body_sha256": "c76f4eb4034aceb5247f65403b7cd60388fd4c0bc130a6b77126b8ff4a23a6aa",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Status: open, says what we are doing, nothing needed, next date stated, no promise or article.",
+   "verdict_id": "ocv-0fa9b5f91402661d",
+   "statement_sha256": "431ad7b49ad0c7031e8d1966b7e6904df6b3e4f2826d22f1863665cb4e7811b2",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T08:18:55Z",
+   "response_sha256": "2f3c1c6bbf725ef9a060034da10b8f660641da1ffce524426c9138873c459465",
+   "rubric": "gdpr",
+   "rubric_sha256": "9237b374a6b2b9149b4b4c50887ddbc4f35330e39624b8b11a66caf363f5284c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  }
+ ],
+ "superseded": [
+  {
+   "campaign": "gdpr-access",
+   "copy": "access_answer",
+   "body_sha256": "28336e340d7cbb6a8b1ba77f295527fea9c6aeaeb2b58d1b9b3f879fadf6a15e",
+   "verdict": "rewrite",
+   "note": "gdpr-access cover must not describe or count the copy: 'holds the data on your Muso account', 'a small number of fields', 'such as sign-in secrets and fields that identify another person' describe and count contents.",
+   "replacement": "Subject: The copy of your personal data you asked Muso for\n\nHello, On 11 November 2026 you asked for a copy of the personal data we hold about you. This message is our answer to that request. The copy is attached to this message as one file. Some fields are left out. The file lists each one and gives the reason. If something you expected is missing from the file, reply here and tell us what. Muso.AI Support",
+   "verdict_id": "ocv-5d81b83561541983",
+   "statement_sha256": "a652483a5b303fc3c83f3be44b551d5dea41ed54236fbb044e6daf79e6169e2a",
+   "reviewed_at": "2026-11-12T08:17:31Z"
+  }
+ ]
+}

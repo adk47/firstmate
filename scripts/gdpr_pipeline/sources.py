@@ -40,14 +40,35 @@ class Unknown(RuntimeError):
 
 # ---- core replica
 
-def trino(sql: str) -> list[list[str]]:
+WIDE_FIELD_BYTES = 64 * 1024 * 1024
+
+
+def trino(sql: str, field_limit: int = 0) -> list[list[str]]:
+    """Rows of one replica read. A field wider than the CSV reader takes is `Unknown`, never a short row and never a
+    raw `csv.Error`: every caller's "could not read" path catches `Unknown`. `field_limit` raises the reader's limit
+    for this one read and puts it back (the limit is process-wide)."""
     try:
         p = subprocess.run([TRINO], input=sql, capture_output=True, text=True, timeout=300, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise Unknown(f"replica read did not run: {type(exc).__name__}") from exc
     if p.returncode:
         raise Unknown(f"replica read failed: {p.stderr.strip()[-200:]}")
-    return list(csv.reader(io.StringIO("\n".join(ln for ln in p.stdout.splitlines() if ln.startswith('"')))))
+    text = "\n".join(ln for ln in p.stdout.splitlines() if ln.startswith('"'))
+    before = csv.field_size_limit(field_limit) if field_limit else None
+    try:
+        return list(csv.reader(io.StringIO(text)))
+    except csv.Error as exc:
+        raise Unknown("replica read returned a field wider than the reader takes") from exc
+    finally:
+        if before is not None:
+            csv.field_size_limit(before)
+
+
+def trino_wide(sql: str) -> list[list[str]]:
+    """`trino` for a read that must return whole values however long they are (the Art. 15 copy: a truncated or
+    dropped field is a copy that is not the data). Found on the live replica 2026-11-12: `user_action_log` holds
+    values past the reader's default 131,072 characters."""
+    return trino(sql, field_limit=WIDE_FIELD_BYTES)
 
 
 def _q(xs) -> str:
@@ -90,6 +111,15 @@ def account_names(uids: list[int]) -> dict[int, tuple[str, ...]]:
             names = tuple(n for n in {f"{fn or ''} {ln or ''}".strip(), (full or "").strip()} if n)
             out[int(uid)] = names
     return out
+
+
+def account_email(uid: int) -> str:
+    """The sign-in address on the account right now. Raises Unknown unless exactly one account row answers: the
+    address a copy of personal data is sent to is never a guess."""
+    rows = trino(f"SELECT email FROM postgresql_core.public.users WHERE id = {int(uid)}")
+    if len(rows) != 1 or len(rows[0]) != 1:
+        raise Unknown(f"{len(rows)} account row(s) for one account id")
+    return (rows[0][0] or "").strip()
 
 
 def accounts_by_email(email: str) -> list[int]:

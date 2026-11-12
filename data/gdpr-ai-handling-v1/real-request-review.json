@@ -1,0 +1,134 @@
+{
+ "_comment": "The exact message owed to four real open requests, read from the live register in memory on node-8 at 2026-11-12T04:48:58Z (nothing written, no writer reachable), then put through the real adapter and the real gate in a scratch mirror with the reviewer model. Bodies carry dates and fixed wording only. The statements were signed with a throwaway key that exists only in the mirror, so none is a verdict production would send on, and NOTHING WAS SENT to any of these requests.",
+ "bodies": {
+  "708d0c57003edfebba4fbf7ae6c8261ed3753f41536dc71b750ef2b1d10f1abe": "Hello,\n\nWe received your request on 8 November 2026. It is logged and we are working on it.\n\nThe law gives us one month from the day we received it to answer, so you will have our answer by 8 December 2026 at the latest.\n\nWe are checking what we hold about this request. There is nothing you need to send us right now. If that changes, we will ask you here.\n\nMuso.AI Support",
+  "8c6550d38c57bbe4893b4ec76493bcd325c628f769ac61ed8d8ba606c7b40ac5": "Hello,\n\nWe received your request on 11 November 2026. It is logged and we are working on it.\n\nThe law gives us one month from the day we received it to answer, so you will have our answer by 11 December 2026 at the latest.\n\nWe are checking what we hold about this request. There is nothing you need to send us right now. If that changes, we will ask you here.\n\nMuso.AI Support",
+  "a780e625687d0b489506c8d2e16d51f49ee6d1bc09b7dc81059233990bfecd23": "Hello,\n\nWe received your request on 10 November 2026. It is logged and we are working on it.\n\nThe law gives us one month from the day we received it to answer, so you will have our answer by 10 December 2026 at the latest.\n\nThere is nothing you need to send us right now. If that changes, we will tell you here.\n\nMuso.AI Support"
+ },
+ "copy_sha256": "820a13a9f03ebff864e3826fa3b134a2fdc3358e2fbc2ee1de2ec254978df037",
+ "gate_commit": "7b3b95bbe4c172eae99050dd3916d3511209cfb6",
+ "requests": [
+  {
+   "adapter_ok": true,
+   "body_sha256": "708d0c57003edfebba4fbf7ae6c8261ed3753f41536dc71b750ef2b1d10f1abe",
+   "class": "privacy_erasure",
+   "due_at": "2026-12-08T03:47:47Z",
+   "gates": {
+    "account": {
+     "how": "",
+     "pass": false
+    },
+    "authority": {
+     "needed": false,
+     "on_file": false
+    },
+    "tie_pass": null
+   },
+   "kind": "ack",
+   "need": "unknown",
+   "reason": "",
+   "received_at": "2026-11-08T03:47:47Z",
+   "register_no": 415,
+   "result": "approved",
+   "reviewed_at": "2026-11-12T04:55:41Z",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "route": "intercom",
+   "rubric": "gdpr",
+   "statement_sha256": "fd72cbbecc7876e208555a91dbec72ab3841726708b1093bfc9b679d475a4503",
+   "variant": "ack_unknown",
+   "verdict_id": "ocv-7a37186b80abb904"
+  },
+  {
+   "adapter_ok": true,
+   "body_sha256": "708d0c57003edfebba4fbf7ae6c8261ed3753f41536dc71b750ef2b1d10f1abe",
+   "class": "privacy_access",
+   "due_at": "2026-12-08T12:40:19Z",
+   "gates": {
+    "account": {
+     "how": "",
+     "pass": false
+    },
+    "authority": {
+     "needed": false,
+     "on_file": false
+    },
+    "tie_pass": null
+   },
+   "kind": "ack",
+   "need": "unknown",
+   "reason": "",
+   "received_at": "2026-11-08T12:40:19Z",
+   "register_no": 483,
+   "result": "approved",
+   "reviewed_at": "2026-11-12T04:55:41Z",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "route": "intercom",
+   "rubric": "gdpr",
+   "statement_sha256": "fd72cbbecc7876e208555a91dbec72ab3841726708b1093bfc9b679d475a4503",
+   "variant": "ack_unknown",
+   "verdict_id": "ocv-7a37186b80abb904"
+  },
+  {
+   "adapter_ok": true,
+   "body_sha256": "a780e625687d0b489506c8d2e16d51f49ee6d1bc09b7dc81059233990bfecd23",
+   "class": "privacy_erasure",
+   "due_at": "2026-12-10T15:42:57Z",
+   "gates": {
+    "account": {
+     "how": "external_id (professional_id)",
+     "pass": true
+    },
+    "authority": {
+     "needed": false,
+     "on_file": false
+    },
+    "tie_pass": true
+   },
+   "kind": "ack",
+   "need": "none",
+   "reason": "",
+   "received_at": "2026-11-10T15:42:57Z",
+   "register_no": 442,
+   "result": "approved",
+   "reviewed_at": "2026-11-12T04:55:41Z",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "route": "intercom",
+   "rubric": "gdpr",
+   "statement_sha256": "e97f9cc054b99967d879452b852488ac468ee00daae69a3b5343436daf4b826a",
+   "variant": "ack_none",
+   "verdict_id": "ocv-f5bf80456feac416"
+  },
+  {
+   "adapter_ok": true,
+   "body_sha256": "8c6550d38c57bbe4893b4ec76493bcd325c628f769ac61ed8d8ba606c7b40ac5",
+   "class": "privacy_erasure",
+   "due_at": "2026-12-11T13:40:17Z",
+   "gates": {
+    "account": {
+     "how": "external_id (presented_profile)",
+     "pass": true
+    },
+    "authority": {
+     "needed": false,
+     "on_file": false
+    },
+    "tie_pass": null
+   },
+   "kind": "ack",
+   "need": "unknown",
+   "reason": "",
+   "received_at": "2026-11-11T13:40:17Z",
+   "register_no": 464,
+   "result": "approved",
+   "reviewed_at": "2026-11-12T04:55:41Z",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "route": "intercom",
+   "rubric": "gdpr",
+   "statement_sha256": "a40c156be4a48775b4ec865da7e2d8885616ebe0fd456d2aefe00ed5e4c5af29",
+   "variant": "ack_unknown",
+   "verdict_id": "ocv-e6711bb7e2a43468"
+  }
+ ],
+ "rubric_file_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+ "sent": false
+}

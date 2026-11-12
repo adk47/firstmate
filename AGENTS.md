@@ -982,6 +982,37 @@ Each repo has one live batch PR carrying the whole set; a changed set opens a ne
 force-push. What Caroline answers, does and hands off for billing and hides, the refund caps and every undo:
 `docs/support/caroline-billing-and-hide.md` (pinned by `policies/caroline-billing-and-hide.json` + its test).
 
+**A statutory request (erasure, access) is handled by the DSAR ladder, never routed to a person** (captain
+2026-11-12; `scripts/gdpr_pipeline/dsar.py`, `docs/support/gdpr-pipeline.md` §"The DSAR ladder"). Three rules are code:
+- **No verdict, no send.** An acknowledgement or status update reaches a writer only when
+  `scripts/outbound_copy/gate.py` approves its exact bytes under the `gdpr` rubric
+  (`gdpr_pipeline/copy_gate.py`, called inside `send.deliver`). A missing, pending, refused or unrunnable gate is a
+  hold. Never add a flag, env var or second path that sends a ladder kind without it.
+- **Identity is claim or authority, never a name and never a passport.** A name match is not a tie to a page
+  (`identity.decide_page` paths B/C answer `ASK_IDENTITY`); no copy asks for an identity document (Art. 12(6)).
+- **The body carries dates only.** `policies/gdpr-dsar-copy.json` is fixed text per variant; code fills
+  `{received}`, `{due}`, `{next}`. A name or link in a ladder body breaks the reason its text may be reviewed off
+  node-8. `denial` and `extension_complexity` are locked (`enabled: false`); `extension_number` is sent only on a need
+  recorded with its ruling (`dsar extend`), for 2+ open requests from one requester, while the date is still ahead
+  and code cannot send the answer: a count of requests is a ground, not a need. Never to cover lateness.
+The clock (`dsar clock`) names every request inside 7 d of its date, and every one nobody has written to after
+48 h. `gdpr-dsar-clock.timer` reads it hourly on node-8; firstmate's check
+`scripts/gdpr-dsar-clock-check.sh` pulls it (node-8 has no route to firstmate), and
+`scripts/gdpr-dsar-clock-register.sh` is what puts it in a firstmate home (`--check` asks whether a home has these
+bytes). The unit pages when no check has read the clock for 26 h, or the one reading it is not the deployed one
+(`dsar.clock_unread`): run the register script again whenever the check changes.
+The older ask stands down only where the gate holds a letter for THAT request: `dsar.OLDER_ASK_STANDS_DOWN` has one
+row per gate verdict (sent, approved, pending for 24 h at most; refused, error, missing and none proceed) and a
+test per row. An ask's WORDS are refused separately and on the record (`run.ask_refusal`), never by leaving a row
+off the list. The register stores `''`, never NULL, for an unset timestamp: `confirmed_at IS NULL` matches no row.
+A row stamp is not the record of a send: 23 open rows had a `sent` ask and 7 a `sent` final confirmation in
+`erasure_sends` with no stamp on the row, so "was contacted" and "was answered" read the ledger too
+(`dsar.contacted_at`, `dsar.final_response_at`). No message states an answer date code cannot keep
+(`run.answerable_now`).
+The Art. 15 copy (`gdpr_pipeline/access.py`, manifest `policies/gdpr-access-sources.json`) is built for the account
+the requester controls and sent only when COMPLETE, to the address on the account; an incomplete copy names its gaps
+and is never the answer. Only counts and hashes of a copy may reach a log, the trail or stdout.
+
 ## Sentinel demotion: three independent stops, and nothing promotes itself
 
 `scripts/sentinel/demote.py` is the ONLY code that narrows a capability's rollout state on its own

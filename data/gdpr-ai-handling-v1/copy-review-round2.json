@@ -1,0 +1,376 @@
+{
+ "_comment": "Review of the DSAR ladder copy by the reviewer model, run through the gate lane's own gate.py (check -> pending -> review -> check) in a scratch mirror of both branches. The bodies are the copy file's variants with example dates (received 11 November 2026, due 11 December 2026, next 26 November 2026): fixed wording, no personal data. The statements were signed with a THROWAWAY key that exists only in the scratch mirror, so none of these is a verdict the production gate accepts; production verdicts come from the gate lane's reviewer round under the pinned key.",
+ "round": 2,
+ "gate_commit": "7b3b95bbe4c172eae99050dd3916d3511209cfb6",
+ "gdpr_commit_base": "ecb7a71e640ea7e3bf14778f694fbbf721437c48",
+ "copy_sha256": "61f7158f520de8bf9114e44f16b2183a128e3aca723dbe88b141184a06284cc3",
+ "rubric_file_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+ "counts": {
+  "approve": 16,
+  "rewrite": 2,
+  "refuse": 0
+ },
+ "adapter_would_send": 16,
+ "items": [
+  {
+   "variant": "ack_account",
+   "campaign": "gdpr-ack",
+   "body_sha256": "61241f80ab9ace842a7b055ff51c71b3fc97600c5214805dc7dacdba8c12cb80",
+   "verdict": "approve",
+   "note": "Receipt and answer dates stated, ask limited to writing from the account email or app, request stays open with reply path; no accusation or promise.",
+   "replacement": "",
+   "verdict_id": "ocv-a7397d1581ed0f08",
+   "statement_sha256": "9e36fa0f42495b82b72be140152e11d5383a49b1b2d4a8f710366ea456a41bdd",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:02:38Z",
+   "response_sha256": "9f99212a2ddd00a1417f90dd504d3e7bb134344a4c2b3b21621eeeab6e552f2a",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "ack_authority",
+   "campaign": "gdpr-ack",
+   "body_sha256": "86b3e6476ec06eaafaa0428eeadf5822c25bc87eec1c0acf0be959c5a0c9df53",
+   "verdict": "approve",
+   "note": "On-behalf acknowledgement with receipt and answer dates, only the two permitted on-behalf asks, request stays open with reply path; no accusation or ID document.",
+   "replacement": "",
+   "verdict_id": "ocv-069e79814af954cf",
+   "statement_sha256": "48968733f01047965776de36fb5673128d3de328cba64a32e99b14dd9fa891a2",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:02:38Z",
+   "response_sha256": "9f99212a2ddd00a1417f90dd504d3e7bb134344a4c2b3b21621eeeab6e552f2a",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "ack_claim_or_authority",
+   "campaign": "gdpr-ack",
+   "body_sha256": "017e679bb878878374c1f602be2dae49eaf947a1ddc76b628be0b775e7eb3211",
+   "verdict": "approve",
+   "note": "States receipt and answer dates, asks only for a page claim or label/management letter, says the request stays open and how to reply; no accusation, no ID document, no article, no promise.",
+   "replacement": "",
+   "verdict_id": "ocv-72e9077ab17978ec",
+   "statement_sha256": "0a0ba77f51e111fb1278ceecc120c081f28db3c3c7b81a586e6e7b67030975d1",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:02:38Z",
+   "response_sha256": "9f99212a2ddd00a1417f90dd504d3e7bb134344a4c2b3b21621eeeab6e552f2a",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "ack_link",
+   "campaign": "gdpr-ack",
+   "body_sha256": "799ea681e56e051e11f101f1e542f42b00f8afedd9d4254555bf68837260cf21",
+   "verdict": "approve",
+   "note": "Receipt and answer dates stated, asks only for page links and a claim or label/management letter, says the request stays open and how to reply.",
+   "replacement": "",
+   "verdict_id": "ocv-46ba7378ad820152",
+   "statement_sha256": "f3711cda8e1c2589d6f774e5edf103beec4e18a4004a010b2f34399483362219",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:02:38Z",
+   "response_sha256": "9f99212a2ddd00a1417f90dd504d3e7bb134344a4c2b3b21621eeeab6e552f2a",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "ack_none",
+   "campaign": "gdpr-ack",
+   "body_sha256": "b9f41a679d94fbd116a978ca028a18e69fbb8f99dbc65f5ce9b13744b37cd57e",
+   "verdict": "approve",
+   "note": "States receipt date, answer date with the one-month fact, that nothing is needed; no article, no accusation, no promise beyond the date.",
+   "replacement": "",
+   "verdict_id": "ocv-3a42cc7ff4b1cac8",
+   "statement_sha256": "2d92ba4c25be4270807c7a866e001dc481a42b6fdcfecace44607ecb5f97fc88",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:03:14Z",
+   "response_sha256": "e99495d760e975f9400f87383f63aa7822b684258114b5073b0d2c958ad5dfbd",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "ack_unknown",
+   "campaign": "gdpr-ack",
+   "body_sha256": "8c6550d38c57bbe4893b4ec76493bcd325c628f769ac61ed8d8ba606c7b40ac5",
+   "verdict": "approve",
+   "note": "Receipt and answer dates stated, says nothing is needed now, no promise of outcome, no article, no personal data.",
+   "replacement": "",
+   "verdict_id": "ocv-9b31af81523b9975",
+   "statement_sha256": "f38c604c360e806f0adbb35f83dc74a1aa627c7a1f68d073740a5b5ae153345d",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:02:38Z",
+   "response_sha256": "9f99212a2ddd00a1417f90dd504d3e7bb134344a4c2b3b21621eeeab6e552f2a",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "late_account",
+   "campaign": "gdpr-status",
+   "body_sha256": "d6facb15f9937b227f6f6ddae3e4bdb02263aa5a260d89cccbdcb282f1a70b54",
+   "verdict": "rewrite",
+   "note": "Rule 1: 'we first need to know it comes from the account holder' words the ask as doubt about the person; the ask itself is allowed under rule 2.",
+   "replacement": "Hello, The request you made on 11 November 2026 is still open. We have not finished it yet. What we are doing: we are waiting for one thing from you before we can act on it. What we need from you: Please reply from the email address on your Muso account, or sign in to the Muso app and message us from there. That links your request to the account it concerns. You do not need to send a passport or any other identity document. Your request stays open while we wait. When you will hear from us next: by 26 November 2026 at the latest. Muso.AI Support",
+   "verdict_id": "ocv-dc79f989131a77b8",
+   "statement_sha256": "5646127ebdd43794632c5386b749346f7429290dff81560651f8b33b46b89921",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:03:14Z",
+   "response_sha256": "e99495d760e975f9400f87383f63aa7822b684258114b5073b0d2c958ad5dfbd",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": false,
+    "result": "refused",
+    "reason": "copy_review_rewrite:ocv-dc79f989131a77b8"
+   }
+  },
+  {
+   "variant": "late_authority",
+   "campaign": "gdpr-status",
+   "body_sha256": "6d7ebe31acd7becfc59aa87f78079850e35f971c6b0938204e40b77037454c58",
+   "verdict": "approve",
+   "note": "On-behalf case asks exactly the two permitted things (the person claims and writes from their account, or a label/management authorisation naming the writer); open status and next date present.",
+   "replacement": "",
+   "verdict_id": "ocv-6c8cb70f44c4f0a7",
+   "statement_sha256": "5b81db3ca51c58b52f74f4d32f04b7506641f7273e0429b51f3aa26f9d4bedae",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:02:38Z",
+   "response_sha256": "9f99212a2ddd00a1417f90dd504d3e7bb134344a4c2b3b21621eeeab6e552f2a",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "late_claim_or_authority",
+   "campaign": "gdpr-status",
+   "body_sha256": "7c517bd43ceffcf65eb50fe05200ebd6d4e84b61323a99a61adece4092ae3f9f",
+   "verdict": "approve",
+   "note": "Open status with permitted asks (claim the page or label/management letter), reply path, next date, no ID document required, no accusation.",
+   "replacement": "",
+   "verdict_id": "ocv-ab54c06f2b51fda2",
+   "statement_sha256": "7554008d673ebc7278380d8a1f0d60f1b6680e02bc64fd037c80b6e0d312c797",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:02:38Z",
+   "response_sha256": "9f99212a2ddd00a1417f90dd504d3e7bb134344a4c2b3b21621eeeab6e552f2a",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "late_link",
+   "campaign": "gdpr-status",
+   "body_sha256": "0556773b85774f5728cffffdd05920a93e403e751c0974bae14af427090d6a8b",
+   "verdict": "approve",
+   "note": "Says the request is open, what is being done, asks only for page links plus a claim or label/management letter, and gives the next-contact date; no personal data or forbidden asks.",
+   "replacement": "",
+   "verdict_id": "ocv-d9e6e0a35537567a",
+   "statement_sha256": "068058fef70bca840b4ab7f62f71a472498a0b6d8ceb4afaefb7accd6f9d516e",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:02:38Z",
+   "response_sha256": "9f99212a2ddd00a1417f90dd504d3e7bb134344a4c2b3b21621eeeab6e552f2a",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "late_none",
+   "campaign": "gdpr-status",
+   "body_sha256": "7f4dc8fc68391165573812a05b5379e6cb022053fcb9cb52ebdbd4c15411b3e2",
+   "verdict": "approve",
+   "note": "Open status, working on it, nothing needed, next-contact date; all hard rules hold.",
+   "replacement": "",
+   "verdict_id": "ocv-68fd145a909f2b54",
+   "statement_sha256": "6840c1cc2c67e45fe892fc60fc4c6d1a110c507e2ba7219624567582ba874f2a",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:02:38Z",
+   "response_sha256": "9f99212a2ddd00a1417f90dd504d3e7bb134344a4c2b3b21621eeeab6e552f2a",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "late_unknown",
+   "campaign": "gdpr-status",
+   "body_sha256": "e80c5747fa22f1c25af875d0ee9221770c6dcc735379014f5dbeb4eebd7c8424",
+   "verdict": "approve",
+   "note": "Open status, what we are doing, nothing needed, next date; every hard rule holds.",
+   "replacement": "",
+   "verdict_id": "ocv-548e43be982b35cb",
+   "statement_sha256": "74d0d9dffccf9036a447783aaffb1b04564c89cd716aa8b1543fa8fc426dff45",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:03:14Z",
+   "response_sha256": "e99495d760e975f9400f87383f63aa7822b684258114b5073b0d2c958ad5dfbd",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "status_account",
+   "campaign": "gdpr-status",
+   "body_sha256": "5ce74147cc195632181c60995443e41f12238e17a590b67dd73976657c9f67c7",
+   "verdict": "approve",
+   "note": "Asks only that the person write from their account email or from the app, stated as procedure not doubt; open status and next date present, no ID document, no article.",
+   "replacement": "",
+   "verdict_id": "ocv-4b4a34572bddb324",
+   "statement_sha256": "6e083a5f57d93c8d0da1fc6d255e8b2f4b3b77e63dcc38f19faa24e9db2d6c2b",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:02:38Z",
+   "response_sha256": "9f99212a2ddd00a1417f90dd504d3e7bb134344a4c2b3b21621eeeab6e552f2a",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "status_authority",
+   "campaign": "gdpr-status",
+   "body_sha256": "c61b64a8eace05d3b7cd35bd2887d7e3911802b045aa1c1903b34816e96c6831",
+   "verdict": "approve",
+   "note": "Open status, allowed on-behalf asks only (claim and write from own account, or label/management document), how to send, next date; no identity document, no accusation.",
+   "replacement": "",
+   "verdict_id": "ocv-fc91ab02bc9cb97d",
+   "statement_sha256": "767003e18c79e4fbb25110e4e684fb5156faef1ee78a3e369b587b27767626d7",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:03:14Z",
+   "response_sha256": "e99495d760e975f9400f87383f63aa7822b684258114b5073b0d2c958ad5dfbd",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "status_claim_or_authority",
+   "campaign": "gdpr-status",
+   "body_sha256": "cb0ab735b25576cf197577c5851db420b68ec26c320158e90d2cf2d3be61c4d2",
+   "verdict": "rewrite",
+   "note": "Rule 2: 'a document that shows you are authorised, for example' is wider than the allowed label/management document; rule 7: option 2 does not say how to send it.",
+   "replacement": "Hello, This is an update on the request you made on 11 November 2026. Your request is still open. What we are doing: we are waiting for one thing from you before we can act on the page. What we need from you: Either of these is enough: 1. Claim the page. Sign in to the Muso app (or create an account), open the page and claim it. When the claim has been processed, reply here and we will continue. 2. Reply here with a document from the artist's label or management that names you as authorised to act for the page. You do not need to send a passport or any other identity document. Your request stays open while we wait. When you will hear from us next: by 26 November 2026 at the latest. Muso.AI Support",
+   "verdict_id": "ocv-ed2772988e742a3c",
+   "statement_sha256": "50d23b3d516f4277c3eb3a2cc1b79335fb8b17b33986d38db45f6a25b4649b64",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:03:14Z",
+   "response_sha256": "e99495d760e975f9400f87383f63aa7822b684258114b5073b0d2c958ad5dfbd",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": false,
+    "result": "refused",
+    "reason": "copy_review_rewrite:ocv-ed2772988e742a3c"
+   }
+  },
+  {
+   "variant": "status_link",
+   "campaign": "gdpr-status",
+   "body_sha256": "3d13c37992d35d20489fb124e6f34b968e9621800a3cd1d87dd989178a029b5c",
+   "verdict": "approve",
+   "note": "Same content as message 1 with a neutral opening; open status, allowed asks, reply path and next date all present.",
+   "replacement": "",
+   "verdict_id": "ocv-d89ae702fd19acec",
+   "statement_sha256": "5d19d3cbdfe6c6efb7703c134c158abfbf8db8cbd48527e194e3fb30cc65f5f4",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:02:38Z",
+   "response_sha256": "9f99212a2ddd00a1417f90dd504d3e7bb134344a4c2b3b21621eeeab6e552f2a",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "status_none",
+   "campaign": "gdpr-status",
+   "body_sha256": "7a6be30173eca4a6e1c3ef791a155ad7876a600f88c86e4e3b1b53b78636d8d1",
+   "verdict": "approve",
+   "note": "Open status, what we are doing, nothing needed, and the next-contact date; no dates beyond those allowed, no promise of outcome.",
+   "replacement": "",
+   "verdict_id": "ocv-11b8003ed03bf4c6",
+   "statement_sha256": "a3cc407725e837bd897750e00a0d2de51f064c7a5ace32f3862bbff104544355",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:02:38Z",
+   "response_sha256": "9f99212a2ddd00a1417f90dd504d3e7bb134344a4c2b3b21621eeeab6e552f2a",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  },
+  {
+   "variant": "status_unknown",
+   "campaign": "gdpr-status",
+   "body_sha256": "c76f4eb4034aceb5247f65403b7cd60388fd4c0bc130a6b77126b8ff4a23a6aa",
+   "verdict": "approve",
+   "note": "Open status, what we are doing, nothing needed, next date; every hard rule holds.",
+   "replacement": "",
+   "verdict_id": "ocv-2c8166d191ef296b",
+   "statement_sha256": "d71b9da7515fbc94c2eb584eeb1e513a0abf5b0a668ac5c726b477bbb8340c52",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "reviewed_at": "2026-11-12T04:03:14Z",
+   "response_sha256": "e99495d760e975f9400f87383f63aa7822b684258114b5073b0d2c958ad5dfbd",
+   "rubric": "gdpr",
+   "rubric_sha256": "6ddbb9e711feec27bdc32b30e7f67ab3dbc4663bb7d6f122d9db004a6f62ac7c",
+   "adapter": {
+    "ok": true,
+    "result": "approved",
+    "reason": ""
+   }
+  }
+ ]
+}

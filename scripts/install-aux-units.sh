@@ -955,7 +955,8 @@ log "  $cm: $(systemctl is-active "$cm" 2>/dev/null || echo unknown)"
 # Hourly. scripts/gdpr-pipeline.py tick: intake (open data-deletion / data-export tickets
 # + their Intercom conversations, the notices@/legal@ + support@ ledgers, Intercom last 3 h)
 # into /var/lib/hydra-gdpr/erasure.sqlite, identity per gdpr-ack-v2 §3, the 410 + noindex
-# read-back that sets hidden_at, and the watchdog: pages #cs_priority (Jan) at most once a
+# read-back that sets hidden_at, and the watchdog: pages #cs_priority (no person named: a
+# statutory date is an alarm, and scripts/gdpr-dsar-clock-check.sh carries it to firstmate) at most once a
 # day when a request reaches due_at - 3 d without a written confirmation. It never hides
 # (the hide batch is a separate, human-merged PR) and never deletes. UNTIL 2026-11-04 THE TICK
 # NEVER MESSAGED A CUSTOMER, because a send needed a Slack approval message a cron cannot post.
@@ -974,6 +975,12 @@ log "  $cm: $(systemctl is-active "$cm" 2>/dev/null || echo unknown)"
 # --limit 25 is a deliberate first-wave brake, not a design limit: the standing set is 143 ask
 # letters and 8 confirmations, and the first ticks should be watched before the cap is raised
 # (a one-line PR). Raise it only after reading the first waves' erasure_sends rows.
+# --ladder (captain 2026-11-12): the tick also authors the acknowledgement and the status updates each open
+# statutory request is owed (scripts/gdpr_pipeline/dsar.py) and sends the ones whose EXACT body carries the
+# reviewer's approval (scripts/gdpr_pipeline/copy_gate.py -> scripts/outbound_copy/gate.py, GDPR rubric). No seat and
+# no --approved-by stand behind a ladder message: a verdict bound to the body's sha256 does, and no verdict, a refusal
+# or a gate that is missing or cannot run is a hold, ledgered with its reason. --ladder-limit 25 is the same kind of
+# first-wave brake as --limit. Kill for the ladder alone: /etc/hydra/gdpr-dsar-ladder.disabled.
 # Kill: /etc/hydra/gdpr-pipeline.disabled.
 # HOME=/root so `gh api` (the read of the two hide lists) finds root's gh config.
 [[ -x "$HYDRA_ROOT/scripts/gdpr-pipeline.py" ]] \
@@ -997,7 +1004,7 @@ EnvironmentFile=-/etc/openclaw/main.env
 # Environment= line above at run time. Unescaped, the shell tried to expand it at write time,
 # the variable is not set in the installer's own shell, and `set -u` killed the whole deploy at
 # Step 5c (2026-11-06: every deploy refused with `GDPR_SENDER_SEAT: unbound variable`).
-ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/gdpr-pipeline.py tick --page --send --limit 25 --approved-by \$GDPR_SENDER_SEAT
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/gdpr-pipeline.py tick --page --send --limit 25 --approved-by \$GDPR_SENDER_SEAT --ladder --ladder-limit 25
 TimeoutStartSec=3000
 GDPRTICKSVC
 
@@ -1019,6 +1026,56 @@ gt=gdpr-pipeline-tick.timer
 systemctl enable "$gt" >/dev/null 2>&1 || log "WARN: could not enable $gt"
 systemctl start "$gt" >/dev/null 2>&1 || log "WARN: could not start $gt"
 log "  $gt: $(systemctl is-active "$gt" 2>/dev/null || echo unknown)"
+
+# Hourly, at :07. scripts/gdpr-pipeline.py dsar clock --watch: the statutory clock on its OWN timer.
+#
+# The clock is a read of the register (0.14 s on the live one, 2026-11-12), and the tick above is not: it decides
+# every open request and has run for 40 minutes, and on 2026-11-08 its timer stopped for 11 hours. A date that must
+# not be missed does not ride on that. Each hour this unit
+#   - prints the clock line to the journal (every request inside 7 d of its date or past it, named, oldest first),
+#     so what the clock said, and when, is on record: `journalctl -u gdpr-dsar-clock.service`; and
+#   - pages, once a day, when requests are inside the window and FIRSTMATE has not read the clock for 26 h, or the
+#     check reading it is not the scripts/gdpr-dsar-clock-check.sh deployed here (`dsar.clock_unread`).
+# The line reaches firstmate by firstmate's own registered check, scripts/gdpr-dsar-clock-check.sh, which runs
+# `dsar clock --line --read-by firstmate --reader-sha <its sha256>` here every five minutes: there is no route from
+# this host into the firstmate box, so the read is a pull, the registration is run from a checkout of this
+# repository on that box (scripts/gdpr-dsar-clock-register.sh), and this unit is what makes a pull that has
+# stopped, or a registration older than the check, loud.
+# It takes no run lock (it is not a writing run), so a tick in flight never makes it skip. OnCalendar + Persistent,
+# not OnUnitActiveSec: a timer scheduled from its last SUCCESSFUL run stops for good after one failure.
+# No kill file stops the read. /etc/hydra/gdpr-pipeline.disabled silences the page, as it does every page.
+cat > /etc/systemd/system/gdpr-dsar-clock.service << GDPRCLOCKSVC
+[Unit]
+Description=GDPR statutory clock (requests inside 7 d of their date or past it; pages when firstmate stops reading it)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/gdpr-pipeline.py dsar clock --watch
+TimeoutStartSec=300
+GDPRCLOCKSVC
+
+cat > /etc/systemd/system/gdpr-dsar-clock.timer << GDPRCLOCKTMR
+[Unit]
+Description=Read the GDPR statutory clock hourly
+
+[Timer]
+OnCalendar=*:07
+Persistent=true
+Unit=gdpr-dsar-clock.service
+
+[Install]
+WantedBy=timers.target
+GDPRCLOCKTMR
+
+systemctl daemon-reload
+ct=gdpr-dsar-clock.timer
+systemctl enable "$ct" >/dev/null 2>&1 || log "WARN: could not enable $ct"
+systemctl start "$ct" >/dev/null 2>&1 || log "WARN: could not start $ct"
+log "  $ct: $(systemctl is-active "$ct" 2>/dev/null || echo unknown)"
 
 # Four times a day. scripts/gdpr-pipeline.py hide-batch --open-prs: the reversible-hide batch, generated from the
 # identity-PASS rows (profiles, and since the item gate a track / album whose ONE artist passes the same gate) and
@@ -4772,6 +4829,7 @@ AUX_ONFAILURE_UNITS=(
   cs-sla-report.service
   cto-nightly-driver.service
   gdpr-pipeline-tick.service
+  gdpr-dsar-clock.service
   gdpr-hide-batch.service
   hydra-company-finder-cache-refresh.service
   hydra-codex-home-prune.service

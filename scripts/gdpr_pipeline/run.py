@@ -3,10 +3,11 @@ and makes the run exit non-zero)."""
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 
-from gdpr_pipeline import copy, identity, intake, sources
+from gdpr_pipeline import access, copy, copy_gate, dsar, identity, intake, sources
 from gdpr_pipeline import send as letter_send     # 'send' is a local in watchdog_rows: the ledger record for a row
 from gdpr_pipeline.store import Store, _dedupe_pages, now_iso, parse_iso
 
@@ -20,10 +21,10 @@ LETTER_GRACE_HOURS = 24      # a letter the register has NOT sent, this long pas
 ERASURE_FAMILY = ("privacy_erasure", "legal_threat")
 
 
-def ask_refusal(cls: str, past_due: bool) -> str:
+def ask_refusal(cls: str, past_due: bool, kind: str = "") -> str:
     """Why this row's identity ask must NOT leave, or "" when it may.
 
-    Two independent reasons, and the class one is checked FIRST because it is the one that would otherwise be
+    Three independent reasons, and the class one is checked FIRST because it is the one that would otherwise be
     invisible: `copy.ASK` is erasure copy, so a `dmca_takedown` or `legal_threat` row that reaches the same
     `ASK_LINK` verdict would be told "the deletion request you made on {date} is in progress" - a statement about a
     request the person never made. The class gate is `copy.ASK_APPROVED_CLASSES`, which is part of
@@ -35,6 +36,16 @@ def ask_refusal(cls: str, past_due: bool) -> str:
     if past_due and not copy.PROGRESS_LINE_APPROVED:
         return ("past-due ask copy is not approved yet (copy.PROGRESS_LINE_APPROVED = False): the ruling requires "
                 "the letter to say the erasure is in progress, and those words are Fable's to approve")
+    if cls in dsar.STATUTORY and kind in dsar.ASK_WORDING_SUPERSEDED:
+        # The third reason is about the WORDS, and it is why this is a refusal in the ledger and not a row left off
+        # the list: `dsar.older_ask` decides whether the ask is listed from the gate's verdict alone, the same for
+        # every ask, and this row is listed. What cannot leave is the sentence. Editing it here would change
+        # `copy.fingerprint()` and with it every standing ruling, which is the reviewer's to re-cut, not a fix's.
+        return ("the identity step tells the requester that a name 'as it appears on your ID' is enough, and the "
+                "captain's 2026-11-12 ruling made that untrue (a name match ties nobody to a page, and no code path "
+                "passes one): the letter would promise what the next step refuses. It needs replacement words and "
+                "their ruling; until then the request's first message is the ladder's reviewed acknowledgement, "
+                f"and the clock names it after {dsar.NO_FIRST_MESSAGE_HOURS} h without one")
     return ""
 
 
@@ -508,6 +519,7 @@ class Run:
                 or now - parse_iso(r["decided_at"]) > timedelta(hours=stale_hours)]
         prefixes = sorted({p["id"] for r in rows for p in r["pages"] if len(p["id"]) == 8})
         resolved: dict[str, str] = {}
+        self.prefixes_read = True       # the catalog answered the prefix lookup (or there was none to ask)
         if prefixes:
             # NEVER resolve a prefix from what this store happens to hold: a second catalog profile can share the
             # 8-char prefix and be absent from our rows/hide lists, so "the only one we know" is not "unique".
@@ -515,6 +527,7 @@ class Run:
             try:
                 resolved.update(prefix_resolver(prefixes))
             except sources.Unknown as exc:
+                self.prefixes_read = False
                 self.fail("prefix resolution", exc)
         for r in rows:
             try:
@@ -530,10 +543,12 @@ class Run:
         prefix_resolver = prefix_resolver or sources.resolve_prefixes
         prefixes = sorted({p["id"] for r in rows for p in r["pages"] if len(p["id"]) == 8})
         resolved: dict[str, str] = {}
+        self.prefixes_read = True       # the catalog answered the prefix lookup (or there was none to ask)
         if prefixes:
             try:
                 resolved.update(prefix_resolver(prefixes))
             except sources.Unknown as exc:
+                self.prefixes_read = False
                 self.fail("prefix resolution", exc)
         for r in rows:
             try:
@@ -551,18 +566,32 @@ class Run:
                 seen.add(q["id"])
                 pages.append(q)
         conv = conv_reader(r["conversation_id"]) if r["conversation_id"] else {}
-        name = conv.get("author_name") or conv.get("contact_name") or r["requester_name"]
-        email = conv.get("author_email") or conv.get("contact_email") or r["requester_email"]
-        # Provenance, never the channel name: `notices`/`legal` rows come from a message we fetched ourselves, and an
-        # Intercom contact we can see is a logged-in user or wrote by mail. A ClickUp ticket with no conversation is
-        # `support` by construction and its `customer_email` is ticket metadata a requester can type, so it proves
-        # nothing and must not carry D (or account-email B).
-        trusted = (conv.get("source_type") == "email" or conv.get("contact_role") == "user"
-                   or (r["channel"] in ("notices", "legal") and not r["conversation_id"]))
-        rep = intake.is_representative(f"{name} <{email}>", conv.get("customer_text", ""))
+        name, email, trusted, rep = requester_of(r, conv)
+        gates = None        # the DSAR identity chain; statutory classes only
         if cls == "privacy_access":
             dec = identity.Decision("ACCESS", "", [])
             action = "Art. 15 access request: captain/counsel answer (no hide); due date tracked"
+            # The row's verdict stays ACCESS (nothing is hidden for an access request). The identity chain is still
+            # owed: who is asking, and whether they are tied to the page they name. A read that fails here is an
+            # UNKNOWN in the chain, never a pass and never a failed decision for the row.
+            try:
+                acc, how = sources.resolve_account(conv.get("external_id", ""), email, trusted)
+                prof_ids = [p["id"] for p in pages if p.get("entity", "profile") == "profile" and len(p["id"]) == 36]
+                claims = sources.processed_claims(prof_ids) if prof_ids else {}
+                req = identity.Requester(name=name, email=email, account_id=acc, account_names=(),
+                                         representative=rep, verified=bool(trusted))
+                # The claim is read FIRST here, from the claims read itself: `decide_page` answers "already hidden"
+                # before it looks at who is asking (and a hidden page's facts carry no claim), while for an access
+                # request a hidden page still has to be tied to the person before anything about it is told to them.
+                pvs = [{"id": p.entity_id,
+                        "verdict": identity.PASS_A if acc is not None and acc in claims.get(p.entity_id, ())
+                        else identity.decide_page(p, req, "privacy_erasure").verdict}
+                       for p in sources.page_facts(pages, hidden, claims, half)]
+                gates = dsar.gates(cls, acc, how, rep, pvs, len(pages),
+                                   prefixes_read=getattr(self, "prefixes_read", False))
+            except sources.Unknown as exc:
+                self.log(f"row {r['id']} (#{r['register_no']}): identity chain not readable this run ({exc})")
+                gates = dsar.gates(cls, None, "", rep, [], max(len(pages), 1))
         elif cls == "cancel_intent_mentions_deletion":
             dec = identity.Decision(identity.JAN_REVIEW, "", [])
             action = "Jan: cancel-intent ticket that mentions deletion (read the customer's words)"
@@ -583,6 +612,10 @@ class Run:
                                      verified=bool(trusted))
             dec = identity.decide(facts, req, cls)
             action = ""
+            if cls in dsar.STATUTORY:
+                gates = dsar.gates(cls, acc, how, rep, [{"id": pv.entity_id, "verdict": pv.verdict}
+                                                        for pv in dec.pages], len(pages),
+                                   prefixes_read=getattr(self, "prefixes_read", False))
         detail = [{"id": pv.entity_id, "verdict": pv.verdict, "why": pv.why} for pv in dec.pages]
         # A page that answers 404 in the catalog AND publicly, with no merge record, was removed by something
         # other than the hide process (register #36's class). Marked per row so the Jan item can cite the store.
@@ -592,6 +625,8 @@ class Run:
                    "action": action}
         if gone != sorted(r.get("removed_outside_process") or []):
             changes["removed_outside_process"] = gone
+        if gates is not None:
+            changes["gates"] = gates
         if _dedupe_pages(pages) != r["pages"]:
             changes["pages"] = _dedupe_pages(pages)
         if name and not r["requester_name"]:
@@ -668,6 +703,17 @@ class Run:
                 self.store.update(r["id"], "hidden", hidden_at=now_iso(), hidden_pages=sorted(done))
 
     # ---------------------------------------------------------------- asks + confirmations (render; send locked)
+    def older_ask_held(self, r: dict, kind: str, now: datetime) -> str:
+        """Why the older ask stands down for this row now, or '' (`dsar.older_ask`; '' for a class the ladder does
+        not own). Asked when the batch is listed AND again by `send.deliver` on the row as it is at send time: a
+        batch approved an hour ago must not put a second first message beside a ladder message sent since."""
+        if r.get("class") not in dsar.STATUTORY:
+            return ""
+        msgs = self.store.messages(r["id"])
+        first = min((e["at"] for e in self.store.events(r["id"]) if e["kind"] == "dsar_authored"),
+                    default="") if msgs else ""
+        return dsar.older_ask(r, kind, self.store.sends(r["id"]), msgs, first, now)
+
     def asks(self, now: datetime | None = None) -> list[dict]:
         """The identity asks owed, one per row. A row past its statutory date carries the past-due opening line as
         well (the ruling requires it); while that copy is not approved the item carries a `refuse` reason, so the
@@ -676,12 +722,21 @@ class Run:
         A row whose CLASS the ask copy was not written for carries a `refuse` reason too, and for the same reason:
         `copy.ASK` is erasure copy, and a `dmca_takedown` or `legal_threat` row reaches the same `ASK_LINK` verdict.
         Sending it would tell a rights-holder that "the deletion request you made" is in progress (QA finding on
-        #1779). Refused, not dropped: the ledger records why, and the row stays visible in the batch."""
+        #1779). Refused, not dropped: the ledger records why, and the row stays visible in the batch.
+
+        For a statutory request this ask stands down ONLY where the copy gate holds a ladder letter for THAT request
+        (`dsar.older_ask`, over the table `dsar.OLDER_ASK_STANDS_DOWN`): one that is out or approved, or one in the
+        review queue, and that one for no longer than `dsar.FALLBACK_HOURS`. Refused, a gate that could not answer,
+        no answer on record, no letter at all: the ask is listed here exactly as before the ladder existed. The
+        identity step is listed by that same table and then refused for its words (`ask_refusal`), in the ledger.
+        `dsar.owed` is the other half: no acknowledgement once an ask went."""
         now = now or datetime.now(timezone.utc)
         out = []
         for r in self.store.all("open"):
             kind = r["identity_verdict"]
             if kind in copy.ASK and not r["ask_sent_at"]:
+                if self.older_ask_held(r, kind, now):
+                    continue
                 past_due = parse_iso(r["due_at"]) <= now
                 text = copy.ASK[kind]
                 if past_due:
@@ -690,7 +745,7 @@ class Run:
                             "to": r["conversation_id"] or r["requester_email"] or r["gmail_thread"], "kind": kind,
                             "text": text, "due_at": r["due_at"], "received_at": r["received_at"],
                             "class": r["class"], "past_due": past_due,
-                            "refuse": ask_refusal(r["class"], past_due)})
+                            "refuse": ask_refusal(r["class"], past_due, kind)})
         return out
 
     def confirmations(self, now: datetime, horizon_days: int = WARN_DAYS, s_check=None, p_check=None,
@@ -748,7 +803,8 @@ class Run:
 
     # ---------------------------------------------------------------- watchdog
     def watchdog_rows(self, now: datetime) -> list[tuple[int, str]]:
-        """(register_no, line) to page: due_at - 3 d reached without confirmed_at; an ASK sent > 7 d ago with no
+        """(register_no, line) to page: due_at - 3 d (7 d for an erasure or access request) reached without
+        confirmed_at; an ASK sent > 7 d ago with no
         answer. The register number is the identity of the page content, so the caller pages on TURNOVER (a new
         request became due) and not on a line COUNT that one request clearing can leave unchanged."""
         out = []
@@ -756,7 +812,11 @@ class Run:
             if r["class"] not in ("privacy_erasure", "legal_threat", "dmca_takedown", "privacy_access"):
                 continue
             due = parse_iso(r["due_at"])
-            if not r["confirmed_at"] and now >= due - timedelta(days=WARN_DAYS):
+            # A statutory request is paged from 7 days out, the same window as the firstmate clock line
+            # (`dsar.ALARM_DAYS`): that line is carried by a check registered outside this repo, so this page, which
+            # deploys with the tick, must not be the narrower of the two (QA review of #1908).
+            warn = dsar.ALARM_DAYS if r["class"] in dsar.STATUTORY else WARN_DAYS
+            if not r["confirmed_at"] and now >= due - timedelta(days=warn):
                 state = "OVERDUE" if now > due else f"due in {(due - now).days} d"
                 # Whether a letter actually LEFT, and when -- separate from whether the date has passed. The two used
                 # to be the same claim in this line, and on 2026-11-03 they were not: 97 decided rows were "overdue"
@@ -851,6 +911,311 @@ class Run:
     def watchdog(self, now: datetime) -> list[str]:
         return [line for _, line in self.watchdog_rows(now)]
 
+    # ---------------------------------------------------------------- the DSAR ladder (gdpr_pipeline/dsar.py)
+    def dsar_states(self) -> int:
+        """Record each statutory request's DERIVED state; an event only when it changes. Returns how many moved.
+
+        The state is never an input to anything: it is what the recorded facts say, written down so the register
+        shows it and the trail has the date of every transition."""
+        moved = 0
+        for r in self.store.all():
+            if r["class"] not in dsar.STATUTORY or r["status"] == "duplicate":
+                continue
+            st = dsar.state_of(r, self.store.sends(r["id"]))
+            if st != (r.get("dsar_state") or ""):
+                self.store.db.execute("UPDATE erasure_requests SET dsar_state=?, dsar_state_at=? WHERE id=?",
+                                      (st, now_iso(), r["id"]))
+                self.store.event(r["id"], "dsar_state", was=r.get("dsar_state") or "", now=st)
+                self.store.db.commit()
+                moved += 1
+        return moved
+
+    def dsar_owed(self, now: datetime, copy_doc: dict | None = None) -> list[dict]:
+        """The ladder message each open statutory request is owed right now, oldest due date first, with its exact
+        body rendered and linted. Reads only; nothing is authored, queued or sent.
+
+        An item whose body cannot be rendered or fails the lint carries `problem` and no text: it is reported and
+        never authored, so a broken variant is a loud line and not a held message nobody can approve."""
+        copy_doc = copy_doc or dsar.load_copy()
+        out = []
+        # Art. 12(3) "number of the requests": how many open statutory requests each requester has. A requester is
+        # the Intercom contact, else the address; a row with neither counts alone.
+        who = lambda r: r.get("contact_id") or (r.get("requester_email") or "").strip().lower()   # noqa: E731
+        per_requester: dict[str, int] = {}
+        for r in self.store.all("open"):
+            if (r["class"] in dsar.STATUTORY and who(r)
+                    and not dsar.final_response_at(r, self.store.sends(r["id"]))):
+                per_requester[who(r)] = per_requester.get(who(r), 0) + 1
+        # No answer date is stated, and no date is moved, for an answer code cannot produce today (`answerable_now`).
+        try:
+            access_ok = not access.standing_gaps(access.load_manifest())
+        except access.ManifestError:
+            access_ok = False
+        for r in self.store.all("open"):
+            if r["class"] not in dsar.STATUTORY:
+                continue
+            sends = self.store.sends(r["id"])
+            want = dsar.owed(r, sends, now, open_from_requester=per_requester.get(who(r), 1),
+                             answerable=answerable_now(r, access_ok))
+            if not want:
+                continue
+            prior = self.store.send_record(r["id"], want["slot"])
+            if prior and prior["state"] in ("sent", "sending", "unknown"):
+                continue        # this slot is spent or in flight; `deliver` would stand down on it anyway
+            item = {"row": r["id"], "register_no": r["register_no"], "class": r["class"], "channel": r["channel"],
+                    "due_at": dsar.due(r).strftime("%Y-%m-%dT%H:%M:%SZ"), "received_at": r["received_at"],
+                    "need": dsar.need_of(r), "copy_sha": copy_doc["_sha256"], **want, "text": "", "problem": ""}
+            try:
+                body = dsar.render(copy_doc, want["variant"], want["facts"])
+                item["problem"] = dsar.lint(body, want["kind"], want["facts"], r,
+                                            late=want["variant"].startswith("late_"))
+                if not item["problem"]:
+                    item["text"] = body
+            except dsar.CopyError as exc:
+                item["problem"] = str(exc)
+            out.append(item)
+        out.sort(key=lambda x: (x["due_at"], x["register_no"]))
+        return out
+
+    def dsar_author(self, now: datetime, limit: int = 0, checker=None) -> list[dict]:
+        """Freeze the body of every message owed and put it up for review. Sends nothing.
+
+        A body already on record for the slot is KEPT while it is still the message owed (`dsar.stale`): the hash
+        under review must be the hash that is later sent, so a held message is not re-authored every hour. The gate
+        is asked once per held body per run; asking is what queues it for the reviewer."""
+        checker = checker or copy_gate.check
+        out = []
+        for item in self.dsar_owed(now):
+            if limit and len(out) >= limit:
+                break
+            rid, slot = item["row"], item["slot"]
+            if item["problem"]:
+                self.fail(f"dsar #{item['register_no']} {item['variant']}", Exception(item["problem"]))
+                continue
+            msg = self.store.message(rid, slot)
+            if msg and msg["state"] == "sent":
+                continue
+            if not msg or dsar.stale(msg, item, self.store.get(rid), now):
+                msg = self.store.put_message(rid, slot, item["kind"], item["variant"], item["text"],
+                                             copy_gate.body_sha(item["text"]), item["copy_sha"], item["facts"],
+                                             item["next_contact_at"], item.get("effects"))
+            ans = checker(msg["kind"], msg["body"], variant=msg["variant"], slot=slot)
+            changed = (msg["gate_result"], msg["verdict_id"]) != (ans.result, ans.verdict_id)
+            self.store.update_message(rid, slot, "dsar_gate" if changed else "",
+                                      state="approved" if ans.ok else "held", **ans.as_cols())
+            out.append({**item, "text": msg["body"], "variant": msg["variant"], "body_sha": msg["body_sha"],
+                        "gate": ans.result, "gate_reason": ans.reason, "verdict_id": ans.verdict_id,
+                        "approved": ans.ok})
+        return out
+
+    def dsar_send(self, now: datetime, limit: int = 0, dry_run: bool = False, checker=None) -> list[dict]:
+        """Author, then send every message whose exact body the reviewer approved. `send.deliver` asks the gate again
+        on the bytes it is about to send; this method never decides that a message may go."""
+        results = []
+        for item in self.dsar_author(now, checker=checker):
+            if not item["approved"]:
+                results.append({**item, "state": "held", "why": f"copy gate {item['gate']}: {item['gate_reason']}"})
+                continue
+            if limit and sum(1 for x in results if x.get("state") == "sent") >= limit:
+                break
+            out = letter_send.deliver(self, {"row": item["row"], "register_no": item["register_no"],
+                                             "text": item["text"]},
+                                      item["kind"], "gate:pending", dry_run=dry_run, slot=item["slot"])
+            results.append({**item, **out})
+        return results
+
+    def dsar_clock(self, now: datetime) -> dict:
+        return dsar.clock_rows(self.store.all(), self.store.sends, now)
+
+    def dsar_trail(self, register_no: int) -> dict | None:
+        """Everything on record for one request, in order: what was received, what was checked, every message with
+        its hash and verdict, every send attempt. Built only from the store, so it can be rebuilt at any time."""
+        row = next((r for r in self.store.all() if r["register_no"] == register_no), None)
+        if not row:
+            return None
+        sends = self.store.sends(row["id"])
+        return {
+            "register_no": row["register_no"], "class": row["class"], "channel": row["channel"],
+            "received_at": row["received_at"], "due_at": dsar.due(row).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "extended_until": row.get("extended_until") or "", "state": dsar.state_of(row, sends),
+            "register_status": row["status"],
+            "checked": {"decided_at": row["decided_at"], "identity_verdict": row["identity_verdict"],
+                        "identity_basis": row["identity_basis"], "gates": row.get("gates") or {},
+                        "pages": row["verdict_detail"]},
+            "messages": [{k: m[k] for k in ("slot", "kind", "variant", "body", "body_sha", "copy_sha", "facts",
+                                            "state", "gate_result", "gate_reason", "verdict_id", "verdict_sha256",
+                                            "reviewer_model", "reviewed_at", "rubric", "authored_at", "updated_at")}
+                         for m in self.store.messages(row["id"])],
+            "sends": [{k: s.get(k, "") for k in ("kind", "channel", "body_sha", "approved_by", "state", "ref",
+                                                  "detail", "at", "attempt")} for s in sends],
+            "stamps": {k: row.get(k) or "" for k in ("ack_sent_at", "ack_ref", "ask_sent_at", "status_sent_at",
+                                                     "status_ref", "next_contact_at", "interim_confirm_at",
+                                                     "confirmed_at", "confirm_ref", "hidden_at")},
+            # The Art. 15 copies built for this request: hash, size and counts. Never a value from the copy.
+            "access_answers": [{k: a[k] for k in ("sha256", "bytes", "complete", "summary", "manifest_sha",
+                                                  "produced_at")} for a in self.store.access_answers(row["id"])],
+            "events": [{"at": e["at"], "kind": e["kind"], "detail": e["detail"]}
+                       for e in self.store.events(row["id"])],
+        }
+
+    # ---- the Art. 15 answer (gdpr_pipeline/access.py)
+
+    def _access_account(self, row: dict, conv_reader) -> tuple[int | None, str]:
+        """(account id, '') for the account this requester controls NOW, or (None, why not). Read fresh each time:
+        a copy of an account's data is built and sent only for the person who controls that account."""
+        if row["class"] != "privacy_access":
+            return None, f"#{row['register_no']} is {row['class']}, not an access request"
+        if row["status"] != "open":
+            return None, f"#{row['register_no']} is {row['status']}"
+        try:
+            conv = conv_reader(row["conversation_id"]) if row["conversation_id"] else {}
+            _name, email, trusted, rep = requester_of(row, conv)
+            if rep:
+                return None, ("written on someone else's behalf: an authority document is needed, and no coded "
+                              "check for one exists yet")
+            acc, _how = sources.resolve_account(conv.get("external_id", ""), email, trusted)
+        except sources.Unknown as exc:
+            return None, f"the requester's account could not be read this run ({type(exc).__name__})"
+        if acc is None:
+            return None, "account control is not shown: the requester is not signed in to, or writing from, one account"
+        return acc, ""
+
+    def access_build(self, register_no: int, record: bool = False, conv_reader=None, reader=None,
+                     manifest: dict | None = None) -> dict:
+        """Build the copy of the personal data for one access request. Reads only, unless `record`: then the copy
+        is written beside the register (0600) and its hash and counts go on the trail. Returns counts and the hash,
+        never a value from the copy. Sends nothing."""
+        row = next((r for r in self.store.all() if r["register_no"] == register_no), None)
+        if not row:
+            return {"state": "not_built", "why": f"no request #{register_no} in the register"}
+        acc, why = self._access_account(row, conv_reader or sources.conversation)
+        if acc is None:
+            return {"state": "not_built", "register_no": register_no, "why": why}
+        manifest = manifest or access.load_manifest()
+        try:
+            doc = access.collect(manifest, acc, reader or sources.trino_wide,
+                                 register=access.register_view(row, self.store.sends(row["id"])))
+        except (sources.Unknown, ValueError) as exc:
+            return {"state": "not_built", "register_no": register_no,
+                    "why": f"the database could not be read ({type(exc).__name__}): nothing is known, nothing built"}
+        raw, sha = access.package(doc)
+        out = {"state": "built", "register_no": register_no, "recorded": False,
+               **access.summary(doc, sha, len(raw))}
+        if record:
+            self.store.put_access_answer(row["id"], acc, raw, sha, access.summary(doc, sha, len(raw)))
+            out["recorded"] = True
+        return out
+
+    def access_deliver(self, register_no: int, now: datetime, dry_run: bool = False, conv_reader=None,
+                       checker=None, mailer=None, email_reader=None) -> dict:
+        """Send the recorded copy as the final response to an access request, or say every reason it is held.
+
+        Sent only when ALL hold: the newest recorded copy is complete, its file is the recorded bytes, the requester
+        controls that account now, the copy is fresh, and the cover message has a verdict on its exact bytes. The
+        only recipient is the sign-in address on the account, READ AGAIN HERE: a copy is up to 24 h old, and an
+        address changed since the build makes it held until it is rebuilt (QA review of #1908). One send per
+        request, claimed before the mailer runs; an ambiguous failure is `unknown` and is never retried."""
+        row = next((r for r in self.store.all() if r["register_no"] == register_no), None)
+        if not row:
+            return {"state": "held", "why": [f"no request #{register_no} in the register"]}
+        rid = row["id"]
+        prior = self.store.send_record(rid, dsar.KIND_ACCESS)
+        if prior and prior["state"] in ("sent", "sending", "unknown"):
+            return {"state": "skipped", "register_no": register_no, "why": [f"already {prior['state']}"]}
+        acc, why_acc = self._access_account(row, conv_reader or sources.conversation)
+        answers = self.store.access_answers(rid)
+        answer = answers[-1] if answers else None
+        raw = None
+        if answer and answer["path"]:
+            try:
+                with open(answer["path"], "rb") as fh:
+                    raw = fh.read()
+            except OSError:
+                raw = None
+        age = ((now - parse_iso(answer["produced_at"])).total_seconds() / 3600) if answer else 0.0
+        email_now = None
+        if acc is not None:
+            try:
+                email_now = (email_reader or sources.account_email)(acc)
+            except sources.Unknown:
+                email_now = None        # unread is held, never "unchanged"
+        why = access.undeliverable(answer, raw, acc, age, email_now)
+        if why_acc and acc is None:
+            why.append(why_acc)
+        if why:
+            return {"state": "held", "register_no": register_no, "why": why}
+        copy_doc = dsar.load_copy()
+        facts = {"received": dsar.human_date(parse_iso(row["received_at"]))}
+        subject = (copy_doc.get("subjects") or {}).get(dsar.ACCESS_VARIANT, "")
+        body = dsar.render(copy_doc, dsar.ACCESS_VARIANT, facts)
+        problem = dsar.lint(body, dsar.KIND_ACCESS, facts, row) or ("" if subject else "no subject for the cover message")
+        if problem:
+            return {"state": "held", "register_no": register_no, "why": [f"cover message: {problem}"]}
+        msg = self.store.message(rid, dsar.KIND_ACCESS)
+        if not msg or msg["body"] != body:
+            msg = self.store.put_message(rid, dsar.KIND_ACCESS, dsar.KIND_ACCESS, dsar.ACCESS_VARIANT, body,
+                                         copy_gate.body_sha(body), copy_doc["_sha256"], facts, "")
+        ans = (checker or copy_gate.check)(dsar.KIND_ACCESS, body, variant=dsar.ACCESS_VARIANT,
+                                           slot=dsar.KIND_ACCESS, subject=subject)
+        self.store.update_message(rid, dsar.KIND_ACCESS, "dsar_gate" if ans.result != msg.get("gate_result") else "",
+                                  state="approved" if ans.ok else "held", **ans.as_cols())
+        if not ans.ok:
+            return {"state": "held", "register_no": register_no, "why": [f"copy gate {ans.result}: {ans.reason}"]}
+        email = email_now       # equal to the address in the copy, or `undeliverable` held it above
+        out = {"state": "would_send", "register_no": register_no, "sha256": answer["sha256"],
+               "body_sha": copy_gate.body_sha(body), "verdict_id": ans.verdict_id}
+        if dry_run:
+            return out
+        key = letter_send.idem_key(rid, dsar.KIND_ACCESS, body + answer["sha256"])
+        self.store.claim_send(rid, dsar.KIND_ACCESS, "mail_attach", email, copy_gate.body_sha(body),
+                              f"gate:{ans.verdict_id}", "sending", detail=f"copy sha256 {answer['sha256']}", idem=key)
+        try:
+            ref = (mailer or letter_send._mail_send_attachment)(email, body, key, subject, answer["path"])
+        except letter_send.Ambiguous as exc:
+            self.store.finish_send(rid, dsar.KIND_ACCESS, "unknown", detail=str(exc))
+            self.fail(f"access answer #{register_no} (AMBIGUOUS: not retried, reconcile by hand)", exc)
+            return {**out, "state": "unknown"}
+        except (letter_send.Unknown, OSError) as exc:
+            self.store.finish_send(rid, dsar.KIND_ACCESS, "failed", detail=str(exc))
+            self.fail(f"access answer #{register_no}", exc)
+            return {**out, "state": "failed"}
+        self.store.finish_send(rid, dsar.KIND_ACCESS, "sent", ref=ref, detail=f"copy sha256 {answer['sha256']}")
+        self.store.stamp_sent(rid, dsar.KIND_ACCESS, dsar.KIND_ACCESS, ref)
+        self.store.update_message(rid, dsar.KIND_ACCESS, "dsar_sent", state="sent")
+        return {**out, "state": "sent"}
+
+
+def requester_of(r: dict, conv: dict) -> tuple[str, str, bool, bool]:
+    """(name, email, trusted, representative) for one request: who is asking, as far as a read can show.
+
+    Provenance, never the channel name: `notices`/`legal` rows come from a message we fetched ourselves, and an
+    Intercom contact we can see is a logged-in user or wrote by mail. A ClickUp ticket with no conversation is
+    `support` by construction and its `customer_email` is ticket metadata a requester can type, so it proves nothing
+    and must not carry D (or account-email B). ONE function, so the identity decision and the Art. 15 copy can never
+    disagree about who the requester is."""
+    name = conv.get("author_name") or conv.get("contact_name") or r["requester_name"]
+    email = conv.get("author_email") or conv.get("contact_email") or r["requester_email"]
+    trusted = (conv.get("source_type") == "email" or conv.get("contact_role") == "user"
+               or (r["channel"] in ("notices", "legal") and not r["conversation_id"]))
+    rep = intake.is_representative(f"{name} <{email}>", conv.get("customer_text", ""))
+    return name, email, bool(trusted), rep
+
+
+def answerable_now(r: dict, access_ok: bool) -> bool:
+    """Can code alone produce this request's final response today? Only then does a message state an answer date
+    or move the date (firstmate 2026-11-12: "no promise we cannot hold").
+
+      * access: only while a COMPLETE copy can be built (`access.standing_gaps` is empty).
+      * erasure: only when every page named is already hidden (`ALREADY_HIDDEN`), which is the one case where the
+        final confirmation needs nothing but this pipeline's own read-backs. A page that still needs its hide merged
+        waits on a person, and a page that is already off the site (`GONE`) has no approved final wording, so
+        neither gets a date from us: the update gives the next-contact date instead.
+    """
+    if r["class"] == "privacy_access":
+        return access_ok
+    verdicts = [d.get("verdict") for d in r.get("verdict_detail") or []]
+    return bool(verdicts) and all(v == identity.ALREADY_HIDDEN for v in verdicts)
+
 
 PAGE_CHUNK = 40
 SLACK_TEXT_LIMIT = 3500          # chat.postMessage truncates near 4000 chars; 40 escaped lines stay well under
@@ -866,7 +1231,10 @@ def page_chunks(lines: list[str], head: str | None = None) -> list[str]:
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     if not lines:
         return []
-    base = head or (f"<@{JAN}> :hourglass: *GDPR erasure register: {len(lines)} request(s) at or past due - 3 d "
+    # No person is mentioned: a statutory date is an alarm, not somebody's queue (captain 2026-11-12). The alarm that
+    # NAMES each request goes to firstmate (`gdpr-pipeline.py dsar clock`, read by scripts/gdpr-dsar-clock-check.sh);
+    # this channel post is the record beside it.
+    base = head or (f":hourglass: *GDPR erasure register: {len(lines)} request(s) at or past due - 3 d "
                     f"without a written confirmation*")
     head_for = lambda n, total: base + (f" (part {n}/{total})" if total > 1 else "")   # noqa: E731
     budget = SLACK_TEXT_LIMIT - len(head_for(9, 9)) - 1
