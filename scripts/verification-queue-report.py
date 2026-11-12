@@ -85,6 +85,19 @@ SENTINEL_STATE = os.environ.get("VQR_SENTINEL_STATE",
 SENTINEL_KILL = os.environ.get("VQR_SENTINEL_KILL", "/etc/hydra/backlog-sentinel.disabled")
 TRINO_SESSION = "SET SESSION query_max_execution_time='90s'; "
 
+# [key=open-status-index] The open filter must be a POSITIVE status list, the way core's status
+# index can serve it. `status NOT IN ('approved','rejected')` is not pushed down, so it reads the
+# whole table (5.65M rows, 76 GB of JSON) and dies on the session's 90s cap: on 2026-11-12 the
+# reporter's credits query was the piece that failed, "Query exceeded the maximum execution time
+# limit of 90.00s", and it took the whole report down with it (last.json stuck at 2026-11-10
+# 12:01Z, so "the untold count fell" could not be measured). The consumer that actually sends
+# (owing_proof.REPLICA_SQL) already uses this exact list after #1893: 106.9 s whole-table vs
+# 8.2 s on the index. Keep this beside CREDIT_OPEN_STATUSES' owner; a test asserts the two agree
+# so they cannot drift apart.
+CLOSED_STATUSES = ("approved", "rejected")
+OPEN_STATUSES = ("unverified", "processing", "user_verification_needed")
+OPEN_STATUS_LIST = ", ".join(f"'{s}'" for s in OPEN_STATUSES)
+
 # Campaigns in the hydra ledger that ASK the user for something (see
 # scripts/credit_review/verify_ledger.py ASK_CAMPAIGNS). A note from one of these is
 # "the user has been told"; any other campaign (a status note, a take-back notice) is
@@ -266,7 +279,27 @@ def age_h(ts: str, now: datetime) -> float:
         return 0.0
 
 
+def credit_status_guard() -> list[str]:
+    """[key=open-status-index] The positive open-status filter is only equal to "not approved/rejected" while every
+    status in the table is one we know. An unknown status (core adds `review_pending`) would be silently left out of
+    the population, and the untold/owing count would read LOWER while the work is still there - a served number
+    lowered by a filter, which is the one thing this report must never do. So the statuses are read first and an
+    unknown one refuses the report (FATAL-prefixed, so the tick pages instead of publishing a smaller number).
+
+    The guard is owing_proof's, not a copy: one list, one decision about who is asked. An offline run measures
+    nothing at all (every reader is bypassed on purpose), so it has no population to guard and no baseline to
+    publish; the guard stays out of its way rather than turning a shape-only run into a refusal."""
+    if OFFLINE:
+        return []
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from credit_review import owing_proof
+    return owing_proof.check_statuses(lambda sql: [list(r) for r in trino(sql, numeric_first=False)])
+
+
 def credit_rows() -> dict[int, dict]:
+    credit_status_guard()
     rows = trino(f"""
 select cast(cr.userid as varchar),
  cast(max(case when cr.workspaceid in {PAID_TEAMS} then 1 else 0 end) as varchar),
@@ -281,7 +314,7 @@ select cast(cr.userid as varchar),
  cast(sum(case when cr.workspaceid in {PAID_TEAMS} then 1 else 0 end) as varchar),
  cast(max(cr.createdat) as varchar)
 from postgresql_core.public.credit_requests cr
-where cr.deletedat is null and cr.status not in ('approved','rejected')
+where cr.deletedat is null and cr.status in ({OPEN_STATUS_LIST})
 group by 1""")
     return {int(r[0]): {"paid": r[1] == "1", "n": int(r[2]), "oldest": r[3],
                         "core_ask": r[4] == "1",
