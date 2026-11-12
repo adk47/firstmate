@@ -2524,6 +2524,9 @@ jobs:
           # the anchor verifier behind both scale-drain gates: the checks themselves, the pinned admin
           # source (a caller CREDIT_REVIEW_ADMIN_SCRIPT is denied), and the file run as the wrapper runs it.
           python3 scripts/tests/test_verify_anchor.py
+          # the standing review (docs/standing-review.md): only a defect pages, a clean pass prints nothing,
+          # "could not review" is never "clean", and a pass writes nowhere but its own state directory.
+          python3 scripts/tests/test_standing_review.py
           for f in scripts/paid-status/*.py; do python3 -m py_compile "$f"; done
           # The stage-2 release from the proof-on-file hold (credit_review/stage2_verdicts.py):
           # uvn-status for no_document, gap-ask for need_more, the gap-ask ledger rules. Stdlib only.

@@ -1073,6 +1073,21 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   token resolve, per-item failure isolation, writes serialised after reads, gates still
   run).
 
+## The standing review reads; it never steers
+
+`scripts/standing_review/review.py` (tick `scripts/standing-review-tick.sh`, every 2 h on ak47, the only box that
+reaches the reviewer model) samples one plan document plus the commits merged since its cursor and asks a tool-less
+reviewer. Operator doc: `docs/standing-review.md`; rubric: `policies/standing-review-rubric.md`.
+
+- **Code decides what pages, not the reviewer's wording.** `judge()` pages only one of six defect classes, marked
+  `verified`, with what / blast radius / smallest fix, and every evidence quote found verbatim on a new-side line of the
+  sample. Everything else lands in `report.md` with its `why_not`. A clean pass prints nothing.
+- **"Could not review" is exit 3, never clean**, and the cursor does not move. An undelivered page stays in the outbox
+  and fails the run (exit 2).
+- **It has no way to touch a lane**: git is an allowlist of read-only subcommands (`status` is not on it, it rewrites
+  the index), every write goes through `Store` under the state directory, and the tick fetches into its own bare
+  mirror. Do not add a GitHub client, an inbox write or a status-file write to it; the tests pin their absence.
+
 ## Picking the right extension mechanism
 
 Before writing new code in this repo, walk this decision tree top-down and stop at
