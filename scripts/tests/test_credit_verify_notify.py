@@ -3963,5 +3963,48 @@ class ApplyPoolTests(unittest.TestCase):
         self.assertEqual(accounted, {"1", "2", "3", "4"})
 
 
+class ReadOnlyOpenerTests(unittest.TestCase):
+    """[key=read-never-writes]: the send path's READS must never open the ledger for writing.
+
+    verify_ledger.connect() runs _migrate (BEGIN IMMEDIATE) on every call, so a read that uses it does schema work.
+    On 2026-11-12 that raised "attempt to write a readonly database" three times and the tick auto-killed before
+    sending. The assertion is CALL COUNTS, not an exception: these readers swallow sqlite3.Error and return a
+    default, so a raising stub would pass on both the old and the new code."""
+
+    def setUp(self):
+        import tempfile
+        from credit_review import verify_ledger
+        self.ledger = verify_ledger
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "l.sqlite3")
+        db = verify_ledger.connect(self.path)
+        verify_ledger.ensure_schema(db)
+        db.close()
+
+    def _no_writes(self, fn):
+        calls = []
+        orig = self.ledger.connect
+
+        def watch(*a, **k):
+            calls.append(a)
+            return orig(*a, **k)
+        self.ledger.connect = watch
+        try:
+            fn()
+        finally:
+            self.ledger.connect = orig
+        self.assertEqual(calls, [], f"a read opened the ledger write-capable ({len(calls)} call(s))")
+
+    def test_a_capped_read_never_opens_the_ledger_for_writing(self):
+        from credit_review import verify_notify
+        self._no_writes(lambda: verify_notify._already_noted_today(
+            self.path, campaign="uvn-status", user_key="a@b.c", user_id="1", day="2026-11-12"))
+
+    def test_a_read_failure_hold_read_never_opens_the_ledger_for_writing(self):
+        from credit_review import verify_notify
+        self._no_writes(lambda: verify_notify.read_hold_until(
+            self.path, campaign="uvn-status", user_key="a@b.c"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

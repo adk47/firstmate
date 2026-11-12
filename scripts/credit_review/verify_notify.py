@@ -1364,7 +1364,11 @@ def _already_noted_today(path: str, campaign: str, user_key: str, user_id: str, 
     if not (user_key or user_id):
         return False
     try:
-        db = verify_ledger.connect(path)
+        # [key=read-never-writes]: a capped READ never opens the ledger for writing. connect() runs the schema
+        # migration (BEGIN IMMEDIATE) on every call, and a read that can write turned a daily-cap check into
+        # "attempt to write a readonly database" three times on 2026-11-12 (10:35Z, 12:27Z, 14:28Z), each time
+        # auto-killing the tick before a send. connect_ro is the reader QA #1564 built: no create, no migrate.
+        db = verify_ledger.connect_ro(path)
         try:
             return verify_ledger.capped(db, user_key=user_key, day=day, user_id=user_id)
         finally:
@@ -1810,7 +1814,9 @@ def read_hold_until(path: str, campaign: str, user_key: str, *, now: Any = None)
     if not user_key:
         return ""
     try:
-        db = verify_ledger.connect(path)
+        # [key=read-never-writes]: read_failure() is a SELECT (its sibling clear_read_hold() below is the DELETE and
+        # keeps the write-capable opener). Same 2026-11-12 failures as _already_noted_today above.
+        db = verify_ledger.connect_ro(path)
         try:
             row = verify_ledger.read_failure(db, campaign=campaign, user_key=user_key, now=now)
         finally:

@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import sqlite3
 import unittest
 from unittest import mock
 from datetime import datetime, timedelta, timezone
@@ -2880,6 +2881,27 @@ class SegmentDailyCapTest(unittest.TestCase):
         rep, gate = self.run_(max_users=10, query=replica(range(1, 8)), segment_daily_cap=10)
         self.assertEqual(len(gate.calls), 1)
         self.assertEqual(rep.over_daily_max > 0, True)
+
+    def test_a_cap_count_never_opens_the_ledger_for_writing(self):
+        """[key=read-never-writes] (2026-11-12): the cap read used verify_ledger.connect(), which runs _migrate()'s
+        BEGIN IMMEDIATE on every call. On the 2026-11-12 ticks that returned "attempt to write a readonly database"
+        and the auto-kill took the tick down BEFORE any send (10:35Z, 12:27Z, 14:28Z). A read must not migrate."""
+        day = NOW.strftime("%Y-%m-%d")
+        db = verify_ledger.connect(self.ledger)
+        verify_ledger.claim(db, campaign="uvn-status", user_key="u1@x.com", day=day, request_ids=["r1"],
+                            message_type="email", approved_by="U7RP6HKUZ", approval_ref="ref", now=NOW, user_id="1")
+        db.close()
+        real = verify_ledger.connect
+
+        def explode(*a, **k):
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+        verify_ledger.connect = explode
+        try:
+            self.assertEqual(uvn_status.segment_used_today(self.ledger, "uvn-status", "paid", day), 1)
+            # the claim above is an ATTEMPTED row, so it IS a prior ask: the read must still SEE it read-only
+            self.assertEqual(uvn_status.asked_ids(self.ledger, "uvn-status", {"r1"}, []), {"r1"})
+        finally:
+            verify_ledger.connect = real
 
     def test_unrecorded_ledger_sends_count_against_both_segments(self):
         # QA #1541: a hand run WITHOUT --segment-daily-cap sent 8 today (ledger rows, no segment record): unknown

@@ -1053,7 +1053,12 @@ def asked_ids(path: str | None, campaign: str, listed: set[str], pending: list[d
         return set()
     # its own short-lived connection: the send loop's `db` handle is closed by the time it re-plans a user, and a
     # closed handle here would take the whole run down (sqlite3.ProgrammingError) instead of holding one user
-    db = verify_ledger.connect(path)
+    # [key=read-never-writes] (2026-11-12): this is a READ. It used to open the ledger WRITE-capable, so every call ran
+    # _migrate()'s "BEGIN IMMEDIATE" - and on the 2026-11-12 ticks that came back
+    # "attempt to write a readonly database" and auto-killed the tick before a single send (10:35Z, 12:27Z, 14:28Z).
+    # connect_ro() is the reader QA #1564 built: never creates, never migrates, and tolerates a migration that is
+    # mid-flight on another connection instead of reporting it as a failure.
+    db = verify_ledger.connect_ro(path)
     try:
         return verify_ledger.blocked_ids(db, ids, campaign=campaign)
     finally:
@@ -1865,7 +1870,9 @@ def segment_used_today(ledger: str, campaign: str, segment: str, day: str) -> in
                     r = json.loads(ln)
                     if r["day"] == day and r["campaign"] == campaign:
                         recorded_users.add(str(r["user"]))
-    db = verify_ledger.connect(ledger)
+    # [key=read-never-writes]: a cap COUNT is a read - see asked_ids above. Opening it write-capable made the daily
+    # cap look like a schema migration, and a failed migration auto-kills the tick ("cap source unreadable").
+    db = verify_ledger.connect_ro(ledger)
     try:
         rows = db.execute("SELECT account_id FROM verify_messages WHERE campaign=? AND day=? "
                           "AND status IN ('attempted','sent')", (campaign, day)).fetchall()
