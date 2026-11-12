@@ -38,8 +38,8 @@
 # ledger ids, 5 rendered bodies dir) for flows-verify v1's 2-hourly read of 10 sends per family; v1 stops the tick by
 # writing the same kill file.
 # Claim families (claim-status, claim-proof-ask; Fable 10-30): the list is the claim lane's (c2) latest
-# $CLAIM_LIST (the claim runners refuse a list older than 30 h and keep every claim gate); on Sat/Sun (UTC) the claim
-# families run FIRST.
+# $CLAIM_LIST (the claim runners refuse a list older than 30 h and keep every claim gate). The claim families run
+# FIRST on every day, inside their own CLAIM_GROUP_BUDGET_S slice ([key=claims-never-starved]).
 # Outputs per tick: $OUT_ROOT/<UTC stamp>/ (outcomes JSON, check output, 5 bodies per family+segment, the log).
 # Exit: 0 ran (or killed/disabled cleanly), 1 a step failed (the OTHER family groups still ran; the tick fails at the end),
 # 2 bad config. A family failure ends the tick at once only for the UNMEASURED bar (the gate is slow, every family behind
@@ -94,7 +94,6 @@ CLAIM_LIST="$(cfg CVO_CLAIM_LIST "$STATE/claim-list.json")"
 CAP="$(cfg CVO_CAP 250)"                 # users per family+segment per tick (l1: 250/run)
 R1_CAP="$(cfg CVO_R1_CAP 250)"
 CLAIM_CAP="$(cfg CVO_CLAIM_CAP 250)"
-DOW="$(cfg CVO_DOW "$(date -u +%u)")"     # 6 = Saturday, 7 = Sunday: claim families first
 REFUSAL_SPIKE="$(cfg CVO_REFUSAL_SPIKE 0.20)"
 FIRST_CAP=100                          # [key=scale-now]: a family's first unsigned ticks, until v1's 10-sample line
 # p1 22:0xZ / 519, b1 518, QA #1587: a live-gate check costs ~6-15 s a user (10-31), and the 20:00Z dry tick ran past
@@ -106,6 +105,27 @@ FIRST_CAP=100                          # [key=scale-now]: a family's first unsig
 #  - the bodies are skipped once TICK_HARD_S is passed; the apply is cut to what fits before it at APPLY_S_PER_USER.
 TICK_BUDGET_S="$(cfg CVO_TICK_BUDGET_S 6000)"
 TICK_HARD_S="$(cfg CVO_TICK_HARD_S 6900)"
+# [key=claims-never-starved] (2026-11-12): the group that runs LAST only runs if the groups before it leave time. From
+# 2026-11-07 04:25Z to 2026-11-12 17:22Z the ledger holds no claim row at all, for THREE reasons in turn (tick.log):
+# through 11-12 04:35Z every tick skipped the group at `list_signed_on_stale` (nothing rebuilt the list on the deployed
+# head until #1903's timer); at 06:00Z the group was reached and not armed; and at 08:00Z, armed, it was never reached -
+# the weekday order ran the credit families first, they used the whole TICK_BUDGET_S (18 uvn-status sends in 5,400 s)
+# and all four claim segments logged "tick budget 6000s reached". Only the last is this script's own doing, and it is
+# the one that recurs on every slow credit tick. The claim families are the CHEAP group - measured 11 min for all four
+# with a 19-send apply (16:33Z tick), 15 min check-only (06:00Z) - so they run first on every day and are held to their
+# own slice: once the claim group has used CLAIM_GROUP_BUDGET_S it starts no new claim family, and the family IN
+# FLIGHT is bounded by it too (QA on #1919: a slice only checked before a family starts can be overrun by one slow
+# check or apply) - its read-only steps stop at the slice's end, and its apply is handed the seconds left and starts
+# no user past them (see step_end / py_ro). So it can never do to the credit families what the credit families did to
+# it. What may still run past the slice is never a new send: a user whose send outruns its own worst case (the loop
+# starts only one whose worst case fits), and that apply's own post-send read-backs. This is ORDER and TIME only - the caps, the arming rows, the
+# one-message-per-stage ledger rule and the gate are untouched.
+CLAIM_GROUP_BUDGET_S="$(cfg CVO_CLAIM_GROUP_BUDGET_S 1500)"
+# A family that is not reached is counted per family in $STATE/starved-<family>-<segment> and, when ARMED, paged on its
+# STARVED_PAGE_AT-th consecutive unreached tick and again every STARVED_REPAGE_EVERY ticks: "armed" must never again be
+# indistinguishable from "running".
+STARVED_PAGE_AT="$(cfg CVO_STARVED_PAGE_AT 2)"
+STARVED_REPAGE_EVERY="$(cfg CVO_STARVED_REPAGE_EVERY 12)"
 # spec-deploy-lock-deferral-m1 (Fable 2026-11-05 12:4xZ + addenda 14:3xZ/14:4xZ): a TRANSIENT condition is not a
 # terminal failure of the run. Three ticks in one day lost the claim families (the only family with a real send queue)
 # because an earlier family's failure ended the tick before claim_families() ran. The two transient classes are:
@@ -283,7 +303,7 @@ PY
 }
 if [ "${1:-}" = "--print-config" ]; then
   for v in CVO_HARNESS HYDRA_ROOT KILL KILL2 LIVE_FLAG PAID_FLAG EXCLUDE STATE PY RUNNER OWING RECEIPTS HEALTH ZERO_READ \
-           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP RD_CHECKS RD_BUDGET POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES PAGE_FLOOR TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER APPLY_USER_WORST_S APPLY_WORKERS TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
+           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP RD_CHECKS RD_BUDGET POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES PAGE_FLOOR TICK_BUDGET_S TICK_HARD_S CLAIM_GROUP_BUDGET_S STARVED_PAGE_AT STARVED_REPAGE_EVERY CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER APPLY_USER_WORST_S APPLY_WORKERS TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
            CLAIM_PROOF_STATE CLAIM_PROOF_LIMIT_H CLAIM_PROOF_UNREAD_H CLAIM_PROOF_REPEAT_MIN; do
     printf '%s=%s\n' "$v" "${!v}"
   done
@@ -362,9 +382,27 @@ notify_confirmed() { # <text>: 0 only on a confirmed post; 1 for a refusal, no c
 elapsed() { echo $(( $(date -u +%s) - TICK_T0 )); }
 # QA #1587: every subprocess of a started family runs under the deadline - `bounded` gives it the seconds left before
 # TICK_HARD_S (at least 1) and SIGTERMs it there (SIGKILL 30 s later); rc 124/137 = it hit the deadline
-bounded() { local left=$(( TICK_HARD_S - $(elapsed) )); [ "$left" -ge 1 ] || left=1
+bounded_to() { local end="$1"; shift; local left=$(( end - $(elapsed) )); [ "$left" -ge 1 ] || left=1
   "$TIMEOUT_BIN" --kill-after=30 "${left}s" "$@"; }
+bounded() { bounded_to "$TICK_HARD_S" "$@"; }
 deadline_rc() { [ "$1" = 124 ] || [ "$1" = 137 ]; }
+# [key=claims-never-starved] (QA on #1919): a group slice bounds the work IN FLIGHT, not only the next family's start.
+# Checked only before family() started, one slow claim check or apply could run to TICK_HARD_S and take the tick from
+# the credit families - the same starvation, in the other direction. While a slice is in force (GROUP_END_S set):
+#  - a READ-ONLY family step (check, bodies, the shadow judge) runs under the slice's end instead of TICK_HARD_S. It
+#    has sent nothing, so stopping it costs only the time already spent; the family waits (not_reached), the tick
+#    goes on to the next group. py_ro is for those steps ONLY;
+#  - the APPLY is never killed at the slice (a kill mid-apply is a partial send): it is handed the seconds left in
+#    the slice as --apply-budget-s, so the send loop starts no user whose worst case would not fit, and the user in
+#    flight finishes. Everything after a send (health, zero-read, the fraud re-check) keeps TICK_HARD_S: a read-back
+#    is never cut short to save time;
+#  - a retry sleep (Trino transient, a held apply lock) must fit the slice as well as the tick budget.
+GROUP_END_S=""   # empty = no group slice in force (0 is a real deadline: a slice that starts at second 0)
+SLICE_CUT=0      # 1 = the slice ended this family's work before its apply began (family() keeps its not-reached count)
+FAMILY_REACHED=0
+step_end() { if [ -n "$GROUP_END_S" ] && [ "$GROUP_END_S" -lt "$TICK_HARD_S" ]; then echo "$GROUP_END_S"; else echo "$TICK_HARD_S"; fi; }
+slice_spent() { [ -n "$GROUP_END_S" ] && [ "$(elapsed)" -ge "$GROUP_END_S" ]; }
+py_ro() { bounded_to "$(step_end)" "$PY" "$@"; }
 # Defect A (Fable d2): the runner stops a batch LOUDLY only at unmeasured_users >= max(5, 10% of the batch) and writes
 # the reason into the outcome file (`stopped_on_unmeasured`). The tick reads that field - never a string match on the
 # summary - and that stop is the ONE family failure that ends the whole tick (the gate itself is slow, every family
@@ -392,7 +430,7 @@ run_transient() {
     "$@" > "$out" 2>&1; RC=$?
     cost=$(( $(date -u +%s) - t0 ))
     [ "$RC" = "$TRANSIENT_RC" ] || return 0
-    if [ "$attempt" -ge "${#TRANSIENT_RETRY_SLEEPS[@]}" ] || [ "$(elapsed)" -ge "$TICK_BUDGET_S" ]; then
+    if [ "$attempt" -ge "${#TRANSIENT_RETRY_SLEEPS[@]}" ] || [ "$(elapsed)" -ge "$TICK_BUDGET_S" ] || slice_spent; then
       log "$tag: $what deferred - Trino is transiently unavailable (rc=$RC after $attempt retries); this family and the rest of the tick defer to the next tick (no kill file, no refusal, no cursor move)"
       page "$tag: $what deferred - Trino transiently unavailable; nothing was sent and nothing was refused"
       return 2
@@ -406,6 +444,8 @@ run_transient() {
     # budget whenever wait == left, and past it by the step's own duration even when wait < left. Require the WHOLE
     # retry - the sleep plus a repeat of the attempt we just measured - to finish strictly inside the budget.
     left=$(( TICK_BUDGET_S - $(elapsed) ))
+    # [key=claims-never-starved]: inside a group slice the retry must fit the slice too
+    if [ -n "$GROUP_END_S" ] && [ $(( GROUP_END_S - $(elapsed) )) -lt "$left" ]; then left=$(( GROUP_END_S - $(elapsed) )); fi
     wait="${TRANSIENT_RETRY_SLEEPS[$attempt]}"
     if [ "$left" -le 0 ] || [ "$(( wait + cost ))" -ge "$left" ]; then
       log "$tag: $what deferred - a ${wait}s retry does not fit in the ${left}s left of the ${TICK_BUDGET_S}s budget (the step itself just took ${cost}s, so the retry would finish at or past it); this family and the rest of the tick defer to the next tick (no kill file, no refusal, no cursor move)"
@@ -775,8 +815,13 @@ PY
       [ -n "$ref" ] || { log "$tag JUDGE CALL FAILED: an item has no copy_ref; not judged"; page "$tag: shadow judge not run - an item has no copy_ref"; continue; }
       py -c 'import json,sys; [sys.stdout.write(l) for l in open(sys.argv[1]) if l.strip() and json.loads(l).get("copy_ref") == sys.argv[2]]' \
         "$items" "$ref" > "$OUT/$tag-items-$ref.jsonl" 2>/dev/null
-      local jrc
-      py "$JUDGE" judge --items "$OUT/$tag-items-$ref.jsonl" --copy-ref "$ref" >> "$OUT/$tag-judge.out" 2>&1; jrc=$?
+      local jrc jend; jend="$(step_end)"
+      py_ro "$JUDGE" judge --items "$OUT/$tag-items-$ref.jsonl" --copy-ref "$ref" >> "$OUT/$tag-judge.out" 2>&1; jrc=$?
+      # [key=claims-never-starved]: the shadow judge acts on nothing, so a group slice may end it - that is the slice
+      # working, not a judge failure, and it is not paged as one (family() then starts no apply)
+      if deadline_rc "$jrc" && [ "$jend" -lt "$TICK_HARD_S" ]; then
+        log "$tag judge SHADOW copy=$ref stopped at the end of the group slice (acts on nothing)"; continue
+      fi
       log "$tag judge SHADOW copy=$ref (rc=$jrc, acts on nothing): $(tail -c 300 "$OUT/$tag-judge.out")"
       # r5 596: a judge call that fails (argv, crash) is LOUD - logged as such and paged - never a silent shadow line;
       # it still acts on nothing (shadow)
@@ -883,12 +928,55 @@ advance_cursor() { # <tag> <cursor file> <run's outcomes json> <this tick's star
   log "$1 page: entries from $4 this tick; next tick starts at $nxt"
 }
 
+# [key=claims-never-starved]: <tag> <family> <segment> <why>. The one place a family is told to wait for TIME (the tick
+# budget, the claim group's slice, a worst case that does not fit). It logs the wait with the running count, and pages
+# an ARMED family that has now gone unreached STARVED_PAGE_AT ticks in a row - a family nothing reaches sends nothing,
+# and until this existed only somebody reading tick.log could tell. The page marker is written on a CONFIRMED delivery
+# only, so an undelivered page is owed again next tick; a family that is reached clears both files.
+not_reached() {
+  local tag="$1" name="$2" seg="$3" why="$4" f="$STATE/starved-$1" n last
+  n="$(cat "$f" 2>/dev/null)"; [[ "$n" =~ ^[0-9]{1,6}$ ]] || n=0
+  n=$(( n + 1 ))
+  { printf '%s\n' "$n" > "$f.tmp" && mv -f "$f.tmp" "$f"; } 2>/dev/null || true
+  log "$tag: $why; this family waits for the next tick (not reached on $n consecutive tick(s))"
+  [ "$n" -ge "$STARVED_PAGE_AT" ] || return 0
+  [ "$(family_armed "$name" "$seg")" = 1 ] || return 0   # the same key family() arms on
+  last="$(cat "$f.paged" 2>/dev/null)"; [[ "$last" =~ ^[0-9]{1,6}$ ]] || last=0
+  if [ "$last" -gt 0 ] && [ "$last" -le "$n" ] && [ $(( n - last )) -lt "$STARVED_REPAGE_EVERY" ]; then return 0; fi
+  if notify_confirmed "$tag is ARMED but was NOT REACHED on $n consecutive ticks ($why) - it has sent nothing in that time"; then
+    { printf '%s\n' "$n" > "$f.paged.tmp" && mv -f "$f.paged.tmp" "$f.paged"; } 2>/dev/null || true
+  else
+    log "$tag: not-reached page NOT DELIVERED (${PAGE_WHY:-unknown}); owed again next tick"
+  fi
+}
+# <tag> <family> <segment> <where>: the group slice ended this family's work before its apply began. Nothing was sent,
+# so it is the same fact as never having been started and is counted (and, for an armed family, paged) the same way.
+slice_cut() {
+  SLICE_CUT=1
+  not_reached "$1" "$2" "$3" "the claim group's own slice (${CLAIM_GROUP_BUDGET_S}s) ended $4"
+}
+# family <family> <segment> <list> <cap> <subcommand> [runner args]: one family's step for this tick (family_run), and
+# the ONE place its not-reached count starts over - only when it was reached AND the slice did not end it before its
+# apply. Clearing at the moment a family starts would let one whose check outlasts the slice on every tick send
+# nothing for ever and never be counted.
 family() {
+  local tag="$1-$2" rc
+  FAMILY_REACHED=0; SLICE_CUT=0
+  family_run "$@"; rc=$?
+  if [ "$FAMILY_REACHED" = 1 ] && [ "$SLICE_CUT" = 0 ]; then
+    rm -f "$STATE/starved-$tag" "$STATE/starved-$tag.paged" 2>/dev/null || true
+  fi
+  return "$rc"
+}
+family_run() {
   local name="$1" seg="$2" list="$3" cap="$4" sub="$5"; shift 5
   local tag="$name-$seg" rc
   killed && { log "$tag: kill file present; stop"; return 1; }
   if [ "$(elapsed)" -ge "$TICK_BUDGET_S" ]; then
-    log "$tag: tick budget ${TICK_BUDGET_S}s reached; this family waits for the next tick"; return 0
+    not_reached "$tag" "$name" "$seg" "tick budget ${TICK_BUDGET_S}s reached"; return 0
+  fi
+  if [ -n "$GROUP_END_S" ] && [ "$(elapsed)" -ge "$GROUP_END_S" ]; then
+    not_reached "$tag" "$name" "$seg" "the claim group's own slice (${CLAIM_GROUP_BUDGET_S}s) is used"; return 0
   fi
 
   [ -s "$list" ] || { log "$tag: empty audience; skipped"; return 0; }
@@ -956,15 +1044,20 @@ family() {
     fi
   fi
   if [ $(( $(elapsed) + worst )) -gt "$TICK_HARD_S" ]; then
-    log "$tag: $(elapsed)s into the tick and its worst case is ${worst}s (cap $cap); it does not fit before the ${TICK_HARD_S}s deadline; this family waits for the next tick"
+    not_reached "$tag" "$name" "$seg" "$(elapsed)s into the tick and its worst case is ${worst}s (cap $cap); it does not fit before the ${TICK_HARD_S}s deadline"
     return 0
   fi
+  FAMILY_REACHED=1   # family() clears the not-reached count on the way out, unless the slice ends this run first
+  local s_end; s_end="$(step_end)"   # what bounds this family's read-only steps: the slice's end, or TICK_HARD_S
   run_transient "$tag" check "$OUT/$tag-check.out" \
-    py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode dry-run --max-users "$cap" \
+    py_ro "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode dry-run --max-users "$cap" \
     --check-recipients --outcomes-json "$OUT/$tag-check.json"; rc=$?
   [ "$rc" = 2 ] && return 2
   rc="$RC"
   log "$tag check (rc=$rc): $(head -c 600 "$OUT/$tag-check.out")"
+  if deadline_rc "$rc" && [ "$s_end" -lt "$TICK_HARD_S" ]; then
+    slice_cut "$tag" "$name" "$seg" "during its check (read-only, stopped; nothing was sent)"; return 0
+  fi
   if deadline_rc "$rc"; then log "$tag: check hit the ${TICK_HARD_S}s deadline (read-only, stopped); the tick ends"; TICK_ENDS=1; return 1; fi
   [ -s "$OUT/$tag-check.json" ] && log "$tag check: $(unmeasured_summary "$OUT/$tag-check.json")"
   if unmeasured_bar_hit "$OUT/$tag-check.json"; then
@@ -979,14 +1072,18 @@ family() {
     page_next "$OUT/$tag-check.json" >/dev/null || { log "$tag: the check recorded no page; tick stops"; return 1; }
   fi
   if [ "$(elapsed)" -ge "$TICK_HARD_S" ]; then log "$tag: ${TICK_HARD_S}s deadline passed after the check; no bodies, no apply this tick"; return 0; fi
+  if slice_spent; then slice_cut "$tag" "$name" "$seg" "after its check (no bodies, no apply; nothing was sent)"; return 0; fi
   install -d -m 700 "$OUT/$tag-bodies"
   # r5: the bodies ARE the after-the-fact review sample - no sample, no send (the tick stops). [key=scale-now-openclaw]:
   # the WHOLE batch is rendered (not 5), each body with the renderer's facts beside it - the batch judge's items
   run_transient "$tag" bodies "$OUT/$tag-bodies.out" \
-    py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode dry-run --max-users "$cap" \
+    py_ro "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode dry-run --max-users "$cap" \
     --preview "$OUT/$tag-bodies" --preview-accepted "$OUT/$tag-check.json"; rc=$?
   [ "$rc" = 2 ] && return 2
   rc="$RC"
+  if deadline_rc "$rc" && [ "$s_end" -lt "$TICK_HARD_S" ]; then
+    slice_cut "$tag" "$name" "$seg" "while its bodies were rendered (read-only, stopped; nothing was sent)"; return 0
+  fi
   if deadline_rc "$rc"; then log "$tag: bodies hit the ${TICK_HARD_S}s deadline (read-only, stopped); no apply, the tick ends"; TICK_ENDS=1; return 1; fi
   [ "$rc" = 0 ] || { alert_nothing_sent "$tag" "$OUT/$tag-bodies.out"; log "$tag: body sample failed; no apply, tick stops: $(head -c 300 "$OUT/$tag-bodies.out")"; return 1; }
   accept_bodies "$tag"; rc=$?
@@ -1015,6 +1112,7 @@ family() {
     advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0
   fi
   killed && { log "$tag: kill file present; stop"; return 1; }
+  if slice_spent; then slice_cut "$tag" "$name" "$seg" "before its apply (checked, not applied; nothing was sent)"; return 0; fi
   local campaign; campaign="$(printf '%s\n' "$@" | awk 'p{print; exit} $0=="--campaign"{p=1}')"
   [ -n "$campaign" ] || campaign="$sub"   # the claim runners: the subcommand IS the campaign
   [ "$runner" = "$NEED_RUNNER" ] && campaign=proof-need-ask
@@ -1027,9 +1125,16 @@ family() {
   if [ "${n:-0}" -le 0 ]; then log "$tag: daily cap reached for $campaign/$seg; no apply"; return 0; fi
   # [key=apply-pool] (captain 2026-11-11, work order item 1): APPLY_WORKERS note steps run at once, so the users that
   # fit before the deadline is the serial fit x the pool size. The pool is bounded at 6; the runner clamps it.
-  local fit=$(( (TICK_HARD_S - $(elapsed)) * APPLY_WORKERS / APPLY_S_PER_USER ))
+  # [key=claims-never-starved]: inside a group slice the apply is sized and budgeted to the SLICE's end (a_end); the
+  # deadline wrapper around it stays TICK_HARD_S, because an apply is never killed to keep a slice
+  local a_end; a_end="$(step_end)"
+  if [ "$a_end" -lt "$TICK_HARD_S" ] && [ $(( a_end - $(elapsed) )) -lt "$APPLY_USER_WORST_S" ]; then
+    slice_cut "$tag" "$name" "$seg" "with $(( a_end - $(elapsed) )) s left, less than one user's worst case ($APPLY_USER_WORST_S s); no apply this tick"
+    return 0
+  fi
+  local fit=$(( (a_end - $(elapsed)) * APPLY_WORKERS / APPLY_S_PER_USER ))
   if [ "$fit" -le 0 ]; then log "$tag: no time left before the ${TICK_HARD_S}s deadline; no apply this tick"; return 0; fi
-  if [ "$n" -gt "$fit" ]; then log "$tag: apply cut from $n to $fit (what fits before the ${TICK_HARD_S}s deadline)"; n="$fit"; fi
+  if [ "$n" -gt "$fit" ]; then log "$tag: apply cut from $n to $fit (what fits before the $([ "$a_end" -lt "$TICK_HARD_S" ] && echo "end of the claim group's slice" || echo "${TICK_HARD_S}s deadline"))"; n="$fit"; fi
   local lo; lo="$(maxid)"
   [ "$lo" -ge 0 ] || { autokill "$tag: ledger unreadable before the apply"; return 1; }
   local capargs=(); [ "$sub" = uvn-status ] && capargs=(--segment-daily-cap "$daily")
@@ -1047,7 +1152,7 @@ family() {
   # TICK_HARD_S is a partial send and must fail closed, and a kill there is the one kill that stays real.
   # It is computed ONCE, outside the retry loop: a retry re-enters the same runner, and re-deriving the share from the
   # clock each attempt would hand every attempt a fresh budget (the overrun this key exists to prevent).
-  local abudget=$(( TICK_HARD_S - $(elapsed) ))
+  local abudget=$(( a_end - $(elapsed) ))
   [ "$abudget" -ge 0 ] || abudget=0
   # [key=note-step-budget]: not even one user's worst case left -> the send loop would defer every user it was handed and
   # we would have paid for a subprocess to say so. Nothing is owed differently: the tick says it and the next one starts.
@@ -1104,7 +1209,7 @@ family() {
     local held=$(( $(date -u +%s) - first_at ))
     local why="a deploy holds the apply lock"; [ "$rc" = "$TRANSIENT_RC" ] && why="Trino is transiently unavailable"
     if [ "$attempt" -ge "${#APPLY_RETRY_SLEEPS[@]}" ] || [ "$held" -ge "$APPLY_RETRY_CAP_S" ] \
-       || [ "$(elapsed)" -ge "$TICK_BUDGET_S" ]; then
+       || [ "$(elapsed)" -ge "$TICK_BUDGET_S" ] || slice_spent; then
       log "$tag: apply deferred - $why for ${held}s (${attempt} retries, ledger unchanged at $lo); this family and the rest of the tick defer to the next tick (no kill file, no refusal, no cursor move)"
       page "$tag: apply deferred after ${held}s - $why; nothing was sent and nothing was refused"
       deferred=1; break
@@ -1113,6 +1218,7 @@ family() {
     # APPLY_RETRY_CAP_S window. A retry that does not fit is not a retry: defer now rather than sleep past the budget
     # and starve every family behind this one.
     left=$(( TICK_BUDGET_S - $(elapsed) ))
+    if [ -n "$GROUP_END_S" ] && [ $(( GROUP_END_S - $(elapsed) )) -lt "$left" ]; then left=$(( GROUP_END_S - $(elapsed) )); fi
     local cap_left=$(( APPLY_RETRY_CAP_S - held ))
     [ "$cap_left" -lt "$left" ] && left="$cap_left"
     wait="${APPLY_RETRY_SLEEPS[$attempt]}"
@@ -1715,8 +1821,7 @@ for m in "$STATE"/zero-unmeasured-undelivered-*; do
   fi
 done
 
-# spec-deploy-lock-deferral-m1 addendum 2 (Fable 2026-11-05 14:4xZ): the ORDER is the 10-30 ruling and does not change.
-# What changes is that a TRANSIENT family failure (rc=2: deploy lock, Trino transient) stops THAT GROUP and the tick
+# spec-deploy-lock-deferral-m1 addendum 2 (Fable 2026-11-05 14:4xZ): a TRANSIENT family failure (rc=2: deploy lock, Trino transient) stops THAT GROUP and the tick
 # CONTINUES to the next one, instead of `exit 1` starving every family behind it. A hard failure (rc=1: kill file,
 # partial send, zero-read unmeasured, a real SQL/auth error) still exits 1 immediately. A deferred tick exits 2, so it is
 # visible in the exit code and the log without having cost the families behind it.
@@ -1744,16 +1849,16 @@ run_group() { # <label> <group fn>: 0 = done, 1 = hard stop (exit 1), 2 = deferr
   log "$label: FAILED (rc=$rc); the next family group still runs (a credit failure never skips the claim families and a claim failure never skips the credit families); the tick exits 1 at the end"
   return 0
 }
-if [ "$DOW" = 6 ] || [ "$DOW" = 7 ]; then   # Fable 10-30: claims prioritised Sat-Sun
-  log "weekend: claim families first"
-  run_group "claim families" claim_families || exit 1
-  run_group "credit families" credit_families || exit 1
-  run_group "need families" need_families || exit 1
-else
-  run_group "credit families" credit_families || exit 1
-  run_group "claim families" claim_families || exit 1
-  run_group "need families" need_families || exit 1
-fi
+# [key=claims-never-starved] (2026-11-12, replaces the 10-30 "claims first on Sat/Sun, credit first on weekdays"): the
+# claim families run FIRST every day, inside their own slice. On weekdays they ran after the credit families, and on
+# 2026-11-12 08:00Z those used the whole tick budget on 18 sends: all four claim segments logged "tick budget 6000s
+# reached". A group that is never reached is not low priority, it is unreachable.
+log "claim families first (every day), held to their own ${CLAIM_GROUP_BUDGET_S}s slice"
+GROUP_END_S=$(( $(elapsed) + CLAIM_GROUP_BUDGET_S ))
+run_group "claim families" claim_families || exit 1
+GROUP_END_S=""
+run_group "credit families" credit_families || exit 1
+run_group "need families" need_families || exit 1
 if [ -n "$FAILED_GROUPS" ]; then
   log "tick done with FAILED group(s): $FAILED_GROUPS (the other groups ran); exit 1"
   exit 1

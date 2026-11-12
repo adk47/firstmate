@@ -29,7 +29,8 @@ mode = a[a.index("--mode") + 1]
 if os.environ.get("STUB_FAIL_LIST") and "--list" in a and \
         os.path.basename(a[a.index("--list") + 1]).startswith(os.environ["STUB_FAIL_LIST"]):
     print("stub: this list's step fails"); sys.exit(1)          # a family whose step fails, by list name
-if os.environ.get("STUB_SLEEP") and mode == os.environ.get("STUB_SLEEP_MODE") and (mode == "apply" or "--check-recipients" in a):
+if os.environ.get("STUB_SLEEP") and mode == os.environ.get("STUB_SLEEP_MODE") and (mode == "apply" or "--check-recipients" in a) \
+        and (not os.environ.get("STUB_SLEEP_SUB") or a[0] == os.environ["STUB_SLEEP_SUB"]):   # only the named family is slow
     import time; time.sleep(float(os.environ["STUB_SLEEP"]))
 if mode != "apply" and os.environ.get("STUB_CHECK_RC") and (
         not os.environ.get("STUB_CHECK_RC_SUB") or a[0] == os.environ["STUB_CHECK_RC_SUB"]):
@@ -111,6 +112,8 @@ elif "--outcomes-json" in a:
     # Defect A (Fable d2): the runner's UNMEASURED rows (a read-only gate call timed out: result `unmeasured`, reason
     # gate_timeout) and the bar it stops at - the real writer is credit-review.py write_outcomes
     nu = int(os.environ.get("STUB_UNMEASURED", "0")) if mode != "apply" else 0
+    if os.environ.get("STUB_UNMEASURED_SUB") and a[0] != os.environ["STUB_UNMEASURED_SUB"]:
+        nu = 0                                   # only the named family's check is slow
     for i in range(nu):
         doc["outcomes"].append({"user": "u%d" % i, "result": "unmeasured",
                                 "reason": "gate_timeout: a gate call timed out after 1 attempt(s) of 20s; outcome unknown"})
@@ -163,7 +166,8 @@ if mode == "apply" and os.environ.get("STUB_APPLY_LOCK_AFTER_ROWS"):
     # rc=3 AND the lock prose AND rows already written: the lock word must not launder a partial send into a deferral
     print("Credit review uvn-status: a deploy holds the apply lock /var/lib/hydra/credit-review/apply.lock; nothing sent (re-run after it)")
     sys.exit(3)
-if mode == "apply" and os.environ.get("STUB_APPLY_RC"):
+if mode == "apply" and os.environ.get("STUB_APPLY_RC") and (
+        not os.environ.get("STUB_APPLY_RC_SUB") or a[0] == os.environ["STUB_APPLY_RC_SUB"]):
     sys.exit(int(os.environ["STUB_APPLY_RC"]))   # rows were written above; the run then FAILS (a partial send)
 if mode == "apply" and os.environ.get("STUB_APPLY_NOTHING_SENT"):
     # a FAILED apply that sent nothing (the fraud lens could not be measured): the same silent no-send class
@@ -269,7 +273,6 @@ held = [h for h in os.environ.get("STUB_FRAUD_HELD", "").split(",") if h and h i
 print("hit " + ",".join(held) if held else "ok")
 PY
   export CVO_FRAUD="$TEST_TMPDIR/fraud.py"
-  export CVO_DOW=3   # a weekday unless a test says otherwise
   SCRIPT="$BATS_TEST_DIRNAME/../credit-verify-outbound.sh"
 }
 
@@ -289,7 +292,7 @@ newest_tick() { printf '%s' "$(newest_out)tick.log"; }
   evil=(HYDRA_ROOT="$E" CVO_ETC="$E/etc" CVO_STATE="$E/state" PY_BIN="$E/py" CVO_RUNNER="$E/r" CVO_OWING="$E/o" CVO_RECEIPTS="$E/rc"
         CVO_HEALTH="$E/h" CVO_ZERO_READ="$E/z" CVO_FRAUD="$E/f" CVO_MAIN_ENV="$E/env" CVO_LEDGER="$E/l.sqlite3" CVO_SCRIPTS="$E/s"
         CVO_RD_SCAN="$E/rd" CVO_RD_CAP=99999 CVO_POLICY="$E/p.json" CVO_CLAIM_LIST="$E/c.json" CVO_CAP=99999 CVO_R1_CAP=99999
-        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_DOW=9 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_CHECK_ENTRIES=99999 CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_PER_SEGMENT_FROM_TEST=status-doc-received=2000-01-01T00:00Z CVO_PAID_FROM_TEST=proof-need-ask=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t"
+        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_CLAIM_GROUP_BUDGET_S=1 CVO_STARVED_PAGE_AT=99 CVO_STARVED_REPAGE_EVERY=1 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_CHECK_ENTRIES=99999 CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_PER_SEGMENT_FROM_TEST=status-doc-received=2000-01-01T00:00Z CVO_PAID_FROM_TEST=proof-need-ask=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t"
         CVO_CLAIM_PROOF_STATE="$E/cpc" CVO_CLAIM_PROOF_LIMIT_H=999 CVO_CLAIM_PROOF_UNREAD_H=999 CVO_CLAIM_PROOF_REPEAT_MIN=999)
   run -0 env -u BATS_TEST_TMPDIR "${evil[@]}" "$SCRIPT" --print-config
   [[ "$output" != *"$E"* ]]; [[ "$output" != *99999* ]]
@@ -322,7 +325,6 @@ CLAIM_LIST=/var/lib/hydra/credit-verify-outbound/claim-list.json
 CAP=250
 R1_CAP=250
 CLAIM_CAP=250
-DOW=$(date -u +%u)
 REFUSAL_SPIKE=0.20
 NEED_RUNNER=/opt/hydra/scripts/credit_review/need_asks.py
 FIRST_CAP=100
@@ -333,6 +335,9 @@ CHECK_ENTRIES=200
 PAGE_FLOOR=20
 TICK_BUDGET_S=6000
 TICK_HARD_S=6900
+CLAIM_GROUP_BUDGET_S=1500
+STARVED_PAGE_AT=2
+STARVED_REPAGE_EVERY=12
 CHECK_S_PER_USER=4
 RESERVE_PAD_S=300
 APPLY_S_PER_USER=40
@@ -830,14 +835,18 @@ PY
 }
 
 @test "outbound tick (b1 560): EVERY python subprocess runs under the one deadline wrapper - a slow builder is stopped at the deadline and the tick ends" {
-  # no bare "$PY" command left outside the py() wrapper itself
+  # no bare "$PY" command left outside the two deadline wrappers themselves: py() (the tick's hard deadline) and
+  # py_ro() (QA #1919: the same wrapper, ending at a group slice's end when one is in force - never LATER than the
+  # tick's deadline, which step_end pins by taking the smaller of the two)
   src="$BATS_TEST_DIRNAME/../credit-verify-outbound.sh"; [ -s "$src" ]
   grep -q '^py() { bounded "\$PY" "\$@"; }' "$src"
-  if grep -nE '(^|[[:space:](;|&]|\$\()"\$PY" ' "$src" | grep -v ':py() {'; then false; fi
+  grep -q '^py_ro() { bounded_to "\$(step_end)" "\$PY" "\$@"; }' "$src"
+  grep -q '^bounded() { bounded_to "\$TICK_HARD_S" "\$@"; }' "$src"
+  if grep -nE '(^|[[:space:](;|&]|\$\()"\$PY" ' "$src" | grep -v ':py() {' | grep -v ':py_ro() {'; then false; fi
   touch "$CVO_ETC/credit-verify-outbound.live"
   claim_list
   t0=$(date +%s)
-  STUB_OWING_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 CVO_DOW=3 run -1 "$SCRIPT"
+  STUB_OWING_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 run -1 "$SCRIPT"
   [ $(( $(date +%s) - t0 )) -lt 25 ]
   # QA #1857 r2 (Important): the CENSUS builder killed at the deadline is the deadline class, not "census UNMEASURED" -
   # before the fix the tick read it as a failed census read, went on into the receipts read and every family group past
@@ -870,12 +879,13 @@ runpy.run_path(os.environ["STUB_OWING_REAL"], run_name="__main__")
 PYSRC
   t0=$(date +%s)
   STUB_OWING_REAL="$TEST_TMPDIR/owing.py" CVO_OWING="$TEST_TMPDIR/owing-rebuild-slow.py" \
-    CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 CVO_DOW=3 run -1 "$SCRIPT"
+    CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 run -1 "$SCRIPT"
   [ $(( $(date +%s) - t0 )) -lt 25 ]
   grep -q "owing builder on the rebuild before uvn-status paid hit the 6900s deadline (rc=124" "$(newest_tick)"
   grep -q "credit families: FAILED at the unmeasured bar, the deadline or a failed apply; the tick ends here" "$(newest_tick)"
   if grep -q "the next family group still runs" "$(newest_tick)"; then false; fi
-  if grep -q -- "^claim-" "$CALLS"; then false; fi         # nothing behind a spent budget runs blind
+  # nothing behind a spent budget runs blind. The claim group runs BEFORE the credit families now
+  # ([key=claims-never-starved]), so the group behind the rebuild is the need group.
   if grep -q -- "need-build" "$CALLS.need" 2>/dev/null; then false; fi
   if grep -q -- "--mode apply" "$CALLS"; then false; fi
 }
@@ -895,7 +905,7 @@ PYSRC
   # families complete their read-only checks inside the 3 s before the need group starts.
   t0=$(date +%s)
   STUB_NEED_REAL="$TEST_TMPDIR/need.py" CVO_NEED_RUNNER="$TEST_TMPDIR/need-slow.py" \
-    CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6880 CVO_TICK_HARD_S=6900 CVO_DOW=3 run -1 "$SCRIPT"
+    CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6880 CVO_TICK_HARD_S=6900 run -1 "$SCRIPT"
   [ $(( $(date +%s) - t0 )) -lt 60 ]
   grep -q "proof-need-ask builder (rebuild before need families) hit the 6900s deadline (rc=124" "$(newest_tick)"
   grep -q "need families: FAILED at the unmeasured bar, the deadline or a failed apply; the tick ends here" "$(newest_tick)"
@@ -926,15 +936,15 @@ PYSRC
 # FirstMate ruling 2 (3 Nov) + CTO MUS-27638: the missing-document ask runs LAST in every tick, free then paid; paid is held in code
 first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
 
-@test "outbound tick (ruling 2): proof-need-ask free runs AFTER every uvn-status / r1 / reply-due / claim-* family on a weekday tick and on a weekend tick, and free comes before paid" {
+@test "outbound tick (ruling 2): proof-need-ask free runs AFTER every uvn-status / r1 / reply-due / claim-* family (one order, every day), and free comes before paid" {
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
   export STUB_NEED_USERS=1 CVO_PAID_FROM_TEST="proof-need-ask=2020-01-01T00:00Z"
   printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"
   printf '{"generated_at": "x", "signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}]}' "$DEP" > "$CVO_STATE.claims.json"
   export CVO_CLAIM_LIST="$CVO_STATE.claims.json"
-  for dow in 3 6; do
+  for pass in 1 2; do                                        # twice: the order does not depend on what ran before
     : > "$CALLS"; rm -rf "$CVO_OUT_ROOT" "$CVO_STATE.d" "$CVO_LEDGER.segments.jsonl"
-    CVO_DOW=$dow run -0 "$SCRIPT"
+    run -0 "$SCRIPT"
     log="$(ls "$CVO_OUT_ROOT"/*/tick.log)"
     need="$(first_line 'proof-need-ask-free check (rc=0)')"; [ -n "$need" ]
     seen=0
@@ -1701,20 +1711,25 @@ J
   grep -q -- "^claim-proof-ask .*--segment free .*--mode apply --max-users 1" "$CALLS"        # 4 - 3 claim rows
 }
 
-@test "outbound tick (Fable 10-30): the claim families run from the claim lane's list, FIRST on Sat/Sun, after credit on weekdays; no list = skipped" {
+@test "outbound tick ([key=claims-never-starved]): the claim families run from the claim lane's list, FIRST on every day; no list = skipped" {
   touch "$CVO_ETC/credit-verify-outbound.live"
   printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"
   printf '{"generated_at": "x", "signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}]}' "$DEP" > "$CVO_STATE.claims.json"
   export CVO_CLAIM_LIST="$CVO_STATE.claims.json"
   run -0 "$SCRIPT"
-  grep -q -- "^claim-proof-ask --list .*/claims-filtered.json --segment free .*--mode apply --max-users 250" "$CALLS"
+  grep -q -- "^claim-proof-ask --list .*/claims-filtered.json --segment free .*--check-recipients" "$CALLS"
+  # QA #1919: the apply is sized to what fits in the claim group's SLICE (1,500 s x 6 workers / 40 s a user = 225), not
+  # in the tick - so the default cap of 250 is cut, and the log says by what. A cap the slice cannot carry is not sent.
+  n="$(grep -m1 -- "^claim-proof-ask --list .*/claims-filtered.json --segment free .*--mode apply" "$CALLS" | sed -E 's/.*--max-users ([0-9]+).*/\1/')"
+  [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -le 225 ] && [ "$n" -ge 150 ]
+  grep -q "claim-proof-ask-free: apply cut from 250 to $n (what fits before the end of the claim group's slice)" "$(newest_tick)"
   grep -q -- "^claim-status --list .*/claims-filtered.json --segment free .*--mode apply" "$CALLS"
   if grep -q -- "^claim-.*--exclude-users" "$CALLS"; then false; fi
-  first="$(grep -m1 -- "--mode apply" "$CALLS" | cut -d' ' -f1)"; [ "$first" = "uvn-status" ]
-  : > "$CALLS"; rm -f "$CVO_LEDGER.segments.jsonl"
-  CVO_DOW=6 run -0 "$SCRIPT"
   first="$(grep -m1 -- "--mode apply" "$CALLS" | cut -d' ' -f1)"; [ "$first" = "claim-proof-ask" ]
-  grep -q "weekend: claim families first" "$(newest_tick)"
+  last="$(grep -- "--mode apply" "$CALLS" | tail -1 | cut -d' ' -f1)"; [ "$last" != "claim-proof-ask" ] && [ "$last" != "claim-status" ]
+  grep -q "claim families first (every day), held to their own 1500s slice" "$(newest_tick)"
+  # the day of the week is not an input any more: there is no weekday on which the claims wait behind the credit families
+  if grep -q 'CVO_DOW\|"\$DOW"' "$SCRIPT"; then false; fi
   : > "$CALLS"; rm -f "$CVO_CLAIM_LIST"
   run -0 "$SCRIPT"
   if grep -q "^claim-" "$CALLS"; then false; fi
@@ -2068,7 +2083,10 @@ print('{"rows": 1}')
 PY
   # the family DEFERS because its worst case cannot fit before the hard deadline (its own "does not fit" path), so
   # neither segment writes its .done marker - while the scan itself still runs and reports a token to resume from
-  STUB_UPSTREAM="cDlwYWdlMg" CVO_TICK_ELAPSED0=5000 CVO_CHECK_S_PER_USER=40 CVO_RESERVE_PAD_S=300 CVO_TICK_HARD_S=6900     CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_up.py" run -0 "$SCRIPT"
+  # (5100, not 5000: at exactly 5000 the page cut is (6900 - 5000 - 300) / 80 = 20 = PAGE_FLOOR, so a tick that reached
+  # this family inside its first wall-clock second FIT and the case failed at the cursor assertion below - one run in
+  # three on 2026-11-12, reproduced by setting 4998. 5100 leaves 18, under the floor at any speed.)
+  STUB_UPSTREAM="cDlwYWdlMg" CVO_TICK_ELAPSED0=5100 CVO_CHECK_S_PER_USER=40 CVO_RESERVE_PAD_S=300 CVO_TICK_HARD_S=6900     CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_up.py" run -0 "$SCRIPT"
   out="$(ls -d "$CVO_OUT_ROOT"/*)"
   # ... and the upstream state must NOT be committed: the rows this walk collected never reached anybody, so resuming
   # past them next tick would answer nobody about them, ever
@@ -2302,6 +2320,13 @@ PY
 # failure ended the tick before claim_families() ran. A TRANSIENT condition (a deploy holding the apply lock, Trino
 # saying "retry in a few minutes") must cost that family, never the families behind it.
 
+# [key=claims-never-starved]: the claim group runs FIRST on every day, so "the tick stopped" is witnessed by the group
+# BEHIND the credit families - the need group, whose builder a healthy tick always calls - never having started.
+no_group_behind_credit() {
+  if grep -q -- "need-build" "$CALLS.need" 2>/dev/null; then false; fi
+  if grep -q -- "need-asks.json" "$CALLS"; then false; fi
+}
+
 claim_list() {   # a claim list signed on the deployed head, so the claim families actually run
   printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"
   printf '{"generated_at": "x", "signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}]}' "$DEP" > "$CVO_STATE.claims.json"
@@ -2351,7 +2376,7 @@ claim_list() {   # a claim list signed on the deployed head, so the claim famili
   if grep -q "apply lock busy/transient" "$(newest_tick)"; then false; fi   # never retried
   if grep -q "apply deferred" "$(newest_tick)"; then false; fi              # never deferred
   if grep -q "tick deferred" "$(newest_tick)"; then false; fi
-  if grep -q -- "^claim-" "$CALLS"; then false; fi                          # the hard stop is preserved
+  no_group_behind_credit                                                    # the hard stop is preserved
   [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
 }
 
@@ -2370,7 +2395,7 @@ PY
   grep -q "apply rc=3 WITHOUT the held-lock marker AND a CHANGED ledger" "$(newest_tick)"
   grep -q "a partial send; the post-send rails own it" "$(newest_tick)"
   [ -s "$CALLS.health" ] || false          # the health rail RAN: the early return is gone
-  if grep -q -- "^claim-" "$CALLS"; then false; fi
+  no_group_behind_credit
 }
 
 @test "outbound tick (QA #1799 r12 carried): an UNOPENABLE apply lock is a hard stop - never retried, never deferred" {
@@ -2385,7 +2410,7 @@ PY
   if grep -q "apply lock busy/transient" "$(newest_tick)"; then false; fi
   if grep -q "apply deferred" "$(newest_tick)"; then false; fi
   if grep -q "tick deferred" "$(newest_tick)"; then false; fi
-  if grep -q -- "^claim-" "$CALLS"; then false; fi
+  no_group_behind_credit
   [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
 }
 
@@ -2407,15 +2432,23 @@ PY
   [ "$tick_marker" = "$runner_marker" ]
 }
 
-@test "outbound tick (spec-deploy-lock-deferral-m1): a REAL failed apply (rc!=0 with a CHANGED ledger) still stops the tick before the claims" {
+@test "outbound tick (spec-deploy-lock-deferral-m1): a REAL failed apply (rc!=0 with a CHANGED ledger) still stops the tick before every group behind it - a credit apply before the need group, a claim apply before the credit families" {
   touch "$CVO_ETC/credit-verify-outbound.live"
   claim_list
   rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
   # the runner wrote rows and THEN failed: the ledger moved, so this is a partial send, not a deferral
-  STUB_APPLY_RC=1 run -1 "$SCRIPT"
-  grep -q "apply failed rc=1; tick stops" "$(newest_tick)"
-  if grep -q -- "^claim-" "$CALLS"; then false; fi
+  STUB_APPLY_RC=1 STUB_APPLY_RC_SUB=uvn-status run -1 "$SCRIPT"
+  grep -q "uvn-status-free: apply failed rc=1; tick stops" "$(newest_tick)"
+  grep -q -- "^claim-proof-ask --list .*--mode apply" "$CALLS"          # the claim families had already run
+  no_group_behind_credit
   if grep -q "tick deferred" "$(newest_tick)"; then false; fi
+  # the mirror: the claim group is first now, so ITS failed apply is the one that must not be walked past
+  : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"; rm -f "$CALLS.need" "$CVO_ETC/credit-verify-outbound.disabled" "$CVO_LEDGER.segments.jsonl"
+  STUB_APPLY_RC=1 STUB_APPLY_RC_SUB=claim-proof-ask run -1 "$SCRIPT"
+  grep -q "claim-proof-ask-free: apply failed rc=1; tick stops" "$(newest_tick)"
+  grep -q "claim families: FAILED at the unmeasured bar, the deadline or a failed apply; the tick ends here" "$(newest_tick)"
+  if grep -q -- "^uvn-status " "$CALLS"; then false; fi                  # no credit family started
+  no_group_behind_credit
 }
 
 @test "outbound tick (spec-deploy-lock-deferral-m1): the wait is BOUNDED - the retry cap stops the loop, it never runs past it" {
@@ -2495,7 +2528,8 @@ PY
 
 @test "outbound tick (QA #1799 r14): the apply loop counts the attempt's own cost in the fit too" {
   touch "$CVO_ETC/credit-verify-outbound.live"
-  claim_list
+  # no claim list here: the claim families run first now ([key=claims-never-starved]) and would spend the ~20s this
+  # boundary needs left over before uvn-status is reached
   rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
   # Same boundary on the apply loop: the attempt costs 10s and the next retry sleep is 15s with ~20s of budget left, so
   # the SLEEP alone fits (15 < 20) and the old check retried - finishing at 15+10 = 25s, past the budget.
@@ -2508,16 +2542,135 @@ PY
   [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
 }
 
-@test "outbound tick (spec-deploy-lock-deferral-m1 addendum 2): the weekday/weekend ORDER is unchanged - a deferral never reorders the groups" {
+@test "outbound tick (spec-deploy-lock-deferral-m1 addendum 2): a deferral never reorders the groups - claims, credit, need, whichever one deferred" {
   touch "$CVO_ETC/credit-verify-outbound.live"
   claim_list
   rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
   STUB_CHECK_RC=4 STUB_CHECK_RC_SUB=uvn-status run -2 "$SCRIPT"
-  first="$(grep -m1 -- "--mode apply" "$CALLS" | cut -d' ' -f1)"; [ "$first" = "claim-proof-ask" ]   # credit deferred, claims next
+  first="$(grep -m1 -- "--mode apply" "$CALLS" | cut -d' ' -f1)"; [ "$first" = "claim-proof-ask" ]   # claims ran first, then credit deferred
+  grep -q "^need-build" "$CALLS.need"                                                               # and the need group still ran
   : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
-  CVO_DOW=6 STUB_CHECK_RC=4 STUB_CHECK_RC_SUB=claim-proof-ask run -2 "$SCRIPT"
-  grep -q "weekend: claim families first" "$(newest_tick)"
+  STUB_CHECK_RC=4 STUB_CHECK_RC_SUB=claim-proof-ask run -2 "$SCRIPT"
+  grep -q "claim families first (every day)" "$(newest_tick)"
   first="$(grep -m1 -- "--mode apply" "$CALLS" | cut -d' ' -f1)"; [ "$first" = "uvn-status" ]        # claims deferred, credit next
+}
+
+@test "outbound tick ([key=claims-never-starved]): the claim group has its OWN slice - a used slice makes the claims wait and the credit families still run" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  CVO_CLAIM_GROUP_BUDGET_S=0 run -0 "$SCRIPT"
+  grep -q "claim-proof-ask-paid: the claim group's own slice (0s) is used; this family waits for the next tick (not reached on 1 consecutive tick(s))" "$(newest_tick)"
+  if grep -q -- "^claim-" "$CALLS"; then false; fi                 # no claim family was started
+  grep -q -- "^uvn-status .*--mode apply" "$CALLS"                 # the slice is the claims' own: credit is not charged for it
+  grep -q "^need-build" "$CALLS.need"
+}
+
+@test "outbound tick ([key=claims-never-starved]): the slice bounds the claim group, never the credit families - claims run first and credit still applies" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  run -0 "$SCRIPT"
+  first="$(grep -m1 -- "--mode apply" "$CALLS" | cut -d' ' -f1)"; [ "$first" = "claim-proof-ask" ]
+  grep -q -- "^uvn-status .*--mode apply" "$CALLS"
+  if grep -q "slice (.*) is used" "$(newest_tick)"; then false; fi
+  if ls "$CVO_STATE"/starved-* >/dev/null 2>&1; then false; fi     # nobody waited, nothing is counted
+}
+
+@test "outbound tick ([key=claims-never-starved], QA #1919): the slice bounds a claim family IN FLIGHT - a slow read-only check is stopped at the slice's end, nothing is sent, the credit families still run, and the family is counted and paged" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  claim_list
+  rm -f "$CALLS.page-confirmed"
+  # a claim check that would take 300 s inside a 20 s slice: checked only before the family started, it ran on to the
+  # tick deadline and the credit families waited behind it - the starvation this change exists to end, the other way
+  t0=$(date +%s)
+  STUB_SLEEP_MODE=dry-run STUB_SLEEP=300 STUB_SLEEP_SUB=claim-proof-ask CVO_CLAIM_GROUP_BUDGET_S=20 run -0 "$SCRIPT"
+  [ $(( $(date +%s) - t0 )) -lt 150 ]
+  grep -q "claim-proof-ask-paid: the claim group's own slice (20s) ended during its check (read-only, stopped; nothing was sent); this family waits for the next tick (not reached on 1 consecutive tick(s))" "$(newest_tick)"
+  grep -q "claim-status-paid: the claim group's own slice (20s) is used" "$(newest_tick)"   # and no later claim family starts
+  if grep -q -- "^claim-.*--mode apply" "$CALLS"; then false; fi
+  if grep -q "the tick ends" "$(newest_tick)"; then false; fi      # a slice is not the tick deadline: the tick goes on
+  grep -q -- "^uvn-status .*--mode apply" "$CALLS"
+  grep -q "^need-build" "$CALLS.need"
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  [ "$(cat "$CVO_STATE/starved-claim-proof-ask-paid")" = 1 ]
+  # the same thing next tick: the family WAS started, and it still sent nothing - so its count is not cleared by the
+  # start, and an armed family is paged on the second tick like one that was never started
+  rm -rf "$CVO_OUT_ROOT"
+  STUB_SLEEP_MODE=dry-run STUB_SLEEP=300 STUB_SLEEP_SUB=claim-proof-ask CVO_CLAIM_GROUP_BUDGET_S=20 run -0 "$SCRIPT"
+  [ "$(cat "$CVO_STATE/starved-claim-proof-ask-paid")" = 2 ]
+  grep -q "claim-proof-ask-paid is ARMED but was NOT REACHED on 2 consecutive ticks (the claim group's own slice (20s) ended during its check" "$CALLS.page-confirmed"
+}
+
+@test "outbound tick ([key=claims-never-starved], QA #1919): a claim APPLY is handed the seconds left in the SLICE, not in the tick - the credit families keep the tick's" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  claim_list
+  CVO_CLAIM_GROUP_BUDGET_S=600 run -0 "$SCRIPT"
+  budget_of() { grep -m1 -- "^$1 .*--mode apply" "$CALLS" | sed -E 's/.*--apply-budget-s ([0-9]+).*/\1/'; }
+  c="$(budget_of claim-proof-ask)"; u="$(budget_of uvn-status)"
+  [[ "$c" =~ ^[0-9]+$ ]] && [[ "$u" =~ ^[0-9]+$ ]]
+  [ "$c" -gt 0 ] && [ "$c" -le 600 ]        # the send loop starts no user whose worst case would pass the slice's end
+  [ "$u" -gt 600 ]                           # outside the slice the share is the tick's, as it was
+}
+
+@test "outbound tick ([key=claims-never-starved], QA #1919): with less than one user's worst case left in the slice the claim apply does not start - checked, counted, and the credit families still apply" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  claim_list
+  CVO_CLAIM_GROUP_BUDGET_S=50 run -0 "$SCRIPT"                     # 50 s < APPLY_USER_WORST_S (200 s)
+  grep -q -- "^claim-proof-ask .*--check-recipients" "$CALLS"      # it was checked
+  if grep -q -- "^claim-.*--mode apply" "$CALLS"; then false; fi   # and nothing was started that could outlast the slice
+  grep -Eq "claim-proof-ask-paid: the claim group's own slice \(50s\) ended with [0-9]+ s left, less than one user's worst case \(200 s\); no apply this tick; this family waits for the next tick \(not reached on 1 consecutive tick\(s\)\)" "$(newest_tick)"
+  [ "$(cat "$CVO_STATE/starved-claim-proof-ask-paid")" = 1 ]
+  grep -q -- "^uvn-status .*--mode apply" "$CALLS"
+}
+
+@test "outbound tick ([key=claims-never-starved], QA #1919): a claim apply IN FLIGHT when the slice ends is never killed - it finishes, its read-backs run, no kill file, and no later claim family starts" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  claim_list
+  # the apply starts inside a 20 s slice and takes 25 s: a kill there would be a partial send (the kill-file path)
+  STUB_SLEEP_MODE=apply STUB_SLEEP=25 STUB_SLEEP_SUB=claim-proof-ask CVO_CLAIM_GROUP_BUDGET_S=20 CVO_APPLY_USER_WORST_S=1 CVO_APPLY_S_PER_USER=1 run -0 "$SCRIPT"
+  grep -q "claim-proof-ask-paid APPLY (rc=0)" "$(newest_tick)"
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  grep -q "claim-status-paid: the claim group's own slice (20s) is used" "$(newest_tick)"
+  [ ! -e "$CVO_STATE/starved-claim-proof-ask-paid" ]              # it applied: reached, nothing counted
+  grep -q -- "^uvn-status .*--mode apply" "$CALLS"
+}
+
+@test "outbound tick ([key=claims-never-starved]): an ARMED family not reached on two consecutive ticks is PAGED by name, once; an unarmed one is counted and never paged" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CALLS.page-confirmed"
+  CVO_TICK_BUDGET_S=0 run -0 "$SCRIPT"
+  grep -q "uvn-status-free: tick budget 0s reached; this family waits for the next tick (not reached on 1 consecutive tick(s))" "$(newest_tick)"
+  [ "$(cat "$CVO_STATE/starved-uvn-status-free")" = 1 ]
+  if grep -q "NOT REACHED" "$CALLS.page-confirmed" 2>/dev/null; then false; fi   # one tick is a slow tick, not a defect
+  rm -rf "$CVO_OUT_ROOT"
+  CVO_TICK_BUDGET_S=0 run -0 "$SCRIPT"
+  [ "$(cat "$CVO_STATE/starved-uvn-status-free")" = 2 ]
+  grep -q "uvn-status-free is ARMED but was NOT REACHED on 2 consecutive ticks (tick budget 0s reached)" "$CALLS.page-confirmed"
+  grep -q "claim-proof-ask-free is ARMED but was NOT REACHED on 2 consecutive ticks" "$CALLS.page-confirmed"
+  if grep -q -- "-paid is ARMED but was NOT REACHED" "$CALLS.page-confirmed"; then false; fi   # paid is not armed here: counted, not paged
+  [ "$(cat "$CVO_STATE/starved-uvn-status-paid")" = 2 ]
+  : > "$CALLS.page-confirmed"; rm -rf "$CVO_OUT_ROOT"
+  CVO_TICK_BUDGET_S=0 run -0 "$SCRIPT"                              # third tick: still starved, already paged
+  [ "$(cat "$CVO_STATE/starved-uvn-status-free")" = 3 ]
+  if grep -q "NOT REACHED" "$CALLS.page-confirmed"; then false; fi
+}
+
+@test "outbound tick ([key=claims-never-starved]): an UNDELIVERED not-reached page is owed again, and a family that is reached clears its count" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CALLS.page-confirmed"
+  CVO_TICK_BUDGET_S=0 run -0 "$SCRIPT"; rm -rf "$CVO_OUT_ROOT"
+  CVO_TICK_BUDGET_S=0 STUB_SLACK_CONFIRM_RC=1 run -0 "$SCRIPT"
+  grep -q "uvn-status-free: not-reached page NOT DELIVERED" "$(newest_tick)"
+  [ ! -e "$CVO_STATE/starved-uvn-status-free.paged" ]              # an undelivered page buys no silence
+  : > "$CALLS.page-confirmed"; rm -rf "$CVO_OUT_ROOT"
+  CVO_TICK_BUDGET_S=0 run -0 "$SCRIPT"
+  grep -q "uvn-status-free is ARMED but was NOT REACHED on 3 consecutive ticks" "$CALLS.page-confirmed"
+  [ "$(cat "$CVO_STATE/starved-uvn-status-free.paged")" = 3 ]
+  rm -rf "$CVO_OUT_ROOT"
+  run -0 "$SCRIPT"                                                 # a tick with room: every family is reached
+  [ ! -e "$CVO_STATE/starved-uvn-status-free" ] && [ ! -e "$CVO_STATE/starved-uvn-status-free.paged" ]
+  [ ! -e "$CVO_STATE/starved-claim-proof-ask-free" ]
 }
 
 @test "outbound tick (verify-outbound-migration-race-m1): the ledger is migrated ONCE, BEFORE the tick lock - a reader can never race a migration a family started mid-tick" {
@@ -2586,14 +2739,15 @@ PY
 
 # -- Fable d2 2026-11-08: Defect A (one slow gate call), Defect B (the list rebuilt before the stage), weekday ordering --
 
-@test "outbound tick (Fable d2, weekday ordering): a credit-family CHECK failure does not skip the claim families - they still run, the tick exits 1 and names the failed group" {
+@test "outbound tick (Fable d2): a credit-family CHECK failure does not fail the tick quietly - the claim families ran before it, the need group still runs, the tick exits 1 and names the failed group" {
   touch "$CVO_ETC/credit-verify-outbound.live"
   claim_list
   rm -f "$CVO_ETC/credit-verify-outbound.disabled"
   # uvn-status paid's read-only check fails hard (rc=1: a real error, not the transient rc=4)
-  STUB_CHECK_RC=1 STUB_CHECK_RC_SUB=uvn-status CVO_DOW=3 run -1 "$SCRIPT"
+  STUB_CHECK_RC=1 STUB_CHECK_RC_SUB=uvn-status run -1 "$SCRIPT"
   grep -q "uvn-status-paid: check failed; this family stops" "$(newest_tick)"
   grep -q "credit families: FAILED (rc=1); the next family group still runs" "$(newest_tick)"
+  grep -q "^need-build" "$CALLS.need"                                    # the group behind it RAN
   grep -q -- "^claim-proof-ask --list .*--mode apply" "$CALLS"          # the claim families RAN
   grep -q -- "^claim-status --list .*--mode apply" "$CALLS"
   grep -q "tick done with FAILED group(s): credit families" "$(newest_tick)"
@@ -2606,7 +2760,7 @@ PY
   claim_list
   rm -f "$CVO_ETC/credit-verify-outbound.disabled"
   # one gate_timeout in the uvn-status check: that user is unmeasured, the runner returns 0, the family goes on
-  STUB_UNMEASURED=1 CVO_DOW=3 run -0 "$SCRIPT"
+  STUB_UNMEASURED=1 run -0 "$SCRIPT"
   grep -q "uvn-status-paid check: unmeasured 1 / bar 5 (unmeasured_users >= max(5, 10% of the batch))" "$(newest_tick)"
   jq -e '.unmeasured_users == 1 and (.unmeasured_reasons // .outcomes | map(select(.result == "unmeasured")) | length) == 1' "$CVO_OUT_ROOT"/*/uvn-status-paid-check.json >/dev/null
   # the family itself completed: paid is checked (LIVE applies free only), free is checked AND applied
@@ -2622,21 +2776,21 @@ PY
   touch "$CVO_ETC/credit-verify-outbound.live"
   claim_list
   rm -f "$CVO_ETC/credit-verify-outbound.disabled"
-  STUB_UNMEASURED=5 STUB_UNMEASURED_STOP=1 CVO_DOW=3 run -1 "$SCRIPT"
+  STUB_UNMEASURED=5 STUB_UNMEASURED_STOP=1 STUB_UNMEASURED_SUB=uvn-status run -1 "$SCRIPT"
   grep -q "uvn-status-paid: UNMEASURED STOP - the check crossed the bar (unmeasured 5 / bar 5" "$(newest_tick)"
   grep -q "credit families: FAILED at the unmeasured bar, the deadline or a failed apply; the tick ends here" "$(newest_tick)"
-  if grep -q -- "^claim-" "$CALLS"; then false; fi                        # nothing behind a slow gate runs blind
-  if grep -q -- "--mode apply" "$CALLS"; then false; fi
+  no_group_behind_credit                                                  # nothing behind a slow gate runs blind
+  if grep -q -- "^uvn-status .*--mode apply" "$CALLS"; then false; fi     # and no credit apply (the claims ran before it)
   jq -e '.stopped_on_unmeasured | test("UNMEASURED STOP: 5 of 12")' "$CVO_OUT_ROOT"/*/uvn-status-paid-check.json >/dev/null
   [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]                     # a loud exit 1, not an auto-kill
 }
 
-@test "outbound tick (Fable d2, weekend order kept): a claim-family CHECK failure does not skip the credit families, and claims still go first on Sat/Sun" {
+@test "outbound tick (Fable d2): a claim-family CHECK failure does not skip the credit families, and claims still go first" {
   touch "$CVO_ETC/credit-verify-outbound.live"
   claim_list
   rm -f "$CVO_ETC/credit-verify-outbound.disabled"
-  STUB_CHECK_RC=1 STUB_CHECK_RC_SUB=claim-proof-ask CVO_DOW=6 run -1 "$SCRIPT"
-  grep -q "weekend: claim families first" "$(newest_tick)"
+  STUB_CHECK_RC=1 STUB_CHECK_RC_SUB=claim-proof-ask run -1 "$SCRIPT"
+  grep -q "claim families first (every day)" "$(newest_tick)"
   grep -q "claim-proof-ask-paid: check failed; this family stops" "$(newest_tick)"
   grep -q "claim families: FAILED (rc=1); the next family group still runs" "$(newest_tick)"
   grep -q -- "^uvn-status --list .*owing-uvn.json --segment free .*--mode apply" "$CALLS"   # the credit families RAN after it
@@ -2673,7 +2827,7 @@ if n == 0:                                   # the census build fails once; ever
     print("replica unavailable at census"); sys.exit(1)
 sys.argv[0] = os.environ["STUB_OWING_REAL"]; runpy.run_path(os.environ["STUB_OWING_REAL"], run_name="__main__")
 PY
-  STUB_OWING_REAL="$TEST_TMPDIR/owing.py" CVO_OWING="$TEST_TMPDIR/owing-census-flaky.py" STUB_NEED_USERS=1 CVO_DOW=3 run -0 "$SCRIPT"
+  STUB_OWING_REAL="$TEST_TMPDIR/owing.py" CVO_OWING="$TEST_TMPDIR/owing-census-flaky.py" STUB_NEED_USERS=1 run -0 "$SCRIPT"
   grep -q "census UNMEASURED (1): owing builder failed" "$(newest_tick)"
   grep -q -- "^claim-proof-ask --list .*--mode apply" "$CALLS"
   grep -q -- "^send --list .*need-asks.json .*--mode apply" "$CALLS"
@@ -2692,7 +2846,7 @@ if n >= 1:                                   # the census build works; every REB
     print("replica unavailable"); sys.exit(1)
 sys.argv[0] = os.environ["STUB_OWING_REAL"]; runpy.run_path(os.environ["STUB_OWING_REAL"], run_name="__main__")
 PY
-  STUB_OWING_REAL="$TEST_TMPDIR/owing.py" CVO_OWING="$TEST_TMPDIR/owing-flaky.py" CVO_DOW=3 run -1 "$SCRIPT"
+  STUB_OWING_REAL="$TEST_TMPDIR/owing.py" CVO_OWING="$TEST_TMPDIR/owing-flaky.py" run -1 "$SCRIPT"
   grep -q "owing builder failed on the rebuild before uvn-status paid" "$(newest_tick)"
   if grep -q -- "^uvn-status --list .*owing-uvn.json" "$CALLS"; then false; fi    # the stale list was never checked
   grep -q -- "^claim-proof-ask --list .*--mode apply" "$CALLS"                    # and the claims still ran

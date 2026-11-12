@@ -789,3 +789,39 @@ send, so it is a separate change that needs a ruling, not a side effect of this 
   nothing had been refused and the rest of the batch was still owed.
 
 <!-- Reviewed baseline: deploy overwrites - 2026-10-27 (claim-lane-resume-c2, firstmate 035): node-8 holds the #1377-era text of this file, copied outside a deploy at 00:36:52Z; main is the reviewed text (proof ask and gap ask locked, claim status on). -->
+
+## What bounds a tick's sends: order, the claim slice, the not-reached page (`[key=claims-never-starved]`, 2026-11-12)
+
+Measured on node-8 on 2026-11-12: 44 sends by 16:35Z, every one of them `uvn-status`. Three things bound a tick, and
+the configured caps were not among the ones that bound:
+
+- **Group order.** `credit-verify-outbound.sh` runs the claim families FIRST on every day, then the credit families,
+  then the need families. On weekdays the credit families used to run first; at 08:00Z they spent the whole
+  `TICK_BUDGET_S` on 18 sends and all four claim segments logged `tick budget 6000s reached`. The claim group is the
+  cheap one (11 min for all four segments with a 19-send apply), so it goes first and is held to its own
+  `CLAIM_GROUP_BUDGET_S` (1,500 s) slice: once that is used it starts no new claim family. This is order and time
+  only: caps, arming rows, the one-message-per-stage ledger rule and the gate are unchanged.
+- **The slice bounds the claim family in flight, not only the next one's start** (QA on #1919). A slice that is only
+  checked before a family starts can be overrun by one slow check or apply, which is the same starvation in the other
+  direction. While the slice is in force a claim family's read-only steps (check, bodies, the shadow judge) run under
+  the slice's end and are stopped there: nothing was sent, the family is counted as not reached, and the tick goes on
+  to the credit families. Its apply is never killed (a kill mid-apply is a partial send). It is sized to the slice and
+  handed the seconds left in it as `--apply-budget-s`, so the send loop starts no user whose worst case would pass the
+  slice's end, and it does not start at all with less than one user's worst case (`APPLY_USER_WORST_S`) left. What can
+  still run past the slice is never a new send: a user whose send outruns its own worst case (the loop only starts
+  one whose worst case, `WORST_USER_S`, fits), and that apply's own read-backs. At the default slice one claim apply carries at most
+  225 users (1,500 s x 6 workers / 40 s a user), under the default `CLAIM_CAP` of 250; node-8's claim cap is 25.
+  A family that is started and then cut by the slice keeps its not-reached count: it sent nothing, so two ticks of
+  that page exactly like two ticks of never being started.
+- **A family that is not reached is counted, and an armed one is paged.** Every wait for time (tick budget, claim
+  slice, a worst case that does not fit) goes through `not_reached`, which keeps `$STATE/starved-<family>-<segment>`
+  and pages on the `STARVED_PAGE_AT`-th (2) consecutive unreached tick, again every `STARVED_REPAGE_EVERY` (12). The
+  marker is written only on a confirmed delivery; a reached family clears both files. "Armed" and "running" are
+  different facts, and tick.log was the only place that said so.
+- **The other reasons the claim families sent nothing from 11-07 to 11-12 were not the order**: through 11-12 04:35Z
+  every tick skipped them at `list_signed_on_stale` (fixed by the `claim-list-build.timer`, #1903), and the
+  `shared_daily_cap.claim` row on node-8 is 25 a DAY across both claim campaigns. Read the tick's own line before
+  blaming the budget.
+
+A family whose check accepts nobody says so per rule in `<family>-<segment>-check.json` (`outcomes[].reason`); count
+those before raising a cap. A cap is raised because the gate accepts the people, never to move a number.
