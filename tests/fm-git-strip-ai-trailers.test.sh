@@ -260,6 +260,14 @@ test_unresolvable_project_hookspath_still_refuses() {
   printf 'note\n' >>"$repo/README.md"
   git -C "$repo" add README.md
   git -C "$repo" config core.hooksPath '~fm-no-such-user-6171/hooks'
+  # Some git builds expand core.hooksPath during startup, so every command in
+  # this repository dies before any hook can run and the refusal below is
+  # unreachable. The scenario needs a git that defers the expansion to hook
+  # lookup, so probe for it rather than reporting a failure the toolchain owns.
+  if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "skip: this git expands core.hooksPath at startup, so no hook can run"
+    return 0
+  fi
   hooks="$TMP_ROOT/hooks-unresolvable"
   "$STRIP" install "$hooks" "$repo" || fail "install should succeed with an unresolvable core.hooksPath"
   head=$(git -C "$repo" rev-parse HEAD)
@@ -281,6 +289,13 @@ test_valueless_project_hookspath_still_refuses() {
   printf 'note\n' >>"$repo/README.md"
   git -C "$repo" add README.md
   printf '[core]\n\thooksPath\n' >>"$repo/.git/config"
+  # Same toolchain boundary as the unresolvable case above: a git that rejects
+  # the valueless key during startup never reaches a hook, so the refusal this
+  # test describes cannot be observed there.
+  if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "skip: this git rejects a valueless core.hooksPath at startup, so no hook can run"
+    return 0
+  fi
   err=$(with_hooks_env "$hooks" git -C "$repo" commit -q -m 'fix: valueless hooksPath' 2>&1) &&
     fail "a commit succeeded although core.hooksPath has no value"
   assert_contains "$err" "refusing to skip its pre-commit hook" "the refusal did not name the skipped hook"

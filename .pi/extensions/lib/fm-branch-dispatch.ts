@@ -485,6 +485,81 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     .filter(Boolean);
   const decisionConfig = `${resolveVerb}\0${heldVerb}\0${reservedPrefixes.join("\0")}`;
   let presentationCursor: ReturnType<typeof readPresentationCursor> | undefined;
+  // Whether a task's own status log already carries a decision the branch must
+  // not claim. A second mate's signal is judged by its new span on both paths:
+  // an attended host can have accepted a routine signal before its task gained a
+  // main-owned decision, so it checks the whole log, while Pi reads only the span
+  // the presentation cursor has not covered yet. "unsafe" means the log could not
+  // be read consistently, which the caller turns into UNSAFE_SCOPE.
+  const decisionOwnedFor = (task: string, kind: string): boolean | "unsafe" => {
+    // A second mate's signal is judged by its new span on both paths. For a
+    // single-task log, an attended host can have accepted a routine signal
+    // before its task gained a main-owned decision, so it checks the whole
+    // log; Pi retains its existing per-row scan.
+    const spanRule = kind === "signal" && secondmates.has(task);
+    if (!task) return false;
+    {
+      const statusPath = `${state}/${task}.status`;
+      const ownershipKey = `${kind}\0${statusPath}`;
+      if (!staleDecisionOwnership.has(ownershipKey)) {
+        let version: string | null;
+        try {
+          version = statusFileVersion(statusPath);
+        } catch {
+          return "unsafe";
+        }
+        let decisionOwned = false;
+        if (version) {
+          let cursor: { ident: string; offset: number } | null | undefined;
+          if (spanRule) {
+            if (presentationCursor === undefined) presentationCursor = readPresentationCursor(state);
+            cursor = presentationCursor?.get(task);
+          }
+          const config = spanRule ? `${decisionConfig}\0${cursor?.ident ?? ""}\0${cursor?.offset ?? 0}` : decisionConfig;
+          const cached = staleDecisionCache.get(ownershipKey);
+          if (cached?.version === version && cached.config === config) {
+            decisionOwned = cached.decisionOwned;
+          } else {
+            let contents: Buffer;
+            let spanOffset = 0;
+            try {
+              contents = readFileSync(statusPath);
+              if (cursor && cursor.offset <= contents.length) {
+                try {
+                  if (cursor.ident === statusFileIdentity(statusPath)) spanOffset = cursor.offset;
+                } catch {
+                  // No identity to match: the span is the whole log.
+                }
+              }
+              if (statusFileVersion(statusPath) !== version) return "unsafe";
+            } catch {
+              return "unsafe";
+            }
+            const statusLines = nonBlankLines(contents.toString("utf8"));
+            const open = openDecisions(statusLines, resolveVerb, heldVerb, reservedPrefixes);
+            decisionOwned = spanRule
+              ? spanIsDecisionOwned(
+                open,
+                nonBlankLines(contents.subarray(0, spanOffset).toString("utf8")),
+                nonBlankLines(contents.subarray(spanOffset).toString("utf8")),
+                resolveVerb,
+                heldVerb,
+                reservedPrefixes,
+              )
+              : [...open.values()].includes("needs-decision") || statusLineVerb(statusLines.at(-1) ?? "") === heldVerb;
+            staleDecisionCache.set(ownershipKey, { version, config, decisionOwned });
+            if (staleDecisionCache.size > 512) {
+              staleDecisionCache.delete(staleDecisionCache.keys().next().value!);
+            }
+          }
+        } else {
+          staleDecisionCache.delete(ownershipKey);
+        }
+        staleDecisionOwnership.set(ownershipKey, decisionOwned);
+      }
+      return staleDecisionOwnership.get(ownershipKey) ?? false;
+    }
+  };
   for (const line of rows) {
     const fields = line.split("\t");
     if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
@@ -537,6 +612,22 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
         rowTasks.add(fileTask);
       }
       signalTasksByPayload[payload] = [...rowTasks];
+      // A second mate's signal is judged by its new span, exactly like a stale
+      // row: a decision the presentation cursor already covered must not hand
+      // the row to the branch. A crewmate's signal keeps its own rule - Pi
+      // judges only the row payload, while the attended host reads the whole
+      // log - so only those two cases consult the log here.
+      let signalDecisionOwned = false;
+      for (const rowTask of rowTasks) {
+        if (!attendedHost && !secondmates.has(rowTask)) continue;
+        const owned = decisionOwnedFor(rowTask, "signal");
+        if (owned === "unsafe") return UNSAFE_SCOPE;
+        if (owned) signalDecisionOwned = true;
+      }
+      if (signalDecisionOwned) {
+        needsDecisionKeys.push(key);
+        if (!afk) continue;
+      }
       eligibleSeqs.push(seq);
       continue;
     } else if (kind === "stale") {
@@ -549,71 +640,10 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     }
     // Projectless records may establish ambiguity, never routing authority.
     if (!project || !task) return UNSAFE_SCOPE;
-    // A second mate's signal is judged by its new span on both paths. For a
-    // single-task log, an attended host can have accepted a routine signal
-    // before its task gained a main-owned decision, so it checks the whole
-    // log; Pi retains its existing per-row scan.
-    const spanRule = kind === "signal" && secondmates.has(task);
-    if (task && (kind === "stale" || (kind === "signal" && (attendedHost || spanRule)))) {
-      const statusPath = `${state}/${task}.status`;
-      const ownershipKey = `${kind}\0${statusPath}`;
-      if (!staleDecisionOwnership.has(ownershipKey)) {
-        let version: string | null;
-        try {
-          version = statusFileVersion(statusPath);
-        } catch {
-          return UNSAFE_SCOPE;
-        }
-        let decisionOwned = false;
-        if (version) {
-          let cursor: { ident: string; offset: number } | null | undefined;
-          if (spanRule) {
-            if (presentationCursor === undefined) presentationCursor = readPresentationCursor(state);
-            cursor = presentationCursor?.get(task);
-          }
-          const config = spanRule ? `${decisionConfig}\0${cursor?.ident ?? ""}\0${cursor?.offset ?? 0}` : decisionConfig;
-          const cached = staleDecisionCache.get(ownershipKey);
-          if (cached?.version === version && cached.config === config) {
-            decisionOwned = cached.decisionOwned;
-          } else {
-            let contents: Buffer;
-            let spanOffset = 0;
-            try {
-              contents = readFileSync(statusPath);
-              if (cursor && cursor.offset <= contents.length) {
-                try {
-                  if (cursor.ident === statusFileIdentity(statusPath)) spanOffset = cursor.offset;
-                } catch {
-                  // No identity to match: the span is the whole log.
-                }
-              }
-              if (statusFileVersion(statusPath) !== version) return UNSAFE_SCOPE;
-            } catch {
-              return UNSAFE_SCOPE;
-            }
-            const statusLines = nonBlankLines(contents.toString("utf8"));
-            const open = openDecisions(statusLines, resolveVerb, heldVerb, reservedPrefixes);
-            decisionOwned = spanRule
-              ? spanIsDecisionOwned(
-                open,
-                nonBlankLines(contents.subarray(0, spanOffset).toString("utf8")),
-                nonBlankLines(contents.subarray(spanOffset).toString("utf8")),
-                resolveVerb,
-                heldVerb,
-                reservedPrefixes,
-              )
-              : [...open.values()].includes("needs-decision") || statusLineVerb(statusLines.at(-1) ?? "") === heldVerb;
-            staleDecisionCache.set(ownershipKey, { version, config, decisionOwned });
-            if (staleDecisionCache.size > 512) {
-              staleDecisionCache.delete(staleDecisionCache.keys().next().value!);
-            }
-          }
-        } else {
-          staleDecisionCache.delete(ownershipKey);
-        }
-        staleDecisionOwnership.set(ownershipKey, decisionOwned);
-      }
-      if (staleDecisionOwnership.get(ownershipKey)) {
+    if (task) {
+      const owned = decisionOwnedFor(task, "stale");
+      if (owned === "unsafe") return UNSAFE_SCOPE;
+      if (owned) {
         needsDecisionKeys.push(key);
         if (!afk) continue;
       }

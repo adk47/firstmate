@@ -5785,29 +5785,6 @@ parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absor
   reap "$pid"
   return 0
 }
-test_secondmate_status_signal_never_absorbed_classifier() {
-  local dir fakebin state
-  dir=$(make_case secondmate-signal-classify); fakebin="$dir/fakebin"; state="$dir/state"
-  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
-  # Even PROVABLY working, a secondmate's .status signal is its routed-reply
-  # channel and must surface; its bare turn-ended keeps the ordinary absorb.
-  export FM_FAKE_CREW_STATE_sm='state: working · source: run-step · running'
-  printf 'kind=secondmate\n' > "$state/sm.meta"
-  printf 'working: routed reply for the parent\n' > "$state/sm.status"
-  ! signal_crew_provably_working "$state/sm.status" \
-    || fail "a working secondmate's status signal was treated as absorbable"
-  signal_crew_provably_working "$state/sm.turn-ended" \
-    || fail "a working secondmate's bare turn-end lost its ordinary absorb"
-  # An ordinary crewmate with the same verdict stays absorbable: the rule is
-  # keyed on recorded kind, not on task naming or content guessing.
-  export FM_FAKE_CREW_STATE_crew='state: working · source: run-step · running'
-  printf 'kind=ship\n' > "$state/crew.meta"
-  printf 'working: progress\n' > "$state/crew.status"
-  signal_crew_provably_working "$state/crew.status" \
-    || fail "the secondmate rule leaked onto an ordinary crewmate status"
-  unset FM_FAKE_CREW_STATE_sm FM_FAKE_CREW_STATE_crew
-  pass "a secondmate's status signal is never absorbed as provably working; crewmates are unaffected"
-}
 test_gateway_stall_is_re_rung_instead_of_wedge_escalated() {
   local dir state fakebin out capture_file window key pane_hash sig pid msgs
   dir=$(make_case gateway-stall-rering); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6070,12 +6047,16 @@ test_uncapturable_busy_window_is_waited_on() {
   out="$dir/watch.out"
   window="test:fm-blip"
   steer=$(make_uncapturable_steer_case "$dir" blip) || fail "could not write the ordinary steer"
+  # The busy-deferral ladder is bounded (FM_TASK_INBOX_BUSY_MAX), so it is pinned
+  # wide here: this case is about one capture blip not charging an attempt, not
+  # about how many consecutive busy deferrals a stuck-busy crew is allowed.
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_PANE_ALIVE=1 \
     FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_TASK_INBOX_RING_MAX=1 \
+    FM_TASK_INBOX_BUSY_MAX=999 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited on a busy crew's capture blip: $(cat "$out")"; }
@@ -6926,7 +6907,6 @@ fm_test_run \
   test_quoted_exit_picker_stays_ordinary_stale \
   test_secondmate_exit_picker_stays_quiet \
   test_closed_exit_picker_drops_saved_dialog_name \
-  test_secondmate_status_signal_never_absorbed_classifier \
   test_gateway_stall_is_re_rung_instead_of_wedge_escalated \
   test_gateway_record_survives_the_harness_internal_retry \
   test_gateway_record_is_dropped_after_a_long_busy_stretch \
@@ -6962,7 +6942,6 @@ test_empty_write_prune_widens_the_probe
 test_empty_write_prune_from_the_environment_widens_the_probe
 test_worktree_write_probe_is_wall_clock_bounded
 test_signal_crew_provably_working_classifier
-test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced

@@ -14,6 +14,11 @@ set -u
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+# The cap ladder is this suite's subject, so the wedged-repeat re-alarm backstop
+# (FM_WEDGE_REALARM_SECS, which absorbs a repeat escalation for an unchanged pane
+# once FM_WEDGE_DEMAND_INSPECT_COUNT deliveries have gone out) is pinned off here:
+# at its default the ladder stops delivering at round four and no cap can fire.
+export FM_WEDGE_REALARM_SECS=0
 # The fixture root for make_case, which reads TMP_ROOT at call time.
 # shellcheck disable=SC2034
 TMP_ROOT=$(fm_test_tmproot fm-watch-wedge-cap-tests)

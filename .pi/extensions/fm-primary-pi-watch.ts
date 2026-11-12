@@ -1166,7 +1166,16 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on?.("before_agent_start", (event) => {
-    consumeWake(generation, event.prompt);
+    // Pi 1.2 replaced the prompt-only event with a custom-message event, so read
+    // whichever shape this SDK delivers rather than assuming `prompt` exists.
+    if ("prompt" in event && typeof event.prompt === "string") {
+      consumeWake(generation, event.prompt);
+      return;
+    }
+    if ("message" in event) {
+      const message = (event as { message?: { content?: unknown } }).message;
+      consumeWake(generation, userMessageText(message?.content));
+    }
   });
   pi.on?.("message_start", (event) => {
     if (event.message.role !== "user") return;

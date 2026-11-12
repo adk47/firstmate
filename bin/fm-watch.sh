@@ -696,6 +696,15 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # idle; pane staleness elsewhere still needs busy proof.
 inbox_steer_busy() {  # <window> <backend> <task> <tail40>
   local w=$1 backend=$2 task=$3 tail40=$4
+  if [ -z "$tail40" ]; then
+    # A capture blip leaves no screen to judge, so the crew's own authoritative
+    # state is the only evidence left: a gone endpoint is dead, never busy, while
+    # a live one that is provably working keeps its turn and is waited on rather
+    # than charged. The recorded busy verdict is deliberately not consulted here,
+    # because a stale record would otherwise silence a dead window's steer.
+    crew_is_provably_working "$task"
+    return
+  fi
   if [ "$backend" = t3code ]; then
     fm_busy_is_busy t3code "$w" "$(window_harness "$w")" "$task" "$STATE" "$tail40"
   else
@@ -4882,6 +4891,19 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
+    # An idle secondmate endpoint is healthy by design, so a mate is admitted to
+    # the pane-stale path ONLY to serve a status-declared wait's bounded
+    # re-surface. This gate reads the shared predicate rather than the pause verb
+    # alone so it includes a declared `captain-held` status. A hold recorded only
+    # in the backlog while the mate still says `working:` or `done:` is outside
+    # this guard: reaching it would require backlog reads for windows this gate
+    # deliberately skips, putting that read on the ordinary poll hot path.
+    # It sits ahead of the capture so a quiet mate costs no pane read at all, and
+    # a mate's steers still land in an inbox, so loss detection runs here.
+    if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
+      [ -z "$task" ] || inbox_steer_check "$w" "$task"
+      continue
+    fi
     # A pane that cannot be captured is still served by the steering-inbox
     # ladder, on the live classification rather than the screen: a gone
     # endpoint is dead, never busy, so a dead window with an unhandled steer
@@ -4923,18 +4945,6 @@ EOF
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task" "$busy_now"
-    # An idle secondmate endpoint is healthy by design, so a mate is admitted to
-    # the pane-stale path ONLY to serve a status-declared wait's bounded
-    # re-surface. This gate reads the shared predicate rather than the pause verb
-    # alone so it includes a declared `captain-held` status. A hold recorded only
-    # in the backlog while the mate still says `working:` or `done:` is outside
-    # this guard: reaching it would require backlog reads for windows this gate
-    # deliberately skips, putting that read on the ordinary poll hot path.
-    if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
-      continue
-    fi
-    watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
-    tail40=$WATCHER_CAPTURE
     # The matcher is already defined in this shell. It reads the capture this
     # poll already takes, and a miss drops a name the away daemon saved.
     dialog=$(fm_composer_blocking_dialog "$tail40") || dialog=
@@ -5075,13 +5085,24 @@ EOF
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
               working)
-                clear_pause_tracking "$key"
-                printf '%s' "$h" > "$sf"
-                # The pre-cap shape reset the count here too, through
-                # clear_pause_tracking, so this route is not a keep-count site.
-                wedge_episode_end "$key"
-                date +%s > "$ssf"
-                triage_log "absorbed non-terminal stale (provably working): $w"
+                if status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")"; then
+                  # The crew declared the wait itself, so the declaration outranks
+                  # the run step's working verdict: take the pane onto the long
+                  # pause cadence instead of clearing its tracking and starting the
+                  # wedge timer. A pause appended after the run started (a CI step
+                  # that cannot finish until a human acts) is the common shape, and
+                  # handle_paused_stale still bounds a declaration left behind by a
+                  # run that resumed without lifting it.
+                  handle_paused_stale "$w" "$task" "$h"
+                else
+                  clear_pause_tracking "$key"
+                  printf '%s' "$h" > "$sf"
+                  # The pre-cap shape reset the count here too, through
+                  # clear_pause_tracking, so this route is not a keep-count site.
+                  wedge_episode_end "$key"
+                  date +%s > "$ssf"
+                  triage_log "absorbed non-terminal stale (provably working): $w"
+                fi
                 ;;
               paused)
                 handle_paused_stale "$w" "$task" "$h"
@@ -5093,12 +5114,21 @@ EOF
           else
             task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")"; then
+              # The declaration still stands here (the lifted case was cleared at
+              # the top of this loop), so an active run behind it is the declared
+              # wait, not a wedge suspect: the declaration outranks the run step's
+              # working verdict, and the wedge timer below is reached only if the
+              # declaration was lifted between this branch's read and the check.
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) clear_pause_state "$key"
-                         printf '%s' "$h" > "$sf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task" "$h" "$dialog"
-                         triage_log "absorbed non-terminal stale (provably working): $w" ;;
+                working) if status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")"; then
+                           handle_paused_stale "$w" "$task" "$h"
+                         else
+                           clear_pause_state "$key"
+                           printf '%s' "$h" > "$sf"
+                           wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task" "$h" "$dialog"
+                           triage_log "absorbed non-terminal stale (provably working): $w"
+                         fi ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else

@@ -75,6 +75,15 @@ make_stand_in() {  # <path>
 make_stand_in "$LAB/bin/claude-link"
 make_stand_in "$LAB/bin/pi"
 make_stand_in "$LAB/bin/notaharness"
+# omp (Oh My Pi) is a single binary whose live process name is the bare word
+# `omp`; the two decoys are the substrings an unanchored glob would misread.
+make_stand_in "$LAB/bin/omp"
+make_stand_in "$LAB/bin/ompd"
+make_stand_in "$LAB/bin/comp"
+# Command Code sets its process title to the bare word `command-code`; the decoy
+# merely contains it.
+make_stand_in "$LAB/bin/command-code"
+make_stand_in "$LAB/bin/command-code-helper"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall

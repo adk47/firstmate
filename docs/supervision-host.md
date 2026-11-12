@@ -288,7 +288,7 @@ When the captain returned during a failed turn that recorded visible outcomes, t
 
 ### The broken-session latch
 
-The host copies the Pi branch's broken-session policy ([pi-supervision-branch.md](pi-supervision-branch.md#broken-branch-latch-and-recovery)), with an engine error in place of a provider error: a turn that exited nonzero, hit its bound, or ended without a complete successful result.
+The host copies the Pi branch's broken-session policy ([pi-supervision-branch.md](pi-supervision-branch.md#components-and-their-owners)), with an engine error in place of a provider error: a turn that exited nonzero, hit its bound, or ended without a complete successful result.
 Two consecutive engine errors latch the session: every wake reaches main for a five-minute cooldown, the attended close unchanged and the away close with a `supervision-host:` line, after which one wake probes the engine, and each probe that ends in another engine error doubles the cooldown up to one hour.
 A turn that records a report without an engine error clears the latch; a turn with a complete engine result but no report neither counts toward it nor clears it, while an engine error counts even if no report was recorded.
 The first trip adds one `supervision-host:` line to the failing turn's handback; a recovery is only recorded in the host ledger, so a routine probe stays off main.

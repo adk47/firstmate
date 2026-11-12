@@ -728,6 +728,11 @@ fm_task_inbox_quote() {  # <word>
 fm_task_inbox_doorbell_line() {  # <record-path>
   local dir=${1%/*} abs task state ack inbox
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
+  # A non-printable path fails without output so terminal controls never reach
+  # the pane's line discipline.
+  case "$abs" in
+    *[![:print:]]*) return 1 ;;
+  esac
   # A record the worker already acknowledged sits in handled/; the inbox it
   # belongs to is one level up, and the command must name that inbox rather than
   # a "<id>.inbox/handled.inbox" that cannot exist.
@@ -739,7 +744,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
   state=${abs%/*}
   ack=$(fm_task_inbox_ack_command)
   inbox=$(fm_task_inbox_quote "$abs")
-  printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then acknowledge each handled record by moving it into %s/handled/. The plain form is mv %s/NNN.msg %s/handled/. Where that helper path is reachable, %s %s %s NNN acknowledges the same way and also retires the hidden link. Never delete or clear the inbox, because deleting is not acknowledging.' \
+  printf ': Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then acknowledge each handled record by moving it into %s/handled/. The plain form is mv %s/NNN.msg %s/handled/. Where that helper path is reachable, %s %s %s NNN acknowledges the same way and also retires the hidden link. Never delete or clear the inbox, because deleting is not acknowledging.' \
     "$inbox" "$inbox" "$inbox" "$inbox" \
     "$(fm_task_inbox_quote "$ack")" "$(fm_task_inbox_quote "$state")" \
     "$(fm_task_inbox_quote "$task")"

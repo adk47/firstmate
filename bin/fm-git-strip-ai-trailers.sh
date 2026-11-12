@@ -292,7 +292,12 @@ install_hooks() {
     echo "error: worktree is not a directory: $wt" >&2
     return 1
   }
-  git -C "$wt" rev-parse --is-inside-work-tree >/dev/null || {
+  # A worktree probe that runs no git command: the repository's own config can
+  # make every git invocation in it die (an unexpandable core.hooksPath does),
+  # and installing this strip is exactly the repair for a project whose hook
+  # wiring is broken. Every worktree, including a submodule or a linked
+  # worktree, carries a .git directory or file at its root.
+  [ -e "$wt/.git" ] || {
     echo "error: not a git worktree: $wt" >&2
     return 1
   }

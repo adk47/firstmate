@@ -404,7 +404,7 @@ A leftover `state/.afk` flag declines nothing.
 - Every actionable row is branch-eligible.
   Check rows, decision-owned signal and stale rows, and heartbeat rows are claimed by the branch on whatever wake finds them unread.
   The trigger class no longer forces a batch to main.
-  The fail-closed scope checks in [Decision-owned rows](#decision-owned-rows), including ambiguous metadata ownership, still apply, as does structural queue validation.
+  The fail-closed scope checks in [Two-stage noise filter](#two-stage-noise-filter), including ambiguous metadata ownership, still apply, as does structural queue validation.
   A prompt that claims a check row is not scoped by task, so the branch may report it as `fleet`.
 - Main is parked, and reachable only for the classes only main can act on:
   - A watcher-failure alarm is delivered to main as always, because `fm_watch_arm_pi` lives there.

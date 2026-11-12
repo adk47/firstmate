@@ -268,13 +268,27 @@ valid_note_id() {
 }
 
 note_path() {  # <id>
-  if [ -f "$INBOX/$1.note" ]; then
-    printf '%s\n' "$INBOX/$1.note"
-  elif [ -f "$INBOX/handled/$1.note" ]; then
-    printf '%s\n' "$INBOX/handled/$1.note"
-  else
-    return 1
-  fi
+  local dir
+  # The class that wrote a record decides which queue holds it, so a lookup by id
+  # searches both queues before giving up.
+  for dir in "$INBOX" "$INBOX_AUTO"; do
+    if [ -f "$dir/$1.note" ]; then
+      printf '%s\n' "$dir/$1.note"
+      return 0
+    elif [ -f "$dir/handled/$1.note" ]; then
+      printf '%s\n' "$dir/handled/$1.note"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The class recorded in a note, which is what routes its wake and its queue.
+note_class() {  # <id>
+  local path class
+  path=$(note_path "$1") || return 1
+  class=$(sed -n 's/^source=//p' "$path" | head -1)
+  printf '%s\n' "${class:-text}"
 }
 
 note_announced() {  # <id>
@@ -364,11 +378,21 @@ PY
 # Returns 2 without waking when the note is no longer pending: firstmate has
 # already acknowledged it, so a wake would only spend a turn on an empty inbox.
 announce_note() {  # <id> <summary>
-  local id=$1 summary=$2 lib="$FM_ROOT/bin/fm-wake-lib.sh" status=0
+  local id=$1 summary=$2 lib="$FM_ROOT/bin/fm-wake-lib.sh" status=0 class payload path
   if note_announced "$id"; then
     return 0
   fi
-  [ -f "$INBOX/$id.note" ] || return 2
+  # A record already moved into handled/ is acknowledged, which is a different
+  # answer from "not announced yet".
+  path=$(note_path "$id") || return 2
+  case "$path" in */handled/*) return 2 ;; esac
+  # The payload is the one line firstmate reads without opening the record, so it
+  # says which queue the record came from rather than leaving it to guess.
+  class=$(note_class "$id") || class=text
+  case " $CAPTAIN_CLASSES " in
+    *" $class "*) payload="check: captain inbox note $id - $summary" ;;
+    *) payload="check: automated inbox note $id ($class) - $summary" ;;
+  esac
   if [ ! -r "$lib" ]; then
     printf 'fm-inbox: note saved but NOT announced (missing %s)\n' "$lib" >&2
     return 1
@@ -379,11 +403,16 @@ announce_note() {  # <id> <summary>
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0
   fi
-  if [ ! -f "$INBOX/$id.note" ]; then
+  path=$(note_path "$id") || {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 2
-  fi
-  if fm_wake_append_locked check "inbox:$id" "check: captain inbox note $id - $summary"; then
+  }
+  case "$path" in */handled/*)
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 2
+    ;;
+  esac
+  if fm_wake_append_locked check "inbox:$id" "$payload"; then
     mark_announced "$id"
   else
     status=1
@@ -394,13 +423,13 @@ announce_note() {  # <id> <summary>
 
 finish_note_result() {  # <outcome> <id> <request-id> <json> <strict-exit> <summary>
   local outcome=$1 id=$2 request_id=$3 json=$4 strict=$5 summary=$6
-  local announced=0 acknowledged=0 path="$INBOX/$id.note" rc=0
+  local announced=0 acknowledged=0 path rc=0
+  path=$(note_path "$id") || path="$INBOX/$id.note"
   announce_note "$id" "$summary" || rc=$?
   case "$rc" in
     0) announced=1 ;;
     2) acknowledged=1 ;;
   esac
-  [ -f "$INBOX/handled/$id.note" ] && path="$INBOX/handled/$id.note"
   if [ "$json" -eq 1 ]; then
     emit_note_json "$outcome" "$id" "$request_id" 1 "$announced" "$path" "$acknowledged"
   else
@@ -451,22 +480,6 @@ publish_from_reservation() {  # <request-id> <source> <body> <extra>
   fi
   printf '%s\n' "$id"
 }
-wake_for() {  # <class> <id> <summary>
-  local class=$1 id=$2 summary=$3 payload lib="$FM_ROOT/bin/fm-wake-lib.sh"
-  if [ ! -r "$lib" ]; then
-    printf 'fm-inbox: note saved but NOT announced (missing %s)\n' "$lib" >&2
-    return 1
-  fi
-  # The payload is the one line firstmate reads without opening the record, so it
-  # says which queue the record came from rather than leaving it to guess.
-  case " $CAPTAIN_CLASSES " in
-    *" $class "*) payload="check: captain inbox note $id - $summary" ;;
-    *) payload="check: automated inbox note $id ($class) - $summary" ;;
-  esac
-  # shellcheck source=/dev/null
-  FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" STATE="$STATE" . "$lib"
-  fm_wake_append check "inbox:$id" "$payload"
-}
 
 # The queue a class files under, or a refusal naming the classes that exist.
 class_queue() {  # <class>
@@ -479,8 +492,16 @@ class_queue() {  # <class>
   die "unknown note class: $1 (captain: $CAPTAIN_CLASSES; automated: $AUTOMATED_CLASSES)"
 }
 
-queue_note() {  # <class> <body> [<extra>] [<request-id>] [<json>]
-  local class=$1 body=$2 extra=${3:-} request_id=${4:-} json=${5:-0}
+queue_note() {  # <class> <body> [<extra>] [<request-id>] [<json>] [<strict>]
+  # The queued record's source IS its class: the class is what routes the record
+  # between the captain queue and the automated one, and it is the only
+  # provenance a caller supplies. A caller that supplied a request id is a
+  # machine caller: it is told (exit 3) that the note was saved but not
+  # announced, while a plain note keeps the historical exit 1.
+  local class=$1 source=$1 body=$2 extra=${3:-} request_id=${4:-} json=${5:-0} strict=${6:-}
+  if [ -z "$strict" ]; then
+    if [ -n "$request_id" ]; then strict=1; else strict=0; fi
+  fi
   [ -n "${body//[[:space:]]/}" ] || die "refusing to queue an empty note"
   dir=$(class_queue "$class")
   mkdir -p "$dir"
@@ -556,7 +577,7 @@ cmd_note() {
   else
     body="$*"
   fi
-  queue_note text "$body" "" "$request_id" "$json"
+  queue_note "$class" "$body" "" "$request_id" "$json"
 }
 
 cmd_announce() {
@@ -1262,7 +1283,7 @@ case "${1:-}" in
   say)      shift; cmd_say "$@" ;;
   status)   shift; cmd_status ;;
   ask)      shift; cmd_ask "$@" ;;
-  list)     shift; cmd_list ;;
+  list)     shift; cmd_list "$@" ;;
   drain)    shift; cmd_drain "$@" ;;
   ''|-h|--help|help)
     # The whole header block, found rather than counted: everything after the
