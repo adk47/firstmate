@@ -312,6 +312,13 @@ NOTHING_LEFT = ("Closed by the pipeline: nothing in this PR is still waiting. Ev
                 "already or no longer hide-eligible in the erasure register. Nothing here was merged.")
 
 
+# Reviewed baseline: deploy overwrites - 2026-11-12 (caroline-billing-and-hide-k3, firstmate inbox 003): node-8 holds
+# a hand edit of this file made 2026-11-10T00:51Z (backup hide_batch.py.bak-stale-20261110T005131Z, never committed):
+# an own batch PR older than 24 h stopped deferring the next pair, capped at five open pairs per repository. Read
+# against this blob: its purpose (an unmerged batch PR must not block the queue) is met here at every age, because
+# open_prs never defers, and its cap is met by construction, because each repository has one pipeline PR. It adds
+# nothing this blob lacks, and it is what opened the out-of-step pairs (H-DevOps #5105, PDP #2582 / #2583) that the
+# first run of this blob replaces with one pair. The 2026-11-12 04:04Z deploy halted on exactly this conflict.
 def open_prs(batch: list[dict], dry_run: bool = True, runner=_run) -> dict:
     """Bring each repository's ONE pipeline PR in line with the batch, and (unless dry_run) push and open what changed.
 
