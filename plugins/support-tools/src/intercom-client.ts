@@ -27,7 +27,10 @@ export interface IntercomReader {
   // applying (and pin that exact id across preview→apply). muso re-verifies
   // the part's provenance (author == the actor's contact, recent)
   // server-side regardless.
-  getLatestCustomerPart(conversationId: string, token: string): Promise<{ id: string; snippet: string } | null>;
+  // `text` is the COMPLETE plaintext of that part; `snippet` is its first 200 characters
+  // (a "…" marks truncation). A decision that reads the customer's words must read `text`
+  // and fail closed when it is absent (QA #1873 r9).
+  getLatestCustomerPart(conversationId: string, token: string): Promise<{ id: string; snippet: string; text?: string } | null>;
 
   // Did the bot admin post a comment containing any of `markers` (case-insensitive,
   // whitespace-normalized) in one of this conversation's contact's OTHER conversations
@@ -89,8 +92,11 @@ function normalizedText(body: string | undefined): string {
 // snippetOf reduces a message body (plaintext via display_as=plaintext, but
 // defensively tag-stripped) to a short, injection-marker-free echo string.
 const SNIPPET_MAX = 200;
+function plaintextOf(body: string | undefined): string {
+  return (body ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
 function snippetOf(body: string | undefined): string {
-  const text = (body ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  const text = plaintextOf(body);
   return text.length > SNIPPET_MAX ? `${text.slice(0, SNIPPET_MAX)}…` : text;
 }
 
@@ -154,7 +160,7 @@ export function createIntercomReader(http: HttpClient): IntercomReader {
       // and pick the most recent — that is the customer's latest utterance,
       // which per the ask-then-confirm flow SHOULD be their same-artist
       // confirmation; the returned snippet lets the caller verify it is.
-      let best: { id: string; snippet: string } | null = null;
+      let best: { id: string; snippet: string; text: string } | null = null;
       let bestAt = -1;
       const consider = (id: string | undefined, at: number | undefined, author: intercomAuthor | undefined, body: string | undefined, partType?: string) => {
         if (!id || typeof at !== "number") return;
@@ -164,7 +170,7 @@ export function createIntercomReader(http: HttpClient): IntercomReader {
         if (partType && partType !== "comment") return;
         if (at > bestAt) {
           bestAt = at;
-          best = { id, snippet: snippetOf(body) };
+          best = { id, snippet: snippetOf(body), text: plaintextOf(body) };
         }
       };
       consider(conv.source?.id, conv.source?.created_at ?? conv.created_at, conv.source?.author, conv.source?.body);

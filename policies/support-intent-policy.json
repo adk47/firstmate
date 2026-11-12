@@ -1,0 +1,51 @@
+{
+  "version": 5,
+  "why": "Reader/actor separation (captain 2026-11-09 19:38Z, hydra#1872). The support agent emits one of these typed intents; a deterministic gate checks the customer's own message, the live record and this policy, and the named actor below performs the write. The agent itself never holds the write tool. Editing this file is the only way to permit an action: there is no prompt, message or tool-arg that can. Markers are ACTION-SPECIFIC and carry the OBJECT of their own intent (a bare 'yes' is refused as policy_invalid generic_marker, a bare 'cancel', 'unsubscribe' or 'address' as broad_marker: 'please unsubscribe me from your newsletter' must never satisfy cancel_subscription, 'please cancel my order' must never satisfy cancel_subscription), a negation in the requesting sentence refuses the intent, a later reversal in the same message refuses it, a request for instructions about the action is not a request for it, and every params_bound value must appear verbatim in the customer's own requesting sentence (QA #1873 r1-r4). The cost is that 'yes, cancel it' alone is refused: Caroline must ask the customer to name the thing ('reply: cancel my subscription').",
+  "intents": {
+    "cancel_subscription": {
+      "enabled": true,
+      "actor": "caroline.support-executor",
+      "confirmation_markers": [
+        "cancel my subscription", "cancel the subscription", "cancel our subscription", "cancel subscription",
+        "cancel my plan", "cancel the plan", "cancel my membership", "cancel my pro plan", "cancel my pro subscription",
+        "cancel pro", "cancel my renewal", "cancel the renewal", "cancel auto-renew", "cancel auto renew", "cancel autorenew",
+        "cancelling my subscription", "cancelling my plan", "cancelling the subscription",
+        "canceling my subscription", "canceling my plan",
+        "unsubscribe from my plan", "unsubscribe from the plan", "unsubscribe from my subscription", "unsubscribe from pro",
+        "unsubscribe me from pro", "unsubscribe me from my plan", "unsubscribe my account from pro",
+        "stop my subscription", "end my subscription", "stop the subscription", "end the subscription",
+        "stop my plan", "end my plan", "stop billing me", "stop charging me", "stop the renewal", "do not renew", "don't renew"
+      ],
+      "params_allowed": [],
+      "params_bound": []
+    },
+    "retention_offer_apply": {
+      "enabled": true,
+      "actor": "caroline.support-executor",
+      "confirmation_markers": ["apply the offer", "apply that offer", "accept the offer", "accept that offer", "take the offer", "take that offer", "i'll take the offer", "yes to the offer", "keep my plan with the offer", "apply the discount", "take the discount"],
+      "params_allowed": ["offer_code"],
+      "params_bound": ["offer_code"],
+      "params_shape": { "offer_code": "code" }
+    },
+    "order_address_update": {
+      "enabled": false,
+      "disabled_why": "a free-text address cannot be bound from a chat sentence: the model-supplied value can swallow the customer's withdrawal (QA #1873 r11). Stays off until the address comes from a structured source (a form, or the account's saved address) and the row has a closed params_shape; enabling it is a captain decision.",
+      "actor": "caroline.support-executor",
+      "confirmation_markers": [
+        "update my shipping address", "change my shipping address", "update the shipping address", "change the shipping address",
+        "update my delivery address", "change my delivery address", "update my address", "change my address", "correct my address",
+        "new shipping address", "new delivery address", "my new address is", "shipping address is", "ship it to", "ship my order to",
+        "ship the order to", "send my order to", "send the order to", "deliver my order to", "deliver it to"
+      ],
+      "params_allowed": ["address"],
+      "params_bound": ["address"]
+    },
+    "founding_buyback_link": {
+      "enabled": true,
+      "actor": "caroline.support-executor",
+      "confirmation_markers": ["founding buyback", "founding member buyback", "founding buy back", "buyback link", "buy back link", "buyback offer", "founding offer link", "buy back my founding", "buyback my founding"],
+      "params_allowed": [],
+      "params_bound": []
+    }
+  }
+}

@@ -137,7 +137,21 @@ describe("intercom-client getLatestCustomerPart", () => {
         ],
       },
     }));
-    expect(await reader.getLatestCustomerPart("c", "tok")).toEqual({ id: "p-cust-late", snippet: "yes both are me!" });
+    expect(await reader.getLatestCustomerPart("c", "tok")).toEqual({ id: "p-cust-late", snippet: "yes both are me!", text: "yes both are me!" });
+  });
+
+  it("carries the COMPLETE text next to the 200-character snippet (QA #1873 r9: a decision reads text, never the snippet)", async () => {
+    const body = `<p>Please cancel my subscription. ${"x".repeat(260)} Actually, do not cancel it.</p>`;
+    const reader = createIntercomReader(httpReturning({
+      created_at: 100,
+      source: { id: "src", created_at: 100, body, author: { type: "user" } },
+      conversation_parts: { conversation_parts: [] },
+    }));
+    const part = await reader.getLatestCustomerPart("c", "tok");
+    expect(part?.snippet.length).toBe(201);
+    expect(part?.snippet.endsWith("\u2026")).toBe(true);
+    expect(part?.text.endsWith("Actually, do not cancel it.")).toBe(true);
+    expect(part?.text).not.toContain("\u2026");
   });
 
   it("falls back to the source message when it is the only customer part", async () => {
