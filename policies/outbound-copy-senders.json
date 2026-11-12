@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "_about": "Every file that can send a message to a customer. Checked by scripts/check-outbound-copy-gate.py (rules in its docstring). `gated` = cannot reach its POST without a reviewer verdict bound to the sha256 of the bytes (scripts/outbound_copy/gate.py, asked through sendgate.py or lib/copy_gate.py), proven on the AST. `gated_elsewhere` = behind the same gate in a shape the AST rule cannot read; `checked_by` names the test that proves it. `open` = not behind the gate yet; the owner lane wires it.",
+  "senders": [
+    {"path": "scripts/overdue-verification-notifier.py", "family": "overdue-verification-notifier", "status": "gated", "send_functions": ["post_intercom_reply"]},
+    {"path": "scripts/resolve-notify.py", "family": "resolve-notify", "status": "gated", "send_functions": ["post_intercom_reply"]},
+    {"path": "scripts/merge-outcome-notify.py", "family": "merge-outcome-notify", "status": "gated", "send_functions": ["post_reply_once"]},
+    {"path": "scripts/intercom-verify-request.sh", "family": "verify-request (every --campaign: asks, status lines, declines)", "status": "gated_elsewhere", "checked_by": "scripts/tests/intercom-verify-request.bats", "why": "bash: it pipes the exact payload body to gate.py check between the ledger claim and its one customer POST and holds on any answer but an approval; the `copy gate` bats cases run the real gate.py against it"},
+    {"path": "scripts/gdpr_pipeline/send.py", "family": "gdpr-erasure", "status": "open", "owner": "gdpr-ai-handling-v1", "why": "that lane wires its own senders to the same gate (its inbox note of 2026-11-12 01:18Z)"},
+    {"path": "scripts/dedup/sweeps/notify-merged-customers.py", "family": "notify-merged-customers", "status": "gated", "send_functions": ["post_intercom_reply"]},
+    {"path": "scripts/request_comms/channels.py", "family": "request-status (intercom + email rungs)", "status": "gated_elsewhere", "checked_by": "tests/test_request_comms.py", "why": "copy_hold() asks lib/copy_gate and returns the hold as a rejected send instead of raising, so the ladder records it and asks again next tick; CopyGateTests pin that a held Intercom body or email line is never posted"},
+    {"path": "scripts/paid-status/email_route.py", "family": "paid-status email", "status": "open", "owner": "verif-fable-gate-rollout-s6", "why": "sends a template key plus data to send-gateway /v1/send rather than a finished body; what the gate hashes has to be settled first"},
+    {"path": "scripts/intercom-backlog/send.py", "family": "intercom-backlog", "status": "open", "owner": "verif-fable-gate-rollout-s6", "why": "locked today (COPY_APPROVED=0, dry-run default); posts through intercom-ops-write.sh"},
+    {"path": "scripts/intercom-ops-write.sh", "family": "staff-requested replies (ops, gdpr-erasure purpose)", "status": "open", "owner": "unassigned", "why": "a named staff requester approves each reply; bash, so it needs the gate's `check` exit code wired before its POST"},
+    {"path": "scripts/resolution-matcher.py", "family": "resolution-matcher (a shipped fix, told to its reporters)", "status": "gated", "send_functions": ["post_intercom_reply"]},
+    {"path": "scripts/close-duplicate-conversations.py", "family": "duplicate-conversation closer", "status": "gated", "send_functions": ["post_pointer_comment"]},
+    {"path": "scripts/legal-intake.py", "family": "legal-intake acknowledgement", "status": "open", "owner": "unassigned", "why": "fixed acknowledgement mailed from support@ through gog"},
+    {"path": "scripts/lib/muso_outreach/gmail_client.py", "family": "outreach mail", "status": "open", "owner": "unassigned", "why": "outreach drafts, not verification"},
+    {"path": "scripts/lib/muso_outreach/worker.py", "family": "outreach mail", "status": "open", "owner": "unassigned", "why": "outreach drafts, not verification"},
+    {"path": "scripts/intercom-webhook.js", "family": "intercom webhook replies", "status": "open", "owner": "unassigned", "why": "intercom-webhook.service posts replies into conversations; not a verification notifier, no per-message verdict"},
+    {"path": "plugins/intercom/src/outbound.ts", "family": "Caroline replies", "status": "open", "owner": "unassigned", "why": "conversational replies pass caroline-output-guard.ts; a per-message verdict needs a reviewer node-8 can reach in seconds, which does not exist yet"}
+  ],
+  "not_senders": [
+    {"path": "scripts/apply-cmo-send-denylist.sh", "why": "removes gog send from an agent's tool list; sends nothing"},
+    {"path": "scripts/check-intercom-ops-write-doctrine.sh", "why": "a CI check that names the reply endpoint in its messages"},
+    {"path": "scripts/intercom-queue-reassign.py", "why": "its one reply call is post_internal_note with message_type fixed to note; it moves assignments and posts nothing a customer sees"}
+  ]
+}

@@ -809,6 +809,55 @@ conversation is decided in ONE module, `plugins/intercom/src/assignment-policy.t
   verify): assignment parts and internal notes only, a ledger row with the inverse before each
   write, never a close or a customer message.
 
+## Outbound customer copy passes a signed reviewer gate
+
+Captain 2026-11-12: "check your messages with Fable ... if something was denied, you don't have to tell them why ...
+you can always resubmit". Every scheduled customer message asks `scripts/outbound_copy/gate.py check`, which looks
+for a verdict **signed by the pinned reviewer key** on those exact bytes (body + subject + campaign + send
+frame + rubric sha256). Full doc, the sender list and what is deliberately outside it: `docs/credit-verification/outbound-copy-gate.md`.
+
+- **The mode is per campaign, in `policies/outbound-copy-enforce.json`, and the default is OBSERVE.** Enforce: no
+  `approve`, no send. Observe: the message goes (exit 4, `observed`), the review is recorded and the ledger row says
+  `copy_review = observed:<state>`. **A signed `refuse`, a code-lint hit and a `retired` frame hold in either mode**,
+  and so does a table nobody can read. Only the gate reads the table: no caller, flag or env var picks a mode.
+  A campaign moves to `enforce` by a one-line PR citing `gate.py report` (`ready_to_enforce`), one campaign at a
+  time; never flip the default. Why: the first real measurement approved 20 of 77 rendered bodies.
+
+- **node-8 can verify a verdict and cannot mint one.** The signing key and the reviewer model (Fable) live on the
+  reviewer host only; `scripts/outbound_copy/review_pull.py` pulls held bodies, reviews, and writes verdicts back.
+  **If that round does not run, an enforced campaign sends nothing and an observed one goes out unread** - a stalled
+  round refuses nothing and fails nothing. It runs as a `systemd --user` timer installed by `scripts/outbound_copy/install-reviewer-host.sh`
+  (re-run after any `gate.py` or rubric change: hosts with different rubrics stop the round), and
+  `cron-health-watchdog.sh` pages when the oldest waiting body passes 4h (`gate.py pending-age`), and the page
+  says how many of them are held: an observed campaign's backlog is never called a held customer message. A queue it
+  has measured and can no longer measure pages too, a `gate.py` that went missing from the host included (an EMPTY
+  `CRON_HEALTH_COPY_GATE` is the only disarm).
+- **Every visible byte is copy, a list item included.** Markup excuses nothing: what the lint excuses is a VALUE the
+  sender declared from the request (`data`: name, role, title, artist), whole-word, once per declaration. A new
+  sender whose body carries customer-supplied words passes them as `data` or a song called "Fraud" is held.
+- **The verdict names the frame** (`intercom`, `email-template:<key>@<sha256>`). An email template's own words live
+  in send-gateway, so the policy pins the sha256 of its reviewed source (`channels.email.template_sha256`) and
+  `SEND_JS` re-hashes the live template in the pod before its one POST: no pin or a changed template sends nothing.
+- **Every customer sender is one row in `policies/outbound-copy-senders.json`** (`gated`, `gated_elsewhere`, `open`),
+  policed by `scripts/check-outbound-copy-gate.py`. `lib/copy_gate.require` and `outbound_copy/sendgate.require_verdict`
+  are two callers of the same `gate.py`; a sender uses one, never both.
+- **In an enforced campaign, no verdict, a `rewrite`, a `refuse`, a bad signature or a gate that cannot run all hold
+  the message.** There is no flag or env var that skips it, and `lib/copy_gate.py` reads none on purpose. A rewrite
+  is a proposal for a person to adopt in code; the reviewer's text is never sent.
+- **A received or verifying note never says "nothing is needed from you"** (captain bar 2026-10-30): the gate's lint
+  refuses it, and the rubric must never ask for it. A rubric that demands what a ruling barred makes the reviewer
+  reject the compliant copy - that one line cost 11 of 11 `status-team-review` bodies in the first measurement.
+- **A hold is a `deferred` LOG, never a lock** (`verify_ledger.hold_copy_review`): the claim is given back so the
+  note is offered again next run. Ask the gate BEFORE any "attempted"/"pending" marker, or a held body burns a
+  one-shot attempt or reads as an unconfirmed delivery (duplicate pointer).
+- **A new Python sender** calls `copy_gate.require(COPY_CAMPAIGN, message)` as the first statement of the one
+  function that POSTs, and adds its campaign to `CAMPAIGN_STAGE`; `test_outbound_copy_gate.py` scans for direct
+  Intercom POSTs and fails on one that is neither gated nor argued onto `NOT_BEHIND_THIS_GATE`.
+- **A denial is three sentences**: denied for now / verification didn't prove out, "You can resubmit for the credit
+  again later.", sign-off. No reason, no accusation word; the code lint outranks the model on both.
+- A message family with other duties gets its own rubric file + `RUBRIC_FAMILY` row (chosen by code, never the
+  caller); a listed family with no file is held, never reviewed under the default rubric.
+
 ## Caroline is measured by one reader, and a promise closes only on a sent message
 
 `scripts/caroline-monitor.py tick` (`caroline-monitor.timer`, every 2h) reads Intercom read-only and is the

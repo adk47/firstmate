@@ -117,6 +117,35 @@ PY
   # The captain path never reads it; the ruling tests below point it at throwaway files when they need a bad one.
   export INTERCOM_VERIFY_TEST_FABLE_RULINGS="$HYDRA_REPO/policies/fable-rulings.json"
   mkdir -p "$INTERCOM_VERIFY_TEST_LOG_DIR"
+  # THE OUTBOUND COPY GATE (captain 2026-11-12). Every send asks scripts/outbound_copy/gate.py whether the exact body
+  # has a signed reviewer verdict. This suite pins the SENDER's other rules, so its default gate is a stand-in that
+  # approves the body it is handed (STUB_COPY_GATE=pending|refuse|fail|wrongbody|noverdict changes its answer) and
+  # logs each call. The gate's own rules are test_outbound_copy_gate.py; the tests at the end of this file run the
+  # REAL gate.py and pin that a body with no verdict is never POSTed.
+  cat > "$TEST_TMPDIR/copy_gate.py" <<'COPYGATE'
+import hashlib, json, os, sys
+msg = json.loads(sys.stdin.read())
+sha = hashlib.sha256(msg["body"].encode("utf-8")).hexdigest()
+here = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(here, "copy_gate.calls"), "a") as fh:
+    fh.write(json.dumps({"argv": sys.argv[1:], "body_sha256": sha, "subject": msg.get("subject", "")}) + "\n")
+mode = os.environ.get("STUB_COPY_GATE", "approve")
+base = {"body_sha256": sha, "campaign": sys.argv[sys.argv.index("--campaign") + 1]}
+ok = {"result": "approved", "verdict_id": "ocv-" + sha[:16], "verdict_sha256": sha[::-1]}
+if mode == "approve":
+    print(json.dumps({**base, **ok})); sys.exit(0)
+if mode == "wrongbody":
+    print(json.dumps({**base, **ok, "body_sha256": "0" * 64})); sys.exit(0)
+if mode == "noverdict":
+    print(json.dumps({**base, "result": "approved"})); sys.exit(0)
+if mode == "pending":
+    print(json.dumps({**base, "result": "pending", "reason": "copy_review_pending"})); sys.exit(3)
+if mode == "refuse":
+    print(json.dumps({**base, "result": "refused", "reason": "copy_review_refuse:ocv-0123456789abcdef"})); sys.exit(1)
+sys.exit(2)
+COPYGATE
+  export INTERCOM_VERIFY_TEST_COPY_GATE="$TEST_TMPDIR/copy_gate.py"
+  export INTERCOM_VERIFY_TEST_COPY_STORE="$TEST_TMPDIR/copy-store"
 
   # curl stub: answers like Intercom per (method, path). Every call is logged as
   # "METHOD URL"; every payload is appended to curl-payloads.jsonl; the /messages payload is
@@ -1509,13 +1538,13 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
   [[ "$output" == "POSTED email message=1001 credits=1"* ]]
   [ "$(msg .subject)" = "Your credit request on Muso" ]
   expected="Hi Jane,
-Thanks for your request. The supporting information we received wasn't enough to confirm this credit, so we've closed the request.
-If you'd like us to look again, submit the credit again with your supporting documents and a fresh review will start.
+We finished checking your credit request. For now the credit is denied: the verification didn't prove out.
+You can resubmit for the credit again later.
 Muso.AI"
   [ "$(msg .body | plain)" = "$expected" ]
-  # the same words, byte for byte, as the ruling's approved text
-  [[ "$(msg .body | plain)" == *"The supporting information we received wasn't enough to confirm this credit, so we've closed the request."* ]]
-  [[ "$(msg .body | plain)" == *"If you'd like us to look again, submit the credit again with your supporting documents and a fresh review will start."* ]]
+  # the captain's words (2026-11-12): denied for now, the verification didn't prove out, you can resubmit later
+  [[ "$(msg .body | plain)" == *"For now the credit is denied: the verification didn't prove out."* ]]
+  [[ "$(msg .body | plain)" == *"You can resubmit for the credit again later."* ]]
   # no reason, no deadline, no document list, no hand-off, no Caroline sign-off
   # `! grep` would NOT fail this test (bats ignores errexit on an inverted command, so a later passing assertion
   # keeps it green — QA #1718 5): the branch body is what aborts.
@@ -1525,6 +1554,7 @@ Muso.AI"
   [ "$(sql "select campaign||'|'||kind||'|'||coalesce(due_day,'NULL')||'|'||coalesce(removal_day,'NULL')||'|'||coalesce(copy_ref,'') from verify_messages where message_id='1001'")" = "decline|initial|NULL|NULL|decline" ]
   [[ "$(sql "select approval_ref from verify_messages where message_id='1001'")" == *"decline-copy-ruling.md"* ]]
   [[ "$(sql "select approval_ref from verify_messages where message_id='1001'")" == *"2026-10-29 13:2xZ"* ]]
+  [[ "$(sql "select approval_ref from verify_messages where message_id='1001'")" == *"2026-11-12 ~01:00Z"* ]]
 }
 
 @test "the decline: several credits get the N-credits sentence and the plain title list, never a per-line reason" {
@@ -1533,8 +1563,8 @@ Muso.AI"
   [[ "$output" == "POSTED email message=1001 credits=2"* ]]
   [ "$(msg .subject)" = "Your credit request on Muso" ]
   body="$(msg .body | plain)"
-  [[ "$body" == *"wasn't enough to confirm these 2 credits, so we've closed the requests."* ]]
-  [[ "$body" == *"submit them again with your supporting documents and a fresh review will start."* ]]
+  [[ "$body" == *"We finished checking your 2 credit requests. For now these credits are denied: the verification didn't prove out."* ]]
+  [[ "$body" == *"You can resubmit for them again later."* ]]
   [[ "$body" == *'Mixing on "Song A" by Big Star'* ]]
   [[ "$body" == *'Producer on "Song B" by Other Band'* ]]
   [ "$(msg .body | grep -o '<li>' | wc -l | tr -d ' ')" -eq 2 ]
@@ -1549,8 +1579,8 @@ Muso.AI"
   [[ "$output" == "POSTED email message=1001 credits=1"* ]]
   [ "$(msg .subject)" = "Your profile claim on Muso" ]
   body="$(msg .body | plain)"
-  [[ "$body" == *"wasn't enough to confirm this profile claim, so we've closed the request."* ]]
-  [[ "$body" == *"submit the claim again from the profile page and a fresh review will start."* ]]
+  [[ "$body" == *"For now the claim is denied: the verification didn't prove out."* ]]
+  [[ "$body" == *"You can resubmit the claim later from the profile page."* ]]
   [[ "$body" != *"these 1 credits"* ]]
   [ "$(sql "select copy_ref||'|'||coalesce(variant,'') from verify_messages where message_id='1001'")" = "decline|" ]
   # QA #1718 (2026-11-06): a claim is declined by core's OWN claim template, so the who-tells-them read must ask
@@ -1677,14 +1707,16 @@ Muso.AI"
 @test "the decline's forbidden-word assertion refuses to send, and records the refusal" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   # a derived gate whose decline copy names a reason: the guard must catch it before the claim is POSTed
-  sed "s/so we've closed the request./because it did not name you, so we've closed the request./" "$SCRIPT" > "$TEST_TMPDIR/leaky.sh"
+  sed "s/For now the credit is denied: the verification didn't prove out./For now the credit is denied because it did not name you./" "$SCRIPT" > "$TEST_TMPDIR/leaky.sh"
+  grep -q 'because it did not name you' "$TEST_TMPDIR/leaky.sh"    # the mutation landed (a no-op sed proves nothing)
   chmod +x "$TEST_TMPDIR/leaky.sh"
   INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -1 "$TEST_TMPDIR/leaky.sh" send --credits-file "$TEST_TMPDIR/c.json" \
     --approved-by U7RP6HKUZ --campaign decline
   [[ "$output" == *"decline_copy_reason_word"* ]]
   [ "$(posts)" -eq 0 ]
   # a deadline/removal sentence is refused too
-  sed "s/and a fresh review will start./within 30 days, before removal./" "$SCRIPT" > "$TEST_TMPDIR/deadline.sh"
+  sed "s/You can resubmit for the credit again later./You can resubmit for the credit in the next 30 days, before removal./" "$SCRIPT" > "$TEST_TMPDIR/deadline.sh"
+  grep -q 'in the next 30 days, before removal' "$TEST_TMPDIR/deadline.sh"
   chmod +x "$TEST_TMPDIR/deadline.sh"
   INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -1 "$TEST_TMPDIR/deadline.sh" send --credits-file "$TEST_TMPDIR/c.json" \
     --approved-by U7RP6HKUZ --campaign decline
@@ -5922,4 +5954,233 @@ apology() { # <credits-file> <paid:true|false> <fact:F1|F2|F3|F4> <all_approved:
   [ "$(posts)" -eq 1 ]
   run -1 send --campaign wait-apology --kind reminder-14 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == *"REFUSED: wait-apology has no follow-ups"* ]]
+}
+
+# --- the outbound copy gate ---------------------------------------------------------
+# Captain 2026-11-12: "check your messages with Fable. Make sure Fable likes the messages that you're sending out."
+# A message the reviewer has not approved does not go out, and the reason is on the ledger.
+
+# The REAL gate.py in a mirror tree whose allowed-signers file names a throwaway key (the gate pins its trust to its
+# own location, so the mirror is the only way to hold a key that signs). gate.py and the rubric are copied unmodified.
+real_copy_gate() {
+  mkdir -p "$TEST_TMPDIR/gate-tree/scripts/outbound_copy" "$TEST_TMPDIR/gate-tree/policies"
+  cp "$HYDRA_REPO/scripts/outbound_copy/gate.py" "$TEST_TMPDIR/gate-tree/scripts/outbound_copy/gate.py"
+  cp "$HYDRA_REPO/policies/outbound-copy-rubric.md" "$TEST_TMPDIR/gate-tree/policies/"
+  # Every campaign ENFORCED here unless the case sets COPY_GATE_DEFAULT_MODE=observe: these cases are about what the
+  # gate holds. (The shipped table observes most campaigns; test_outbound_copy_gate.py ModeTests reads it.)
+  printf '{"version":1,"default":"%s","enforce":[],"observe":[],"retired":[{"campaign":"verify-live","copy":"windowed","why":"states a removal deadline"}]}\n' \
+    "${COPY_GATE_DEFAULT_MODE:-enforce}" > "$TEST_TMPDIR/gate-tree/policies/outbound-copy-enforce.json"
+  ssh-keygen -q -t ed25519 -N "" -C test -f "$TEST_TMPDIR/${1:-reviewer}-key"
+  if [ "${1:-reviewer}" = reviewer ]; then
+    printf 'outbound-copy-reviewer namespaces="muso-outbound-copy-v1" %s\n' "$(cut -d' ' -f1,2 "$TEST_TMPDIR/reviewer-key.pub")" \
+      > "$TEST_TMPDIR/gate-tree/policies/outbound-copy-reviewer.allowed_signers"
+  fi
+  export INTERCOM_VERIFY_TEST_COPY_GATE="$TEST_TMPDIR/gate-tree/scripts/outbound_copy/gate.py"
+}
+# Sign every queued body the way the reviewer host does (as the reviewer MODEL) with KEY, and import the verdicts.
+copy_verdicts() { # <verdict> [key-name]
+  python3 - "$TEST_TMPDIR/gate-tree/scripts/outbound_copy/gate.py" "$INTERCOM_VERIFY_TEST_COPY_STORE" "$1" "$TEST_TMPDIR/${2:-reviewer}-key" <<'PY'
+import importlib.util, json, pathlib, subprocess, sys
+gate, store, verdict, key = sys.argv[1:5]
+spec = importlib.util.spec_from_file_location("gate", gate); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+rows = []
+for f in sorted(pathlib.Path(store, "pending").glob("*.json")):
+    it = json.loads(f.read_text())
+    it["rubric"], _, it["rubric_sha256"] = g.rubric_read(it["campaign"])
+    st = g.make_statement(it, verdict, "test", "Other words." if verdict == "rewrite" else "", "0" * 64, g.REVIEWER_MODEL)
+    rows.append(json.dumps({"statement": st.decode(), "signature": g.sign(st, pathlib.Path(key)).decode()}))
+p = subprocess.run([sys.executable, "-I", gate, "import-verdicts", "--store", store], input="\n".join(rows) + "\n",
+                   capture_output=True, text=True)
+print(p.stdout.strip())
+PY
+}
+
+@test "copy gate: a message with no verdict is never POSTed, and the hold is a ledger row with the reason and the hash" {
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  STUB_COPY_GATE=pending INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  [[ "$output" == *"DEFERRED copy_review_pending credits=1"* ]]
+  [[ "$output" == *"nothing was sent"* ]]
+  [ "$(posts)" -eq 0 ]
+  [ "$(replies)" -eq 0 ]
+  # the gate was handed the body AFTER the claim, and the claim was given back: a log row, no request locked
+  sha="$(jq -rs '.[-1].body_sha256' "$TEST_TMPDIR/copy_gate.calls")"
+  [ "$(sql "SELECT status FROM verify_messages")" = "deferred" ]
+  [ "$(sql "SELECT reason FROM verify_messages")" = "copy_review_hold: copy_review_pending body=$sha" ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_requests")" = "0" ]
+  # a second run the same day is held again and adds no second line
+  STUB_COPY_GATE=pending INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  [ "$(sql "SELECT COUNT(*) FROM verify_messages")" = "1" ]
+  [ "$(posts)" -eq 0 ]
+  # ...and the hold is not a lock: once the verdict is there, the same note goes out, once
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 send --campaign decline
+  [[ "$output" == "POSTED email message=1001 credits=1"* ]]
+  [ "$(posts)" -eq 1 ]
+  [ "$(printf '%s' "$(msg .body)" | sha256sum | cut -d' ' -f1)" = "$sha" ]
+  [ "$(sql "SELECT copy_verdict_id || '|' || copy_verdict_sha256 FROM verify_messages WHERE status='sent'")" = "ocv-${sha:0:16}|$(printf '%s' "$sha" | rev)" ]
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 send --campaign decline
+  [[ "$output" == *"SKIPPED already-notified"* ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "copy gate: a refusal, a gate that cannot run, and an answer that names no verdict or another body all send nothing" {
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  for mode in refuse fail wrongbody noverdict; do
+    STUB_COPY_GATE="$mode" INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+    [[ "$output" == *"DEFERRED copy_"* ]] || { echo "mode=$mode: $output"; false; }
+    [ "$(posts)" -eq 0 ] || { echo "mode=$mode POSTed"; false; }
+  done
+  [ "$(sql "SELECT COUNT(*) FROM verify_messages WHERE status<>'deferred'")" = "0" ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_messages WHERE reason LIKE 'copy_review_hold: copy_review_refuse:ocv-0123456789abcdef%'")" = "1" ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_messages WHERE reason LIKE 'copy_review_hold: copy_gate_error:%'")" = "2" ]
+  # a gate file that does not exist is the same answer, never a send
+  INTERCOM_VERIFY_TEST_COPY_GATE="$TEST_TMPDIR/absent.py" INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  [[ "$output" == *"DEFERRED copy_gate_error"* ]]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "copy gate: every customer send family asks the gate about the exact bytes it then POSTs" {
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  run -0 send
+  [[ "$output" == "POSTED "* ]]
+  [ "$(jq -rs 'length' "$TEST_TMPDIR/copy_gate.calls")" = "1" ]
+  [ "$(printf '%s' "$(msg .body)" | sha256sum | cut -d' ' -f1)" = "$(jq -rs '.[0].body_sha256' "$TEST_TMPDIR/copy_gate.calls")" ]
+  [ "$(jq -rs '.[0].subject' "$TEST_TMPDIR/copy_gate.calls")" = "$(msg .subject)" ]
+  [ "$(jq -rs '.[0].argv | index("--campaign") as $i | .[$i + 1]' "$TEST_TMPDIR/copy_gate.calls")" = "verify-live" ]
+  # a dry run renders and sends nothing, so it asks nothing and queues nothing
+  credits "$TEST_TMPDIR/c.json" "Joe Roe" "r2:Mixing:Song B:Big Star"
+  run -0 send --dry-run
+  [ "$(jq -rs 'length' "$TEST_TMPDIR/copy_gate.calls")" = "1" ]
+}
+
+@test "copy gate: a deployed copy cannot be pointed at another gate or another verdict store" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  for v in INTERCOM_VERIFY_TEST_COPY_GATE INTERCOM_VERIFY_TEST_COPY_STORE; do
+    run -2 env -i PATH="$PATH" "$v=/tmp/x" "$REAL_SCRIPT" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --validate
+    [[ "$output" == *"$v is not settable on a deployed copy"* ]]
+  done
+  grep -q '^  COPY_GATE="\$PROD_COPY_GATE"$' "$REAL_SCRIPT"
+  grep -q '^  COPY_STORE="\$PROD_COPY_STORE"$' "$REAL_SCRIPT"
+}
+
+@test "copy gate (REAL gate.py): the denial is held until the reviewer's signed verdict on its exact bytes, then sends with the verdict on the row" {
+  real_copy_gate
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  [[ "$output" == *"DEFERRED copy_review_pending credits=1"* ]]
+  [ "$(posts)" -eq 0 ]
+  # the exact denial is waiting for review: no reason, no accusation, and the resubmit line
+  pending="$(ls "$INTERCOM_VERIFY_TEST_COPY_STORE/pending"/*.json)"
+  [ "$(jq -r .stage "$pending")" = "denied" ]
+  body="$(jq -r .body "$pending" | plain)"
+  [[ "$body" == *"For now the credit is denied: the verification didn't prove out."* ]]
+  [[ "$body" == *"You can resubmit for the credit again later."* ]]
+  if printf '%s' "$body" | grep -qiE 'fraud|because|suspicious|flagged|abuse|cheat'; then false; fi
+  # a verdict signed by a key the tree does not pin is not a verdict
+  real_copy_gate stranger
+  run copy_verdicts approve stranger
+  [[ "$output" == *'"stored": 0'* ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  [ "$(posts)" -eq 0 ]
+  # the reviewer's signed approval: the same run now sends, and the ledger row names the artefact
+  run copy_verdicts approve
+  [[ "$output" == *'"stored": 1'* ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 send --campaign decline
+  [[ "$output" == "POSTED email message=1001 credits=1"* ]]
+  [ "$(posts)" -eq 1 ]
+  st="$(ls "$INTERCOM_VERIFY_TEST_COPY_STORE/verdicts"/*.json)"
+  [ "$(printf '%s' "$(msg .body)" | sha256sum | cut -d' ' -f1)" = "$(jq -r .body_sha256 "$st")" ]
+  [ "$(sql "SELECT copy_verdict_id FROM verify_messages WHERE status='sent'")" = "$(jq -r .verdict_id "$st")" ]
+  [ "$(sql "SELECT copy_review FROM verify_messages WHERE status='sent'")" = "approved" ]
+  [ "$(sql "SELECT copy_verdict_sha256 FROM verify_messages WHERE status='sent'")" = "$(sha256sum "$st" | cut -d' ' -f1)" ]
+  run -0 python3 -I "$INTERCOM_VERIFY_TEST_COPY_GATE" verify --statement "$st" --signature "$st.sig"
+  [[ "$output" == *'"valid": true'* ]]
+  # the approval is of those bytes only: another person's denial is a different body and waits for its own verdict
+  credits "$TEST_TMPDIR/c.json" "Omar Roe" "r2:Mixing:Song B:Big Star"
+  # (16 days on: inside 7 days the sender's own one-note-a-week rule holds a second note before the gate is asked)
+  INTERCOM_VERIFY_TEST_DAY=2026-11-20 run -3 send --campaign decline
+  [[ "$output" == *"DEFERRED copy_review_pending"* ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "copy gate (REAL gate.py): a track called Fraud is declared as the request's data, so it is reviewed and not read as our accusation" {
+  real_copy_gate
+  credits "$TEST_TMPDIR/c.json" "Jane" "r1:Producer:Fraud:Bot" "r2:Mixing:Song B:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  # held for the reviewer (a list item is copy, and only the declared values are excused), not refused by the lint
+  [[ "$output" == *"DEFERRED copy_review_pending credits=2"* ]]
+  [ "$(posts)" -eq 0 ]
+  pending="$(ls "$INTERCOM_VERIFY_TEST_COPY_STORE/pending"/*.json)"
+  [ "$(jq -c .data "$pending")" = '["Big Star","Bot","Fraud","Jane","Mixing","Producer","Song B"]' ]
+  [[ "$(jq -r .body "$pending")" == *"<li>Producer on &quot;Fraud&quot; by Bot</li>"* ]]
+  # the same bytes with nothing declared are a hard-rule hit: the excuse is the declaration, never the <li>
+  run bash -c 'jq -c "{subject: .subject, body: .body}" "$1" | python3 -I "$2" check --campaign decline --store "$3"' \
+    _ "$pending" "$INTERCOM_VERIFY_TEST_COPY_GATE" "$TEST_TMPDIR/other-store"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"copy_lint:accusation_word"* ]]
+}
+
+@test "copy gate (REAL gate.py, observe mode): the note is sent with no verdict, the row says observed, and the body is still queued for review" {
+  COPY_GATE_DEFAULT_MODE=observe real_copy_gate
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 send --campaign decline
+  [[ "$output" == *"POSTED"* ]]
+  [ "$(posts)" -eq 1 ]
+  # the ledger says what the review said when it left, and names no verdict it did not have
+  [ "$(sql "SELECT copy_review || '|' || COALESCE(copy_verdict_id,'') FROM verify_messages WHERE status='sent'")" = "observed:pending|" ]
+  # and the body was queued for the reviewer all the same: observing is measuring, not skipping
+  [ "$(find "$INTERCOM_VERIFY_TEST_COPY_STORE/pending" -name '*.json' | wc -l)" -eq 1 ]
+  grep -rq '"copy_review": *"observed:pending"' "$INTERCOM_VERIFY_TEST_LOG_DIR"
+}
+
+# Hold a denial under enforce, have the reviewer answer it, then put the table in observe mode.
+_observe_after_verdict() { # <verdict>
+  real_copy_gate
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  run copy_verdicts "$1"
+  [[ "$output" == *'"stored": 1'* ]]
+  sed -i 's/"default":"enforce"/"default":"observe"/' "$TEST_TMPDIR/gate-tree/policies/outbound-copy-enforce.json"
+  grep -q '"default":"observe"' "$TEST_TMPDIR/gate-tree/policies/outbound-copy-enforce.json"
+}
+
+@test "copy gate (REAL gate.py, observe mode): a body the reviewer wants rewritten still sends, and the row says so" {
+  _observe_after_verdict rewrite
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 send --campaign decline
+  [[ "$output" == *"POSTED"* ]]
+  [ "$(posts)" -eq 1 ]
+  [ "$(sql "SELECT copy_review FROM verify_messages WHERE status='sent'")" = "observed:rewrite" ]
+  if grep -rq 'Other words' "$CURL_STUB_PAYLOADS" 2>/dev/null; then false; fi    # our bytes went, never the reviewer's
+}
+
+@test "copy gate (REAL gate.py, observe mode): a body the reviewer REFUSED is never sent" {
+  _observe_after_verdict refuse
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  [[ "$output" == *"DEFERRED copy_review_refuse"* ]]
+  [ "$(posts)" -eq 0 ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_messages WHERE status='sent'")" = "0" ]
+}
+
+@test "copy gate (REAL gate.py, observe mode): a retired frame is never sent, whatever its words" {
+  COPY_GATE_DEFAULT_MODE=observe real_copy_gate
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  printf '%s' '{"subject":"s","body":"<p>Hi Jane, your Mixing credit is on your profile.</p>"}' > "$TEST_TMPDIR/m.json"
+  run python3 -I "$INTERCOM_VERIFY_TEST_COPY_GATE" check --campaign verify-live --copy windowed --store "$INTERCOM_VERIFY_TEST_COPY_STORE" < "$TEST_TMPDIR/m.json"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'"reason": "copy_retired:states a removal deadline"'* ]]
+  run python3 -I "$INTERCOM_VERIFY_TEST_COPY_GATE" check --campaign verify-live --copy v1 --store "$INTERCOM_VERIFY_TEST_COPY_STORE" < "$TEST_TMPDIR/m.json"
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'"result": "observed"'* ]]
+}
+
+@test "copy gate (REAL gate.py): a rewrite or a refusal from the reviewer sends nothing, and the replacement is never sent in its place" {
+  real_copy_gate
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  run copy_verdicts rewrite
+  [[ "$output" == *'"stored": 1'* ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  [[ "$output" == *"DEFERRED copy_review_rewrite"* ]]
+  [ "$(posts)" -eq 0 ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_messages WHERE reason LIKE 'copy_review_hold: copy_review_rewrite:ocv-%'")" = "1" ]
+  if grep -rq 'Other words' "$CURL_STUB_PAYLOADS" 2>/dev/null; then false; fi
 }

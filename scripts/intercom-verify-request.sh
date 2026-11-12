@@ -394,6 +394,12 @@ readonly API_VERSION="2.11"
 readonly PROD_LOG_DIR="/opt/hydra/workspaces/operations/api-logs"
 readonly PROD_LEDGER="/var/lib/hydra/credit-review/ledger.sqlite3"
 readonly PROD_LEDGER_HELPER="/opt/hydra/scripts/credit_review/verify_ledger.py"
+# THE OUTBOUND COPY GATE (captain 2026-11-12: "check your messages with Fable. Make sure Fable likes the messages that
+# you're sending out"). Every body this script POSTs to a customer needs the reviewer's SIGNED verdict on its exact
+# bytes; this host can verify one and cannot mint one (docs/credit-verification/outbound-copy-gate.md). Neither path
+# is a parameter on a deployed copy: a caller-selectable gate or store is a caller-selectable approval.
+readonly PROD_COPY_GATE="/opt/hydra/scripts/outbound_copy/gate.py"
+readonly PROD_COPY_STORE="/var/lib/hydra/outbound-copy"
 # gap-ask reads the stage-2 verdicts (read-only) from the proof store through this helper.
 readonly PROD_STAGE2_HELPER="/opt/hydra/scripts/credit_review/stage2_verdicts.py"
 # Who tells a closed request (core's own credits_rejected email or hydra's decline) - the per-user read the
@@ -480,7 +486,11 @@ readonly APPROVAL_REF_REFUND_CONFIRM="Fable d2 ruling refund-confirm-1103 (2026-
 # -fable-o1, 2026-10-29) items 1 and 3. It replaces the retired after-rejection note (which named ONE of five reasons -
 # exactly the lesson a forged document learns from) and it is the SAME sentence for a fraud-deny and for an ordinary
 # shortfall, by design: nothing about which check failed ever reaches the user.
-readonly APPROVAL_REF_DECLINE="captain U7RP6HKUZ 2026-10-29 13:2xZ (verbatim in this script's DECLINE lock comment); copy = decline-copy-ruling.md item 1 (ops-humans-off-fable-o1, 2026-10-29), byte-for-byte; replaces the retired after-rejection note and its five reason strings; firstmate brief decline-copy"
+# The WORDS changed on 2026-11-12 (captain ~01:00Z, verbatim above decline_note): the 10-29 sentence said the
+# supporting information "wasn't enough", which is a reason. The decision that there is ONE decline, with no reason
+# and no follow-up, is still the 10-29 one. The exact bytes are no longer approved by this constant at all: every
+# rendered body needs the reviewer's signed verdict from the outbound copy gate, recorded on the ledger row.
+readonly APPROVAL_REF_DECLINE="captain U7RP6HKUZ 2026-11-12 ~01:00Z (verbatim above decline_note: say the credit is denied for now, the verification didn't prove out, no reason, never fraud, you can resubmit later); one decline, no reason, no follow-up = captain 2026-10-29 13:2xZ, decline-copy-ruling.md item 1; the rendered bytes are approved per body by the outbound copy gate (copy_verdict_id on this row); firstmate brief outbound-copy-fable-gate-v1"
 readonly APPROVAL_REF_PAST="captain U7RP6HKUZ 2026-10-15 23:35Z: \"im referring to before when nick made changes and did a trust verify flow and now we have a lotnof credits to verify with documents and give people 30 days to send something in for the ones missing documents\"; 2026-10-16 00:35Z: \"how many credits were approved without documentstion i dont want to lose users unless its obvious fraud feom tbe past\""
 # Caroline's outbound sanitizer word list, IDENTICAL to intercom-ops-write.sh's
 # SANITIZER_WORDS (which CI compares to plugins/intercom/src/sanitize-tool-leak.ts);
@@ -494,11 +504,13 @@ readonly SANITIZER_WORDS="profile_status|profile_lookup|credits_search|create_ti
 # popularity word, no list of accepted document types"). It is asserted on the COPY PARAGRAPHS only, never on the
 # track list: "Because", "Within" and "Fraud" are all real song titles and a decline still has to go out about them.
 # A match is a build defect: the note is refused before anything is claimed or sent.
+# "resubmit" left this list on 2026-11-12: the captain's denial now SAYS it ("You can always resubmit for a credit
+# again later"), and the outbound copy gate refuses a denial that does not.
 # A claim-shaped decline (the entry's request_id is claim-<claiming.id>) renders the profile-claim sentence instead of
 # the credit one. COPY is readonly by the time the payload's shape is known (the file is read later), so the shape rides
 # its own flag: COPY stays the copy token the ledger records, DECLINE_CLAIM says which of its two shapes rendered.
 DECLINE_CLAIM=0
-readonly DECLINE_FORBIDDEN='because|didn.t name|different track|different role|unreadable|couldn.t read|not a document|fraud|forged|doctored|suspicious|support team|business day|within|popular|speak to|resubmit|we check|we look at|threshold'
+readonly DECLINE_FORBIDDEN='because|didn.t name|different track|different role|unreadable|couldn.t read|not a document|fraud|forged|doctored|suspicious|support team|business day|within|popular|speak to|we check|we look at|threshold'
 
 # QA #1603: the gate's number / roles checks count TRACKS with the renderer's own identity (tkey: track_id, else the
 # normalised title + artist) - two different tracks both called "Home" are two tracks. Byte-identical to RENDER_JQ's defs.
@@ -538,12 +550,14 @@ refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 if [ "$TESTABLE" != "1" ]; then
   for v in INTERCOM_VERIFY_TEST_LOG_DIR INTERCOM_VERIFY_TEST_CURL_BIN INTERCOM_VERIFY_TEST_TIMEOUT_BIN \
            INTERCOM_VERIFY_TEST_LEDGER INTERCOM_VERIFY_TEST_LEDGER_HELPER INTERCOM_VERIFY_TEST_DAY \
-           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER INTERCOM_VERIFY_TEST_GMO INTERCOM_VERIFY_TEST_POLICY INTERCOM_VERIFY_TEST_FABLE_RULINGS INTERCOM_VERIFY_TEST_STRIPE_BASE INTERCOM_VERIFY_TEST_JQ_LIB INTERCOM_VERIFY_TEST_STRIPE_ENV_FILE INTERCOM_VERIFY_TEST_API_RETRY_SLEEPS DECLINE_CLOSE_HELPER INTERCOM_VERIFY_TEST_DECLINE_SINCE INTERCOM_VERIFY_TEST_DECLINE_CORE_ROUTE_OFF; do
+           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER INTERCOM_VERIFY_TEST_GMO INTERCOM_VERIFY_TEST_POLICY INTERCOM_VERIFY_TEST_FABLE_RULINGS INTERCOM_VERIFY_TEST_STRIPE_BASE INTERCOM_VERIFY_TEST_JQ_LIB INTERCOM_VERIFY_TEST_STRIPE_ENV_FILE INTERCOM_VERIFY_TEST_API_RETRY_SLEEPS DECLINE_CLOSE_HELPER INTERCOM_VERIFY_TEST_DECLINE_SINCE INTERCOM_VERIFY_TEST_DECLINE_CORE_ROUTE_OFF INTERCOM_VERIFY_TEST_COPY_GATE INTERCOM_VERIFY_TEST_COPY_STORE; do
     [ -z "${!v:-}" ] || die "$v is not settable on a deployed copy of this script. The log, the ledger, the client and the clock are not parameters: a caller-selectable one is a send nobody can audit."
   done
   LOG_DIR="$PROD_LOG_DIR"
   LEDGER="$PROD_LEDGER"
   LEDGER_HELPER="$PROD_LEDGER_HELPER"
+  COPY_GATE="$PROD_COPY_GATE"
+  COPY_STORE="$PROD_COPY_STORE"
   STAGE2_HELPER="$PROD_STAGE2_HELPER"
   DECLINE_CLOSE_HELPER="$PROD_DECLINE_CLOSE_HELPER"
   # the activation lock is an OPERATOR decision, never a caller's: a deployed copy is silent whatever the
@@ -572,6 +586,8 @@ else
   LOG_DIR="${INTERCOM_VERIFY_TEST_LOG_DIR:-$PROD_LOG_DIR}"
   LEDGER="${INTERCOM_VERIFY_TEST_LEDGER:-$PROD_LEDGER}"
   LEDGER_HELPER="${INTERCOM_VERIFY_TEST_LEDGER_HELPER:-$PROD_LEDGER_HELPER}"
+  COPY_GATE="${INTERCOM_VERIFY_TEST_COPY_GATE:-$PROD_COPY_GATE}"
+  COPY_STORE="${INTERCOM_VERIFY_TEST_COPY_STORE:-$PROD_COPY_STORE}"
   STAGE2_HELPER="${INTERCOM_VERIFY_TEST_STAGE2_HELPER:-$PROD_STAGE2_HELPER}"
   DECLINE_CLOSE_HELPER="${INTERCOM_VERIFY_TEST_DECLINE_CLOSE_HELPER:-$PROD_DECLINE_CLOSE_HELPER}"
   DISABLED_DIR="${INTERCOM_VERIFY_TEST_DISABLED_DIR:-/etc/hydra}"
@@ -593,7 +609,7 @@ else
   API_RETRY_SLEEPS="${INTERCOM_VERIFY_TEST_API_RETRY_SLEEPS:-2 5}"
   DAY="${INTERCOM_VERIFY_TEST_DAY:-$(date -u +%Y-%m-%d)}"
 fi
-readonly LOG_DIR LEDGER LEDGER_HELPER STAGE2_HELPER CORE_NOTICE_HELPER PROOF_DB POLICY_JSON FABLE_RULINGS_FILE \
+readonly LOG_DIR LEDGER LEDGER_HELPER COPY_GATE COPY_STORE STAGE2_HELPER CORE_NOTICE_HELPER PROOF_DB POLICY_JSON FABLE_RULINGS_FILE \
   CURL_BIN JQ_BIN TIMEOUT_BIN PY_BIN STRIPE_API_BASE DAY STRIPE_ENV_FILE API_RETRIES API_RETRY_SLEEPS
 
 # ---------------------------------------------------------------------------------------
@@ -2176,34 +2192,35 @@ def live_followup($fn; $c; $maxl; $kind; $due):
   | .segs += [ {p: "Nothing has been removed yet: \(it1($n; "the credit stays"; "the credits stay")) on your profile. If we can't verify \(it1($n; "it"; "a credit")) by \($due), \(it1($n; "it"; "that credit")) will be removed from your profile that day. Reply to this message with any one of the documents from my earlier note and we'll pick it up right away."} ]
   | .segs += (if $kind == "reminder-25" then [ {p: "This is my last reminder about this review. If you need more time, tell us which credit and why, and we will keep the request open."} ] else [] end)
   | .segs += sig;
-# THE DECLINE (captain 2026-10-29 13:2xZ, verbatim: "It feels like we are over-communicating when we deny a credit: we
-# could just say supporting information was not provided adequate enough to earn the credit, and if they want to submit
-# something they can submit something again to start the process again"; ruling decline-copy-ruling.md item 1).
-# ONE reason-free sentence. It never names a reason, never lists what was wrong, never sets a date, never mentions
-# verification, fraud, documents we accept or a person to contact, and it is the SAME words for a fraud deny and for an
-# ordinary shortfall - a decline must not teach anyone which check failed. 
+# THE DECLINE (captain 2026-11-12 ~01:00Z, verbatim: "let them know if something was denied. You don't have to tell
+# them why. Say credit was denied. verification didn't prove out. If there's fraud, you don't tell them there's fraud.
+# You just say for now the credit's denied. You can always resubmit for a credit again later." It replaces the
+# 2026-10-29 wording, whose "supporting information ... wasn't enough" was itself a reason.)
+# It says the credit is denied for now and that the verification didn't prove out, and nothing else: no reason, no
+# list of what was wrong, no date, no accusation, no person to contact - the SAME words for a fraud deny and for an
+# ordinary shortfall, because a decline must not teach anyone which check failed. Then the resubmit line.
 # The sign-off is "Muso.AI" alone, not Caroline's "Thank you, Caroline, Muso Support" (a denial is not a support
-# conversation, and the approved text carries no such line).
+# conversation).
 def decline_note($fn; $c; $maxl; $claim):
   ($c | length) as $n
   | if $claim then
       { subject: "Your profile claim on Muso",
         segs: [ {p: "Hi \($fn),"},
-                {p: "Thanks for your request. The supporting information we received wasn't enough to confirm this profile claim, so we've closed the request."},
-                {p: "If you'd like us to look again, submit the claim again from the profile page and a fresh review will start."},
+                {p: "We finished checking your claim on this profile. For now the claim is denied: the verification didn't prove out."},
+                {p: "You can resubmit the claim later from the profile page."},
                 {p: "Muso.AI"} ] }
     elif $n == 1 then
       { subject: "Your credit request on Muso",
         segs: [ {p: "Hi \($fn),"},
-                {p: "Thanks for your request. The supporting information we received wasn't enough to confirm this credit, so we've closed the request."},
-                {p: "If you'd like us to look again, submit the credit again with your supporting documents and a fresh review will start."},
+                {p: "We finished checking your credit request. For now the credit is denied: the verification didn't prove out."},
+                {p: "You can resubmit for the credit again later."},
                 {p: "Muso.AI"} ] }
     else
       { subject: "Your credit request on Muso",
         segs: [ {p: "Hi \($fn),"},
-                {p: "Thanks for your request. The supporting information we received wasn't enough to confirm these \($n) credits, so we've closed the requests."},
+                {p: "We finished checking your \($n) credit requests. For now these credits are denied: the verification didn't prove out."},
                 {ul: listed($c; $maxl)},
-                {p: "If you'd like us to look again, submit them again with your supporting documents and a fresh review will start."},
+                {p: "You can resubmit for them again later."},
                 {p: "Muso.AI"} ] }
     end;
 def past_initial($fn; $c; $maxl):
@@ -3845,6 +3862,56 @@ if ! dg="$(decline_copy_guard "$RENDERED" 2>&1)"; then
   refuse "$dg"
 fi
 PAYLOAD="$(payload "$RENDERED" "$CONTACT_ID")"
+# ---------------------------------------------------------------------------------------
+# THE OUTBOUND COPY GATE. The exact bytes about to be POSTed (.body, and the subject when there is one) go to the gate,
+# which answers "approved" only when the reviewer's SIGNED verdict on this body's sha256 is on file, under today's
+# rubric, for this campaign. Everything else - no verdict yet (the body is queued for review), a rewrite or refuse
+# verdict, a hard-rule hit, a bad signature, a gate that cannot run - gives the claim back (a `deferred` log row with
+# the reason and the hash) and sends NOTHING. There is no flag, variable or campaign that skips this, and it runs
+# before the reassign below, so an unreviewed note has no side effect at all.
+#
+# OBSERVE MODE is the gate's answer, never this script's choice: for a campaign policies/outbound-copy-enforce.json
+# does not enforce yet, the gate exits 4 with result "observed" about these bytes. The note is then sent and the
+# ledger row says `observed:<what the review said>` instead of `approved`. A code-lint hit, a signed refusal and a
+# retired frame are exit 1 in either mode, so they are held here like any other non-approval.
+COPY_SHA_LOCAL="$(printf '%s' "$PAYLOAD" | "$JQ_BIN" -j '.body' | "$PY_BIN" -I -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+set +e
+# `data` declares the request's own values (the first name, each credit's role, title and artist) so a song called
+# "Fraud" is not read as our accusation. It excuses those values only; every sentence, in a list item or not, is copy.
+CG="$(printf '%s\n%s\n' "$PAYLOAD" "$CLAIMED_INPUT" | "$JQ_BIN" -c -s '
+      {subject: (.[0].subject // ""), body: .[0].body,
+       data: ([(.[1].user.first_name? // empty), (.[1].credits[]? | (.role?, .track_title?, .artist_name?))]
+              | map(select(type == "string" and length > 0)))}' \
+  | "$PY_BIN" -I "$COPY_GATE" check --campaign "$CAMPAIGN" --copy "$COPY" --kind "$KIND" --message-type "$MESSAGE_TYPE" \
+      --store "$COPY_STORE" 2>/dev/null)"
+cg_rc=$?
+set -e
+CG_RESULT="$(printf '%s' "$CG" | "$JQ_BIN" -r '.result // ""' 2>/dev/null || true)"
+COPY_VERDICT_ID="$(printf '%s' "$CG" | "$JQ_BIN" -r '.verdict_id // ""' 2>/dev/null || true)"
+COPY_VERDICT_SHA="$(printf '%s' "$CG" | "$JQ_BIN" -r '.verdict_sha256 // ""' 2>/dev/null || true)"
+CG_BODY="$(printf '%s' "$CG" | "$JQ_BIN" -r '.body_sha256 // ""' 2>/dev/null || true)"
+CG_MODE="$(printf '%s' "$CG" | "$JQ_BIN" -r '.mode // ""' 2>/dev/null || true)"
+CG_REVIEW="$(printf '%s' "$CG" | "$JQ_BIN" -r '.review // ""' 2>/dev/null || true)"
+COPY_REVIEW=""
+if [ "$cg_rc" = 0 ] && [ "$CG_RESULT" = "approved" ] && [ "$CG_BODY" = "$COPY_SHA_LOCAL" ] \
+   && [[ "$COPY_VERDICT_ID" =~ ^ocv-[0-9a-f]{16}$ ]] && [[ "$COPY_VERDICT_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+  COPY_REVIEW="approved"
+elif [ "$cg_rc" = 4 ] && [ "$CG_RESULT" = "observed" ] && [ "$CG_MODE" = "observe" ] && [ "$CG_BODY" = "$COPY_SHA_LOCAL" ] \
+   && [[ "$CG_REVIEW" =~ ^[a-z_]{1,40}$ ]]; then
+  # the verdict on file, when there is one (a rewrite), still goes on the row; a malformed one is dropped, not trusted
+  [[ "$COPY_VERDICT_ID" =~ ^ocv-[0-9a-f]{16}$ ]] && [[ "$COPY_VERDICT_SHA" =~ ^[0-9a-f]{64}$ ]] || { COPY_VERDICT_ID=""; COPY_VERDICT_SHA=""; }
+  COPY_REVIEW="observed:$CG_REVIEW"
+fi
+if [ -z "$COPY_REVIEW" ]; then
+  cg_why="$(printf '%s' "$CG" | "$JQ_BIN" -r '.reason // ""' 2>/dev/null || true)"
+  [ -n "$cg_why" ] || cg_why="copy_gate_error:the gate gave no readable answer (rc=$cg_rc)"
+  if { [ "$cg_rc" = 0 ] && [ "$CG_RESULT" = "approved" ]; } || [ "$cg_rc" = 4 ]; then cg_why="copy_gate_error:the gate's answer does not name this body or a verdict"; fi
+  ledger hold-copy-review --message-row "$ROW_ID" --reason "copy_review_hold: ${cg_why:0:300}" --body-sha256 "$COPY_SHA_LOCAL" >/dev/null \
+    || die "the copy gate did not approve this message and the hold could not be ledgered; nothing was sent (row $ROW_ID stays claimed for a human)."
+  printf 'DEFERRED %s credits=%s (the outbound copy gate has not approved this exact message; nothing was sent)\n' "${cg_why%%:*}" "$NC"
+  exit 3
+fi
+readonly COPY_SHA_LOCAL COPY_VERDICT_ID COPY_VERDICT_SHA COPY_REVIEW
 # [key=lamberto-reply-due]: the handed answer went unsent for 48 h - reassign to this gate (+ note), ledger row FIRST,
 # then the answer. Any failure: the claim is closed refused and nothing is posted to the customer.
 if [ "$RD_ACT" = "reassign+answer" ]; then
@@ -3892,7 +3959,9 @@ LOG_FILE="$(new_log_file verify-request "$CONTACT_ID")"
   --arg campaign "$CAMPAIGN" --arg kind "$KIND" --arg parent "$PARENT_ID" --arg due "$DUE_DAY" \
   --arg copy "$COPY" --arg removal "$REMOVAL_DAY" --arg legacy "$LEGACY_MATCH" \
   --argjson ids "$(printf '%s' "$CLAIMED_INPUT" | "$JQ_BIN" -c '[.credits[].request_id]')" --arg row "$ROW_ID" \
+  --arg cvid "$COPY_VERDICT_ID" --arg cvsha "$COPY_VERDICT_SHA" --arg csha "$COPY_SHA_LOCAL" --arg crev "$COPY_REVIEW" \
   '{agent:"operations", action:"intercom_verify_request", campaign:$campaign, kind:$kind,
+    copy_verdict_id:$cvid, copy_verdict_sha256:$cvsha, copy_body_sha256:$csha, copy_review:$crev,
     parent_message:(if $parent == "" then null else $parent end), due_day:(if $due == "" then null else $due end),
     copy:$copy, removal_day:(if $removal == "" then null else $removal end),
     target:$target, conversation:(if $thread == "" then null else $thread end),
@@ -3902,6 +3971,11 @@ LOG_FILE="$(new_log_file verify-request "$CONTACT_ID")"
     authorization:"captain approved this verify-request campaign (fixed copy); see approval_ref"}' > "$LOG_FILE"
 
 if [ -n "$THREAD" ]; then POST_PATH="/conversations/$THREAD/reply"; else POST_PATH="/messages"; fi
+# the copy gate ruled on COPY_SHA_LOCAL: the bytes leaving now must still be those bytes
+if [ "$(printf '%s' "$PAYLOAD" | "$JQ_BIN" -j '.body' | "$PY_BIN" -I -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')" != "$COPY_SHA_LOCAL" ]; then
+  ledger finalize --message-row "$ROW_ID" --status refused --reason "copy gate: the body changed after its verdict" >/dev/null
+  refuse "the body changed after the copy gate ruled on it; nothing was sent."
+fi
 set +e
 RESPONSE="$(printf '%s' "$PAYLOAD" | api POST "$POST_PATH")"
 rc=$?
@@ -3912,7 +3986,7 @@ if [ "$rc" -ne 0 ]; then
   # cannot verify is a DIFFERENT fact - the body may already be in the customer's inbox - so it exits 5. A caller that
   # merely tests "non-zero" still stops; a caller that decides what to retry can now tell the two apart without reading
   # prose.
-  ledger finalize --message-row "$ROW_ID" --status attempted --reason "curl rc=$rc; outcome unknown" --api-log "$LOG_FILE" >/dev/null || true
+  ledger finalize --message-row "$ROW_ID" --status attempted --reason "curl rc=$rc; outcome unknown" --api-log "$LOG_FILE" --copy-verdict-id "$COPY_VERDICT_ID" --copy-verdict-sha256 "$COPY_VERDICT_SHA" --copy-review "$COPY_REVIEW" >/dev/null || true
   printf 'POST FAILED (curl rc=%s); logged at %s and left CLAIMED (outcome unknown, so it is never re-sent automatically). Response:\n%s\n' \
     "$rc" "$LOG_FILE" "$RESPONSE" >&2
   exit 5
@@ -3943,20 +4017,21 @@ fi
 if [ -n "$THREAD" ]; then
   if [ "$R_TYPE" != "conversation" ] || [ "$R_CONV" != "$THREAD" ] || [ "$R_PART" != "comment/admin/$INTERCOM_ADMIN_ID" ] \
      || ! printf '%s' "$R_ID" | grep -qE '^[0-9]+$'; then
-    ledger finalize --message-row "$ROW_ID" --status attempted --reason "unverified reply type=${R_TYPE:-none} part=${R_PART:-none}" --api-log "$LOG_FILE" >/dev/null || true
+    ledger finalize --message-row "$ROW_ID" --status attempted --reason "unverified reply type=${R_TYPE:-none} part=${R_PART:-none}" --api-log "$LOG_FILE" --copy-verdict-id "$COPY_VERDICT_ID" --copy-verdict-sha256 "$COPY_VERDICT_SHA" --copy-review "$COPY_REVIEW" >/dev/null || true
     printf 'POST NOT VERIFIED: expected a Caroline comment in conversation %s, Intercom answered type "%s" last part "%s". Logged at %s; left CLAIMED. Response:\n%s\n' \
       "$THREAD" "${R_TYPE:-<none>}" "${R_PART:-<none>}" "$LOG_FILE" "$RESPONSE" >&2
     exit 5     # rc 5: attempted, outcome unknown (rc 4 = nothing was sent)
   fi
 elif [ "$R_TYPE" != "admin_message" ] || [ "$R_MT" != "$(if [ "$MESSAGE_TYPE" = "inapp" ]; then echo inapp; else echo "$EXPECT_TYPE"; fi)" ] \
      || ! printf '%s' "$R_ID" | grep -qE '^[0-9]+$'; then
-  ledger finalize --message-row "$ROW_ID" --status attempted --reason "unverified response type=${R_TYPE:-none} message_type=${R_MT:-none}" --api-log "$LOG_FILE" >/dev/null || true
+  ledger finalize --message-row "$ROW_ID" --status attempted --reason "unverified response type=${R_TYPE:-none} message_type=${R_MT:-none}" --api-log "$LOG_FILE" --copy-verdict-id "$COPY_VERDICT_ID" --copy-verdict-sha256 "$COPY_VERDICT_SHA" --copy-review "$COPY_REVIEW" >/dev/null || true
   printf 'POST NOT VERIFIED: expected an admin_message of type "%s", Intercom answered type "%s" message_type "%s". Logged at %s; left CLAIMED. Response:\n%s\n' \
     "$(if [ "$MESSAGE_TYPE" = "inapp" ]; then echo inapp; else echo "$EXPECT_TYPE"; fi)" "${R_TYPE:-<none>}" "${R_MT:-<none>}" "$LOG_FILE" "$RESPONSE" >&2
   exit 5     # rc 5: attempted, outcome unknown (rc 4 = nothing was sent)
 fi
 ledger finalize --message-row "$ROW_ID" --status sent --message-id "$R_ID" --conversation-id "$R_CONV" \
-  --body-sha256 "$BODY_SHA" --api-log "$LOG_FILE" ${LEGACY_MATCH:+--reason "in-thread-legacy-id $LEGACY_MATCH"} >/dev/null
+  --body-sha256 "$BODY_SHA" --api-log "$LOG_FILE" ${LEGACY_MATCH:+--reason "in-thread-legacy-id $LEGACY_MATCH"} \
+  --copy-verdict-id "$COPY_VERDICT_ID" --copy-verdict-sha256 "$COPY_VERDICT_SHA" --copy-review "$COPY_REVIEW" >/dev/null
 if [ -n "$THREAD" ]; then
   printf 'POSTED %s conversation=%s message=%s credits=%s\n' "$MESSAGE_TYPE" "$THREAD" "$R_ID" "$NC"
 elif [ "$KIND" = "initial" ]; then

@@ -179,6 +179,100 @@ if [ -x "$SESSION_BUDGET_CHECK" ]; then
 fi
 
 # ──────────────────────────────────────────────────────────────
+# Outbound copy review queue (scripts/outbound_copy/gate.py, docs/credit-verification/outbound-copy-gate.md)
+#
+# A customer message leaves only with a signed reviewer verdict on its exact bytes, and the review round runs on
+# another host (scripts/outbound_copy/review_pull.py). When that round stops, nothing is refused and nothing errors:
+# every sender holds, quietly, and customers stop hearing from us. This is the only place that silence becomes a
+# page. It reads one number (the age of the oldest held body) and never approves, releases or sends anything.
+#
+#   rc 0  nothing has waited too long
+#   rc 1  the oldest held body is older than COPY_REVIEW_MAX_AGE_S          -> page
+#   rc 2  (or the gate file itself is gone) the queue could not be measured. Before any sender has asked the gate the store does not exist, and that
+#         is not a fault; once it HAS been measured, "cannot measure" is a page, never a healthy zero.
+# ──────────────────────────────────────────────────────────────
+COPY_GATE="${CRON_HEALTH_COPY_GATE-$_WATCHDOG_DIR/outbound_copy/gate.py}"   # `-`, not `:-`: "" disarms the block
+COPY_STORE="${CRON_HEALTH_COPY_STORE:-/var/lib/hydra/outbound-copy}"
+COPY_REVIEW_MAX_AGE_S="${CRON_HEALTH_COPY_REVIEW_MAX_AGE_S:-14400}"          # 4h = two send ticks with no review round
+COPY_REVIEW_ALERT_STATE="${CRON_HEALTH_COPY_REVIEW_STATE:-/var/lib/cron-health-watchdog/copy-review-last-alert}"
+COPY_REVIEW_SEEN="${CRON_HEALTH_COPY_REVIEW_SEEN:-/var/lib/cron-health-watchdog/copy-review-store-seen}"
+COPY_REVIEW_ALERT_INTERVAL="${CRON_HEALTH_COPY_REVIEW_INTERVAL:-21600}"      # 6h
+
+# An EMPTY path disarms the block (the test seam). A non-empty path whose file is missing does NOT: every sender
+# asks that same file, so with it gone they all hold, and skipping the measurement here would silence the one page
+# that says so (QA review 5871428015 of hydra#1895). It is "cannot measure" like any other unreadable queue.
+if [ -n "$COPY_GATE" ]; then
+  _cr_out=""; _cr_rc=0; _cr_what="\`gate.py pending-age --store ${COPY_STORE}\` exited"
+  if [ -f "$COPY_GATE" ]; then
+    _cr_out="$(python3 -I "$COPY_GATE" pending-age --store "$COPY_STORE" --max-age-s "$COPY_REVIEW_MAX_AGE_S" 2>&1)" || _cr_rc=$?
+  else
+    _cr_rc=127; _cr_out="the copy gate is not at ${COPY_GATE}"
+    _cr_what="the copy gate is MISSING at \`${COPY_GATE}\` (every sender asks that file, so every sender holds); rc"
+  fi
+  _cr_head=""
+  case "$_cr_rc" in
+    (0)
+      [ "$DRY_RUN" -eq 1 ] || { mkdir -p "$(dirname "$COPY_REVIEW_SEEN")" 2>/dev/null && : > "$COPY_REVIEW_SEEN"; } 2>/dev/null || true
+      if [ -e "$COPY_REVIEW_ALERT_STATE" ] && [ "$DRY_RUN" -eq 0 ]; then
+        rm -f "$COPY_REVIEW_ALERT_STATE" 2>/dev/null || true
+        log "copy review queue clean: cleared the dedupe stamp (a later stall pages immediately)"
+      fi ;;
+    (1)
+      [ "$DRY_RUN" -eq 1 ] || { mkdir -p "$(dirname "$COPY_REVIEW_SEEN")" 2>/dev/null && : > "$COPY_REVIEW_SEEN"; } 2>/dev/null || true
+      _cr_n="$(printf '%s' "$_cr_out" | jq -r '.pending // "?"' 2>/dev/null || echo '?')"
+      _cr_age="$(printf '%s' "$_cr_out" | jq -r '.oldest_s // "?"' 2>/dev/null || echo '?')"
+      # `held` = waiting bodies whose campaign is ENFORCED (policies/outbound-copy-enforce.json). A waiting body of an
+      # observed campaign was sent; calling it "held" would be a false alarm about customers who did hear from us.
+      # An unreadable count is treated as held: the stronger page is the safe one.
+      _cr_held="$(printf '%s' "$_cr_out" | jq -r '.held // "?"' 2>/dev/null || echo '?')"
+      _cr_fix="Run it on the reviewer host: \`python3 scripts/outbound_copy/review_pull.py --remote '<ssh to node-8>' --key ~/.config/muso/outbound-copy-reviewer/id_ed25519\`. See docs/credit-verification/outbound-copy-gate.md."
+      if [ "$_cr_held" = "0" ]; then
+        _cr_head=":warning: *The copy review round has stopped* — ${_cr_n} message(s) are waiting for a reviewer verdict and the oldest has waited ${_cr_age}s (limit ${COPY_REVIEW_MAX_AGE_S}s). None is held: their campaigns are in observe mode, so they went out without a verdict and nobody is reading what we send. ${_cr_fix}"
+      else
+        _cr_head=":no_entry: *Customer messages are held: the copy review round has stopped* — ${_cr_n} message(s) are waiting for a reviewer verdict, ${_cr_held} of them held (their campaign is enforced), and the oldest has waited ${_cr_age}s (limit ${COPY_REVIEW_MAX_AGE_S}s). Nothing is refused and nothing has failed: an enforced sender holds until a verdict arrives, so those customers hear nothing until the round runs. Do not release the messages another way: there is no flag that skips the gate. ${_cr_fix}"
+      fi ;;
+    (*)
+      if [ -e "$COPY_REVIEW_SEEN" ]; then
+        _cr_head=":rotating_light: *Copy review queue: CANNOT MEASURE* — ${_cr_what} ${_cr_rc} on a queue this watchdog has measured before. That is not \"0 waiting\": held customer messages may be ageing unseen. Output: ${_cr_out:0:300}"
+      else
+        log "copy review queue not measurable yet (rc=${_cr_rc}; no sender has asked the gate on this host): ${_cr_out:0:200}"
+      fi ;;
+  esac
+  if [ -n "$_cr_head" ]; then
+    _cr_now="$(date -u +%s)"
+    _cr_last="$(cat "$COPY_REVIEW_ALERT_STATE" 2>/dev/null || echo 0)"
+    case "$_cr_last" in (*[!0-9]*|"") _cr_last=0 ;; esac
+    if [ "$DRY_RUN" -eq 1 ]; then
+      log "DRY-RUN: copy review queue rc=${_cr_rc} (would page ${SLACK_CHANNEL}): ${_cr_out:0:300}"
+    elif [ $((_cr_now - _cr_last)) -ge "$COPY_REVIEW_ALERT_INTERVAL" ]; then
+      # slack_notify_critical always returns 0, so it cannot tell a delivered page from a lost one. Use the
+      # status-returning sender (the same one the exec-posture page uses) so the stamp follows a CONFIRMED post.
+      _cr_send_rc=1; _cr_payload=""
+      _cr_payload="$(mktemp 2>/dev/null)" && {
+        if jq -n --arg c "$SLACK_CHANNEL" --arg n "<@${SLACK_UID_NICK}> <@${SLACK_UID_AARON}>" --arg h "$_cr_head" \
+             '{channel:$c, text:($n + " " + $h)}' > "$_cr_payload" 2>/dev/null; then
+          _cr_send_rc=0
+          slack_notify_payload_file_status "$_cr_payload" || _cr_send_rc=$?
+        else
+          log "WARN: could not build the copy review queue page"
+        fi
+        rm -f "$_cr_payload"
+      }
+      if [ "$_cr_send_rc" -eq 0 ]; then
+        log "Posted copy review queue alert to ${SLACK_CHANNEL} (rc=${_cr_rc})."
+        mkdir -p "$(dirname "$COPY_REVIEW_ALERT_STATE")" 2>/dev/null || true
+        printf '%s' "$_cr_now" > "$COPY_REVIEW_ALERT_STATE" 2>/dev/null || true
+      else
+        # NO STAMP: a page nobody received must never buy six hours of silence.
+        log "copy review queue page delivery FAILED (rc=${_cr_rc}) — NOT stamped, retried next tick"
+      fi
+    else
+      log "copy review queue stall (page suppressed, last $((_cr_now - _cr_last))s ago, rc=${_cr_rc})"
+    fi
+  fi
+fi
+
+# ──────────────────────────────────────────────────────────────
 # Agent exec posture (guardrails-1101 gap 2 / H1): policies/agent-exec-policy.json + the RULES in
 # scripts/check-agent-exec-policy.py.
 #

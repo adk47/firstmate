@@ -55,6 +55,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from lib.customer_outcome import outcome_tag, outcome_tags_of  # noqa: E402
 from lib.intercom_identity import resolve_admin_id  # noqa: E402
+from lib import copy_gate  # noqa: E402
+
+COPY_CAMPAIGN = "merged-notify"
 from lib import merge_keep_conflict as mkc  # noqa: E402
 
 CLICKUP_API = os.environ.get("CLICKUP_API", "https://api.clickup.com/api/v2")
@@ -185,6 +188,9 @@ def check_admin_replied_since(conv_id, merge_at, intercom_token):
 
 
 def post_intercom_reply(conv_id, admin_id, message, intercom_token):
+    # THE OUTBOUND COPY GATE (captain 2026-11-12): the exact body must carry a signed reviewer verdict, or it does
+    # not go out. This is the only customer POST in this file, so there is no path around it.
+    copy_gate.require(COPY_CAMPAIGN, message)
     s, body = http(
         "POST",
         f"{INTERCOM_API}/conversations/{conv_id}/reply",

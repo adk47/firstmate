@@ -271,7 +271,10 @@ CREATE TABLE IF NOT EXISTS verify_messages (
   variant TEXT,                      -- p1 615: the openers/prefixes it carried, comma-joined (c2, reply_due_correction, o)
   approver_kind TEXT,                -- captain-slack | fable-ruling; NULL only on rows written before 2026-11-03
   approval_id TEXT,                  -- the Slack UID, or the fable-ruling-YYYYMMDD-N id, that authorizes this send
-  template_sha256 TEXT               -- sha256 of the template identity it rendered (campaign|kind|copy|variant)
+  template_sha256 TEXT,              -- sha256 of the template identity it rendered (campaign|kind|copy|variant)
+  copy_verdict_id TEXT,              -- outbound copy gate: the reviewer's signed verdict on body_sha256 (ocv-...)
+  copy_verdict_sha256 TEXT,          -- sha256 of that signed statement, so the row names the exact artefact
+  copy_review TEXT                   -- what the copy review said when the note left: approved | observed:<pending|rewrite|...>
 );
 CREATE TABLE IF NOT EXISTS verify_proof_reviews (
   family INTEGER NOT NULL,           -- verify_messages.id of the initial note
@@ -1477,9 +1480,18 @@ def log_deferral(db: sqlite3.Connection, *, campaign: str, user_key: str, day: s
 
 
 def finalize(db: sqlite3.Connection, *, message_row: int, status: str, message_id: str = "", conversation_id: str = "",
-             reason: str = "", body_sha256: str = "", api_log: str = "", now: datetime | None = None) -> None:
+             reason: str = "", body_sha256: str = "", api_log: str = "", now: datetime | None = None,
+             copy_verdict_id: str = "", copy_verdict_sha256: str = "", copy_review: str = "") -> None:
     if status not in ("sent", "rejected", "refused", "attempted"):
         raise ValueError(f"bad status {status!r}")
+    if copy_review and not COPY_REVIEW_RE.match(copy_review):
+        raise ValueError(f"copy review {copy_review!r} is not `approved` or `observed:<state>`")
+    if copy_review == "approved" and not (copy_verdict_id and copy_verdict_sha256):
+        raise ValueError("an approved copy review names its verdict id and sha256")
+    if copy_verdict_id and not COPY_VERDICT_ID_RE.match(copy_verdict_id):
+        raise ValueError(f"copy verdict id {copy_verdict_id!r} is not an ocv-<16 hex> id")
+    if copy_verdict_sha256 and not TEMPLATE_SHA_RE.match(copy_verdict_sha256):
+        raise ValueError("copy verdict sha256 is not a sha256 hex digest")
     ts = stamp(now)
     db.execute("BEGIN IMMEDIATE")
     try:
@@ -1487,12 +1499,67 @@ def finalize(db: sqlite3.Connection, *, message_row: int, status: str, message_i
             "UPDATE verify_messages SET status=?, message_id=COALESCE(NULLIF(?,''),message_id), "
             "conversation_id=COALESCE(NULLIF(?,''),conversation_id), reason=COALESCE(NULLIF(?,''),reason), "
             "body_sha256=COALESCE(NULLIF(?,''),body_sha256), api_log=COALESCE(NULLIF(?,''),api_log), updated_at=?, "
-            "sent_at=CASE WHEN ?='sent' THEN COALESCE(sent_at, ?) ELSE sent_at END "
+            "sent_at=CASE WHEN ?='sent' THEN COALESCE(sent_at, ?) ELSE sent_at END, "
+            "copy_verdict_id=COALESCE(NULLIF(?,''),copy_verdict_id), "
+            "copy_verdict_sha256=COALESCE(NULLIF(?,''),copy_verdict_sha256), "
+            "copy_review=COALESCE(NULLIF(?,''),copy_review) "
             "WHERE id=?", (status, message_id, conversation_id, reason[:500], body_sha256, api_log, ts, status, ts,
-                           message_row))
+                           copy_verdict_id, copy_verdict_sha256, copy_review, message_row))
         db.execute("UPDATE verify_requests SET status=?, updated_at=? WHERE message_row=?", (status, ts, message_row))
         db.execute("COMMIT")
     except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+COPY_VERDICT_ID_RE = re.compile(r"^ocv-[0-9a-f]{16}$")
+# approved = a signed approval on the exact bytes. observed:<state> = the campaign was in the gate's observe mode, the
+# note left WITHOUT an approval, and <state> is what the review said (pending, rewrite, verdict_invalid).
+COPY_REVIEW_RE = re.compile(r"^(approved|observed:[a-z_]{1,40})$")
+COPY_HOLD_PREFIX = "copy_review"
+
+
+def hold_copy_review(db: sqlite3.Connection, *, message_row: int, reason: str, body_sha256: str = "",
+                     now: datetime | None = None) -> dict[str, Any]:
+    """The outbound copy gate did not approve the body this claim rendered, so NOTHING was posted: give the claim
+    back. The row becomes a `deferred` LOG (never a lock: no cap, no idempotency, no 7-day gate, not a refusal) that
+    carries the reason and the body's hash, and its requests return to what they were before the claim, so the note is
+    offered again next run - when the reviewer has ruled, or the copy has changed. Refuses any row that is not a
+    never-posted `attempted` claim: a hold can never un-send a message. One log row per user, campaign, day and
+    reason; a repeat the same day drops the fresh claim instead of adding a second identical line."""
+    if not reason.startswith(COPY_HOLD_PREFIX):
+        raise ValueError(f"a copy-review hold reason starts with {COPY_HOLD_PREFIX!r}: {reason!r}")
+    if body_sha256 and not TEMPLATE_SHA_RE.match(body_sha256):
+        raise ValueError("body sha256 is not a sha256 hex digest")
+    ts = stamp(now)
+    full = (reason + (f" body={body_sha256}" if body_sha256 else ""))[:500]
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        row = db.execute("SELECT id, campaign, kind, user_key, account_id, day, status, message_id FROM verify_messages "
+                         "WHERE id=?", (message_row,)).fetchone()
+        if row is None or row["status"] != "attempted" or row["message_id"]:
+            db.execute("ROLLBACK")
+            raise ValueError(f"row {message_row} is not a never-posted claim; a copy hold cannot touch it")
+        # the claim's own request rows: a first attempt is removed, a retry goes back to the rejected attempt it was
+        db.execute("DELETE FROM verify_requests WHERE message_row=? AND status='attempted' AND attempts<=1",
+                   (message_row,))
+        db.execute("UPDATE verify_requests SET status='rejected', attempts=attempts-1, updated_at=? "
+                   "WHERE message_row=? AND status='attempted'", (ts, message_row))
+        dup = db.execute(
+            "SELECT id FROM verify_messages WHERE id<>? AND campaign=? AND kind=? AND user_key=? AND day=? "
+            "AND status='deferred' AND reason=? LIMIT 1",
+            (message_row, row["campaign"], row["kind"], row["user_key"], row["day"], full)).fetchone()
+        if dup is not None:
+            db.execute("DELETE FROM verify_messages WHERE id=?", (message_row,))
+            db.execute("UPDATE verify_messages SET updated_at=? WHERE id=?", (ts, dup["id"]))
+            db.execute("COMMIT")
+            return {"result": "held", "message_row": int(dup["id"]), "repeat": True}
+        db.execute("UPDATE verify_messages SET status='deferred', reason=?, body_sha256=COALESCE(NULLIF(?,''),body_sha256), "
+                   "attempts=MAX(COALESCE(attempts,1)-1,0), updated_at=? WHERE id=?",
+                   (full, body_sha256, ts, message_row))
+        db.execute("COMMIT")
+        return {"result": "held", "message_row": message_row, "repeat": False}
+    except sqlite3.Error:
         db.execute("ROLLBACK")
         raise
 
@@ -1804,8 +1871,8 @@ def _past_removal_day(db: sqlite3.Connection, day: str, *,
                 told_at = str(note["created_at"]) if note is not None else (
                     str(review["reviewed_at"]) if by_core and by_core.get(rid) is True else None)
                 if proof_at and str(proof_at) > str(review["reviewed_at"]):
-                    # a document arrived AFTER this review: the decline promised a fresh review ("submit the credit
-                    # again with your supporting documents and a fresh review will start"), so the credit is held for
+                    # a document arrived AFTER this review: the decline says the person can resubmit ("You can
+                    # resubmit for the credit again later"), and this is that resubmission, so the credit is held for
                     # that review, never removed on the strength of the earlier one.
                     reason = HELD_AWAITING_REVIEW
                 elif told_at is None:
@@ -2087,7 +2154,7 @@ def awaiting_proof(db: sqlite3.Connection, *, days: int = 45, now: datetime | No
         if r["proof_tagged_at"]:
             if r["campaign"] == DECLINE_CAMPAIGN:
                 # A decline is read whatever its parent note's date is: the user's new document is the restart the
-                # decline promised ("submit the credit again ... a fresh review will start"), never a dead thread.
+                # decline offered ("You can resubmit for the credit again later"), never a dead thread.
                 # And it names its OWN credits, which can come from SEVERAL note families (QA #1718, 2026-11-06):
                 # reading the parent note's ids and the parent's reviews meant that once the FIRST credit was
                 # accepted the whole decline was skipped, so a fresh document for the second credit was never
@@ -2508,6 +2575,13 @@ def _main(argv: list[str] | None = None) -> int:
     f.add_argument("--reason", default="")
     f.add_argument("--body-sha256", default="")
     f.add_argument("--api-log", default="")
+    f.add_argument("--copy-verdict-id", default="")
+    f.add_argument("--copy-verdict-sha256", default="")
+    f.add_argument("--copy-review", default="")
+    hc = sub.add_parser("hold-copy-review", help="give back a claim whose body the copy gate did not approve")
+    hc.add_argument("--message-row", type=int, required=True)
+    hc.add_argument("--reason", required=True)
+    hc.add_argument("--body-sha256", default="")
     pn = sub.add_parser("pending", help="the given request ids that have NOT had this campaign's note yet")
     pn.add_argument("--campaign", default="verify-live", choices=CAMPAIGNS)
     pn.add_argument("--request-ids", required=True)
@@ -2622,8 +2696,12 @@ def _main(argv: list[str] | None = None) -> int:
         out = refund_unconfirmed(db, feed=a.feed, hours=a.hours, now=(a.now or None))
     elif a.op == "finalize":
         finalize(db, message_row=a.message_row, status=a.status, message_id=a.message_id,
-                 conversation_id=a.conversation_id, reason=a.reason, body_sha256=a.body_sha256, api_log=a.api_log)
+                 conversation_id=a.conversation_id, reason=a.reason, body_sha256=a.body_sha256, api_log=a.api_log,
+                 copy_verdict_id=a.copy_verdict_id, copy_verdict_sha256=a.copy_verdict_sha256,
+                 copy_review=a.copy_review)
         out = {"result": "ok"}
+    elif a.op == "hold-copy-review":
+        out = hold_copy_review(db, message_row=a.message_row, reason=a.reason, body_sha256=a.body_sha256)
     elif a.op == "pending":
         ids = _ids(a.request_ids)
         blocked = blocked_ids(db, ids, a.campaign)

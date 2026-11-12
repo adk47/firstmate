@@ -150,6 +150,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.intercom_identity import resolve_admin_id  # noqa: E402
+from lib import copy_gate  # noqa: E402
+
+COPY_CAMPAIGN = "duplicate-pointer"
 from lib.jev_shadow import shadow_judge  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
@@ -659,6 +662,9 @@ def post_pointer_comment(token, admin_id, conv_id, message):
     """POST /conversations/{id}/reply, message_type "comment" — a
     customer-visible admin reply. Same shape as resolve-notify.py's
     post_intercom_reply (scripts/resolve-notify.py:182-188)."""
+    # THE OUTBOUND COPY GATE (captain 2026-11-12): the exact body must carry a signed reviewer verdict, or it does
+    # not go out. This is the only customer POST in this file, so there is no path around it.
+    copy_gate.require(COPY_CAMPAIGN, message)
     req = urllib.request.Request(
         f"{INTERCOM_API}/conversations/{conv_id}/reply",
         data=json.dumps({"message_type": "comment", "type": "admin",
@@ -1158,6 +1164,13 @@ def main():
             # a customer whose original POST may have actually landed).
             status = pointer_state.get(str(older["id"]))
             if status != "posted":
+                # The copy gate is asked BEFORE the "pending" marker below: a held pointer must leave no marker,
+                # or a later run would treat a comment that was never posted as an unconfirmed delivery.
+                try:
+                    copy_gate.require(COPY_CAMPAIGN, POINTER_TEXT)
+                except copy_gate.CopyHeld as e:
+                    fail.append((older["id"], f"pointer held by the copy gate (no post, no close): {str(e)[:140]}"))
+                    continue
                 if status is None:
                     # First attempt this conversation has ever seen: record
                     # "pending" BEFORE the POST. Persist failure -> skip

@@ -15,6 +15,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import shutil
 import tempfile
 import threading
 import unittest
@@ -55,6 +56,7 @@ def live_policy(**kw) -> dict:
         p["channels"][ch]["enabled"] = kw.get(ch, True)
     p["channels"]["bell"]["workflow_keys"] = {}
     p["channels"]["email"]["template_keys"] = {t: f"request_status_{t}" for t in lines.TYPES}
+    p["channels"]["email"]["template_sha256"] = {f"request_status_{t}": TEMPLATE_PIN for t in lines.TYPES}
     p["channels"]["email"]["template_uses_line_text"] = True   # the template renders {{event.status_line}}
     return p
 
@@ -111,13 +113,39 @@ class FakeChannels:
         self.bells.append({"key": workflow_key, "user": user_id, "data": data, "idem": idempotency_key})
         return self._res("bell", json.dumps(data, sort_keys=True))
 
-    def intercom(self, text, contact_id, *, admin_id, conversation_id=""):
-        self.intercoms.append({"text": text, "contact": contact_id, "conversation_id": conversation_id})
+    def intercom(self, text, contact_id, *, admin_id, conversation_id="", typ="", state=""):
+        self.intercoms.append({"text": text, "contact": contact_id, "conversation_id": conversation_id,
+                               "typ": typ, "state": state})
         return self._res("intercom", text)
 
     def email(self, text, *, email, user_id, typ, request_ref, idempotency_key="", state=""):
         self.emails.append({"text": text, "ref": request_ref, "idem": idempotency_key, "state": state})
         return self._res("email", text)
+
+
+# THE OUTBOUND COPY GATE (captain 2026-11-12). Every body request_comms writes is put to lib/copy_gate.require
+# before it leaves. This suite pins the driver's and the channels' OTHER rules, so by default the gate here is a
+# stand-in that approves and records what it was asked; CopyGateTests below make it hold and pin that nothing
+# leaves. The gate's own rules are scripts/tests/test_outbound_copy_gate.py.
+COPY_GATE = channels_mod._copy_gate()
+COPY_ASKED: list[tuple[str, str, str]] = []
+TEMPLATE_PIN = "ab" * 32         # stands for the sha256 of a reviewed send-gateway template source
+COPY_FRAMES: list[str] = []      # the `copy` each ask named: the frame the body is sent in
+_REAL_REQUIRE = COPY_GATE.require
+
+
+def _approving_require(campaign, body, *, subject="", copy="", **_kw):
+    COPY_ASKED.append((campaign, body, subject))
+    COPY_FRAMES.append(copy)
+    return {"result": "approved", "verdict_id": "ocv-" + "0" * 16}
+
+
+def setUpModule() -> None:
+    COPY_GATE.require = _approving_require
+
+
+def tearDownModule() -> None:
+    COPY_GATE.require = _REAL_REQUIRE
 
 
 class Base(unittest.TestCase):
@@ -1607,6 +1635,7 @@ class RoundTenTests(Base):
     def test_an_unreadable_2xx_email_is_uncertain(self):
         pol = repo_policy()
         pol["channels"]["email"]["template_keys"] = {"credit": "status_credit"}
+        pol["channels"]["email"]["template_sha256"] = {"status_credit": TEMPLATE_PIN}
         ch = channels_mod.Channels(policy=pol, send_gateway=lambda p: {"http": 200})
         r = ch.email("hello", email="u@example.com", user_id="111", typ="credit", state="received",
                      request_ref="credit:1")
@@ -2517,6 +2546,286 @@ class IdentityUnknownTests(Base):
                                    channels=ch, bans=FakeBans(), identity=lambda e, u, d: ""))
         self.assertEqual(len(ch.emails), 1, "a confirmed no-contact account is who email is for")
         self.assertEqual(out["counts"].get("sent"), 1)
+
+
+def _gate_tree(default_mode: str) -> Path:
+    """A copy of the real gate with its own mode table, so a test can read the gate in a mode the shipped table
+    (policies/outbound-copy-enforce.json: most campaigns observed) does not give this campaign."""
+    tmp = Path(tempfile.mkdtemp(prefix="rc-gate-"))
+    (tmp / "scripts" / "outbound_copy").mkdir(parents=True)
+    (tmp / "policies").mkdir()
+    shutil.copy(ROOT / "scripts" / "outbound_copy" / "gate.py", tmp / "scripts" / "outbound_copy" / "gate.py")
+    for name in ("outbound-copy-rubric.md", "outbound-copy-reviewer.allowed_signers"):
+        shutil.copy(ROOT / "policies" / name, tmp / "policies" / name)
+    (tmp / "policies" / "outbound-copy-enforce.json").write_text(json.dumps(
+        {"version": 1, "default": default_mode, "enforce": [], "observe": [], "retired": []}))
+    return tmp / "scripts" / "outbound_copy" / "gate.py"
+
+
+class CopyGateTests(unittest.TestCase):
+    """A body the outbound copy gate has not approved does not leave, on either channel that carries our words."""
+
+    def setUp(self):
+        self._require = COPY_GATE.require
+        del COPY_ASKED[:]
+        del COPY_FRAMES[:]
+
+    def tearDown(self):
+        COPY_GATE.require = self._require
+
+    def hold(self, reason="copy_review_pending", pending=True):
+        def require(campaign, body, *, subject="", **_kw):
+            COPY_ASKED.append((campaign, body, subject))
+            raise COPY_GATE.CopyHeld(reason, "0" * 64, pending=pending)
+        COPY_GATE.require = require
+
+    def test_the_gate_is_asked_about_the_exact_intercom_body_under_the_requests_own_campaign(self):
+        posted = []
+        ch = channels_mod.Channels(policy=live_policy(),
+                                   intercom_post=lambda m, p, b: posted.append((p, b)) or {"id": "42"})
+        got = ch.intercom("We have your request.", "c_1", admin_id="1", typ="credit", state="received")
+        self.assertEqual(got.status, "sent")
+        self.assertEqual(len(COPY_ASKED), 1)
+        campaign, body, subject = COPY_ASKED[0]
+        self.assertEqual(campaign, "request-credit-received")
+        self.assertEqual((body, subject), (posted[0][1]["body"], str(posted[0][1].get("subject") or "")))
+
+    def test_each_channel_names_the_frame_its_body_is_sent_in(self):
+        """The verdict is bound to the frame: an Intercom message is the whole of what the person reads, an email
+        line is placed into the template named by the policy's key, and a line approved for one is not approved
+        for the other (QA review of hydra#1895)."""
+        policy = live_policy()
+        key = policy["channels"]["email"]["template_keys"]["credit"]
+        ch = channels_mod.Channels(policy=policy, intercom_post=lambda m, p, b: {"id": "42"},
+                                   send_gateway=lambda p: {"status": "sent", "id": "m1"})
+        ch.intercom("We have your request.", "c_1", admin_id="1", typ="credit", state="received")
+        ch.email("We have your request.", email="a@b.co", user_id="1", typ="credit", request_ref="credit:1",
+                 state="received")
+        self.assertEqual(COPY_FRAMES, ["intercom", f"email-template:{key}@{TEMPLATE_PIN}"])
+        self.assertTrue(key)
+
+    def test_a_held_intercom_body_is_never_posted(self):
+        for reason, pending in (("copy_review_pending", True), ("copy_review_refuse:ocv-0123456789abcdef", False),
+                                ("copy_gate_error:rc=2", False)):
+            with self.subTest(reason=reason):
+                self.hold(reason, pending)
+                posted = []
+                ch = channels_mod.Channels(policy=live_policy(),
+                                           intercom_post=lambda m, p, b: posted.append(p) or {"id": "42"})
+                for conversation_id in ("", "900"):
+                    got = ch.intercom("We have your request.", "c_1", admin_id="1", typ="credit",
+                                      state="received", conversation_id=conversation_id)
+                    self.assertEqual((got.status, got.reason), ("rejected", f"copy_review_hold: {reason}"))
+                self.assertEqual(posted, [])
+
+    def test_a_held_email_line_is_never_handed_to_the_send_gateway(self):
+        self.hold()
+        sent = []
+        ch = channels_mod.Channels(policy=live_policy(),
+                                   send_gateway=lambda p: sent.append(p) or {"status": "sent", "id": "m1"})
+        got = ch.email("We have your request.", email="a@b.co", user_id="1", typ="credit",
+                       request_ref="credit:1", state="received")
+        self.assertEqual((got.status, got.reason), ("rejected", "copy_review_hold: copy_review_pending"))
+        self.assertEqual(sent, [])
+        self.assertEqual(COPY_ASKED[0][:2], ("request-credit-received", "We have your request."))
+
+    def test_an_email_whose_template_has_no_reviewed_source_hash_is_never_sent(self):
+        """The verdict covers the status line. The words around it (subject, greeting, footer) are the template's,
+        and they live in send-gateway; the policy's pin is the sha256 of the template source that was reviewed.
+        No pin = nobody can say which words surround the line, so nothing is sent and the gate is not even asked
+        (QA review 5869455348 of hydra#1895)."""
+        for broken in ({}, {"request_status_credit": ""}, {"request_status_credit": "abc"},
+                       {"request_status_credit": "Z" * 64}, {"request_status_claim": TEMPLATE_PIN}, None, "x"):
+            policy = live_policy()
+            policy["channels"]["email"]["template_sha256"] = broken
+            sent = []
+            del COPY_ASKED[:]
+            ch = channels_mod.Channels(policy=policy,
+                                       send_gateway=lambda p: sent.append(p) or {"status": "sent", "id": "m1"})
+            got = ch.email("We have your request.", email="a@b.co", user_id="1", typ="credit",
+                           request_ref="credit:1", state="received")
+            self.assertEqual((got.status, got.reason),
+                             ("rejected", "copy_review_hold: email_template_unpinned:request_status_credit"), broken)
+            self.assertEqual((sent, COPY_ASKED), ([], []), broken)
+
+    def test_a_changed_template_pin_is_another_frame_so_an_earlier_verdict_does_not_cover_it(self):
+        frames = []
+        for pin in (TEMPLATE_PIN, "cd" * 32):
+            policy = live_policy()
+            policy["channels"]["email"]["template_sha256"]["request_status_credit"] = pin
+            del COPY_FRAMES[:]
+            channels_mod.Channels(policy=policy, send_gateway=lambda p: {"status": "sent", "id": "m1"}).email(
+                "We have your request.", email="a@b.co", user_id="1", typ="credit", request_ref="credit:1",
+                state="received")
+            frames.append(COPY_FRAMES[0])
+        self.assertEqual(frames, [f"email-template:request_status_credit@{TEMPLATE_PIN}",
+                                  f"email-template:request_status_credit@{'cd' * 32}"])
+        # and through the REAL gate: the two frames are two review slots, never one verdict for both
+        store = tempfile.mkdtemp(prefix="rc-pin-")
+        real, COPY_GATE.require = COPY_GATE.require, _REAL_REQUIRE
+        saved_store, COPY_GATE.STORE = COPY_GATE.STORE, store
+        saved_gate, COPY_GATE.GATE = COPY_GATE.GATE, _gate_tree("enforce")
+        try:
+            for frame in frames:
+                self.assertIn("copy_review_pending", channels_mod.copy_hold(
+                    "credit", "received", "We have your request.", frame=frame))
+        finally:
+            COPY_GATE.require, COPY_GATE.STORE, COPY_GATE.GATE = real, saved_store, saved_gate
+        self.assertEqual(len(list((Path(store) / "pending").glob("*.json"))), 2)
+
+    def test_email_cannot_be_enabled_without_a_reviewed_source_hash_for_every_template(self):
+        pol = live_policy()
+        self.assertFalse(any("template_sha256" in p for p in lines.validate(pol)))
+        del pol["channels"]["email"]["template_sha256"]["request_status_refund"]
+        pol["channels"]["email"]["template_sha256"]["request_status_claim"] = "not-a-hash"
+        problems = [p for p in lines.validate(pol) if "template_sha256" in p]
+        self.assertEqual(len(problems), 2, problems)
+        self.assertTrue(any("request_status_refund" in p for p in problems) and any("request_status_claim" in p for p in problems))
+        # the shipped policy keeps the rung off, so it needs no pin yet
+        shipped = json.loads((Path(__file__).resolve().parents[1] / "policies" / "request-status-lines.json").read_text())
+        self.assertEqual((shipped["channels"]["email"]["enabled"], shipped["channels"]["email"]["template_sha256"]), (False, {}))
+
+    def _templates(self, subject="Your Muso request: an update", html_body="<p>Hi, {{ event.status_line }}</p>"):
+        root = Path(tempfile.mkdtemp(prefix="rc-tpl-")) / "templates"
+        (root / "native" / "request_status_credit").mkdir(parents=True)
+        (root / "registry.json").write_text(json.dumps({"keys": {"other": {"subject": "x", "html": "a", "text": "b"}}}))
+        (root / "native.json").write_text(json.dumps({"keys": {"request_status_credit": {
+            "class": "notify", "subject": subject, "preview_text": "",
+            "html": "native/request_status_credit/body.html", "text": "native/request_status_credit/body.txt"}}}))
+        (root / "native" / "request_status_credit" / "body.html").write_text(html_body, encoding="utf-8")
+        (root / "native" / "request_status_credit" / "body.txt").write_text("Hi, {{ event.status_line }}\n")
+        return root
+
+    def _run_send_js(self, payload, templates, token="admin:secret"):
+        """SEND_JS exactly as the pod runs it (`node -e`), against a local stand-in for the gateway's /v1/send."""
+        import http.server
+        self.assertTrue(__import__("shutil").which("node"), "node is required: SEND_JS is the code that posts")
+        got = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                got.append((self.path, self.headers.get("authorization"),
+                            json.loads(self.rfile.read(int(self.headers["content-length"])))))
+                out = json.dumps({"id": "m1", "status": "sent"}).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+            def log_message(self, *_a):
+                pass
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        try:
+            env = {"PATH": os.environ["PATH"], "PORT": str(srv.server_address[1]), "INTERNAL_TOKENS": token,
+                   "TEMPLATES_DIR": str(templates)}
+            p = subprocess.run(["node", "-e", channels_mod.SEND_JS], input=json.dumps(payload), env=env,
+                               capture_output=True, text=True, timeout=60)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout.strip().splitlines()[-1]), got
+
+    def test_the_pod_posts_only_when_the_live_template_is_the_pinned_one(self):
+        """QA review of hydra#1895: a pin the policy merely declares is not a check. The script that posts hashes the
+        template the gateway would render and posts nothing unless it is the reviewed one."""
+        tpl = self._templates()
+        pin = channels_mod.template_source_sha256(tpl, "request_status_credit")
+        payload = {"key": "request_status_credit", "to": {"email": "a@b.co", "user_id": "1"},
+                   "data": {"event": {"status_line": "We have your request."}}, "idempotency_key": "k"}
+        ans, got = self._run_send_js({**payload, "_template_sha256": pin}, tpl)
+        self.assertEqual((ans["status"], ans["id"], len(got)), ("sent", "m1", 1), ans)
+        self.assertEqual(got[0][:2], ("/v1/send", "Bearer secret"))
+        self.assertEqual(got[0][2], payload, "the pin is ours, never a gateway field: it is stripped before the POST")
+        # each of the four parts the reader sees is in the hash: change one and nothing is posted
+        changed = (self._templates(subject="Your Muso request: ACTION NEEDED"),
+                   self._templates(html_body="<p>Hi, {{ event.status_line }}</p><p>You were flagged.</p>"))
+        txt = self._templates()
+        (txt / "native" / "request_status_credit" / "body.txt").write_text("Other words.\n")
+        pre = self._templates()
+        nat = json.loads((pre / "native.json").read_text())
+        nat["keys"]["request_status_credit"]["preview_text"] = "Act now"
+        (pre / "native.json").write_text(json.dumps(nat))
+        for other in (*changed, txt, pre):
+            live = channels_mod.template_source_sha256(other, "request_status_credit")
+            self.assertNotEqual(live, pin)
+            ans, got = self._run_send_js({**payload, "_template_sha256": pin}, other)
+            self.assertEqual((ans["status"], ans["reason"], ans["live_template_sha256"], got),
+                             ("rejected", "template_pin_mismatch", live, []), ans)
+        # no pin, a malformed pin, an unknown key, a missing body file, a key defined twice: nothing is posted
+        gone = self._templates()
+        (gone / "native" / "request_status_credit" / "body.html").unlink()
+        twice = self._templates()
+        (twice / "registry.json").write_text((twice / "native.json").read_text())
+        for body, where, why in (({**payload}, tpl, "template_pin_missing"),
+                                 ({**payload, "_template_sha256": "abc"}, tpl, "template_pin_missing"),
+                                 ({**payload, "key": "nope", "_template_sha256": pin}, tpl, "template_unreadable"),
+                                 ({**payload, "_template_sha256": pin}, gone, "template_unreadable"),
+                                 ({**payload, "_template_sha256": pin}, twice, "template_unreadable"),
+                                 ({**payload, "_template_sha256": pin}, tpl.parent / "absent", "template_unreadable")):
+            ans, got = self._run_send_js(body, where)
+            self.assertEqual((ans["status"], got), ("rejected", []), ans)
+            self.assertTrue(ans["reason"].startswith(why), ans)
+
+    def test_a_template_the_pod_refuses_is_a_hold_and_the_pin_travels_with_every_email(self):
+        sent = []
+        for reason in ("template_pin_mismatch", "template_unreadable: ENOENT", "template_pin_missing"):
+            ch = channels_mod.Channels(policy=live_policy(), send_gateway=lambda p, r=reason: (
+                sent.append(p), {"status": "rejected", "reason": r})[1])
+            got = ch.email("We have your request.", email="a@b.co", user_id="1", typ="credit",
+                           request_ref="credit:1", state="received")
+            self.assertEqual((got.status, got.reason), ("rejected", f"copy_review_hold: {reason}"))
+        self.assertEqual({p["_template_sha256"] for p in sent}, {TEMPLATE_PIN})
+        # the default transport is the checked script, with nothing in between that could drop the pin
+        import inspect
+        self.assertIn("_pod_json(SEND_GATEWAY_POD, payload, SEND_JS)", inspect.getsource(channels_mod.Channels.__init__))
+        js = channels_mod.SEND_JS
+        self.assertLess(js.index("template_pin_mismatch"), js.index("/v1/send"))
+        self.assertEqual(js.count("fetch("), 1)
+
+    def test_a_gate_that_cannot_even_be_asked_holds(self):
+        def broken(*_a, **_k):
+            raise OSError("no gate here")
+        COPY_GATE.require = broken
+        self.assertEqual(channels_mod.copy_hold("credit", "received", "<p>hi</p>"), "copy_review_hold: OSError")
+
+    def _real_gate(self, default_mode: str):
+        """No stand-in at all: the real lib/copy_gate + gate.py against a scratch store that has seen nothing."""
+        saved = (COPY_GATE.require, COPY_GATE.STORE, COPY_GATE.GATE)
+        self.addCleanup(lambda: (setattr(COPY_GATE, "require", saved[0]), setattr(COPY_GATE, "STORE", saved[1]),
+                                 setattr(COPY_GATE, "GATE", saved[2])))
+        COPY_GATE.require, COPY_GATE.STORE = _REAL_REQUIRE, tempfile.mkdtemp(prefix="rc-copy-")
+        COPY_GATE.GATE = _gate_tree(default_mode)
+        posted = []
+        ch = channels_mod.Channels(policy=live_policy(), intercom_post=lambda m, p, b: posted.append(p) or {"id": "42"})
+        return ch, posted, Path(COPY_GATE.STORE)
+
+    def test_the_real_gate_with_no_verdict_holds(self):
+        ch, posted, store = self._real_gate("enforce")
+        got = ch.intercom("We have your request.", "c_1", admin_id="1", typ="credit", state="received")
+        self.assertEqual((got.status, got.reason, posted), ("rejected", "copy_review_hold: copy_review_pending", []))
+        self.assertEqual(len(list((store / "pending").glob("*.json"))), 1)   # and it is queued for review
+
+    def test_the_real_gate_in_observe_mode_sends_and_queues_and_still_refuses_what_the_code_lint_refuses(self):
+        ch, posted, store = self._real_gate("observe")
+        got = ch.intercom("We have your request.", "c_1", admin_id="1", typ="credit", state="received")
+        self.assertEqual((got.status, len(posted)), ("sent", 1))
+        self.assertEqual(len(list((store / "pending").glob("*.json"))), 1)   # sent, and queued for review all the same
+        for text in ("Your request was flagged for fraud.",
+                     "Your request is with our team. Nothing is needed from you right now."):
+            got = ch.intercom(text, "c_1", admin_id="1", typ="credit", state="verifying")
+            self.assertEqual(got.status, "rejected", text)
+            self.assertTrue(got.reason.startswith("copy_review_hold: copy_lint:"), got.reason)
+        self.assertEqual(len(posted), 1)
+
+    def test_the_driver_passes_the_requests_type_and_state_to_the_channel(self):
+        src = (ROOT / "scripts" / "request_comms" / "driver.py").read_text()
+        self.assertEqual(src.count("chan.intercom("), 1)
+        i = src.index("chan.intercom(")
+        self.assertIn("typ=r.type, state=r.state", src[i:i + 400])
 
 
 class ChannelTests(unittest.TestCase):

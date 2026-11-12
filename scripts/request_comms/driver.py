@@ -713,7 +713,8 @@ def _deliver(chan: Any, p: Plan, text: str, cfg: Cfg, identify=None,
                 contact, _ = identify(str(facts.get("email") or ""), r.user_id, r.detail or {}, "")
             if not contact:
                 continue
-            res = chan.intercom(text, contact, admin_id=cfg.admin_id(), conversation_id=thread)
+            res = chan.intercom(text, contact, admin_id=cfg.admin_id(), conversation_id=thread,
+                                typ=r.type, state=r.state)
         elif channel == "email":
             email = str(facts.get("email") or "")
             if not email or "@" not in email:

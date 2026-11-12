@@ -114,6 +114,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.customer_outcome import outcome_tag, outcome_tags_of  # noqa: E402
 from lib.intercom_identity import resolve_admin_id  # noqa: E402
+from lib import copy_gate  # noqa: E402
+
+COPY_CAMPAIGN = "resolution-match"
 from lib.jev_shadow import shadow_judge  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
@@ -262,6 +265,9 @@ def get_conversation(conv_id, token):
 
 
 def post_intercom_reply(conv_id, admin_id, message, token):
+    # THE OUTBOUND COPY GATE (captain 2026-11-12): the exact body must carry a signed reviewer verdict, or it does
+    # not go out. This is the only customer POST in this file, so there is no path around it.
+    copy_gate.require(COPY_CAMPAIGN, message)
     s, body = http("POST", f"{INTERCOM_API}/conversations/{conv_id}/reply",
                    _ic_headers(token),
                    body={"message_type": "comment", "type": "admin",
@@ -1031,6 +1037,13 @@ def main(argv=None):
             else:
                 seen_convs.add(cid)
             acted.append(m)
+        except copy_gate.CopyHeld as e:
+            # The reviewer has not approved this exact copy: nothing was sent and nothing is marked, so the next run
+            # asks again. Waiting for a first review is not a failure; a refusal or a gate that cannot run is.
+            print(f"[{cid}] HELD {e} (nothing sent; "
+                  f"{'waiting for review' if e.pending else 'needs a person'})", file=sys.stderr)
+            if not e.pending:
+                failed += 1
         except urllib.error.HTTPError as e:
             try:
                 detail = e.read().decode("utf-8", "replace")[:200]

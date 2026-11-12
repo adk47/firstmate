@@ -46,7 +46,9 @@
         "refund": ""
       },
       "_note": "send-gateway template key per request type. A type with no key gets no email rung (it is reported, never silently dropped to a different channel). The gateway renders the TEMPLATE, so each key must be registered with a body of `{{event.status_line}}` (the approved line travels in `data.event.status_line`); `template_uses_line_text` is the promise that they do, and enabling this rung without it is a policy error.",
-      "template_uses_line_text": false
+      "template_uses_line_text": false,
+      "template_sha256": {},
+      "_template_sha256_note": "sha256 of the reviewed send-gateway template source, per template key. It is part of the frame the outbound copy gate's verdict is bound to (email-template:<key>@<sha256>): a template whose words change needs a new pin, and a new pin voids every earlier verdict for that template. A key with no pin sends no email."
     }
   },
   "sources": {

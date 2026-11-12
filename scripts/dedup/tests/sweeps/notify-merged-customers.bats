@@ -126,6 +126,12 @@ import sys, types, json
 from importlib import util
 spec = util.spec_from_file_location('n', '$NOTIFY')
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+# The outbound copy gate has its own suites (scripts/tests/test_outbound_copy_gate.py runs this sender against the
+# REAL gate.py in both modes). Here a stand-in approves, and records what it was asked.
+gate_asks = []
+def _gate(campaign, body, **kw):
+    gate_asks.append((campaign, body)); return {'result': 'approved'}
+mod.copy_gate.require = _gate
 
 captured = {}
 def fake_http(method, url, headers, body=None, timeout=30):
@@ -152,6 +158,58 @@ assert body['message_type'] == 'comment', body
 assert body['type'] == 'admin', body
 assert body['admin_id'] == 'admin-42', body
 assert body['body'] == mod.MESSAGE, body
+assert gate_asks == [(mod.COPY_CAMPAIGN, body['body'])], gate_asks   # asked once, about these bytes
+print('ok')
+PYEOF
+  run python3 "$script"
+  rm -f "$script"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx "ok"
+}
+
+@test "a message the copy gate does not approve is not posted, the ticket stays open and the conversation is not marked" {
+  # Captain 2026-11-12: a customer message is put to the outbound copy gate first. A hold (no verdict yet in an
+  # enforced campaign, a refusal, or a gate that cannot run - which is what a host without the gate's store gives)
+  # must leave NOTHING behind: no reply, no closed ticket, no dedup mark that would close a sibling ticket silently.
+  script=$(mktemp)
+  cat > "$script" <<PYEOF
+import sys, types
+from importlib import util
+spec = util.spec_from_file_location('n', '$NOTIFY')
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+calls, closed = [], []
+def fake_http(method, url, headers, body=None, timeout=30):
+    calls.append((method, url)); return 200, {}
+mod.http = fake_http
+mod.get_ticket = lambda tid, key: {
+    'description': '''---ACTION-REQUEST---
+{"customer_email": "x@y.com", "customer_profile_id": "abc"}
+---END-ACTION-REQUEST---''',
+    'date_updated': '1716000000000',
+}
+mod.find_intercom_conv = lambda email, tok: {'id': 'CONV-1', 'updated_at': 1}
+mod.check_admin_replied_since = lambda conv_id, merge_at, tok: False
+mod.comment_and_close_ticket = lambda *a, **k: closed.append(a)
+mod.mark_merge_outcome_notified = lambda *a, **k: closed.append(a)
+
+args = types.SimpleNamespace(apply=True)
+env = {'CLICKUP_API_KEY': 'k', 'MUSOAI_INTERCOM_TOKEN': 't', 'ADMIN_ID': 'admin-42'}
+for why, pending in (('copy_review_pending', True),
+                     ('copy_review_refuse:ocv-0123456789abcdef', False),
+                     ("copy_gate_error:[Errno 13] Permission denied: '/var/lib/hydra'", False)):
+    def held(campaign, body, _why=why, _pending=pending, **kw):
+        raise mod.copy_gate.CopyHeld(_why, '0' * 64, pending=_pending)
+    mod.copy_gate.require = held
+    try:
+        mod.process('T1', args, env)
+    except mod.copy_gate.CopyHeld as exc:
+        assert (exc.reason, str(exc)) == (why, 'copy_review_hold: ' + why), exc
+    else:
+        raise AssertionError('a held message must not read as a sent one: ' + why)
+    assert [c for c in calls if '/reply' in c[1]] == [], calls
+    assert closed == [], closed
+    assert 'CONV-1' not in mod._SEEN_CONVS, 'conv was marked dedup though nothing was sent'
 print('ok')
 PYEOF
   run python3 "$script"
@@ -222,6 +280,12 @@ import sys, types, json, os
 from importlib import util
 spec = util.spec_from_file_location('n', '$NOTIFY')
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+# The outbound copy gate has its own suites (scripts/tests/test_outbound_copy_gate.py runs this sender against the
+# REAL gate.py in both modes). Here a stand-in approves, and records what it was asked.
+gate_asks = []
+def _gate(campaign, body, **kw):
+    gate_asks.append((campaign, body)); return {'result': 'approved'}
+mod.copy_gate.require = _gate
 
 captured = {}
 def fake_http(method, url, headers, body=None, timeout=30):
@@ -272,6 +336,12 @@ import sys, types, json, os
 from importlib import util
 spec = util.spec_from_file_location('n', '$NOTIFY')
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+# The outbound copy gate has its own suites (scripts/tests/test_outbound_copy_gate.py runs this sender against the
+# REAL gate.py in both modes). Here a stand-in approves, and records what it was asked.
+gate_asks = []
+def _gate(campaign, body, **kw):
+    gate_asks.append((campaign, body)); return {'result': 'approved'}
+mod.copy_gate.require = _gate
 
 captured = {}
 def fake_http(method, url, headers, body=None, timeout=30):
@@ -367,6 +437,12 @@ os.environ['MERGE_OUTCOME_STATE'] = '$state'
 from importlib import util
 spec = util.spec_from_file_location('n', '$NOTIFY')
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+# The outbound copy gate has its own suites (scripts/tests/test_outbound_copy_gate.py runs this sender against the
+# REAL gate.py in both modes). Here a stand-in approves, and records what it was asked.
+gate_asks = []
+def _gate(campaign, body, **kw):
+    gate_asks.append((campaign, body)); return {'result': 'approved'}
+mod.copy_gate.require = _gate
 
 calls = []
 def fake_http(method, url, headers, body=None, timeout=30):
@@ -441,6 +517,12 @@ import types
 from importlib import util
 spec = util.spec_from_file_location('n', '$NOTIFY')
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+# The outbound copy gate has its own suites (scripts/tests/test_outbound_copy_gate.py runs this sender against the
+# REAL gate.py in both modes). Here a stand-in approves, and records what it was asked.
+gate_asks = []
+def _gate(campaign, body, **kw):
+    gate_asks.append((campaign, body)); return {'result': 'approved'}
+mod.copy_gate.require = _gate
 
 calls = []
 fail_tag = {'on': False}

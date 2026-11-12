@@ -2906,6 +2906,16 @@ class WiringTests(unittest.TestCase):
         (t / "gate-removal.sh").write_text(src.replace("\nreadonly TESTABLE=0\n", "\nreadonly TESTABLE=1\n")
                                            .replace("\nreadonly REMOVAL_COPY_APPROVED=0\n",
                                                     "\nreadonly REMOVAL_COPY_APPROVED=1\n"))
+        # The outbound copy gate stand-in: approves the body it is handed, or answers "pending" when COPY_GATE_STUB
+        # says so. The gate's own rules (signed verdicts, the lint) are test_outbound_copy_gate.py; what is pinned
+        # here is that the driver cannot send past it.
+        (t / "copy_gate.py").write_text(
+            "import hashlib, json, os, sys\n"
+            "sha = hashlib.sha256(json.loads(sys.stdin.read())['body'].encode('utf-8')).hexdigest()\n"
+            "if os.environ.get('COPY_GATE_STUB') == 'pending':\n"
+            "    print(json.dumps({'body_sha256': sha, 'result': 'pending', 'reason': 'copy_review_pending'})); sys.exit(3)\n"
+            "print(json.dumps({'body_sha256': sha, 'result': 'approved', 'verdict_id': 'ocv-' + sha[:16], "
+            "'verdict_sha256': sha[::-1]}))\n")
         for f in ("gate.sh", "gate-retro.sh", "gate-windowed.sh", "gate-removal.sh", "curl"):
             (t / f).chmod((t / f).stat().st_mode | stat.S_IEXEC)
         self.path = str(t / "ledger.sqlite3")
@@ -2916,8 +2926,10 @@ class WiringTests(unittest.TestCase):
             "INTERCOM_VERIFY_TEST_CURL_BIN": str(t / "curl"), "INTERCOM_VERIFY_TEST_DAY": "2026-10-15",
             "INTERCOM_VERIFY_TEST_TIMEOUT_BIN": shutil.which("timeout") or shutil.which("gtimeout"),
             "INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER": str(t / "core_notice.py"),
+            "INTERCOM_VERIFY_TEST_COPY_GATE": str(t / "copy_gate.py"),
+            "INTERCOM_VERIFY_TEST_COPY_STORE": str(t / "copy-store"),
         }
-        self.saved = {k: os.environ.get(k) for k in self.env}
+        self.saved = {k: os.environ.get(k) for k in (*self.env, "COPY_GATE_STUB")}
         os.environ.update(self.env)
 
     def tearDown(self):
@@ -2944,6 +2956,38 @@ class WiringTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM verify_requests WHERE status='sent'").fetchone()[0], 3)
         finally:
             db.close()
+
+    def test_a_note_the_copy_gate_has_not_approved_is_held_not_sent_and_goes_out_once_it_is(self):
+        """Captain 2026-11-12: a message the reviewer has not approved does not go out. Through the real sender and
+        ledger: the driver reports the users as deferred, nothing is POSTed, nothing is locked - and the next run,
+        with the verdict on file, sends each note once."""
+        decisions_db(self.path, [dec("r1"), dec("r2"), dec("r3", pid=PID2)])
+        admin = FakeAdmin([req("r1"), req("r2", title="Other Song"), req("r3", pid=PID2, email="bob@example.com")])
+        gate = os.path.join(self.tmp, "gate-windowed.sh")
+        os.environ["COPY_GATE_STUB"] = "pending"
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper=gate)
+        self.assertEqual((rep.sent_notes, rep.deferred_users, rep.failed_users, rep.refused_users), (0, 2, 0, 0), rep)
+        self.assertTrue(all("copy_review_pending" in d for d in rep.deferrals), rep.deferrals)
+        log = Path(self.env["STUB_LOG"])
+        self.assertEqual([ln for ln in (log.read_text().splitlines() if log.exists() else []) if ln.endswith("/messages")], [])
+        db = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM verify_requests").fetchone()[0], 0)
+            self.assertEqual({r[0] for r in db.execute("SELECT status FROM verify_messages")}, {"deferred"})
+            self.assertTrue(all(r[0].startswith("copy_review_hold: copy_review_pending body=")
+                                for r in db.execute("SELECT reason FROM verify_messages")))
+        finally:
+            db.close()
+        os.environ.pop("COPY_GATE_STUB")
+        rep2 = verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper=gate)
+        self.assertEqual((rep2.sent_notes, rep2.sent_credits, rep2.deferred_users), (2, 3, 0), rep2)
+        db = sqlite3.connect(self.path)
+        try:
+            rows = db.execute("SELECT copy_verdict_id, copy_verdict_sha256 FROM verify_messages WHERE status='sent'").fetchall()
+        finally:
+            db.close()
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(vid.startswith("ocv-") and len(vsha) == 64 for vid, vsha in rows), rows)
 
     def test_a_mixed_user_gets_one_v1_note_through_the_real_gate(self):
         """QA review of #1257 @53428d0, through the real gate and ledger (not Fake): a provisional
@@ -3822,8 +3866,11 @@ class ApplyPoolTests(unittest.TestCase):
 
         def run(argv):
             uid = json.loads(Path(argv[argv.index("--credits-file") + 1]).read_text())["user"]["id"]
-            sha.write_text("b" * 40 + "\n")          # the deploy lands while both in-flight workers are inside
+            # The deploy lands only once BOTH in-flight workers are inside. Written before the barrier, the first
+            # worker could change the head before the second had passed its own pre-start check, which defers four
+            # and sends one (2 of 12 runs under load, on main as well).
             barrier.wait(timeout=10)
+            sha.write_text("b" * 40 + "\n")
             sent.append(uid)
             return subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
 
@@ -3846,9 +3893,14 @@ class ApplyPoolTests(unittest.TestCase):
         deadline: once `spent + WORST_USER_S` would pass the share, nothing more is started and the rest stay owed."""
         clock = {"t": 0.0}
         started = []
+        # The clock moves only once BOTH workers are in flight, which is the case this test describes. Without it the
+        # first worker could finish (clock +120 s) before the second user was submitted, and the guard then rightly
+        # defers that user too: 22 of 60 runs under CPU load on main, and once in PR Validation on hydra#1895.
+        both_in_flight = threading.Barrier(2)
 
         def run(argv):
             started.append(json.loads(Path(argv[argv.index("--credits-file") + 1]).read_text())["user"]["id"])
+            both_in_flight.wait(timeout=10)
             clock["t"] += 120.0
             return subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
 

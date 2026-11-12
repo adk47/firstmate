@@ -21,6 +21,19 @@ _spec = importlib.util.spec_from_file_location("close_duplicate_conversations", 
 m = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(m)
 
+# The outbound copy gate (captain 2026-11-12): the pointer comment is put to lib/copy_gate.require before the
+# "pending" marker and again inside post_pointer_comment. This suite pins the sweep's other rules, so by default the
+# gate is a stand-in that approves; TestPointerCopyGate makes it hold.
+_REAL_REQUIRE = m.copy_gate.require
+
+
+def setUpModule():
+    m.copy_gate.require = lambda campaign, body, **_kw: {"result": "approved"}
+
+
+def tearDownModule():
+    m.copy_gate.require = _REAL_REQUIRE
+
 
 def conv(cid, email="a@b.com", lar=0, lcr=0, created_at=0, is_inbound=True):
     return {"id": cid, "email": email, "lar": lar, "lcr": lcr,
@@ -764,6 +777,59 @@ class TestApplyShadowLogPreWriteFailure(unittest.TestCase):
              mock.patch.object(_sys, "argv", ["m", "--apply"]):
             rc = m.main()
         self.assertNotEqual(rc, 0)
+
+
+class TestPointerCopyGate(unittest.TestCase):
+    """A pointer comment the copy gate has not approved is not posted, leaves no marker, and closes nothing."""
+
+    def run_sweep(self, require):
+        import sys as _sys
+        older = conv("O", email="x@y.com", lar=0, lcr=0, created_at=1000)
+        kept = conv("K", email="x@y.com", lar=50, lcr=10, created_at=1000 + 86400)
+        order = []
+        with mock.patch.object(m.copy_gate, "require", side_effect=require), \
+             mock.patch.object(m, "fetch_open_convs", return_value=[older, kept]), \
+             mock.patch.object(m, "owned_ids", return_value=set()), \
+             mock.patch.object(m, "reverify_still_valid", return_value=True), \
+             mock.patch.object(m, "load_pointer_state", return_value={}), \
+             mock.patch.object(m, "save_pointer_state",
+                                side_effect=lambda *a: order.append("save") or True), \
+             mock.patch.object(m, "post_pointer_comment",
+                                side_effect=lambda *a, **k: order.append("pointer")), \
+             mock.patch.object(m, "get_conversation",
+                                return_value={"id": "O", "state": "open", "lcr": 0, "lar": 0,
+                                              "confirm_email": "x@y.com"}), \
+             mock.patch.object(m, "close_conversation",
+                                side_effect=lambda *a, **k: order.append("close") or {"state": "closed"}), \
+             mock.patch.object(m, "open_shadow_log", return_value=(FakeShadow(), "/fake/path")), \
+             mock.patch.object(m, "post_slack_summary", return_value=True), \
+             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
+                                              "INTERCOM_ADMIN_ID": "5763097"}, clear=False), \
+             mock.patch.object(_sys, "argv", ["m", "--apply"]):
+            m.main()
+        return order
+
+    def test_a_held_pointer_is_not_posted_not_marked_and_the_conversation_stays_open(self):
+        asked = []
+
+        def held(campaign, body, **_kw):
+            asked.append((campaign, body))
+            raise m.copy_gate.CopyHeld("copy_review_pending", "0" * 64, pending=True)
+        self.assertEqual(self.run_sweep(held), [])        # no marker, no comment, no close
+        self.assertEqual(asked, [("duplicate-pointer", m.POINTER_TEXT)])
+
+    def test_an_approved_pointer_goes_out_in_the_usual_order(self):
+        self.assertEqual(self.run_sweep(lambda campaign, body, **_kw: {"result": "approved"}),
+                         ["save", "pointer", "save", "close"])
+
+    def test_the_comment_poster_asks_the_gate_itself(self):
+        def held(campaign, body, **_kw):
+            raise m.copy_gate.CopyHeld("copy_review_pending", "0" * 64, pending=True)
+        with mock.patch.object(m.copy_gate, "require", side_effect=held), \
+             mock.patch.object(m.urllib.request, "urlopen") as urlopen:
+            with self.assertRaises(m.copy_gate.CopyHeld):
+                m.post_pointer_comment("tok", "5763097", "O", m.POINTER_TEXT)
+        urlopen.assert_not_called()
 
 
 class TestPointerPostedDedupe(unittest.TestCase):

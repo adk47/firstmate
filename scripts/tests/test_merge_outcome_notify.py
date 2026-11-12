@@ -115,6 +115,13 @@ class MergeOutcomeNotifyTests(unittest.TestCase):
         self._orig = (mon.rn.http, mon.rn.get_conversation, mon.rn.urllib.request.urlopen, mon.rn.time.sleep,
                       mon.MERGE_OUTCOME_COPY_APPROVED, mon.rn.post_slack)
         self.slack, self.slack_ok = [], True
+        # The copy gate has a verdict for every message in this suite, so these tests keep
+        # exercising what they always did. The no-verdict cases live in
+        # test_outbound_copy_sendgate.py, which drives this notifier against the real adapter.
+        self._gate = (mon.sendgate._ask, mon.sendgate.LOG_PATH)
+        mon.sendgate._ask = lambda body, subject, *a: ("approved", "", {
+            "verdict_id": "ocv-test", "verdict_sha256": "0" * 64})
+        mon.sendgate.LOG_PATH = self.dir / "sendgate.jsonl"
 
         def post_slack(text, channel, config_path, account):
             self.slack.append((channel, account, text))
@@ -123,6 +130,7 @@ class MergeOutcomeNotifyTests(unittest.TestCase):
 
     def tearDown(self):
         mon.clickup_client.shared = self._shared
+        mon.sendgate._ask, mon.sendgate.LOG_PATH = self._gate
         (mon.rn.http, mon.rn.get_conversation, mon.rn.urllib.request.urlopen, mon.rn.time.sleep,
          mon.MERGE_OUTCOME_COPY_APPROVED, mon.rn.post_slack) = self._orig
 

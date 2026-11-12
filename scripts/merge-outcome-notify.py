@@ -120,6 +120,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from lib import clickup_client, merge_keep_conflict as mkc  # noqa: E402
+from outbound_copy import sendgate  # noqa: E402
+
+# The copy gate's name for this family (scripts/outbound_copy/sendgate.py).
+COPY_FAMILY = COPY_CAMPAIGN = "merge-outcome-notify"
 _spec = importlib.util.spec_from_file_location("resolve_notify", HERE / "resolve-notify.py")
 rn = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rn)  # type: ignore[union-attr]
@@ -389,13 +393,30 @@ def save_state(path: str, state: State) -> None:
         os.close(dfd)
 
 
+def copy_id(message: str) -> str:
+    """`<kind>/<outcome>` of the fixed message `message` is, "" when it is none of them. Derived
+    from the bytes, so the ask before the claim and the ask at the POST cannot name two copies."""
+    return next((f"{kind}/{outcome}" for (kind, outcome), text in COPY.items() if text == message), "")
+
+
+def copy_permit(conv_id: str, message: str) -> "sendgate.Permit":
+    """The reviewer verdict bound to exactly `message`, or sendgate.NotApproved. Never posts."""
+    return sendgate.require_verdict(message, family=COPY_FAMILY, campaign=COPY_CAMPAIGN,
+                                    copy=copy_id(message), message_type="comment", ref=conv_id)
+
+
 def post_reply_once(conv_id: str, message: str, token: str) -> None:
     """One POST, never retried: a timeout may still have been delivered."""
+    # Asked HERE as well as before the claim in `_run`: the claim-side check keeps a held message
+    # from burning its one attempt, this one is what makes the POST unreachable without a verdict.
+    permit = copy_permit(conv_id, message)
     s, body = rn.http("POST", f"{rn.INTERCOM_API}/conversations/{conv_id}/reply", rn._ic_headers(token),
                       body={"message_type": "comment", "type": "admin",
                             "admin_id": rn.CAROLINE_ADMIN_ID, "body": message}, attempts=1)
     if s not in (200, 201):
         raise RuntimeError(f"intercom reply {conv_id} -> {s}: {body}")
+    sendgate.record_sent(permit, ref=conv_id,
+                         message_id=(body or {}).get("id", "") if isinstance(body, dict) else "")
 
 
 def fetch_merge_tasks(key: str, list_id: str) -> list[dict]:
@@ -692,18 +713,52 @@ def _run(a: argparse.Namespace, key: str, token: str, state_path: str) -> int:
                     save_state(state_path, state)
                     add_tag(key, c["ticket_id"], SKIPPED_TAG)
                 continue
+            if a.apply:
+                # BEFORE the claim below. `attempted` is written ahead of the POST and is never
+                # retried, so a message held for review must leave no state at all: the ticket is
+                # offered again on the next run, when the verdict may have arrived.
+                try:
+                    copy_permit(c["conv_id"], c["message"])
+                except sendgate.NotApproved as exc:
+                    skipped["copy-held"] = skipped.get("copy-held", 0) + 1
+                    if exc.result == "error":
+                        failed += 1     # the gate could not answer: a failed run, not a quiet skip
+                    print(f"HELD ticket={c['ticket_id']} conv={c['conv_id']} {c['kind']}/{c['outcome']}: "
+                          f"copy gate {exc.result} ({exc.reason}); nothing sent, offered again next run",
+                          file=sys.stderr)
+                    continue
             convs.add(c["conv_id"])
             users_today.add(user)
             if not a.apply:
                 print(f"WOULD POST ticket={c['ticket_id']} conv={c['conv_id']} {c['kind']}/{c['outcome']}: {c['message']}")
                 sent += 1
                 continue
+            before = (done.get(c["ticket_id"]), state.outcomes.get(c["ticket_id"]), state.users.get(user))
             done[c["ticket_id"]] = ATTEMPTED
             state.outcomes[c["ticket_id"]] = state.outcomes.get(c["ticket_id"], []) + [c["outcome"]]
             state.users[user] = today
             save_state(state_path, state)
             try:
                 post_reply_once(c["conv_id"], c["message"], token)
+            except sendgate.NotApproved as exc:
+                # The gate answered differently between the check above and the POST. It raises
+                # before any request is made, so this is the one failure that is KNOWN undelivered:
+                # the claim is undone and the ticket is offered again, never left `attempted`.
+                for store, k, prev in ((done, c["ticket_id"], before[0]),
+                                      (state.outcomes, c["ticket_id"], before[1]),
+                                      (state.users, user, before[2])):
+                    if prev is None:
+                        store.pop(k, None)
+                    else:
+                        store[k] = prev
+                save_state(state_path, state)
+                convs.discard(c["conv_id"])
+                users_today.discard(user)
+                skipped["copy-held"] = skipped.get("copy-held", 0) + 1
+                failed += 1
+                print(f"HELD ticket={c['ticket_id']} conv={c['conv_id']}: copy gate {exc.result} "
+                      f"({exc.reason}) after the claim; nothing sent, claim undone", file=sys.stderr)
+                continue
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 print(f"UNCONFIRMED ticket={c['ticket_id']} conv={c['conv_id']}: the post may have been "

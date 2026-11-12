@@ -86,6 +86,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.intercom_identity import resolve_admin_id  # noqa: E402
+from outbound_copy import sendgate  # noqa: E402
+
+# The copy gate's name for this family (scripts/outbound_copy/sendgate.py).
+COPY_FAMILY = COPY_CAMPAIGN = "overdue-verification-notifier"
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
@@ -219,12 +223,17 @@ def get_conversation(conv_id, token):
 
 
 def post_intercom_reply(conv_id, admin_id, message, token):
+    # No reviewer verdict bound to these exact bytes, no POST: raises sendgate.NotApproved.
+    permit = sendgate.require_verdict(message, family=COPY_FAMILY, campaign=COPY_CAMPAIGN,
+                                      copy="overdue-v2", message_type="comment", ref=conv_id)
     s, body = http("POST", f"{INTERCOM_API}/conversations/{conv_id}/reply",
                    _ic_headers(token),
                    body={"message_type": "comment", "type": "admin",
                          "admin_id": str(admin_id), "body": message})
     if s not in (200, 201):
         raise RuntimeError(f"intercom reply {conv_id} -> {s}: {body}")
+    sendgate.record_sent(permit, ref=conv_id,
+                         message_id=(body or {}).get("id", "") if isinstance(body, dict) else "")
     return body
 
 
@@ -671,8 +680,9 @@ def main():
     seen_convs = set()
     to_send = new[:cap]
     sent, failed = 0, 0
+    held, held_reason = 0, ""
     dirty = False
-    for c in to_send:
+    for i, c in enumerate(to_send):
         try:
             if c["conv_id"] in seen_convs or f"conv:{c['conv_id']}" in state:
                 suppressed["dedup-conv"] = suppressed.get("dedup-conv", 0) + 1
@@ -706,6 +716,16 @@ def main():
             else:
                 seen_convs.add(c["conv_id"])
             sent += 1
+        except sendgate.NotApproved as e:
+            # Nothing was posted and nothing is marked seen, so the ticket is offered again on
+            # the next run. The copy is one fixed constant: the answer for this candidate is the
+            # answer for every candidate left, so stop reading threads we cannot write to.
+            held, held_reason = len(to_send) - i, e.reason
+            print(f"[{c['ticket_id']}] HELD by the copy gate ({e.result}): {e.reason}; "
+                  f"{held} candidate(s) not sent this run", file=sys.stderr)
+            if e.result == "error":
+                failed += 1     # the gate could not answer: the run is a failure, not a quiet skip
+            break
         except urllib.error.HTTPError as e:
             try:
                 detail = e.read().decode("utf-8", "replace")[:300]
@@ -724,11 +744,13 @@ def main():
     print(f"overdue-verification-notifier: scanned={len(tasks)} "
           f"candidates={len(candidates)} new={len(new)} "
           f"{'sent' if args.apply else 'would-send'}={sent} "
-          f"failed={failed} capped={backlog} "
+          f"failed={failed} held={held}{' (' + held_reason + ')' if held else ''} capped={backlog} "
           f"suppressed={json.dumps(suppressed, sort_keys=True)}")
     _summary(args, sent=sent, scanned=len(tasks), candidates=len(candidates),
-             suppressed=suppressed, note="capped" if backlog else "",
-             anomaly=backlog or suppressed.get("email-mismatch", 0) > 0)
+             suppressed=suppressed,
+             note=(f"{held} held by the copy gate: {held_reason}" if held
+                   else "capped" if backlog else ""),
+             anomaly=backlog or held > 0 or suppressed.get("email-mismatch", 0) > 0)
     return 3 if failed else 0
 
 

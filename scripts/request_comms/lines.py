@@ -365,6 +365,15 @@ def validate(policy: dict[str, Any]) -> list[str]:
         if channel_conf(policy, "email").get("template_uses_line_text") is not True:
             problems.append("channels.email is enabled but its templates are not declared to render "
                             "the approved line (set template_uses_line_text: true)")
+        # The reviewer's verdict covers the line; the template's own words (subject, greeting, footer) live
+        # in send-gateway. The pin is the sha256 of the template source that was reviewed, and it is part of
+        # the frame the verdict is bound to: no pin, no email (channels.email() refuses the send too).
+        pins = channel_conf(policy, "email").get("template_sha256") or {}
+        for key in sorted({str(k).strip() for k in keys.values() if str(k or "").strip()}):
+            pin = str(pins.get(key) or "") if isinstance(pins, dict) else ""
+            if not re.fullmatch(r"[0-9a-f]{64}", pin):
+                problems.append(f"channels.email is enabled but template {key!r} has no reviewed-source sha256 "
+                                f"(channels.email.template_sha256.{key})")
     return problems
 
 

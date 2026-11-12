@@ -89,6 +89,13 @@ STUB
   # block install their own stub.
   export CRON_HEALTH_EXEC_POLICY_CHECK=""
   export CRON_HEALTH_EXEC_POLICY_STATE="$TEST_TMPDIR/exec-policy-last-alert"
+  # Same rule for the outbound copy review queue block: CI can run where /var/lib/hydra/outbound-copy really exists.
+  # Left at its default the block would read the live queue and stamp the production dedupe file. Disarm with the
+  # explicit empty seam; the tests that exercise it point at the REAL gate.py and a scratch store.
+  export CRON_HEALTH_COPY_GATE=""
+  export CRON_HEALTH_COPY_STORE="$TEST_TMPDIR/copy-store"
+  export CRON_HEALTH_COPY_REVIEW_STATE="$TEST_TMPDIR/copy-review-last-alert"
+  export CRON_HEALTH_COPY_REVIEW_SEEN="$TEST_TMPDIR/copy-review-store-seen"
   # Hermeticity: never scan the LIVE /var/lib/hydra/unit-failed-unpaged on CI.
   export CRON_HEALTH_UNIT_FAILED_MARKER_DIR="$TEST_TMPDIR/unit-failed-unpaged"
   export CRON_HEALTH_STATE_FILE="$TEST_TMPDIR/state.json"
@@ -895,4 +902,167 @@ _spool_ls() { ls "$CRON_HEALTH_UNIT_FAILED_MARKER_DIR" 2>/dev/null | sort | tr '
   grep -q "restored orphaned unit-failure claim" <<< "$output"
   [ "$(grep -c 'slack send' "$STUB_CALLS")" -eq 1 ]
   [ -z "$(_spool_ls)" ]
+}
+
+# ──────────────────────────────────────────────────────────────
+# Outbound copy review queue: the REAL scripts/outbound_copy/gate.py against a scratch store. A stalled review
+# round refuses nothing and fails nothing, so this page is the only signal that customers have stopped hearing
+# from us.
+# ──────────────────────────────────────────────────────────────
+
+# _hold_copy [age-seconds] — ask the real gate about one body (no verdict exists, so it is held), then age it.
+# _hold_copy [age-seconds] [campaign]: the default campaign is the ENFORCED one (`decline`), so its waiting body
+# is a held customer message; pass an observed campaign to get a body that waits for review but was sent.
+_hold_copy() {
+  export CRON_HEALTH_COPY_GATE="$HYDRA_REPO/scripts/outbound_copy/gate.py"
+  local body='<p>Hi Dana, we finished checking your credit request. For now the credit is denied: the verification did not prove out.</p><p>You can resubmit for the credit again later.</p>'
+  [ "${2:-decline}" = "decline" ] || body='<p>Hi Dana, a quick update: it is with our team for review.</p>'
+  jq -cn --arg b "$body" '{subject:"", body:$b}' \
+    | python3 -I "$CRON_HEALTH_COPY_GATE" check --campaign "${2:-decline}" --store "$CRON_HEALTH_COPY_STORE" >/dev/null || true
+  [ "$(find "$CRON_HEALTH_COPY_STORE/pending" -name '*.json' | wc -l)" -eq 1 ]
+  if [ -n "${1:-}" ]; then
+    find "$CRON_HEALTH_COPY_STORE/pending" -name '*.json' -exec touch -d "@$(( $(date -u +%s) - $1 ))" {} +
+  fi
+}
+
+@test "copy review queue: a body held past the limit pages, names the count and the way to run the round" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _hold_copy 18000
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "Posted copy review queue alert" <<< "$output"
+  grep -q "1 message(s) are waiting" "$TEST_TMPDIR/last-text"
+  grep -q "Customer messages are held" "$TEST_TMPDIR/last-text"
+  grep -q "1 of them held" "$TEST_TMPDIR/last-text"
+  grep -q "review_pull.py" "$TEST_TMPDIR/last-text"
+  grep -q "no flag that skips the gate" "$TEST_TMPDIR/last-text"
+  [ -s "$CRON_HEALTH_COPY_REVIEW_STATE" ]
+}
+
+@test "copy review queue: a stalled round over OBSERVED campaigns pages that nobody is reviewing, and never says a customer is held" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _hold_copy 18000 status-team-review
+  [ "$(python3 -I "$CRON_HEALTH_COPY_GATE" pending-age --store "$CRON_HEALTH_COPY_STORE" | jq -c '[.pending, .held]')" = "[1,0]" ]
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "Posted copy review queue alert" <<< "$output"
+  grep -q "The copy review round has stopped" "$TEST_TMPDIR/last-text"
+  grep -q "1 message(s) are waiting" "$TEST_TMPDIR/last-text"
+  grep -q "None is held" "$TEST_TMPDIR/last-text"
+  grep -q "review_pull.py" "$TEST_TMPDIR/last-text"
+  if grep -q "Customer messages are held" "$TEST_TMPDIR/last-text"; then false; fi
+}
+
+@test "copy review queue: a body inside the limit pages nothing, and repeat ticks on a stall do not re-page" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _hold_copy 60
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  [ ! -s "$STUB_CALLS" ]
+  [ -e "$CRON_HEALTH_COPY_REVIEW_SEEN" ]
+  _hold_copy 18000
+  run bash "$WD"
+  [ "$(grep -c 'slack send' "$STUB_CALLS")" -eq 1 ]
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "copy review queue stall (page suppressed" <<< "$output"
+  [ "$(grep -c 'slack send' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "copy review queue: a page that was not delivered is not stamped and is tried again" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _hold_copy 18000
+  STUB_MUSO_RC=1 run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "copy review queue page delivery FAILED" <<< "$output"
+  [ ! -e "$CRON_HEALTH_COPY_REVIEW_STATE" ]
+  run bash "$WD"
+  grep -q "Posted copy review queue alert" <<< "$output"
+}
+
+@test "copy review queue: once the round catches up the stamp clears, so the next stall pages at once" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _hold_copy 18000
+  run bash "$WD"
+  [ -s "$CRON_HEALTH_COPY_REVIEW_STATE" ]
+  rm -f "$CRON_HEALTH_COPY_STORE"/pending/*.json
+  run bash "$WD"
+  grep -q "copy review queue clean: cleared the dedupe stamp" <<< "$output"
+  [ ! -e "$CRON_HEALTH_COPY_REVIEW_STATE" ]
+  _hold_copy 18000
+  run bash "$WD"
+  grep -q "Posted copy review queue alert" <<< "$output"
+}
+
+@test "copy review queue: a store that was never there is not a fault; one that was measured and is gone pages" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  export CRON_HEALTH_COPY_GATE="$HYDRA_REPO/scripts/outbound_copy/gate.py"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "copy review queue not measurable yet" <<< "$output"
+  [ ! -s "$STUB_CALLS" ]
+  _hold_copy 60
+  run bash "$WD"
+  [ -e "$CRON_HEALTH_COPY_REVIEW_SEEN" ]
+  rm -rf "$CRON_HEALTH_COPY_STORE"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "CANNOT MEASURE" "$TEST_TMPDIR/last-text"
+  if grep -q "0 message(s) are waiting" "$TEST_TMPDIR/last-text"; then false; fi
+}
+
+@test "copy review queue: --dry-run never posts and never stamps; a gate never deployed here is not a fault" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _hold_copy 18000
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  grep -q "DRY-RUN: copy review queue rc=1" <<< "$output"
+  [ ! -s "$STUB_CALLS" ]
+  [ ! -e "$CRON_HEALTH_COPY_REVIEW_STATE" ]
+  [ ! -e "$CRON_HEALTH_COPY_REVIEW_SEEN" ]
+  # no gate file and no queue ever measured on this host: nothing to page about, and it says so
+  export CRON_HEALTH_COPY_GATE="$TEST_TMPDIR/not-deployed-yet/gate.py"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "copy review queue not measurable yet" <<< "$output"
+  [ ! -s "$STUB_CALLS" ]
+  [ ! -e "$CRON_HEALTH_COPY_REVIEW_SEEN" ]
+  # the empty path is the one thing that disarms the block
+  export CRON_HEALTH_COPY_GATE=""
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  if grep -q "copy review queue" <<< "$output"; then false; fi
+}
+
+@test "copy review queue: a gate that goes missing after the queue was measured pages, it does not go quiet" {
+  # QA review 5871428015 of hydra#1895: every sender asks that file, so with it gone they all hold. The block used
+  # to be skipped when the file was absent, which silenced the one page that says customers stopped hearing from us.
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _hold_copy 60
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  [ -e "$CRON_HEALTH_COPY_REVIEW_SEEN" ]
+  [ ! -s "$STUB_CALLS" ]
+  export CRON_HEALTH_COPY_GATE="$TEST_TMPDIR/removed-by-a-bad-deploy/gate.py"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "Posted copy review queue alert" <<< "$output"
+  grep -q "CANNOT MEASURE" "$TEST_TMPDIR/last-text"
+  grep -q "the copy gate is MISSING" "$TEST_TMPDIR/last-text"
+  grep -q "removed-by-a-bad-deploy/gate.py" "$TEST_TMPDIR/last-text"
+  if grep -q "0 message(s) are waiting" "$TEST_TMPDIR/last-text"; then false; fi
+  [ -s "$CRON_HEALTH_COPY_REVIEW_STATE" ]
+  # deduped like any other copy-review page, and a lost page is not stamped
+  run bash "$WD"
+  grep -q "copy review queue stall (page suppressed" <<< "$output"
+  [ "$(grep -c 'slack send' "$STUB_CALLS")" -eq 1 ]
+  rm -f "$CRON_HEALTH_COPY_REVIEW_STATE"
+  STUB_MUSO_RC=1 run bash "$WD"
+  grep -q "copy review queue page delivery FAILED" <<< "$output"
+  [ ! -e "$CRON_HEALTH_COPY_REVIEW_STATE" ]
+  # the file comes back and the queue is clean: the stamp clears
+  export CRON_HEALTH_COPY_GATE="$HYDRA_REPO/scripts/outbound_copy/gate.py"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  if grep -q "CANNOT MEASURE" <<< "$output"; then false; fi
 }

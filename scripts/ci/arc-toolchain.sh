@@ -143,6 +143,8 @@ for g in "$@"; do
       need_apt lsof lsof
       need_apt logrotate logrotate
       need_apt bc bc
+      # the outbound copy gate verifies its reviewer's signature with `ssh-keygen -Y verify` (node-8: OpenSSH 9.6)
+      need_apt ssh-keygen openssh-client
       apt_install; apt_pkgs=()
       ensure_node
       ensure_caddy
@@ -158,6 +160,9 @@ for g in "$@"; do
       ensure_pnpm
       ;;
     python)
+      # test_outbound_copy_gate.py signs and verifies with ssh-keygen, the same binary the gate uses on node-8
+      need_apt ssh-keygen openssh-client
+      apt_install; apt_pkgs=()
       ensure_python
       ;;
     *) log "unknown group: $g"; exit 2 ;;

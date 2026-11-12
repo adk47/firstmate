@@ -323,10 +323,12 @@ notes.
   not a follow-up, and `initial` kind only (no reminders, no second note). The batched
   `decline` campaign sends it (one message per user per UTC day, 7-day cooldown, once per
   request id ever). **The copy never says which check failed and never teaches the
-  process** (captain 2026-10-29 13:2xZ, `decline-copy-ruling.md` item 1): "The supporting
-  information we received wasn't enough to confirm this credit, so we've closed the
-  request." + "If you'd like us to look again, submit the credit again with your supporting
-  documents and a fresh review will start." + `Muso.AI`. The five reasons
+  process** (captain 2026-10-29 13:2xZ, `decline-copy-ruling.md` item 1; wording captain
+  2026-11-12 ~01:00Z: say it is denied for now, no reason, never fraud, they can resubmit):
+  "We finished checking your credit request. For now the credit is denied: the verification
+  didn't prove out." + "You can resubmit for the credit again later." + `Muso.AI`. Like every
+  note from this sender, the rendered bytes also need a signed reviewer verdict before they
+  leave (`outbound-copy-gate.md`). The five reasons
   (`doesnt_name_you`, `other_track`, `other_role`, `unreadable`, `not_a_document`) stay
   INTERNAL — on the `verify_proof_reviews` row and the executor's audit file — because a
   fraud denial and an ordinary shortfall are the same sentence to the customer. The gate
