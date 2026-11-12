@@ -600,7 +600,7 @@ test_bare_prose_cannot_impersonate_a_terminal_declaration() {
     for word in 'done' failed; do
       f="$dir/$kind-$word.status"
       printf 'kind=%s\n' "$kind" > "$dir/$kind-$word.meta"
-      printf 'needs-decision [key=route]: A or B?\npaused: waiting on the vendor\nSteps remaining:\n %s\n' \
+      printf 'needs-decision [key=route]: A or B?\npaused: waiting on the vendor until 18:00Z\nSteps remaining:\n %s\n' \
         "$word" > "$f"
       assert_fold "$f" "$open" "$kind: bare '$word' prose"
       [ "$(status_key_closing_verb "$f" route)" = needs-decision ] \

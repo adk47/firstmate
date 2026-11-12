@@ -1026,7 +1026,7 @@ _fm_status_kind() {
 
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> <kind> [timed]
   local open=$1 line=$2 resolve=$3 held=$4 kind=$5 verb key note unstamped
-  local timed=${6:-} epoch
+  local timed=${6:-} epoch pause_note=''
   # Both colon tests below ask where the head ends, the same question the note
   # and key readers ask, so they read the same unstamped copy those readers do.
   # A worker-written time tag must never decide whether a decision opens or
@@ -1046,40 +1046,47 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
     *:*|*\[key=*\]*) ;;
     *) printf '%s' "$open"; return 0 ;;
   esac
-  status_line_verb_core "$line"
-  verb=$_FM_STATUS_VERB
-  _fm_decision_key_core "$line" || { _FM_FOLD_OPEN=$open; return 0; }
-  key=$_FM_DECISION_KEY
-  status_line_note_core "$line"
-  note=$_FM_STATUS_NOTE
-  _fm_decision_key_transition_allowed "$key" "$note" || { _FM_FOLD_OPEN=$open; return 0; }
-  _FM_FOLD_KEY=$key
+  status_line_verb "$line" verb
+  case "$unstamped" in
+    *:*) case "$verb:$kind" in done:ship|done:scout|failed:ship|failed:scout) return 0 ;; esac ;;
+  esac
+  case "$verb" in
+    needs-decision|blocked|"$resolve"|"$held"|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}") ;;
+    *) printf '%s' "$open"; return 0 ;;
+  esac
+  key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
+  _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
+    || { printf '%s' "$open"; return 0; }
   # A time-less pause opens like blocked: (FM_CLASSIFY_PAUSE_UNTIL_RE), and the
   # entry it opened closes on the key's next line that is not itself one. The one
   # exception is the documented gateway keep-alive declaration, which names no
   # wake time by design (docs/gateway-keepalive.md).
   if [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]; then
+    note=$(status_line_note "$line")
     if status_pause_has_wake_time "$note" || [ "$key" = "$FM_CLASSIFY_PAUSED_DECLARED_WAIT_KEY" ]; then
       verb=working
     else
       # A time-less pause is a weaker statement than the blocked: or
       # needs-decision: it may already sit under the same key: it opens the
       # entry when the key is not open, and never replaces a stronger one.
-      if _fm_open_set_has "$open" "$key"; then
-        _FM_FOLD_OPEN=$open
-        return 0
-      fi
+      case $'\n'"$open" in
+        *$'\n'"$key"$'\t'blocked$'\t'*|*$'\n'"$key"$'\t'needs-decision$'\t'*)
+          printf '%s' "$open"
+          return 0
+          ;;
+      esac
       verb=blocked
       note="${FM_CLASSIFY_TIMELESS_PAUSE_PREFIX}${note}"
+      pause_note=$note
     fi
   fi
   case "$verb" in
     working|done|failed)
+      # A time-less pause is the one weak entry a later non-pause line under the
+      # same key closes on its own, since it never represented a real ask.
       case $'\n'"$open" in
         *$'\n'"$key"$'\t'blocked$'\t'"$FM_CLASSIFY_TIMELESS_PAUSE_PREFIX"*)
-          _fm_decision_drop_core "$open" "$key"
-          open=$_FM_DECISION_DROP
-          _FM_FOLD_OP=close
+          open=$(_fm_decision_drop "$open" "$key")
           ;;
       esac
       ;;
@@ -1087,6 +1094,7 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   case "$verb" in
     needs-decision|blocked)
       note=$(status_line_note "$line")
+      [ -z "$pause_note" ] || note=$pause_note
       if [ "$timed" = timed ]; then
         # The timed view adds an emission-time column, without changing any
         # open/closed rule. Keyless or unstamped events have unknown age.
