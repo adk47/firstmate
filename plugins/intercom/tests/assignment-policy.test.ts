@@ -56,6 +56,27 @@ describe("resolveHandOffTarget", () => {
 
 describe("applyHandOff", () => {
   const client = () => ({ assignConversation: vi.fn(async () => ({})) });
+  /**
+   * A client that behaves like Intercom: an accepted assignment changes who holds the conversation,
+   * and the read-back reports it. `afterCall(n, holder)` lets a test change the holder right after
+   * the nth accepted assignment (somebody else acting in between).
+   */
+  const tracking = (start: { admin: string | number | null; team: string | number | null } = { admin: "bot", team: null }) => {
+    const holder = { ...start };
+    const hooks = new Map<number, Partial<typeof holder>>();
+    let n = 0;
+    return {
+      holder,
+      afterCall(call: number, change: Partial<typeof holder>) { hooks.set(call, change); return this; },
+      assignConversation: vi.fn(async (params: { assigneeId: string; assigneeType?: "admin" | "team" }) => {
+        if (params.assigneeType === "team") holder.team = Number(params.assigneeId);
+        else holder.admin = params.assigneeId === "0" ? null : params.assigneeId;
+        Object.assign(holder, hooks.get(n++) ?? {});
+        return {};
+      }),
+      getConversation: vi.fn(async () => ({ admin_assignee_id: holder.admin, team_assignee_id: holder.team })),
+    };
+  };
   it("AI-queue kinds make no Intercom call at all", async () => {
     const c = client();
     const r = await applyHandOff({ client: c, account, conversationId: "c1", kind: "output_guard" });
@@ -63,13 +84,15 @@ describe("applyHandOff", () => {
     expect(c.assignConversation).not.toHaveBeenCalled();
   });
   it("an escalation takes the bot off, then places the team with type team", async () => {
-    const c = client();
+    const c = tracking();
     const r = await applyHandOff({ client: c, account, conversationId: "c1", kind: "risk_escalation", reason: "rule/legal_threat" });
     expect(r).toMatchObject({ outcome: "escalation_team", human: true, reason: "rule/legal_threat" });
     expect(c.assignConversation.mock.calls.map((x) => x[0])).toEqual([
       { conversationId: "c1", adminId: "bot", assigneeId: "0" },
       { conversationId: "c1", adminId: "bot", assigneeId: "7111842", assigneeType: "team" },
     ]);
+    // the outcome came from a read, not from the two accepted requests
+    expect(c.getConversation).toHaveBeenCalledWith({ conversationId: "c1" });
   });
   it("never sends an admin-typed assignment to anything but '0'", async () => {
     const c = client();
@@ -80,11 +103,71 @@ describe("applyHandOff", () => {
       if (p.assigneeType !== "team") expect(p.assigneeId).toBe("0");
     }
   });
-  it("no team configured: one call, to Unassigned", async () => {
-    const c = client();
+  it("no team configured: one call, to Unassigned, confirmed by a read", async () => {
+    const c = tracking();
     const r = await applyHandOff({ client: c, account: { botAdminId: "bot" }, conversationId: "c1", kind: "restricted_hold", reason: "restricted_account" });
     expect(r.outcome).toBe("unassigned");
     expect(c.assignConversation).toHaveBeenCalledTimes(1);
+    expect(c.getConversation).toHaveBeenCalledTimes(1);
+  });
+  // QA on #1892, round 4: ACCEPTED requests are not proof of who holds the conversation either.
+  describe("accepted requests are still settled by a read-back", () => {
+    const esc = (c: { assignConversation: ReturnType<typeof vi.fn>; getConversation?: ReturnType<typeof vi.fn> }, acct = account) => {
+      const errors: string[] = [];
+      return applyHandOff({ client: c, account: acct, conversationId: "c1", kind: "risk_escalation", reason: "r", log: { error: (m) => errors.push(m) } })
+        .then((r) => ({ r, errors }));
+    };
+    // The reviewed path: unassign accepted, an admin takes the thread, the team POST is accepted
+    // too (Intercom lets an admin and a team hold a conversation together).
+    it("an admin took it between the two calls and the team POST succeeded: failed, naming the admin", async () => {
+      const c = tracking().afterCall(0, { admin: 5465657 });
+      const { r, errors } = await esc(c);
+      expect(c.assignConversation).toHaveBeenCalledTimes(2);
+      expect(c.holder).toEqual({ admin: 5465657, team: 7111842 });
+      expect(r.outcome).toBe("failed");
+      expect(r.error).toMatch(/the team step was accepted and admin 5465657 holds the conversation/);
+      expect(errors[0]).toMatch(/\[intercom:ALERT\].*team assign FAILED/);
+    });
+    it("both requests accepted but the conversation cannot be read: failed, holder unknown", async () => {
+      const c = { assignConversation: vi.fn(async () => ({})), getConversation: vi.fn(async () => { throw new Error("timeout"); }) };
+      const { r } = await esc(c);
+      expect(r.outcome).toBe("failed");
+      expect(r.error).toMatch(/could not be read back, so who holds it is unknown/);
+    });
+    it("a client with no read-back cannot complete an escalation at all", async () => {
+      expect((await esc(client())).r.outcome).toBe("failed");
+      expect((await esc(client(), { botAdminId: "bot" })).r.outcome).toBe("failed");
+    });
+    it("the team POST was accepted but the read shows another team: failed, labelled with it", async () => {
+      const c = tracking().afterCall(1, { team: 2238258 });
+      const { r } = await esc(c);
+      expect(r).toMatchObject({ outcome: "failed", label: "team:2238258" });
+    });
+    it("the team POST was accepted but the read shows no team: Unassigned, with an alert", async () => {
+      const c = tracking().afterCall(1, { team: null });
+      const { r, errors } = await esc(c);
+      expect(r).toMatchObject({ outcome: "unassigned", queue: "unassigned", label: "Unassigned" });
+      expect(errors[0]).toMatch(/team assign FAILED.*left in Unassigned/);
+    });
+    it("the bot still shows as the holder after an accepted unassign: failed, never a queue", async () => {
+      const c = tracking().afterCall(0, { admin: "bot" });
+      const { r } = await esc(c);
+      expect(r.outcome).toBe("failed");
+      expect(r.error).toMatch(/the bot holds the conversation/);
+    });
+    // No escalation team configured: "Unassigned" means no admin AND no team.
+    it("no team configured, unassign accepted, but a team holds it: failed, labelled with that team", async () => {
+      const c = tracking({ admin: "bot", team: 2238258 });
+      const { r, errors } = await esc(c, { botAdminId: "bot" });
+      expect(c.assignConversation).toHaveBeenCalledTimes(1);
+      expect(r).toMatchObject({ outcome: "failed", label: "team:2238258" });
+      expect(r.error).toMatch(/in team 2238258, not Unassigned/);
+      expect(errors[0]).toMatch(/\[intercom:ALERT\].*unassign FAILED/);
+    });
+    it("no team configured and an admin took it after the unassign: failed", async () => {
+      const c = tracking().afterCall(0, { admin: 5465657 });
+      expect((await esc(c, { botAdminId: "bot" })).r.outcome).toBe("failed");
+    });
   });
   it("a failed unassign is reported as failed (the bot still holds it) and the team step is skipped", async () => {
     const c = { assignConversation: vi.fn(async () => { throw new Error("403"); }) };
@@ -94,19 +177,207 @@ describe("applyHandOff", () => {
     expect(c.assignConversation).toHaveBeenCalledTimes(1);
     expect(errors[0]).toMatch(/\[intercom:ALERT\].*unassign FAILED/);
   });
-  it("a failed team step leaves it in Unassigned, which is still nobody's personal inbox", async () => {
-    let n = 0;
-    const c = { assignConversation: vi.fn(async () => { if (n++ === 1) throw new Error("team not found"); return {}; }) };
-    const r = await applyHandOff({ client: c, account, conversationId: "c1", kind: "risk_escalation", reason: "r" });
-    expect(r).toMatchObject({ outcome: "unassigned", queue: "unassigned" });
-    expect(r.error).toMatch(/team not found/);
+  // QA on #1892: a team step that does not complete is reported from a read-back, never from
+  // "the unassign was accepted a moment ago". An admin can take the thread between the two calls.
+  describe("a team step that fails (not a conflict) is settled by a read-back", () => {
+    const teamFails = (holder: unknown) => {
+      let n = 0;
+      return {
+        assignConversation: vi.fn(async () => { if (n++ === 1) throw new Error("team not found"); return {}; }),
+        getConversation: vi.fn(async () => {
+          if (holder instanceof Error) throw holder;
+          return holder as { admin_assignee_id?: string | number | null; team_assignee_id?: string | number | null };
+        }),
+      };
+    };
+    const go = (c: { assignConversation: ReturnType<typeof vi.fn>; getConversation?: ReturnType<typeof vi.fn> }) =>
+      applyHandOff({ client: c, account, conversationId: "c1", kind: "risk_escalation", reason: "r" });
+
+    it("read back shows nobody and no team: Unassigned, which is still nobody's personal inbox", async () => {
+      const r = await go(teamFails({ admin_assignee_id: null, team_assignee_id: null }));
+      expect(r).toMatchObject({ outcome: "unassigned", queue: "unassigned", label: "Unassigned" });
+      expect(r.error).toMatch(/team not found/);
+    });
+    it("an admin took it between the two calls: failed, naming the admin, never Unassigned", async () => {
+      const r = await go(teamFails({ admin_assignee_id: 5465657, team_assignee_id: null }));
+      expect(r.outcome).toBe("failed");
+      expect(r.error).toMatch(/admin 5465657 holds the conversation/);
+    });
+    it("the read-back times out: failed (holder unknown), never Unassigned", async () => {
+      const r = await go(teamFails(new Error("timeout")));
+      expect(r.outcome).toBe("failed");
+      expect(r.error).toMatch(/who holds it is unknown/);
+    });
+    it("a client that cannot read back: failed, never Unassigned", async () => {
+      let n = 0;
+      const c = { assignConversation: vi.fn(async () => { if (n++ === 1) throw new Error("team not found"); return {}; }) };
+      expect((await go(c)).outcome).toBe("failed");
+    });
+    it("it sits in some other team: failed, and the label says which team", async () => {
+      const r = await go(teamFails({ admin_assignee_id: null, team_assignee_id: 2238258 }));
+      expect(r).toMatchObject({ outcome: "failed", label: "team:2238258" });
+      expect(r.error).toMatch(/in team 2238258, not the escalation team 7111842/);
+    });
+    it("the read shows the escalation team and no admin: that is where it is", async () => {
+      expect((await go(teamFails({ admin_assignee_id: null, team_assignee_id: 7111842 }))).outcome).toBe("escalation_team");
+    });
+    // QA on #1892: `{admin_assignee_id: null}` with NO team field once read as "no admin and no
+    // team", so the hand-off was reported complete while the team was never measured.
+    it("a PARTIAL read (no team field) is not a measurement: failed, never Unassigned", async () => {
+      const r = await go(teamFails({ admin_assignee_id: null }));
+      expect(r.outcome).toBe("failed");
+      expect(r.outcome).not.toBe("unassigned");
+      expect(r.error).toMatch(/could not be read back, so who holds it is unknown/);
+    });
+    it("a PARTIAL read (no admin field) is not a measurement either: failed, never the team", async () => {
+      const r = await go(teamFails({ team_assignee_id: 7111842 }));
+      expect(r.outcome).toBe("failed");
+      expect(r.outcome).not.toBe("escalation_team");
+    });
+    it("an explicit null in BOTH fields is a measurement: Unassigned", async () => {
+      expect((await go(teamFails({ admin_assignee_id: null, team_assignee_id: null }))).outcome).toBe("unassigned");
+    });
   });
-  it("a conflict on either step is the desired end state", async () => {
-    const conflict = new Error("already");
-    const c = { assignConversation: vi.fn(async () => { throw conflict; }) };
-    const r = await applyHandOff({ client: c, account, conversationId: "c1", kind: "risk_escalation", reason: "r", isConflict: (e) => e === conflict });
-    expect(r.outcome).toBe("escalation_team");
-    expect(c.assignConversation).toHaveBeenCalledTimes(2);
+  // A conflict is never a completed step by itself (QA on #1673 and #1889). "0" is Intercom's
+  // Unassign and has no "already assigned to" meaning, so only a read-back settles it.
+  describe("a conflict is settled by reading the conversation back, never assumed", () => {
+    class Conflict extends Error {
+      constructor(readonly assigneeId: string) {
+        super(`already assigned to ${assigneeId}`);
+      }
+    }
+    const named = (e: unknown, requested: string) => e instanceof Conflict && e.assigneeId === requested;
+    /** `throwOn`: which calls (0 = unassign, 1 = team) answer a conflict naming the requested id. */
+    const conflicting = (throwOn: number[], holder: unknown, opts: { names?: string } = {}) => {
+      let n = 0;
+      return {
+        assignConversation: vi.fn(async (params: { assigneeId: string }) => {
+          if (throwOn.includes(n++)) throw new Conflict(opts.names ?? params.assigneeId);
+          return {};
+        }),
+        getConversation: vi.fn(async () => {
+          if (holder instanceof Error) throw holder;
+          return holder as { admin_assignee_id?: string | number | null; team_assignee_id?: string | number | null };
+        }),
+      };
+    };
+    const run = (c: ReturnType<typeof conflicting>, errors: string[] = []) =>
+      applyHandOff({
+        client: c, account, conversationId: "c1", kind: "risk_escalation", reason: "rule/legal_threat",
+        isConflict: named, log: { error: (m) => errors.push(m) },
+      });
+
+    it("unassign conflict while THE BOT still holds it: failed, team step never attempted", async () => {
+      const c = conflicting([0], { admin_assignee_id: "bot", team_assignee_id: null });
+      const errors: string[] = [];
+      const r = await run(c, errors);
+      expect(r.outcome).toBe("failed");
+      expect(r.error).toMatch(/the bot still holds the conversation/);
+      expect(c.assignConversation).toHaveBeenCalledTimes(1);
+      expect(errors[0]).toMatch(/\[intercom:ALERT\].*unassign FAILED/);
+    });
+    it("unassign conflict while A PERSON holds it: failed, and the page names that admin, not Unassigned", async () => {
+      const c = conflicting([0], { admin_assignee_id: 5465657, team_assignee_id: null });
+      const r = await run(c);
+      expect(r.outcome).toBe("failed");
+      expect(r.error).toMatch(/admin 5465657 still holds the conversation/);
+      expect(c.assignConversation).toHaveBeenCalledTimes(1);
+    });
+    it("the reviewed failure: unassign conflict with an admin still on it, then a team step that would fail, is never reported Unassigned", async () => {
+      const c = conflicting([0], { admin_assignee_id: "bot", team_assignee_id: null });
+      const r = await run(c);
+      expect(r.outcome).not.toBe("unassigned");
+      expect(r.outcome).not.toBe("escalation_team");
+    });
+    it("unassign conflict and no admin holds it: the step counts, the team is placed, and the result is read", async () => {
+      const c = conflicting([0], { admin_assignee_id: null, team_assignee_id: 7111842 });
+      const r = await run(c);
+      expect(r.outcome).toBe("escalation_team");
+      expect(c.assignConversation).toHaveBeenCalledTimes(2);
+      expect(c.getConversation).toHaveBeenCalledWith({ conversationId: "c1" });
+      expect(c.getConversation).toHaveBeenCalledTimes(2);
+    });
+    // QA on #1892, round 4: with NO escalation team configured, an unassign conflict whose read
+    // shows no admin but ANOTHER TEAM was reported as a completed hand-off to Unassigned.
+    it("no team configured, unassign conflict, the read shows another team: failed, labelled with that team", async () => {
+      const c = conflicting([0], { admin_assignee_id: null, team_assignee_id: 2238258 });
+      const errors: string[] = [];
+      const r = await applyHandOff({
+        client: c, account: { botAdminId: "bot" }, conversationId: "c1", kind: "restricted_hold", reason: "restricted_account",
+        isConflict: named, log: { error: (m) => errors.push(m) },
+      });
+      expect(r.outcome).toBe("failed");
+      expect(r.outcome).not.toBe("unassigned");
+      expect(r.label).toBe("team:2238258");
+      expect(r.error).toMatch(/in team 2238258, not Unassigned/);
+      expect(errors[0]).toMatch(/\[intercom:ALERT\].*unassign FAILED/);
+    });
+    it("no team configured, unassign conflict, the read shows no admin and no team: Unassigned", async () => {
+      const c = conflicting([0], { admin_assignee_id: null, team_assignee_id: null });
+      const r = await applyHandOff({
+        client: c, account: { botAdminId: "bot" }, conversationId: "c1", kind: "restricted_hold", reason: "restricted_account", isConflict: named,
+      });
+      expect(r.outcome).toBe("unassigned");
+    });
+    it("unassign conflict that cannot be read back is failed: unreadable is not Unassigned", async () => {
+      expect((await run(conflicting([0], new Error("502")))).outcome).toBe("failed");
+      expect((await run(conflicting([0], null))).outcome).toBe("failed");
+      // a response with no admin_assignee_id field at all is not a measurement
+      expect((await run(conflicting([0], { assignee: null }))).outcome).toBe("failed");
+      // and neither is one that carries only one of the two holder fields
+      expect((await run(conflicting([0], { admin_assignee_id: null }))).outcome).toBe("failed");
+      expect((await run(conflicting([0], { team_assignee_id: null }))).outcome).toBe("failed");
+    });
+    it("a client that cannot read back never turns a conflict into a completed escalation", async () => {
+      const c = { assignConversation: vi.fn(async (params: { assigneeId: string }) => { throw new Conflict(params.assigneeId); }) };
+      const r = await applyHandOff({ client: c, account, conversationId: "c1", kind: "risk_escalation", reason: "r", isConflict: named });
+      expect(r.outcome).toBe("failed");
+      expect(c.assignConversation).toHaveBeenCalledTimes(1);
+    });
+    it("a conflict naming SOMEBODY ELSE is not a conflict for our request: failed", async () => {
+      const c = conflicting([0], { admin_assignee_id: null, team_assignee_id: null }, { names: "5465657" });
+      const r = await run(c);
+      expect(r.outcome).toBe("failed");
+      expect(c.getConversation).not.toHaveBeenCalled();
+    });
+    it("team conflict and the team really holds it with no admin: escalation_team", async () => {
+      const c = conflicting([1], { admin_assignee_id: null, team_assignee_id: 7111842 });
+      expect((await run(c)).outcome).toBe("escalation_team");
+    });
+    it("team conflict but the conversation is in ANOTHER team: failed, labelled with the real team", async () => {
+      const other = await run(conflicting([1], { admin_assignee_id: null, team_assignee_id: 2238258 }));
+      expect(other).toMatchObject({ outcome: "failed", label: "team:2238258" });
+      expect(other.error).toMatch(/in team 2238258, not the escalation team 7111842/);
+    });
+    it("team conflict and the read shows no admin and no team: Unassigned, verified", async () => {
+      const none = await run(conflicting([1], { admin_assignee_id: null, team_assignee_id: null }));
+      expect(none).toMatchObject({ outcome: "unassigned", queue: "unassigned" });
+      expect(none.error).toMatch(/no admin and no team/);
+    });
+    it("team conflict and a PARTIAL read (no team field): failed, never Unassigned or the team", async () => {
+      const r = await run(conflicting([1], { admin_assignee_id: null }));
+      expect(r.outcome).toBe("failed");
+      expect(r.error).toMatch(/could not be read back/);
+    });
+    it("team conflict while an admin holds it: failed, naming the admin", async () => {
+      const r = await run(conflicting([1], { admin_assignee_id: "5465657", team_assignee_id: 7111842 }));
+      expect(r.outcome).toBe("failed");
+      expect(r.error).toMatch(/admin 5465657 holds the conversation/);
+    });
+    // The reviewed path: unassign accepted, an admin takes the thread, the team request conflicts,
+    // and the GET times out. Nothing is known, so nothing is claimed.
+    it("team conflict that cannot be read back: failed (holder unknown), never Unassigned or the team", async () => {
+      const errors: string[] = [];
+      const r = await run(conflicting([1], new Error("timeout")), errors);
+      expect(r.outcome).toBe("failed");
+      expect(r.error).toMatch(/who holds it is unknown/);
+      expect(errors[0]).toMatch(/\[intercom:ALERT\].*team assign FAILED/);
+    });
+    it("no predicate given: a conflict is just a failure", async () => {
+      const c = conflicting([0], { admin_assignee_id: null, team_assignee_id: null });
+      const r = await applyHandOff({ client: c, account, conversationId: "c1", kind: "risk_escalation", reason: "r" });
+      expect(r.outcome).toBe("failed");
+    });
   });
   it("an escalation with no reason throws before any call", async () => {
     const c = client();

@@ -15,8 +15,19 @@ setup() {
 export async function applyHandOff(p) { await p.client.assignConversation({ assigneeId: "0" }); }
 TS
   cat > "$T/plugins/intercom/src/outbound.ts" <<'TS'
-export const c = { async assignConversation(p) {} };
-export async function w(inner, p) { return inner.assignConversation(p); }
+export class C {
+  async assignConversation(params: { assigneeId: string }): Promise<void> {
+    // refused before the request
+    assertAssignmentTarget(params);
+    await fetch("/parts", { body: JSON.stringify({ message_type: "assignment", assignee_id: params.assigneeId }) });
+  }
+}
+export class W {
+  async assignConversation(params: { assigneeId: string }): Promise<void> {
+    assertAssignmentTarget(params);
+    return this.inner.assignConversation(params);
+  }
+}
 TS
   cat > "$T/plugins/intercom/src/channel.ts" <<'TS'
 await client.assignConversation({
@@ -110,7 +121,175 @@ cfg() {  # cfg <account json>
     > "$T/plugins/intercom/src/escalation-action.ts"
   run bash "$SCRIPT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"escalation-action.ts calls .assignConversation("* ]]
+  [[ "$output" == *"escalation-action.ts:1: names \`assignConversation\`"* ]]
+}
+
+# --- evasions (QA on #1889: the first version matched one call syntax) -----------------------
+
+other() {  # other <ts source>: a module that is not the policy, the client or channel.ts
+  printf '%s\n' "$1" > "$T/plugins/intercom/src/escalation-action.ts"
+}
+
+@test "evasion: a computed member access with the name as a string fails" {
+  other 'await client["assignConversation"]({ conversationId, adminId, assigneeId: person });'
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"escalation-action.ts:1: names"* ]]
+}
+
+@test "evasion: an alias of the method fails" {
+  other 'const go = client.assignConversation.bind(client); await go({ assigneeId: person });'
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"escalation-action.ts:1: names"* ]]
+}
+
+@test "evasion: a destructured method fails" {
+  other 'const { assignConversation: go } = client; await go({ assigneeId: person });'
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"escalation-action.ts:1: names"* ]]
+}
+
+@test "evasion: optional chaining and whitespace before the call fail" {
+  other 'await client?.assignConversation  ({ assigneeId: person });'
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"escalation-action.ts:1: names"* ]]
+}
+
+@test "evasion: the name assembled from string pieces fails" {
+  other 'await client["assign" + "Conversation"]({ assigneeId: person });'
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"from string pieces"* ]]
+}
+
+@test "evasion: a raw assignment part posted without the client fails" {
+  other 'await fetch(url, { body: JSON.stringify({ message_type: "assignment", admin_id: bot, assignee_id: person }) });'
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"writes \`assignee_id\` outside the client"* ]]
+  [[ "$output" == *"builds an Intercom assignment part outside the client"* ]]
+}
+
+# QA on #1892: the exceptions were matched on the basename, so a nested file with an allowed
+# name was exempt from everything.
+nested() {  # nested <file name> <ts source>
+  mkdir -p "$T/plugins/intercom/src/nested"
+  printf '%s\n' "$2" > "$T/plugins/intercom/src/nested/$1"
+}
+
+@test "evasion: a raw assignment in a NESTED outbound.ts fails (the reviewed fixture)" {
+  nested outbound.ts 'await fetch(url, { body: JSON.stringify({ message_type: "assignment", assignee_id: person }) });'
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"src/nested/outbound.ts:1: writes \`assignee_id\` outside the client"* ]]
+  [[ "$output" == *"src/nested/outbound.ts:1: builds an Intercom assignment part outside the client"* ]]
+}
+
+@test "evasion: a NESTED outbound.ts, assignment-policy.ts or types.ts naming the method fails" {
+  for name in outbound.ts assignment-policy.ts types.ts; do
+    rm -rf "$T/plugins/intercom/src/nested"
+    nested "$name" 'await client.assignConversation({ conversationId, adminId, assigneeId: person });'
+    run bash "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"src/nested/$name:1: names"* ]]
+  done
+}
+
+@test "evasion: a NESTED channel.ts does not get the bot self-assign exception" {
+  nested channel.ts 'await client.assignConversation({ adminId: account.botAdminId, assigneeId: account.botAdminId });'
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"src/nested/channel.ts:1: names"* ]]
+}
+
+@test "evasion: a NESTED config.ts reading defaultInboxId fails" {
+  nested config.ts 'const t = account.defaultInboxId || "0";'
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"nested/config.ts references"* ]]
+}
+
+@test "reading admin_assignee_id (the live check) is not a write and passes" {
+  other 'const who = conversation.admin_assignee_id ?? conversation.team_assignee_id;'
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+}
+
+@test "evasion in channel.ts: a computed access fails even with the bot as assignee" {
+  cat >> "$T/plugins/intercom/src/channel.ts" <<'TS'
+await client["assignConversation"]({ conversationId: id, adminId: account.botAdminId, assigneeId: account.botAdminId });
+TS
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"something other than a direct call"* ]]
+}
+
+@test "evasion in channel.ts: an argument that is not an object literal fails" {
+  cat >> "$T/plugins/intercom/src/channel.ts" <<'TS'
+await client.assignConversation(params);
+TS
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"its assignee cannot be read"* ]]
+}
+
+@test "evasion in channel.ts: a spread that can override the assignee fails" {
+  cat >> "$T/plugins/intercom/src/channel.ts" <<'TS'
+await client.assignConversation({ assigneeId: account.botAdminId, ...override });
+TS
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"uses a spread"* ]]
+}
+
+@test "evasion in channel.ts: a second assigneeId key that wins fails" {
+  cat >> "$T/plugins/intercom/src/channel.ts" <<'TS'
+await client.assignConversation({ assigneeId: account.botAdminId, conversationId: id, assigneeId: person });
+TS
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"other than account.botAdminId"* ]]
+}
+
+@test "evasion in channel.ts: a shorthand assigneeId fails" {
+  cat >> "$T/plugins/intercom/src/channel.ts" <<'TS'
+await client.assignConversation({ conversationId: id, adminId: account.botAdminId, assigneeId });
+TS
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"other than account.botAdminId"* ]]
+}
+
+@test "evasion in channel.ts: a team assignment outside the policy module fails" {
+  cat >> "$T/plugins/intercom/src/channel.ts" <<'TS'
+await client.assignConversation({ adminId: account.botAdminId, assigneeId: account.botAdminId, assigneeType: "team" });
+TS
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"only the policy module assigns a team"* ]]
+}
+
+@test "a client that does not refuse a personal assignee first fails (the runtime half)" {
+  cat > "$T/plugins/intercom/src/outbound.ts" <<'TS'
+export class C {
+  async assignConversation(params: { assigneeId: string }): Promise<void> {
+    await fetch("/parts", { body: JSON.stringify({ message_type: "assignment", assignee_id: params.assigneeId }) });
+  }
+}
+TS
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"does not start with \`assertAssignmentTarget(params);\`"* ]]
+}
+
+@test "a client file with no assignConversation at all fails (nothing to check is not a pass)" {
+  echo 'export const nothing = 1;' > "$T/plugins/intercom/src/outbound.ts"
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no client"* ]]
 }
 
 @test "channel.ts assigning to anything but the bot fails" {

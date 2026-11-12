@@ -8,6 +8,7 @@ import { loadHelpManifest, type HelpManifest } from "./help-manifest.js";
 import { sanitizeHandoffClaim } from "./sanitize-handoff-claim.js";
 import { sanitizeInternalReference } from "./sanitize-internal-reference.js";
 import { wasTicketFiledRecently, getFiledTicketIds } from "./ticket-success-signal.js";
+import { assertAssignmentTarget } from "./assignment-policy.js";
 
 // --- Outbound reply retry (design §7 Rate Limiting) ---
 // "Intercom returns 429 with Retry-After. Retry with capped exponential
@@ -174,6 +175,7 @@ export class MockIntercomClient implements IntercomClient {
     assigneeId: string;
     assigneeType?: "admin" | "team";
   }): Promise<void> {
+    assertAssignmentTarget(params);
     this.calls.assignConversation.push(params);
   }
 
@@ -342,6 +344,8 @@ export class RealIntercomClient implements IntercomClient {
     assigneeId: string;
     assigneeType?: "admin" | "team";
   }): Promise<void> {
+    // Refused BEFORE the request: no conversation is assigned to an individual admin.
+    assertAssignmentTarget(params);
     const url = `${this.baseUrl}/conversations/${params.conversationId}/parts`;
     const response = await fetch(url, {
       method: "POST",
@@ -712,6 +716,7 @@ export class SanitizingIntercomClient implements IntercomClient {
     assigneeId: string;
     assigneeType?: "admin" | "team";
   }): Promise<void> {
+    assertAssignmentTarget(params);
     return this.inner.assignConversation(params);
   }
 
@@ -832,11 +837,16 @@ export class IntercomAssignmentConflictError extends Error {
 }
 
 /**
- * "Already assigned to that target": Intercom's answer to a repeat assignment. For an escalation
- * (assignment-policy.ts applyHandOff) that is the desired end state, not a failure.
+ * Did Intercom answer "already assigned" FOR THE ASSIGNEE WE ASKED FOR?
+ *
+ * Target-checked on purpose (QA on #1673, and again on #1889): a conflict that names somebody else
+ * is not ours, and one with no reported id proves nothing. Even a matching conflict is not a
+ * completed step by itself: assignment-policy.ts applyHandOff reads the conversation back before it
+ * believes one ("0" is Intercom's Unassign and has no "already assigned to" meaning).
  */
-export function isAssignmentConflict(err: unknown): boolean {
-  return err instanceof IntercomAssignmentConflictError;
+export function isAssignmentConflict(err: unknown, requestedAssigneeId: string): boolean {
+  if (!(err instanceof IntercomAssignmentConflictError)) return false;
+  return requestedAssigneeId !== "" && err.assigneeId === requestedAssigneeId;
 }
 
 export function trackOutboundMessageId(messageId: string, outboundIds: string[]): void {

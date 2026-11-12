@@ -430,6 +430,8 @@ export interface IntercomClient {
     conversationId: string;
     adminId: string;
     assigneeId: string;
+    /** "team" for the escalation queue (assignment-policy.ts); default "admin". */
+    assigneeType?: "admin" | "team";
   }): Promise<void>;
 
   // Attach a tag (by name) to a conversation. Used by the priority signal to

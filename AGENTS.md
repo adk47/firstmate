@@ -786,7 +786,12 @@ conversation is decided in ONE module, `plugins/intercom/src/assignment-policy.t
   (`applyHandOff` throws without one). It goes to the TEAM queue `escalationTeamId` with
   `type: "team"`, never to an admin id. `defaultInboxId` is retired and ignored;
   `scripts/check-intercom-no-personal-assignee.sh` (PR Validation) fails on it, on a person's id as
-  the escalation queue, and on any `assignConversation` call outside the policy module.
+  the escalation queue, and on any use of `assignConversation` outside the policy module. That
+  scan is a tripwire (a computed call can dodge text): the rule itself is `assertAssignmentTarget`,
+  which makes every client refuse an admin assignee other than "0" or the acting bot.
+- **No escalation outcome is assumed.** `applyHandOff` reads the conversation back after EVERY
+  escalation, accepted requests included, and reports only what the read shows: `failed` while
+  any admin (the bot included) holds it, when it sits in another team, or when it cannot be read.
 - **A human assignee silences Caroline only while that human is working the thread**
   (`humanHold`, `humanHoldHours`, default 72). A stale assignment is reclaimed on the customer's
   next message. Hand-back from the escalation queue is "assign to Caroline".

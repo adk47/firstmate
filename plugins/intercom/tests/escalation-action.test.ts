@@ -216,7 +216,8 @@ describe("executeEscalation", () => {
       client: {
         replyToConversation: async () => ({ messageId: "m1" }),
         assignConversation: async (p: Record<string, unknown>) => { assigns.push(p); },
-        getConversation: async () => ({} as any),
+        // the hand-off is only logged as done when a read-back shows the team and no admin
+        getConversation: async () => ({ admin_assignee_id: null, team_assignee_id: 7111842 } as any),
       } as never,
       saveState: async () => {},
       createTicket: async () => ({ ok: true, ticketId: "T1", sla: "x" }),
@@ -230,6 +231,31 @@ describe("executeEscalation", () => {
     const line = info.find((m) => m.includes("[intercom:escalation] reassigned conv=conv1"));
     expect(line).toContain("team:7111842");
     expect(line).toContain(`reason=${assessment.source}/${assessment.reason}`);
+  });
+
+  // QA on #1892, round 4: both requests accepted, but an admin took the conversation in between.
+  it("does not log a completed hand-off when the read-back shows a person still holds it", async () => {
+    const state = makeState();
+    const info: string[] = [];
+    const errors: string[] = [];
+    await executeEscalation({
+      state,
+      conversationId: "conv1",
+      assessment,
+      currentMessage: "i want a refund please",
+      account,
+      client: {
+        replyToConversation: async () => ({ messageId: "m1" }),
+        assignConversation: async () => {},
+        getConversation: async () => ({ admin_assignee_id: 5465657, team_assignee_id: 7111842 } as any),
+      } as never,
+      saveState: async () => {},
+      createTicket: async () => ({ ok: true, ticketId: "T1", sla: "x" }),
+      postSlack: async () => {},
+      log: { info: (m: string) => info.push(m), warn: () => {}, error: (m: string) => errors.push(m) },
+    });
+    expect(info.some((m) => m.includes("[intercom:escalation] reassigned conv=conv1"))).toBe(false);
+    expect(errors.some((m) => /\[intercom:ALERT\].*team assign FAILED.*admin 5465657 holds the conversation/.test(m))).toBe(true);
   });
 
   it("threads currentMessage into the ticket conversation summary", async () => {

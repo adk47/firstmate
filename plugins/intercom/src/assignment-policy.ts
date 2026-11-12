@@ -73,6 +73,43 @@ function teamId(account: AssignmentAccount): string {
   return /^[1-9][0-9]*$/.test(t) ? t : "";
 }
 
+/**
+ * Thrown by the CLIENT when a caller asks it to assign a conversation to an individual admin.
+ * This is the runtime half of the rule; scripts/check-intercom-no-personal-assignee.sh is the
+ * review-time half, and a text scan can be dodged by a computed call.
+ */
+export class PersonalAssignmentRefused extends Error {
+  constructor(assigneeId: string) {
+    super(
+      `intercom assignment policy: refusing to assign a conversation to admin ${assigneeId}. ` +
+        `No conversation is assigned to a person; escalate with applyHandOff() (a reason, to the team queue).`,
+    );
+    this.name = "PersonalAssignmentRefused";
+  }
+}
+
+/**
+ * The only assignments the plugin may send, enforced inside every client implementation so the
+ * rule holds however the call was written:
+ *   - to a TEAM (the escalation queue): a numeric team id sent as `type: "team"`;
+ *   - to nobody: assignee "0" (Intercom's Unassign);
+ *   - to the acting admin itself: Caroline taking the conversation (the AI queue).
+ * An admin id other than the actor is a person, and is refused before any request is made.
+ */
+export function assertAssignmentTarget(params: {
+  adminId: string;
+  assigneeId: string;
+  assigneeType?: "admin" | "team";
+}): void {
+  if (params.assigneeType === "team") {
+    if (!/^[1-9][0-9]*$/.test(params.assigneeId)) throw new PersonalAssignmentRefused(params.assigneeId);
+    return;
+  }
+  if (params.assigneeId === "0") return;
+  if (params.adminId !== "" && params.assigneeId === params.adminId) return;
+  throw new PersonalAssignmentRefused(params.assigneeId);
+}
+
 /** Where a conversation goes for this kind. Throws when an escalation carries no reason. */
 export function resolveHandOffTarget(account: AssignmentAccount, kind: HandOffKind, reason?: string): HandOffTarget {
   if (AI_QUEUE_KINDS.has(kind)) {
@@ -93,25 +130,81 @@ export interface AssignClient {
     assigneeId: string;
     assigneeType?: "admin" | "team";
   }): Promise<unknown>;
+  /**
+   * Read-back of who holds the conversation. Every escalation outcome is settled ONLY by this
+   * read: a client that cannot read back can never complete an escalation.
+   */
+  getConversation?(params: { conversationId: string }): Promise<
+    | { admin_assignee_id?: string | number | null; team_assignee_id?: string | number | null }
+    | null
+    | undefined
+  >;
 }
 
 export interface AppliedHandOff extends HandOffTarget {
-  /** Where the conversation actually ended up. `failed` = it is still with the bot. */
+  /**
+   * Where the conversation actually ended up, as a read-back showed it. What Intercom answered to
+   * the assignment requests is never the source: `unassigned` and `escalation_team` are reported
+   * only when the read shows exactly that and no admin. `failed` =
+   * the escalation is NOT confirmed in a queue it chose: an admin still holds the conversation
+   * (the bot, or whoever a read-back names), it sits in some other team (`label` says which), or
+   * it could not be read, so who holds it is unknown.
+   */
   outcome: "ai_queue" | "escalation_team" | "unassigned" | "failed";
   error?: string;
+}
+
+/**
+ * Who holds the conversation right now, read from Intercom. `null` = it could not be read, which
+ * includes a response that does not carry both holder fields.
+ */
+async function readHolder(
+  client: AssignClient,
+  conversationId: string,
+): Promise<{ admin: string; team: string } | null> {
+  if (!client.getConversation) return null;
+  try {
+    const conv = await client.getConversation({ conversationId });
+    // The v2.11 API always sends BOTH `admin_assignee_id` and `team_assignee_id` (null when
+    // nobody holds it). A response missing either field is not a measurement of who holds the
+    // conversation, so it is never read as "no admin" or "no team" (QA on #1892: a partial
+    // response once read as a confirmed Unassigned while the team was never measured).
+    if (!conv || conv.admin_assignee_id === undefined || conv.team_assignee_id === undefined) return null;
+    const id = (v: string | number | null | undefined) => (v === null || v === undefined || v === 0 || v === "0" ? "" : String(v));
+    return { admin: id(conv.admin_assignee_id), team: id(conv.team_assignee_id) };
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Carry out a hand-off decision. AI-queue kinds make no call at all.
  *
  * An escalation takes the bot off the conversation first (assign to "0", Intercom's Unassign) and
- * then places it in the escalation team with `type: "team"`. Two calls so the end state does not
- * depend on what Intercom does to the admin assignee on a team assignment: after both, no admin
- * holds it and the team does. A failed team step leaves it in Unassigned, which is still a queue
- * no single person owns; only a failed FIRST step is reported as `failed`.
+ * then, when an escalation team is configured, places it in that team with `type: "team"`. Two
+ * calls so the end state does not depend on what Intercom does to the admin assignee on a team
+ * assignment.
  *
- * `isConflict` is the caller's "already assigned to that target" predicate (Intercom answers a
- * repeat assignment with a conflict, which is the desired end state, not an error).
+ * THE OUTCOME IS ALWAYS A READ-BACK, NEVER AN ASSUMPTION. Whatever the two requests answered
+ * (accepted, conflict, error), the conversation is read once more at the end and the result is
+ * what that read shows:
+ *   - no admin and the escalation team            -> `escalation_team`
+ *   - no admin and no team                        -> `unassigned`
+ *   - an admin holds it (the bot or anybody else) -> `failed`, naming who
+ *   - it sits in a team that was not asked for    -> `failed`, `label` says which team
+ *   - it cannot be read (or a holder field is missing, or the client has no read-back)
+ *                                                 -> `failed`, holder unknown
+ * An accepted request is not proof either: an admin can take the conversation between the two
+ * calls, and Intercom lets an admin and a team hold a conversation together. Four QA rounds on
+ * #1889/#1892 each found one more branch that claimed a queue it had not read, so no branch is
+ * left that can.
+ *
+ * A CONFLICT IS NEVER TAKEN AS SUCCESS ON ITS OWN. `isConflict(err, requested)` only says "Intercom
+ * answered a conflict naming the assignee we asked for". "0" is Intercom's Unassign and has no
+ * "already assigned to" meaning, and a conflict that names somebody else is not ours at all (QA on
+ * #1673: a conflict naming the bot was once reported as a completed hand-off while the bot still
+ * owned the thread). After a conflict on the unassign the conversation is read at once, and the
+ * escalation stops there when an admin still holds it or it cannot be read.
  */
 export async function applyHandOff(p: {
   client: AssignClient;
@@ -119,43 +212,86 @@ export async function applyHandOff(p: {
   conversationId: string;
   kind: HandOffKind;
   reason?: string;
-  isConflict?: (err: unknown) => boolean;
+  isConflict?: (err: unknown, requestedAssigneeId: string) => boolean;
   log?: { info?: (m: string) => void; warn?: (m: string) => void; error?: (m: string) => void };
 }): Promise<AppliedHandOff> {
   const target = resolveHandOffTarget(p.account, p.kind, p.reason);
   if (target.queue === "ai") return { ...target, outcome: "ai_queue" };
   const conflict = p.isConflict ?? (() => false);
+  const where = `conv=${p.conversationId} kind=${p.kind} reason=${target.reason}`;
+  const failed = (step: string, why: string): AppliedHandOff => {
+    p.log?.error?.(`[intercom:ALERT] [intercom:assignment] escalation ${step} FAILED ${where}: ${why}`);
+    return { ...target, outcome: "failed", error: why };
+  };
+  const nameOf = (admin: string) => (admin === p.account.botAdminId ? "the bot" : `admin ${admin}`);
+
+  // Step 1: take the bot off the conversation.
   try {
     await p.client.assignConversation({ conversationId: p.conversationId, adminId: p.account.botAdminId, assigneeId: "0" });
   } catch (err) {
-    if (!conflict(err)) {
-      p.log?.error?.(
-        `[intercom:ALERT] [intercom:assignment] escalation unassign FAILED conv=${p.conversationId} kind=${p.kind} reason=${target.reason}: ${err}`,
-      );
-      return { ...target, outcome: "failed", error: String(err) };
+    if (!conflict(err, "0")) return failed("unassign", String(err));
+    const holder = await readHolder(p.client, p.conversationId);
+    if (!holder) return failed("unassign", `conflict on the unassign and the conversation could not be read back (${err})`);
+    if (holder.admin) {
+      return failed("unassign", `conflict on the unassign and ${nameOf(holder.admin)} still holds the conversation (${err})`);
     }
   }
-  if (target.queue === "unassigned") {
+
+  // Step 2: place it in the escalation team, when one is configured.
+  const team = target.queue === "escalation_team" ? teamId(p.account) : "";
+  let what = "the unassign was accepted";
+  let tail = "";
+  let teamStepErrored = false;
+  if (team) {
+    what = "the team step was accepted";
+    try {
+      await p.client.assignConversation({
+        conversationId: p.conversationId,
+        adminId: p.account.botAdminId,
+        assigneeId: team,
+        assigneeType: "team",
+      });
+    } catch (err) {
+      teamStepErrored = true;
+      what = conflict(err, team) ? "conflict on the team step" : "the team step failed";
+      tail = ` (${err})`;
+    }
+  }
+
+  // Step 3: the outcome is what Intercom shows NOW, for every path that reaches here.
+  const step = team ? "team assign" : "unassign";
+  const holder = await readHolder(p.client, p.conversationId);
+  if (!holder) {
+    return failed(step, `${what} and the conversation could not be read back, so who holds it is unknown${tail}`);
+  }
+  if (holder.admin) return failed(step, `${what} and ${nameOf(holder.admin)} holds the conversation${tail}`);
+  if (!team) {
+    if (holder.team) {
+      // No admin, but not Unassigned either: say where it really is.
+      return {
+        ...failed(step, `${what} and the conversation is in team ${holder.team}, not Unassigned${tail}`),
+        label: `team:${holder.team}`,
+      };
+    }
     p.log?.info?.(`[intercom:assignment] escalated conv=${p.conversationId} → Unassigned kind=${p.kind} reason=${target.reason}`);
     return { ...target, outcome: "unassigned" };
   }
-  const team = teamId(p.account);
-  try {
-    await p.client.assignConversation({
-      conversationId: p.conversationId,
-      adminId: p.account.botAdminId,
-      assigneeId: team,
-      assigneeType: "team",
-    });
-  } catch (err) {
-    if (!conflict(err)) {
-      p.log?.error?.(
-        `[intercom:ALERT] [intercom:assignment] escalation team assign FAILED conv=${p.conversationId} team=${team} kind=${p.kind} ` +
-          `reason=${target.reason} (left in Unassigned): ${err}`,
-      );
-      return { ...target, queue: "unassigned", label: "Unassigned", outcome: "unassigned", error: String(err) };
-    }
+  if (holder.team && holder.team !== team) {
+    return {
+      ...failed(step, `${what} and the conversation is in team ${holder.team}, not the escalation team ${team}${tail}`),
+      label: `team:${holder.team}`,
+    };
   }
+  if (!holder.team) {
+    const why = `${what}; read back: no admin and no team hold it${tail}`;
+    p.log?.error?.(
+      `[intercom:ALERT] [intercom:assignment] escalation team assign FAILED conv=${p.conversationId} team=${team} kind=${p.kind} ` +
+        `reason=${target.reason} (left in Unassigned): ${why}`,
+    );
+    return { ...target, queue: "unassigned", label: "Unassigned", outcome: "unassigned", error: why };
+  }
+  // read back: no admin, and the escalation team holds it
+  if (teamStepErrored) p.log?.warn?.(`[intercom:assignment] ${what} but the read-back shows team:${team} and no admin ${where}${tail}`);
   p.log?.info?.(`[intercom:assignment] escalated conv=${p.conversationId} → team:${team} kind=${p.kind} reason=${target.reason}`);
   return { ...target, outcome: "escalation_team" };
 }

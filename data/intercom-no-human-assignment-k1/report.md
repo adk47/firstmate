@@ -29,6 +29,19 @@ Assignments to Jan (admin `5465657`) per UTC day, every conversation updated in 
 The jump on 11-02 is the day the output guard went to enforce mode (first `output_guard` ledger row
 2026-11-02T00:50Z).
 
+### Status at 2026-11-12T02:05Z: merged, not live
+
+The PR (https://github.com/Muso-AI/hydra/pull/1889) was merged at 2026-11-12T01:40Z. It is not
+running. Read from node-8 at 02:02Z: the live edge config still has `defaultInboxId` set to Jan's
+admin id and no `escalationTeamId`, the new policy module is not on the host, and the edge gateway
+has not restarted since 2026-11-11T04:14Z. So the old rule is still assigning to Jan.
+
+Hydra deploys once a day at 04:00 UTC (`.github/workflows/deploy.yml`), not on merge. The last two
+scheduled deploys (11-10 and 11-11) were refused before changing anything: "a credit send tick
+window is open (7200 tick-in-flight) and waiting it out would exceed 900s". The last deploy that
+succeeded was 2026-11-09T23:09Z. If the 04:00Z run on 11-12 is refused the same way, this change
+stays off until somebody dispatches a deploy outside a credit send window.
+
 ## Part 1: every mechanism that puts a conversation on a person
 
 Jan said 540. It was 581 open at the first pull (2026-11-11 ~17:00Z) and 914 at 19:36Z
@@ -151,8 +164,15 @@ One module now decides who holds a conversation: `plugins/intercom/src/assignmen
 
 Enforcement: `scripts/check-intercom-no-personal-assignee.sh` in PR Validation fails on a
 non-empty `defaultInboxId`, on a person's or the bot's id as `escalationTeamId`, on
-`defaultInboxId` read anywhere in plugin code, and on any `assignConversation` call outside the
-policy module. 13 bats cases. Plugin suite: 1,870 tests pass.
+`defaultInboxId` read anywhere in plugin code, and on any use of `assignConversation` outside the
+policy module (a call, a computed access, an alias, the name built from pieces, a raw assignment
+part). 32 bats cases. Plugin suite: 1,891 tests pass.
+
+Added after QA review of the PR. A text scan can be dodged, so the rule is also enforced at
+runtime: every client refuses an admin assignee other than "0" or the acting bot before any
+request is made. And no escalation outcome is taken from what the assignment requests answered,
+accepted or not: the conversation is always read back, and the escalation reports `failed` while
+any admin, the bot included, holds it, when it sits in another team, or when it cannot be read.
 
 **The escalation path still exists.** A request for a person, a legal threat, a security incident,
 an abuse report, a refund or cancel dispute, the turn cap and a restricted account all still leave
@@ -193,9 +213,16 @@ real fix and belongs in k2's fix loop.
 ### Unverified until the first live escalation
 
 Intercom's reference confirms `assignee_id` may be a team id. It does not show the `type: "team"`
-value in the page I could read. If Intercom rejects it, the thread is left in Unassigned (never on
-a person) and the journal prints `escalation team assign FAILED`. Check the first escalation after
-deploy for `[intercom:assignment] escalated conv=<id> → team:7111842`.
+value in the page I could read. Every escalation is read back, whatever Intercom answered: it is
+reported Unassigned only when the read shows no admin and no team, and `failed` when somebody holds
+it or it cannot be read. If Intercom rejects the team value the journal prints
+`escalation team assign FAILED`. Check the first escalation after deploy for
+`[intercom:assignment] escalated conv=<id> → team:7111842`.
+
+The read-back itself is also unverified live. It needs `admin_assignee_id` and `team_assignee_id`
+in Intercom's answer to `GET /conversations/{id}`. If either is ever absent, every escalation
+reports `failed` and alerts, although the conversation was moved. That is the safe direction, and
+the same first escalation shows it.
 
 ## Standing rules in OpenClaw: what was found and what each became
 

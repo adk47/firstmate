@@ -18,6 +18,7 @@ import {
   isAssignmentConflict,
 } from "../src/outbound.js";
 import type { IntercomClient, IntercomConversation } from "../src/types.js";
+import { PersonalAssignmentRefused, assertAssignmentTarget } from "../src/assignment-policy.js";
 
 describe("MockIntercomClient", () => {
   it("records replyToConversation calls", async () => {
@@ -37,9 +38,17 @@ describe("MockIntercomClient", () => {
     await client.assignConversation({
       conversationId: "conv_1",
       adminId: "admin_1",
-      assigneeId: "admin_2",
+      assigneeId: "admin_1",
     });
     expect(client.calls.assignConversation).toHaveLength(1);
+  });
+
+  it("refuses to assign to another admin, and records nothing", async () => {
+    const client = new MockIntercomClient();
+    await expect(
+      client.assignConversation({ conversationId: "conv_1", adminId: "admin_1", assigneeId: "admin_2" }),
+    ).rejects.toBeInstanceOf(PersonalAssignmentRefused);
+    expect(client.calls.assignConversation).toHaveLength(0);
   });
 
   it("returns sequential message IDs", async () => {
@@ -442,14 +451,23 @@ describe("SanitizingIntercomClient", () => {
     await client.assignConversation({
       conversationId: "c1",
       adminId: "a1",
-      assigneeId: "a2",
+      assigneeId: "0",
     });
     expect(inner.calls.assignConversation).toHaveLength(1);
     expect(inner.calls.assignConversation[0]).toEqual({
       conversationId: "c1",
       adminId: "a1",
-      assigneeId: "a2",
+      assigneeId: "0",
     });
+  });
+
+  it("refuses an assignment to another admin before it reaches the inner client", async () => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner);
+    await expect(
+      client.assignConversation({ conversationId: "c1", adminId: "a1", assigneeId: "a2" }),
+    ).rejects.toBeInstanceOf(PersonalAssignmentRefused);
+    expect(inner.calls.assignConversation).toHaveLength(0);
   });
 
   it("passes getConversation through unmodified", async () => {
@@ -1073,11 +1091,22 @@ describe("SanitizingIntercomClient help-centre link gate", () => {
   });
 });
 
-describe("isAssignmentConflict (a repeat assignment is the desired end state, not a failure)", () => {
-  it("is true only for Intercom's already-assigned conflict", () => {
-    expect(isAssignmentConflict(new IntercomAssignmentConflictError("already 0", "0"))).toBe(true);
-    expect(isAssignmentConflict(new Error("boom"))).toBe(false);
-    expect(isAssignmentConflict(null)).toBe(false);
+describe("isAssignmentConflict (target-checked: only a conflict naming the assignee we asked for)", () => {
+  it("counts a conflict naming the requested assignee", () => {
+    expect(isAssignmentConflict(new IntercomAssignmentConflictError("already", "7111842"), "7111842")).toBe(true);
+    expect(isAssignmentConflict(new IntercomAssignmentConflictError("already 0", "0"), "0")).toBe(true);
+  });
+  it("ignores a conflict on a DIFFERENT assignee than the one we asked for", () => {
+    expect(isAssignmentConflict(new IntercomAssignmentConflictError("already", "5465657"), "0")).toBe(false);
+    expect(isAssignmentConflict(new IntercomAssignmentConflictError("already", "5763097"), "7111842")).toBe(false);
+  });
+  it("a conflict with no reported id proves nothing", () => {
+    expect(isAssignmentConflict(new IntercomAssignmentConflictError("already"), "0")).toBe(false);
+    expect(isAssignmentConflict(new IntercomAssignmentConflictError("already", ""), "")).toBe(false);
+  });
+  it("ignores errors that are not assignment conflicts", () => {
+    expect(isAssignmentConflict(new Error("boom"), "0")).toBe(false);
+    expect(isAssignmentConflict(null, "0")).toBe(false);
   });
 });
 
@@ -1106,5 +1135,58 @@ describe("assignConversation assignee type (assignment-policy.ts: an escalation 
       conversationId: "215", adminId: "5763097", assigneeId: "7111842", assigneeType: "team",
     });
     expect(seen[0].body).toMatchObject({ message_type: "assignment", type: "team", admin_id: "5763097", assignee_id: "7111842" });
+  });
+  it("the bot taking a conversation itself is sent (the AI queue)", async () => {
+    const seen = capture();
+    await new RealIntercomClient("tok").assignConversation({ conversationId: "215", adminId: "5763097", assigneeId: "5763097" });
+    expect(seen[0].body).toMatchObject({ type: "admin", admin_id: "5763097", assignee_id: "5763097" });
+  });
+});
+
+describe("the client refuses to assign a conversation to a person (however the call was written)", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+  const noRequest = () => {
+    const spy = vi.fn(async () => new Response("{}", { status: 200 }));
+    globalThis.fetch = spy as unknown as typeof fetch;
+    return spy;
+  };
+  it("another admin's id as an admin assignee: refused, and no request is made", async () => {
+    const spy = noRequest();
+    await expect(
+      new RealIntercomClient("tok").assignConversation({ conversationId: "215", adminId: "5763097", assigneeId: "5465657" }),
+    ).rejects.toBeInstanceOf(PersonalAssignmentRefused);
+    expect(spy).not.toHaveBeenCalled();
+  });
+  it("the same refusal through a computed member access (what a text scan cannot see)", async () => {
+    const spy = noRequest();
+    const client = new RealIntercomClient("tok") as unknown as Record<string, (p: unknown) => Promise<void>>;
+    const name = ["assign", "Conversation"].join("");
+    await expect(
+      client[name]({ conversationId: "215", adminId: "5763097", assigneeId: "5465657" }),
+    ).rejects.toThrow(/refusing to assign a conversation to admin 5465657/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+  it("a team assignment must carry a team id: '0', empty and non-numeric are refused", async () => {
+    const spy = noRequest();
+    for (const assigneeId of ["0", "", "abc", "7111842x"]) {
+      await expect(
+        new RealIntercomClient("tok").assignConversation({
+          conversationId: "215", adminId: "5763097", assigneeId, assigneeType: "team",
+        }),
+      ).rejects.toBeInstanceOf(PersonalAssignmentRefused);
+    }
+    expect(spy).not.toHaveBeenCalled();
+  });
+  it("assertAssignmentTarget: the three allowed targets, and nothing else", () => {
+    expect(() => assertAssignmentTarget({ adminId: "5763097", assigneeId: "0" })).not.toThrow();
+    expect(() => assertAssignmentTarget({ adminId: "5763097", assigneeId: "5763097" })).not.toThrow();
+    expect(() => assertAssignmentTarget({ adminId: "5763097", assigneeId: "7111842", assigneeType: "team" })).not.toThrow();
+    expect(() => assertAssignmentTarget({ adminId: "5763097", assigneeId: "5465657" })).toThrow(PersonalAssignmentRefused);
+    expect(() => assertAssignmentTarget({ adminId: "5763097", assigneeId: "5465657", assigneeType: "admin" })).toThrow(PersonalAssignmentRefused);
+    // An empty actor never matches an empty assignee.
+    expect(() => assertAssignmentTarget({ adminId: "", assigneeId: "" })).toThrow(PersonalAssignmentRefused);
   });
 });

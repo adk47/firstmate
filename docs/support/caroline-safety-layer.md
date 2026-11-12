@@ -190,7 +190,14 @@ records `assignment="ai_queue"`, and the Slack line says it is for the fix loop,
 conversation is decided in ONE module, `plugins/intercom/src/assignment-policy.ts`: an explicit escalation
 (risk rule, restricted account, legacy pattern) must carry a reason and goes to the `escalationTeamId` TEAM queue
 (or Intercom's Unassigned when unset), never to a personal admin id; `defaultInboxId` is retired and
-`scripts/check-intercom-no-personal-assignee.sh` fails CI on it. A human assignee silences Caroline only while a
+`scripts/check-intercom-no-personal-assignee.sh` fails CI on it. No escalation outcome is taken from what the
+assignment requests answered, accepted or not: `applyHandOff` always reads the conversation back and reports only
+what the read shows, the lesson QA on #1673 first drew for the old hand-off path. It is `failed` while any admin
+(the bot included) holds the conversation, when it sits in a team other than the one chosen, or when it cannot be
+read (a partial read counts as unreadable); the escalation team or Unassigned only when the read shows exactly
+that and no admin. Every
+client also refuses an admin assignee other than "0" or the acting bot before the request
+(`assertAssignmentTarget`), so the rule does not depend on how a call site is written. A human assignee silences Caroline only while a
 human is working the thread (`humanHoldHours`, default 72): a stale assignment is reclaimed on the customer's next
 message. `ledger.jsonl` rows written before this change carry `assignment` values `team_inbox`,
 `already_assigned`, `FAILED`. The digest's
