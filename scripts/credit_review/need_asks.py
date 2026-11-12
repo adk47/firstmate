@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Reviewed baseline: deploy overwrites - 2026-11-12 (codify-v1). node-8 holds the bytes of commit da3df0b07
+# (md5 cfe5ca39a306125bc8ac7a747296f35a) byte for byte: the deploy's drift gate sees "server differs from baseline 87027e74" and cannot tell a
+# stale published commit from a hand edit, so it halts on a path where overwriting is a strict forward step. Verified
+# 2026-11-12: live md5 == `git show da3df0b07:scripts/credit_review/need_asks.py | md5sum`, and da3df0b07 is an ancestor of main, so the deploy
+# only moves this file forward. Nothing on node-8 is lost by the overwrite - there is no local edit to lose.
 """L11c per-need asks: the audience and the sender path (proof-loop captain card L11c; p1 rulings 096/098,
 captain-1028-213x (c)). Every send goes through intercom-verify-request.sh --campaign proof-need-ask, which owns the
 copy, the lock (PROOF_NEED_ASK_COPY_APPROVED), the go-live guards and the send-time comm_state read; this module

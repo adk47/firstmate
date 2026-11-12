@@ -1,3 +1,8 @@
+# Reviewed baseline: deploy overwrites - 2026-11-12 (codify-v1). node-8 holds the bytes of commit da3df0b07
+# (md5 d01c5686f47127c5b09d76206cede46e) byte for byte: the deploy's drift gate sees "server differs from baseline 87027e74" and cannot tell a
+# stale published commit from a hand edit, so it halts on a path where overwriting is a strict forward step. Verified
+# 2026-11-12: live md5 == `git show da3df0b07:scripts/credit_review/owing_proof.py | md5sum`, and da3df0b07 is an ancestor of main, so the deploy
+# only moves this file forward. Nothing on node-8 is lost by the overwrite - there is no local edit to lose.
 """The audience for Fable's S1 line `credit-hold-status` (card L14a): credit requesters who OWE PROOF and were never
 told anything (Fable copy-owing-proof-1027 "Durable process" step 2; captain 01:5xZ delegated the copy yes to Fable,
 firstmate verify-ask-wiring-h2 inbox 063). READ-ONLY: writes one runner list for
