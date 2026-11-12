@@ -1231,9 +1231,10 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
                             continue
                         else:
                             open_since = intent[1]
-                    except sqlite3.Error:
+                    except sqlite3.Error as exc:
                         # No intent on disk, so no API call: a side effect the ledger
                         # never heard about cannot be recovered from.
+                        print(f"INTENTFAIL {d.request_id}: {type(exc).__name__}: {exc}", file=sys.stderr)
                         stats["errors"] += 1
                         continue
             if open_since is not None:
@@ -1285,7 +1286,8 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
             if side_effect:
                 try:
                     writer(d)
-                except Exception:  # noqa: BLE001 - a writer failure is counted, never fatal
+                except Exception as exc:  # noqa: BLE001 - a writer failure is counted, never fatal
+                    print(f"WRITERFAIL {getattr(d,'request_id','?')}: {type(exc).__name__}: {exc}", file=sys.stderr)
                     with lock:
                         stats["errors"] += 1
                     continue  # no confirm: the intent stays open and the next run settles it
