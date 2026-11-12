@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Reviewed baseline: deploy overwrites - 2026-11-12 (deploy-drift-1890, firstmate 006): node-8 carried a
+# 2603-line copy (sha256 129d14ce4f8a621c8e2246368c3184dcfb482a497df8f9decacff36c66352ca9) whose 173
+# live-only lines were ALL code this repo had already deleted: the TIER2_GODMODE allowlist, PROFILE_AUDIT_ID,
+# FRAUD_UVN_ATTEMPT_PATH, resolve_run_header_dryrun() (the 2026-04-23 OPS_DRY_RUN incident guard) and the
+# R3-3 run_started gate. Nothing on the box was newer than main, so the repo is the truth and the deploy
+# overwrites it. Backup of the live copy: node-8 /var/backups/hydra-drift-1890/muso-admin-api.sh.20261112T1046Z
 # muso-admin-api.sh — Core admin API wrapper for all Muso ops skills
 # Usage: bash muso-admin-api.sh [--requester email] <command> [options]
 #
