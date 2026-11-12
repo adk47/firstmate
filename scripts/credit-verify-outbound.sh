@@ -292,6 +292,21 @@ TICK_T0="$(( $(date -u +%s) - TICK_ELAPSED0 ))"
 OUT="$OUT_ROOT/$STAMP"
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$OUT/tick.log"; }
 killed() { [ -e "$KILL" ] || [ -e "$KILL2" ]; }
+# [key=nothing-sent-alert] (firstmate 2026-11-11, Fable ruling (c)): a family that stops with `NOTHING sent` used to leave
+# one line in tick.log and nothing else. That is how 2026-11-11 survived a whole day: every tick from 09:2xZ logged
+# `reply-due-paid check (rc=1): UVN STATUS (paid): NOTHING sent: the replica facts re-read failed (... timed out after
+# 900 seconds); nothing sent.` and no human was ever told. Nothing about a send surface may fail quietly, so a rc=1 that
+# names NOTHING sent is escalated here - an ALERT line with the family and the reason, plus a confirmed page. A page that
+# could not be delivered is logged as its own ALERT line, so the tick.log record survives a dead Slack.
+alert_nothing_sent() { # <tag> <outfile>: 0 and an ALERT when that stage says NOTHING sent
+  local why
+  why="$(grep -o 'NOTHING sent[^\"]*' "$2" 2>/dev/null | head -1)"
+  [ -n "$why" ] || return 1
+  log "ALERT: $1 sent NOTHING this tick: $(head -c 300 "$2")"
+  page_confirmed "credit-verify-outbound $STAMP: ALERT: $1 sent NOTHING this tick - $why" \
+    || log "ALERT (undelivered page, ${PAGE_WHY:-unknown}): $1 sent NOTHING this tick - $why"
+  return 0
+}
 notify() { # <text>: 0 only when the notifier ACCEPTED it (missing notifier / a Slack failure = 1)
   # shellcheck source=/dev/null
   [ -r "$HYDRA_ROOT/scripts/lib/slack-notify.sh" ] && . "$HYDRA_ROOT/scripts/lib/slack-notify.sh" \
@@ -953,7 +968,7 @@ family() {
     log "$tag: UNMEASURED STOP - the check crossed the bar ($(unmeasured_summary "$OUT/$tag-check.json")); the gate is slow, not these accounts; the tick ends here (fail loud)"
     TICK_ENDS=1; return 1
   fi
-  [ "$rc" = 0 ] || { log "$tag: check failed; this family stops"; return 1; }
+  [ "$rc" = 0 ] || { alert_nothing_sent "$tag" "$OUT/$tag-check.out"; log "$tag: check failed; this family stops"; return 1; }
   # QA #1612 (round 2): the cursor moves only when the family's step for this page is DONE - a dry tick or a check
   # that accepted nobody (to where the CHECK stopped), or a clean apply (to where the APPLY stopped) - and to the
   # first entry that run did not get to (page.end), never past entries a capped run never examined
@@ -970,7 +985,7 @@ family() {
   [ "$rc" = 2 ] && return 2
   rc="$RC"
   if deadline_rc "$rc"; then log "$tag: bodies hit the ${TICK_HARD_S}s deadline (read-only, stopped); no apply, the tick ends"; TICK_ENDS=1; return 1; fi
-  [ "$rc" = 0 ] || { log "$tag: body sample failed; no apply, tick stops: $(head -c 300 "$OUT/$tag-bodies.out")"; return 1; }
+  [ "$rc" = 0 ] || { alert_nothing_sent "$tag" "$OUT/$tag-bodies.out"; log "$tag: body sample failed; no apply, tick stops: $(head -c 300 "$OUT/$tag-bodies.out")"; return 1; }
   accept_bodies "$tag"; rc=$?
   if deadline_rc "$rc"; then log "$tag: the accepted-bodies step hit the ${TICK_HARD_S}s deadline; no apply, the tick ends"; TICK_ENDS=1; return 1; fi
   # QA #1610: a check that accepted NOBODY is a no-apply family outcome - never an apply over the original list
@@ -1204,7 +1219,7 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
       return 0
     fi
   fi
-  [ "$rc" = 0 ] || { log "$tag: apply failed rc=$rc; tick stops"; TICK_ENDS=1; return 1; }
+  [ "$rc" = 0 ] || { alert_nothing_sent "$tag" "$OUT/$tag-apply.out"; log "$tag: apply failed rc=$rc; tick stops"; TICK_ENDS=1; return 1; }
   completed "$tag"
   advance_cursor "$tag" "$cur_file" "$OUT/$tag-apply.json" "$cur"
 }

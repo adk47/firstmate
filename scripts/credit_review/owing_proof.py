@@ -99,13 +99,55 @@ def check_statuses(query: Query) -> list[str]:
     return seen
 
 
-def replica_rows(query: Query) -> list[list[str]]:
-    check_statuses(query)
-    rows = query(REPLICA_SQL)
+def replica_sql(user_ids: "list[int] | tuple[int, ...] | None" = None) -> str:
+    """The EXACT SQL this module runs. Without `user_ids` it is the whole open-request table (REPLICA_SQL, the header's
+    pinned string); with them it is THE SAME QUERY restricted to those users.
+
+    [key=facts-scope] (firstmate 2026-11-11, Fable ruling): verify_facts re-ran REPLICA_SQL over the ENTIRE open
+    credit_requests table to check the facts of the (at most a few hundred) users on THIS tick's page. On 2026-11-11 the
+    replica could not finish it: every tick from 09:2xZ ended `reply-due-paid check (rc=1): UVN STATUS (paid): NOTHING
+    sent: the replica facts re-read failed (Command '[/opt/hydra/scripts/trino-query.sh]' timed out after 900 seconds)`,
+    and no family behind it sent either. The re-read exists to compare ONE page's facts with the replica, so it only
+    ever needs those users' rows: the same SELECT, the same columns, `AND cr.userid IN (...)`.
+
+    The header's `query`/`query_sha256` stay pinned to REPLICA_SQL - the scope is a WHERE clause over the same shape,
+    not a different question - and the builder still reads the whole table, because THAT is how the tick learns who
+    owes. Only the re-read is scoped."""
+    if not user_ids:
+        return REPLICA_SQL
+    ids = ",".join(str(int(u)) for u in sorted({int(u) for u in user_ids}))
+    return f"{REPLICA_SQL} AND cr.userid IN ({ids})"
+
+
+def _check_shape(rows: list[list[str]]) -> list[list[str]]:
     if any(len(r) != 8 or not str(r[0]).isdigit() or r[4] not in ("0", "1") or r[5] not in ("0", "1")
            or r[6] not in ("0", "1") or r[7] not in ("0", "1") for r in rows):
         raise OwingProofError("unexpected replica row shape")
     return rows
+
+
+def replica_rows(query: Query) -> list[list[str]]:
+    """The whole open-request table (the builder's read). The status guard runs first on every read."""
+    check_statuses(query)
+    return _check_shape(query(REPLICA_SQL))
+
+
+# A page is a few hundred users; the read-only replica takes an IN list of this size comfortably. Chunked anyway, because
+# a caller with no cap (a hand-run --verify-facts on a full list) must not build one enormous SQL string.
+FACTS_SCOPE_CHUNK = 500
+
+
+def replica_rows_for(query: Query, user_ids: "list[int] | list[str] | None") -> list[list[str]]:
+    """The replica's rows for EXACTLY these users (the scoped half of the r5 signing rule). No users = no query at all:
+    an empty page has nothing to verify, and asking the replica about the whole table was the 2026-11-11 timeout."""
+    ids = sorted({int(u) for u in user_ids or [] if str(u).isdigit()})
+    if not ids:
+        return []
+    rows: list[list[str]] = []
+    check_statuses(query)  # the same guard the whole-table read runs: an unknown status refuses BEFORE any audience read
+    for i in range(0, len(ids), FACTS_SCOPE_CHUNK):
+        rows += query(replica_sql(ids[i:i + FACTS_SCOPE_CHUNK]))
+    return _check_shape(rows)
 
 
 def told_users(ledger_path: str) -> set[int]:
@@ -259,6 +301,27 @@ def _write(path: str, doc: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def local_diffs(lst: dict[str, Any], held: set[int], asked: dict[int, set[str]]) -> list[str]:
+    """The replica-INDEPENDENT half of verify_facts: the header digest, the account holds and the sent asks. A replica
+    re-read that times out may fall back to the list's own facts, but never past these.
+
+    Only a hold RELEASE is locally observable: a class-account_hold entry was built because that account was held, so a
+    release since the build shrinks its owed set. A hold that STARTED since the build cannot be seen without the
+    replica's rows (the h1 class adds every unverified row), so it is not claimed here."""
+    diffs = []
+    head = (lst.get("replica_facts") or {}).get("sha256")
+    if head != facts_header(lst.get("users") or [])["sha256"]:
+        diffs.append(f"header: replica_facts.sha256 {head} does not match the listed facts (the list changed after its build)")
+    for u in lst.get("users") or []:
+        uid = int(u["user_id"])
+        if u.get("class") == "account_hold" and uid not in held:
+            diffs.append(f"{uid}: the account hold was released since the build")
+        named = {str(i).lower() for i in u.get("request_ids") or []}
+        if (named & asked.get(uid, set())) if u.get("class") == NEW_ROWS else (uid in asked):
+            diffs.append(f"{uid}: an ask was sent since the build")
+    return diffs
+
+
 def verify_facts(lst: dict[str, Any], query: Query, *, holds_path: str = ACCOUNT_HOLDS,
                  ledger_path: str = LEDGER) -> list[str]:
     """Re-read the replica for a built list (r5 signing rule); every listed user whose OWED set changed since the build
@@ -267,15 +330,13 @@ def verify_facts(lst: dict[str, Any], query: Query, *, holds_path: str = ACCOUNT
     then blocks a follow-up - is a change, exactly like a row that moved or cleared; request_ids must equal the owed
     ids; and the list's header digest must still match its facts (a list edited after the build is refused).
     A user whose facts changed is OUT of the signed batch."""
-    diffs = []
-    head = (lst.get("replica_facts") or {}).get("sha256")
-    if head != facts_header(lst.get("users") or [])["sha256"]:
-        diffs.append(f"header: replica_facts.sha256 {head} does not match the listed facts (the list changed after its build)")
-    now: dict[str, list[list[str]]] = {}
-    for r in replica_rows(query):
-        now.setdefault(r[0], []).append(r)
     held = held_accounts(holds_path, ledger_path)
-    asked = asked_rows(ledger_path) if any(u.get("class") == NEW_ROWS for u in lst.get("users") or []) else {}
+    asked = asked_rows(ledger_path)
+    diffs = local_diffs(lst, held, asked)
+    now: dict[str, list[str]] = {}
+    # [key=facts-scope]: the re-read asks the replica about THIS page's users, never the whole table
+    for r in replica_rows_for(query, [u.get("user_id") for u in lst.get("users") or []]):
+        now.setdefault(r[0], []).append(r)
     for u in lst.get("users") or []:
         owe, _ = owed(now.get(str(u["user_id"]), []), int(u["user_id"]) in held)
         if u.get("class") == NEW_ROWS:          # the follow-up class: only the rows no ask named (as build lists them)

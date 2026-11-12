@@ -135,6 +135,33 @@ class ProofRequiredAudienceTest(OwingProofTest):
         self.assertTrue(any(d.startswith("header:") for d in self.vf(tampered, q(rows))))
 
 
+    def test_verify_facts_re_reads_ONLY_this_pages_users_never_the_whole_table(self):
+        # [key=facts-scope] (Fable 2026-11-11): the re-read exists to compare ONE page's facts with the replica, and it
+        # used to re-run the whole-table query to do it. On 2026-11-11 that query stopped finishing (900 s timeout) and
+        # every family behind it sent nothing for a day. The re-read must ask about the listed users and nobody else.
+        lst = self.build()
+        seen = []
+        def fake(sql):
+            seen.append(sql)
+            if sql == op.STATUS_GUARD_SQL:                              # the guard, unchanged, still runs first
+                return [[s] for s in ("approved", "rejected") + op.OPEN_STATUSES]
+            return [list(r) for r in ROWS]
+        self.assertEqual(self.vf(lst, fake), [])
+        self.assertEqual(seen[0], op.STATUS_GUARD_SQL)
+        seen = [q for q in seen if q != op.STATUS_GUARD_SQL]
+        self.assertTrue(seen)
+        for sql in seen:
+            self.assertIn("cr.userid IN (", sql)                       # the SAME query, restricted to the page
+            self.assertIn("FROM postgresql_core.public.credit_requests cr", sql)
+            self.assertNotEqual(sql, op.REPLICA_SQL)                    # never the whole table again
+        listed = sorted(u["user_id"] for u in lst["users"])
+        self.assertEqual(seen[0].rsplit("cr.userid IN (", 1)[1].rstrip(")"), ",".join(listed))
+        # an empty page asks the replica NOTHING at all (the whole-table read was the timeout)
+        asked = []
+        self.assertEqual(self.vf({"users": [], "replica_facts": op.facts_header([])},
+                                 lambda sql: asked.append(sql) or []), [])
+        self.assertEqual(asked, [])
+
     def test_the_builders_class_list_verifies_and_a_rewrite_carrying_the_parent_header_does_not(self):
         # r5 776: the 08:00Z dry tick's split kept the full list's facts sha -> the uvn check refused it (rightly)
         replica = q(ROWS)

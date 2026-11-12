@@ -40,6 +40,12 @@ if mode != "apply" and os.environ.get("STUB_CHECK_RC") and (
     # spec-deploy-lock-deferral-m1: the runner's TRANSIENT exit (Trino said "retry in a few minutes") is rc=4
     print("Credit review uvn-status: Trino is transiently unavailable; nothing was sent for this step.")
     sys.exit(int(os.environ["STUB_CHECK_RC"]))
+if mode != "apply" and os.environ.get("STUB_NOTHING_SENT"):
+    # [key=nothing-sent-alert] (Fable 2026-11-11): the LIVE shape of the 2026-11-11 day - the runner answers rc=1 and says
+    # NOTHING sent because the replica facts re-read timed out. This is not the transient rc=4: nothing is retryable.
+    print("UVN STATUS (paid): NOTHING sent: the replica facts re-read failed (Command '['/opt/hydra/scripts/trino-query.sh']'"
+          " timed out after 900 seconds); nothing sent.")
+    sys.exit(1)
 if mode == "apply" and os.environ.get("STUB_APPLY_LOCK_TIMES") and (
         not os.environ.get("STUB_APPLY_LOCK_SUB") or a[0] == os.environ["STUB_APPLY_LOCK_SUB"]):
     # a deploy holds the apply lock EXCLUSIVE: the runner exits 3 with NOTHING attempted - no rows, no outcomes file
@@ -159,6 +165,10 @@ if mode == "apply" and os.environ.get("STUB_APPLY_LOCK_AFTER_ROWS"):
     sys.exit(3)
 if mode == "apply" and os.environ.get("STUB_APPLY_RC"):
     sys.exit(int(os.environ["STUB_APPLY_RC"]))   # rows were written above; the run then FAILS (a partial send)
+if mode == "apply" and os.environ.get("STUB_APPLY_NOTHING_SENT"):
+    # a FAILED apply that sent nothing (the fraud lens could not be measured): the same silent no-send class
+    print("UVN STATUS (paid): NOTHING sent: the fraud lens is unavailable (Unknown: account holds unreadable); nothing sent")
+    sys.exit(1)
 if mode == "apply" and os.environ.get("STUB_APPLY_RC3_AFTER_SEND") and (
         not os.environ.get("STUB_APPLY_LOCK_SUB") or a[0] == os.environ["STUB_APPLY_LOCK_SUB"]):
     # QA #1799 r12 (Critical): credit-review.py returns 3 for a signed-set mismatch and for HEAD_REFUSED AFTER
@@ -535,6 +545,36 @@ PY
   CVO_TICK_BUDGET_S=0 run -0 "$SCRIPT"
   if grep -q -- "--check-recipients" "$CALLS"; then false; fi
   grep -q "tick budget 0s reached; this family waits for the next tick" "$(newest_tick)"
+}
+
+@test "outbound tick ([key=nothing-sent-alert]): a family that answers rc=1 'NOTHING sent' is escalated to an ALERT and a confirmed page, never left as one quiet log line" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # The LIVE shape of 2026-11-11: the runner answers rc=1 saying NOTHING sent because the replica facts re-read timed
+  # out. Every tick from 09:2xZ logged exactly this and told nobody, so the send surface was dead for a day.
+  STUB_NOTHING_SENT=1 CVO_UNSIGNED_ALL=0 run -1 "$SCRIPT"
+  grep -q "ALERT: uvn-status-paid sent NOTHING this tick" "$(newest_tick)"
+  grep -q "replica facts re-read failed" "$(newest_tick)"
+  grep -q "ALERT: uvn-status-paid sent NOTHING" "$CALLS.page-confirmed"
+}
+
+@test "outbound tick ([key=nothing-sent-alert]): a FAILED apply that rendered 'NOTHING sent' alerts instead of exiting quietly" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # The apply branch is the last place a family can send nothing: the fraud lens being unmeasurable renders NOTHING sent
+  # and exits nonzero. That is the same silent no-send the check and bodies branches already escalate.
+  STUB_APPLY_NOTHING_SENT=1 CVO_UNSIGNED_ALL=0 run -1 "$SCRIPT"
+  grep -q "ALERT: uvn-status-paid sent NOTHING this tick" "$(newest_tick)"
+  grep -q "fraud lens is unavailable" "$(newest_tick)"
+  grep -q "apply failed rc=1; tick stops" "$(newest_tick)"
+  grep -q "ALERT: uvn-status-paid sent NOTHING" "$CALLS.page-confirmed"
+}
+
+@test "outbound tick ([key=nothing-sent-alert]): a page Slack rejects is still an ALERT line in tick.log" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # A warning nobody receives is the same silent failure. When the page cannot be confirmed the tick.log ALERT stays
+  # the record, and it says the page was undelivered instead of pretending it went out.
+  STUB_NOTHING_SENT=1 STUB_SLACK_CONFIRM_RC=1 CVO_UNSIGNED_ALL=0 run -1 "$SCRIPT"
+  grep -q "ALERT: uvn-status-paid sent NOTHING this tick" "$(newest_tick)"
+  grep -q "ALERT (undelivered page" "$(newest_tick)"
 }
 
 @test "outbound tick (QA #1587, b1 546): ONE cap rule - before the family's full-cap date at most 100, after a REACHED date its whole cap (250); a held lock is measured (holder + age, STALE past the cadence) and never taken over" {

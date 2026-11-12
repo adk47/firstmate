@@ -1873,8 +1873,11 @@ class WithdrawalConfirmTests(unittest.TestCase):
         gate = FakeGate()
         rep, refused, held, _ = withdrawal_confirm.run([self.RID, self.OTHER, self.THIRD], mode="apply",
                                                        query=lambda sql: rows, runner=gate, wrapper="/gate")
-        self.assertEqual([(p["user"]["professional_id"], p["user"]["auth_id"]) for _, p in gate.calls],
-                         [(pro(12609), "6f1c2a9e-0b7d-4c3e-9a51-000000012609"), (legacy_pro, "")])
+        # verify_notify.send_all dispatches on a worker pool (_send_loop), so the two gate calls complete in either
+        # order: the SET of full (professional_id, auth_id) tuples is the contract, not their arrival order. A missing
+        # or extra call still fails this comparison.
+        self.assertEqual(sorted((p["user"]["professional_id"], p["user"]["auth_id"]) for _, p in gate.calls),
+                         sorted([(pro(12609), "6f1c2a9e-0b7d-4c3e-9a51-000000012609"), (legacy_pro, "")]))
         self.assertEqual((rep.no_professional_id, refused, held), (1, [], [self.THIRD]))
 
     def test_thread_pre_flight_reports_the_gates_refusal_and_read_failures_apart(self):
@@ -2460,6 +2463,130 @@ class ProofRequiredAskTest(unittest.TestCase):
         with mock.patch.object(owing_proof, "verify_facts", vf([])):                # unchanged: the ask goes
             rep, gate = self.run_(mode="apply", query=q)
         self.assertEqual(len(gate.calls), 1, rep)
+
+    def _local_state(self, *, held=(), asked=()):
+        holds = self.dir / "account_holds.jsonl"
+        holds.write_text("".join(json.dumps({"user_id": str(u), "kind": "approval_hold",
+                                             "at": datetime.now(timezone.utc).isoformat()}) + "\n" for u in held))
+        db = verify_ledger.connect(self.ledger)
+        for uid, ids in asked:
+            db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type,"
+                       " request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at) VALUES"
+                       " ('uvn-status', 'initial', 'a@x.com', ?, '2026-11-11', 'sent', 'email', ?, 1, 'r5', 'ref', ?, ?)",
+                       (str(uid), json.dumps(list(ids)), datetime.now(timezone.utc).isoformat(),
+                        datetime.now(timezone.utc).isoformat()))
+        db.close()
+        return str(holds)
+
+    def test_a_re_read_TIMEOUT_falls_back_to_the_lists_facts_with_their_age_and_sends(self):
+        # [key=facts-stale-fallback] (Fable 2026-11-11): the replica not answering is not evidence the facts changed. While
+        # the list's own facts are inside the bar the ask still goes, and the run SAYS how old they are ('facts stale
+        # Nm') instead of the whole send surface dying for the day the way 2026-11-11 did.
+        import re
+        import subprocess
+        from unittest import mock
+        from credit_review import owing_proof
+
+        def q(sql):
+            if "public.users" in sql:
+                return [["1", "a@x.com", "Ann", pro(1), auth(1)]]
+            m = re.search(r"status IN \(([^)]*)\)", sql)
+            wanted = set(re.findall(r"'([a-z_]+)'", m.group(1))) if m else {"user_verification_needed"}
+            return [["ru", "1", "p1", "t1", "Song ru", '[{"name":"Art"}]', "{Mixing}", "10", "{}", "{}", ""]] \
+                if "user_verification_needed" in wanted else []
+
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "class": "uvn", "request_ids": ["ru"],
+                       "facts": [["ru", "user_verification_needed", False]]}]
+        # the list was built 20 minutes ago; the re-read then stalled past the wrapper's 900 s
+        self.list.write_text(json.dumps({"generated_at": iso(1/3), "users": self.users,
+                                         "replica_facts": owing_proof.facts_header(self.users)}))
+        stalled = subprocess.TimeoutExpired("/opt/hydra/scripts/trino-query.sh", 900)
+        holds = self._local_state()
+        with mock.patch.object(owing_proof, "verify_facts", lambda doc, query, **kw: (_ for _ in ()).throw(stalled)):
+            rep, gate = self.run_(mode="apply", query=q, holds_path=holds)
+        self.assertEqual(rep.halted, "", rep.halted)
+        self.assertEqual(len(gate.calls), 1, rep)                       # the ask still went
+        # the age is measured, not echoed: NOW is module-level, so a long suite run only makes the list older
+        self.assertGreaterEqual(rep.facts_stale_min, 19)
+        self.assertLess(rep.facts_stale_min, uvn_status.FACTS_STALE_MAX_MIN)
+        self.assertIn(f"facts stale {rep.facts_stale_min}m", uvn_status.render(rep, "apply", "paid"))
+
+        # past the bar the claim the re-read exists to make is gone: halt, exactly as before
+        self.list.write_text(json.dumps({"generated_at": iso((uvn_status.FACTS_STALE_MAX_MIN + 10) / 60), "users": self.users,
+                                         "replica_facts": owing_proof.facts_header(self.users)}))
+        with mock.patch.object(owing_proof, "verify_facts", lambda doc, query, **kw: (_ for _ in ()).throw(stalled)):
+            rep, gate = self.run_(mode="apply", query=q, holds_path=holds)
+        self.assertEqual(gate.calls, [])
+        self.assertIn("re-read timed out", rep.halted)
+        self.assertIn(f"bar {uvn_status.FACTS_STALE_MAX_MIN}m", rep.halted)
+
+    def test_a_same_minute_fallback_still_discloses_its_age(self):
+        # age 0 is a MEASURED age, not "no fallback": a send that did not re-read the replica always says so
+        import subprocess
+        from credit_review import owing_proof
+
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "class": "uvn", "request_ids": ["ru"],
+                       "facts": [["ru", "user_verification_needed", False]]}]
+        # ONE clock for the stamp and for the run: `run_` defaults `now` to the module's NOW (stamped at import), so a
+        # list written from the real clock reads as NEGATIVE age ~9 minutes later ("the list is -0.1h old") in a full
+        # suite. Both sides here are the real clock, so the age is 0 by construction and never time-of-run dependent.
+        now = datetime.now(timezone.utc)
+        born = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.list.write_text(json.dumps({"generated_at": born, "users": self.users,
+                                         "replica_facts": owing_proof.facts_header(self.users)}))
+        stalled = subprocess.TimeoutExpired("/opt/hydra/scripts/trino-query.sh", 900)
+        with mock.patch.object(owing_proof, "verify_facts", lambda d, query, **kw: (_ for _ in ()).throw(stalled)):
+            rep, gate = self.run_(mode="apply", query=lambda sql: [], holds_path=self._local_state(), now=now)
+        self.assertEqual(rep.halted, "", rep.halted)
+        self.assertEqual(rep.facts_stale_min, 0)
+        self.assertIn("facts stale 0m", uvn_status.render(rep, "apply", "paid"))
+
+    def test_a_re_read_TIMEOUT_still_halts_on_a_list_edited_after_its_build(self):
+        # the replica not answering never licenses sending on a list whose own digest no longer vouches for it
+        import subprocess
+        from credit_review import owing_proof
+
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "class": "uvn", "request_ids": ["ru"],
+                       "facts": [["ru", "user_verification_needed", False]]}]
+        self.list.write_text(json.dumps({"generated_at": iso(1/3), "users": self.users,
+                                         "replica_facts": owing_proof.facts_header(self.users)}))
+        doc = json.loads(self.list.read_text())
+        doc["users"][0]["facts"] = [["ru", "unverified", False]]
+        self.list.write_text(json.dumps(doc))
+        stalled = subprocess.TimeoutExpired("/opt/hydra/scripts/trino-query.sh", 900)
+        with mock.patch.object(owing_proof, "verify_facts", lambda d, query, **kw: (_ for _ in ()).throw(stalled)):
+            rep, gate = self.run_(mode="apply", query=lambda sql: [], holds_path=self._local_state())
+        self.assertEqual(gate.calls, [])
+        self.assertIn("does not match the listed facts", rep.halted)
+
+    def test_a_re_read_TIMEOUT_still_refuses_a_user_asked_since_the_build(self):
+        import subprocess
+        from credit_review import owing_proof
+
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "class": "uvn", "request_ids": ["ru"],
+                       "facts": [["ru", "user_verification_needed", False]]}]
+        self.list.write_text(json.dumps({"generated_at": iso(1/3), "users": self.users,
+                                         "replica_facts": owing_proof.facts_header(self.users)}))
+        holds = self._local_state(asked=[(1, ["ru"])])
+        stalled = subprocess.TimeoutExpired("/opt/hydra/scripts/trino-query.sh", 900)
+        with mock.patch.object(owing_proof, "verify_facts", lambda d, query, **kw: (_ for _ in ()).throw(stalled)):
+            rep, gate = self.run_(mode="apply", query=lambda sql: [], holds_path=holds)
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.facts_changed, ["1"])
+
+    def test_the_local_facts_checks_refuse_a_hold_released_since_the_build(self):
+        from credit_review import owing_proof
+
+        users = [{"user_id": 1, "class": "account_hold", "request_ids": ["ru"],
+                  "facts": [["ru", "unverified", False]]},
+                 {"user_id": 2, "class": "account_hold", "request_ids": ["rv"],
+                  "facts": [["rv", "unverified", False]]}]
+        lst = {"users": users, "replica_facts": owing_proof.facts_header(users)}
+        diffs = owing_proof.local_diffs(lst, held={2}, asked={})
+        self.assertEqual(len(diffs), 1, diffs)
+        self.assertTrue(diffs[0].startswith("1:"), diffs)
+        self.assertIn("hold was released", diffs[0])
+        self.assertEqual(owing_proof.local_diffs(lst, held={1, 2}, asked={}), [])
 
 
 class ReplyDueTitleParityTest(unittest.TestCase):

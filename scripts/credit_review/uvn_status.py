@@ -97,6 +97,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -240,6 +241,14 @@ STATUS_DAILY_MAX = policy_credit_cap()  # the no-ask status notes
 # email). This is the sanity bound on all of a day's notes - it never lifts the shared credit cap above.
 INAPP_DAILY_MAX = 5000
 LIST_MAX_AGE_H = 30
+# [key=facts-stale-fallback] (firstmate 2026-11-11, Fable ruling): the facts re-read is now scoped to this page's users
+# (owing_proof.replica_sql), but a replica that is slow AND the whole page can still push the one read past its timeout.
+# Before this, a timeout was terminal for the family: `nothing sent`, and every family behind it too - on 2026-11-11
+# that was every tick from 09:2xZ to 21:3xZ. The list's own `replica_facts` header IS the last successful read (the tick
+# rebuilds it immediately before the family), so a timeout falls back to it, states its age (`facts stale Nm`), and
+# sends only while that age is inside this bar. Past the bar the re-read's whole purpose - "the owed set has not changed
+# since the list was built" - is no longer something we can claim, so the family halts exactly as it does today.
+FACTS_STALE_MAX_MIN = 90
 # (campaign, wording) pairs the gate takes as --copy; LOCKED_WORDINGS name the gate lock each one waits on.
 WORDINGS = (("status-doc-received", "queued"), ("status-doc-received", "received"), ("status-doc-received", "queued-neutral"),
             ("status-team-review", "no-ask"))
@@ -291,6 +300,7 @@ class UvnReport(verify_notify.Report):
     rows_held: int = 0                 # requests left out of a note sent or validated (blank or gate-refused field)
     unlisted: int = 0
     facts_changed: list = field(default_factory=list)   # QA #1565: listed users whose owed set changed since the build
+    facts_stale_min: int | None = None  # [key=facts-stale-fallback]: the re-read timed out; this page's facts are Nm old
     recently_asked: int = 0
     excluded: int = 0                  # --exclude-users (another lane messages them today)
     count_copy: int = 0                # status-team-review users sent the count-only note (not held)
@@ -323,7 +333,15 @@ def load_list(path: str, *, now: datetime | None = None) -> tuple[list[dict[str,
     return users, ""
 
 
-def _enforce_facts(list_path: str, users: list[dict[str, Any]], report: Any, query: Query) -> str:
+def _re_read_timed_out(exc: BaseException) -> bool:
+    """True only for the timeout class: `trino()` runs the wrapper under `timeout=900`, so a stalled replica arrives as
+    TimeoutExpired. A TrinoTransientError is NOT included on purpose - a semantic "retry in a few minutes" is the tick's
+    deferral rail's business (it retries, then defers), not a licence to send on facts we never confirmed."""
+    return isinstance(exc, subprocess.TimeoutExpired)
+
+
+def _enforce_facts(list_path: str, users: list[dict[str, Any]], report: Any, query: Query, *,
+                   ledger_path: str | None = None, holds_path: str | None = None) -> str:
     """QA #1565: a list built by owing_proof (it carries replica_facts) is checked against the replica BEFORE any send -
     the same owing_proof.verify_facts the signers run, enforced here so no ask goes on a stale list. A list edited
     after its build (or users carrying facts with no header) halts the run; a user whose owed set changed since the
@@ -334,9 +352,40 @@ def _enforce_facts(list_path: str, users: list[dict[str, Any]], report: Any, que
     if not isinstance(doc, dict) or ("replica_facts" not in doc and not any("facts" in u for u in users)):
         return ""
     from credit_review import owing_proof               # lazy: the builder's own rule, one implementation
+    ledger = ledger_path or owing_proof.LEDGER
+    holds = holds_path or owing_proof.ACCOUNT_HOLDS
     try:
-        diffs = owing_proof.verify_facts(doc, query)    # the builder's own holds + ledger, as --verify-facts at signing
+        diffs = owing_proof.verify_facts(doc, query, holds_path=holds, ledger_path=ledger)
     except Exception as exc:  # noqa: BLE001 - a re-read that fails sends nothing
+        # [key=facts-stale-fallback] (Fable 2026-11-11): a TIMEOUT is not evidence the facts are wrong, it is evidence the
+        # replica did not answer. Fall back to the list's own facts (the last successful read) while they are still young
+        # enough for the claim the re-read exists to make, and SAY how old they are. Anything else - a SQL error, a bad
+        # row shape - stays terminal: that is the replica telling us something we must not paper over.
+        if _re_read_timed_out(exc):
+            # The replica did not answer, so the replica-dependent comparison falls back to the list's own facts. The
+            # checks that never needed the replica do NOT: a list edited after its build, a released hold or an ask
+            # sent since the build still halt/refuse here, exactly as they do on a successful re-read.
+            try:
+                held = owing_proof.held_accounts(holds, ledger)
+                asked = owing_proof.asked_rows(ledger)
+                local = owing_proof.local_diffs(doc, held, asked)
+            except Exception as local_exc:  # noqa: BLE001 - a local check that cannot run sends nothing
+                return f"the replica facts re-read timed out and the local checks failed ({local_exc}); nothing sent"[:300]
+            if any(d.startswith("header:") for d in local):
+                return next(d for d in local if d.startswith("header:")) + "; nothing sent"
+            changed = {d.split(":", 1)[0] for d in local}
+            report.facts_changed = sorted(changed)
+            users[:] = [u for u in users if str(u.get("user_id")) not in changed]
+            for _ in changed:
+                report.note("facts_changed")
+            from .evidence import parse_ts
+            gen = parse_ts(doc.get("generated_at")) if isinstance(doc, dict) else None
+            age_min = int((datetime.now(timezone.utc) - gen).total_seconds() // 60) if gen else None
+            if age_min is not None and 0 <= age_min <= FACTS_STALE_MAX_MIN:
+                report.facts_stale_min = age_min
+                return ""
+            return ("the replica facts re-read timed out and the list's own facts are "
+                    f"{age_min if age_min is not None else '?'}m old (bar {FACTS_STALE_MAX_MIN}m); nothing sent")[:300]
         return f"the replica facts re-read failed ({exc}); nothing sent"[:300]
     if any(d.startswith("header:") for d in diffs):
         return next(d for d in diffs if d.startswith("header:")) + "; nothing sent"
@@ -1103,7 +1152,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             report.halted = why
             return report
         if is_ask:
-            why = _enforce_facts(list_path, users, report, query)
+            why = _enforce_facts(list_path, users, report, query, ledger_path=ledger_path, holds_path=holds_path)
             if why:
                 report.halted = why
                 return report
@@ -1883,6 +1932,10 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
                      ("left for the next run (daily cap / run size)", report.over_daily_max)):
         if n:
             parts.append(f"{n} {label}")
+    if report.facts_stale_min is not None:
+        # [key=facts-stale-fallback]: the literal the tick's log and the operator look for
+        parts.append(f"facts stale {report.facts_stale_min}m (the replica re-read timed out; the list's own facts were "
+                     f"used, bar {FACTS_STALE_MAX_MIN}m)")
     if report.deferrals:
         parts.append(f"{len(report.deferrals)} deferred by the gate at send: " + "; ".join(report.deferrals[:20]))
     if report.refused_users:

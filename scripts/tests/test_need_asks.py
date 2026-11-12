@@ -72,7 +72,8 @@ class NeedAsksTest(unittest.TestCase):
         if sql == na.owing_proof.STATUS_GUARD_SQL:                # every status in the table, read before the facts
             return [[s] for s in getattr(self, "table_statuses",
                                          ("approved", "rejected", "unverified", "user_verification_needed"))]
-        if sql == na.FACTS_SQL:                                   # r5 #1582 (c): the signing header's facts read
+        if sql.startswith(na.FACTS_SQL):                          # r5 #1582 (c): the signing header's facts read
+            # [key=facts-scope]: the re-read is the SAME query restricted to this page's users, so match the prefix
             st = getattr(self, "facts_status", {})
             return [[str(u), r.lower(), st.get(r, "user_verification_needed"), "false"]
                     for u, rids in self.pending.items() for r in rids]
@@ -755,7 +756,11 @@ class NeedAsksTest(unittest.TestCase):
         lst = na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying),
                        query=lambda sql: seen.append(sql) or real(sql))
         head = lst["replica_facts"]
-        self.assertIn(head["query"], seen)                                          # the exact string the build ran
+        # [key=facts-scope]: the header pins the base query; the build now runs it RESTRICTED to this page's users, so
+        # the read that happened is the header's query plus the user predicate - never the whole table again.
+        reads = [q for q in seen if q.startswith(head["query"])]
+        self.assertTrue(reads)
+        self.assertIn("cr.userid IN (", reads[0])
         self.assertTrue(head["query"].startswith("SELECT "))
         self.assertEqual(head["query_sha256"], hashlib.sha256(head["query"].encode()).hexdigest())
         self.assertEqual(head["sha256"], na.facts_header(lst["users"])["sha256"])
@@ -768,7 +773,7 @@ class NeedAsksTest(unittest.TestCase):
         self.facts_status = {}
         # QA #1582: the same request, same status, now owned by ANOTHER user - a change (never signable as built)
         real_q = self.q
-        moved = lambda sql: [[("999" if r[1] == rid.lower() else r[0]), *r[1:]] for r in real_q(sql)] if sql == na.FACTS_SQL else real_q(sql)
+        moved = lambda sql: [[("999" if r[1] == rid.lower() else r[0]), *r[1:]] for r in real_q(sql)] if sql.startswith(na.FACTS_SQL) else real_q(sql)
         self.assertEqual([d.split(":")[0] for d in na.verify_facts(lst, moved)], [u0["user_id"]])
         edited = copy.deepcopy(lst)
         edited["users"][0]["facts"] = [["x", "y", "z"]]
@@ -785,7 +790,8 @@ class NeedAsksTest(unittest.TestCase):
         lst = na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying),
                        query=lambda sql: seen.append(sql) or real(sql))
         guard = na.owing_proof.STATUS_GUARD_SQL
-        self.assertLess(seen.index(guard), seen.index(na.FACTS_SQL))                # the guard runs first
+        facts_at = next(i for i, q in enumerate(seen) if q.startswith(na.FACTS_SQL))  # [key=facts-scope]: scoped
+        self.assertLess(seen.index(guard), facts_at)                                # the guard runs first
         head = lst["replica_facts"]
         self.assertEqual((head["guard_query"], head["guard_query_sha256"]),
                          (guard, hashlib.sha256(guard.encode()).hexdigest()))
@@ -795,7 +801,8 @@ class NeedAsksTest(unittest.TestCase):
             with self.assertRaises(na.NeedError):
                 na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying),
                          query=lambda sql: seen.append(sql) or real(sql))
-            self.assertNotIn(na.FACTS_SQL, seen)                                    # refused before the facts read
+            # refused before the facts read
+            self.assertFalse([q for q in seen if q.startswith(na.FACTS_SQL)], "no facts read")
             with self.assertRaises(na.NeedError):
                 na.verify_facts(lst, self.q)
         del self.table_statuses
@@ -856,6 +863,28 @@ class NeedAsksTest(unittest.TestCase):
             na.build(dv_store=str(self.d / "nope.sqlite"), proof_store=self.proof, paying_path=str(self.paying), query=self.q)
         with self.assertRaises(na.NeedError):
             na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.d / "nope.json"), query=self.q)
+
+    def test_the_scoped_re_read_never_asks_the_replica_about_the_whole_table(self):
+        # [key=facts-scope]: an empty page has nothing to verify, so it issues NO query at all; a populated page asks
+        # only about its own users, in 500-id chunks, and never the whole-table FACTS_SQL.
+        seen = []
+
+        def fake(sql):
+            seen.append(sql)
+            if sql == na.owing_proof.STATUS_GUARD_SQL:        # the guard #1893 added runs first, then the scoped read
+                return [[s] for s in na.owing_proof.OPEN_STATUSES]
+            return []
+        self.assertEqual(na.replica_facts(fake, []), {})
+        self.assertEqual(seen, [])
+        ids = list(range(1, 1202))
+        na.replica_facts(fake, ids)
+        seen = [q for q in seen if q != na.owing_proof.STATUS_GUARD_SQL]
+        self.assertEqual(len(seen), 3, seen)
+        for sql in seen:
+            self.assertIn("cr.userid IN (", sql)
+            self.assertNotEqual(sql, na.FACTS_SQL)
+        self.assertEqual([len(sql.rsplit("IN (", 1)[1].rstrip(")").split(",")) for sql in seen], [500, 500, 201])
+        self.assertEqual(na.facts_header([])["query"], na.FACTS_SQL)
 
     def test_doc_kind(self):
         self.assertEqual([na.doc_kind(m) for m in ("image/heic", "application/pdf", "text/plain", "")],

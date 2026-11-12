@@ -260,7 +260,7 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
                           "due_at": (t_now + timedelta(days=1)).isoformat(timespec="seconds")})
             counts["wait_no_sendable_document"] += 1
     users.sort(key=lambda u: (not u["paid"], u["asks"][0]["doc_received_at"]))
-    facts = replica_facts(query or uvn_status.trino) if users else {}
+    facts = replica_facts(query or uvn_status.trino, [u.get("user_id") for u in users]) if users else {}
     for u in users:
         u["facts"] = facts_of(u, facts)
     return {"generated_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
@@ -271,24 +271,35 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
 # r5 #1582 (c): an E list carries the SAME signing header as owing_proof's - the exact runnable SQL, its sha256, and a
 # sha256 over every listed user's per-request facts (request id, core status, proof_required) as read at build time;
 # `verify-facts` re-runs THIS string at signing and names every user whose facts changed (they are out of the batch)
-#
-# The open statuses are owing_proof's ONE positive list, for the reason recorded there: `status NOT IN (...)` is not
-# pushed to Postgres by the Trino connector, so this read pulled every row of the table (measured on the live replica
-# 2026-11-12: 106.9 s as NOT IN, 8.2 s as the list, the same 96,767 rows with 0 differing ids or facts). A closed
-# request reads as `gone` here either way; a status nobody has classified would too, which is why the read runs
-# owing_proof's guard first and refuses on one.
 FACTS_SQL = ("SELECT CAST(cr.userid AS varchar), lower(CAST(cr.id AS varchar)), cr.status, "
              "CAST(coalesce(CAST(json_extract(cr.verificationdata, '$.proof_required') AS boolean), false) AS varchar) "
              "FROM postgresql_core.public.credit_requests cr WHERE cr.deletedat IS NULL AND cr.userid IS NOT NULL "
              "AND cr.status IN (" + ", ".join(f"'{s}'" for s in owing_proof.OPEN_STATUSES) + ")")
 
 
-def replica_facts(query: uvn_status.Query) -> dict[str, list[str]]:
+def facts_sql(user_ids: "list[Any] | None" = None) -> str:
+    """FACTS_SQL, or THE SAME QUERY restricted to these users. [key=facts-scope] (Fable 2026-11-11): the re-read exists to
+    compare ONE page's facts with the replica; running it over the whole open-request table is what stopped finishing on
+    2026-11-11 (900 s timeout, every send family behind it dead for a day). The header keeps pinning FACTS_SQL - the
+    scope is a WHERE clause over the same shape, not a different question. An empty page has nothing to ask about, so
+    there is no query to build."""
+    ids = sorted({int(u) for u in user_ids or [] if str(u).isdigit()})
+    if not ids:
+        raise NeedError("facts_sql needs at least one user id; an empty page issues no replica query")
+    return f"{FACTS_SQL} AND cr.userid IN ({','.join(str(i) for i in ids)})"
+
+
+def replica_facts(query: uvn_status.Query, user_ids: "list[Any] | None" = None) -> dict[str, list[str]]:
+    ids = sorted({int(u) for u in user_ids or [] if str(u).isdigit()})
+    rows: list[list[str]] = []
+    if not ids:
+        return {}
     try:
-        owing_proof.check_statuses(query)
+        owing_proof.check_statuses(query)  # the positive status list is only equal to NOT IN while every status is known
     except owing_proof.OwingProofError as exc:
         raise NeedError(str(exc)) from exc
-    rows = query(FACTS_SQL)
+    for i in range(0, len(ids), owing_proof.FACTS_SCOPE_CHUNK):
+        rows += query(facts_sql(ids[i:i + owing_proof.FACTS_SCOPE_CHUNK]))
     if any(len(r) != 4 or not str(r[0]).isdigit() for r in rows):
         raise NeedError("unexpected replica facts row shape")
     # QA #1582: the OWNER is part of the fact - a request that moved to another user is a change
@@ -317,7 +328,7 @@ def verify_facts(lst: dict[str, Any], query: uvn_status.Query) -> list[str]:
     head = lst.get("replica_facts") or {}
     if head.get("query") != FACTS_SQL or head.get("sha256") != facts_header(users)["sha256"]:
         diffs.append("header: replica_facts does not match the listed facts or the query (the list changed after its build)")
-    now = replica_facts(query)
+    now = replica_facts(query, [u.get("user_id") for u in users])
     for u in users:
         cur = facts_of(u, now)
         if cur != u.get("facts"):
