@@ -279,7 +279,27 @@ def age_h(ts: str, now: datetime) -> float:
         return 0.0
 
 
+def credit_status_guard() -> list[str]:
+    """[key=open-status-index] The positive open-status filter is only equal to "not approved/rejected" while every
+    status in the table is one we know. An unknown status (core adds `review_pending`) would be silently left out of
+    the population, and the untold/owing count would read LOWER while the work is still there - a served number
+    lowered by a filter, which is the one thing this report must never do. So the statuses are read first and an
+    unknown one refuses the report (FATAL-prefixed, so the tick pages instead of publishing a smaller number).
+
+    The guard is owing_proof's, not a copy: one list, one decision about who is asked. An offline run measures
+    nothing at all (every reader is bypassed on purpose), so it has no population to guard and no baseline to
+    publish; the guard stays out of its way rather than turning a shape-only run into a refusal."""
+    if OFFLINE:
+        return []
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from credit_review import owing_proof
+    return owing_proof.check_statuses(lambda sql: [list(r) for r in trino(sql, numeric_first=False)])
+
+
 def credit_rows() -> dict[int, dict]:
+    credit_status_guard()
     rows = trino(f"""
 select cast(cr.userid as varchar),
  cast(max(case when cr.workspaceid in {PAID_TEAMS} then 1 else 0 end) as varchar),

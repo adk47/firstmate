@@ -62,8 +62,13 @@ class OpenStatusIndexTests(unittest.TestCase):
 
     def test_the_credits_query_filters_on_the_open_statuses_not_the_closed_ones(self):
         seen = []
+        sys.path.insert(0, os.path.join(REPO, "scripts"))
+        self.addCleanup(lambda: sys.path.remove(os.path.join(REPO, "scripts")))
 
         def fake_trino(sql, *a, **kw):
+            if "TABLE(postgresql_core.system.query" in sql:
+                return [["approved"], ["rejected"], ["unverified"], ["processing"],
+                        ["user_verification_needed"]]
             seen.append(sql)
             return []
 
@@ -74,6 +79,38 @@ class OpenStatusIndexTests(unittest.TestCase):
         self.assertIn("cr.status in ('unverified', 'processing', 'user_verification_needed')", sql)
         # the negated form is the defect: it cannot use the status index
         self.assertNotIn("status not in (", sql.replace("\n", " ").lower())
+
+    def test_an_unknown_status_refuses_the_report_instead_of_shrinking_it(self):
+        """A positive list is only equal to "not approved/rejected" while every status is known. If core adds one,
+        the population would silently shrink and the untold count would read lower while the work is still there."""
+        def fake_trino(sql, *a, **kw):
+            if "TABLE(postgresql_core.system.query" in sql:
+                return [["approved"], ["rejected"], ["unverified"], ["processing"],
+                        ["user_verification_needed"], ["review_pending"]]
+            return []
+
+        sys.path.insert(0, os.path.join(REPO, "scripts"))
+        self.addCleanup(lambda: sys.path.remove(os.path.join(REPO, "scripts")))
+        with mock.patch.object(vqr, "trino", fake_trino):
+            with self.assertRaises(Exception) as ctx:
+                vqr.credit_rows()
+        self.assertIn("review_pending", str(ctx.exception))
+
+    def test_a_known_status_set_lets_the_report_through(self):
+        seen = []
+        sys.path.insert(0, os.path.join(REPO, "scripts"))
+        self.addCleanup(lambda: sys.path.remove(os.path.join(REPO, "scripts")))
+
+        def fake_trino(sql, *a, **kw):
+            if "TABLE(postgresql_core.system.query" in sql:
+                return [["approved"], ["rejected"], ["unverified"], ["processing"],
+                        ["user_verification_needed"]]
+            seen.append(sql)
+            return []
+
+        with mock.patch.object(vqr, "trino", fake_trino):
+            vqr.credit_rows()
+        self.assertTrue(seen, "the guard refused a known status set")
 
     def test_the_open_statuses_agree_with_the_send_path(self):
         sys.path.insert(0, os.path.join(REPO, "scripts"))
