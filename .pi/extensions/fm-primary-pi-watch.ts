@@ -686,7 +686,7 @@ export default function (pi: ExtensionAPI) {
     // trigger for the same task stays on main. Other tasks and heartbeat
     // handling remain independent.
     const triggerKeys = /^signal:/.test(message)
-      ? message
+      ? scope.signalTasksByPayload[message] ?? message
         .slice("signal:".length)
         .split(/\s+/)
         .filter(Boolean)
@@ -1015,10 +1015,13 @@ export default function (pi: ExtensionAPI) {
     }
     markLoaded();
     if (owner.child) {
-      return {
-        ok: true,
-        message: `watcher: unchanged - Pi extension already owns an arm child; no manual re-arm needed; ${repairOnlyHint}`,
-      };
+      if (owner.child.exitCode === null && owner.child.signalCode === null) {
+        return {
+          ok: true,
+          message: `watcher: unchanged - Pi extension already owns an arm child; no manual re-arm needed; ${repairOnlyHint}`,
+        };
+      }
+      owner.child = null;
     }
     if (owner.retryTimer) {
       return {
