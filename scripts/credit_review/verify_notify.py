@@ -1378,7 +1378,10 @@ def _already_noted_today(path: str, campaign: str, user_key: str, user_id: str, 
             return verify_ledger.capped(db, user_key=user_key, day=day, user_id=user_id)
         finally:
             db.close()
-    except sqlite3.Error:
+    except (sqlite3.Error, verify_ledger.ReadOnlyLedgerError):
+        # connect_ro raises ReadOnlyLedgerError (a RuntimeError, NOT a sqlite3.Error) when the ledger needs a
+        # migration or cannot be read: this read must tolerate exactly that, or the reader crashes the caller it
+        # exists to spare.
         return False
 
 
@@ -1827,7 +1830,9 @@ def read_hold_until(path: str, campaign: str, user_key: str, *, now: Any = None)
             row = verify_ledger.read_failure(db, campaign=campaign, user_key=user_key, now=now)
         finally:
             db.close()
-    except sqlite3.Error:
+    except (sqlite3.Error, verify_ledger.ReadOnlyLedgerError):
+        # Same as _already_noted_today above: an unreadable ledger is "no hold". A bare sqlite3.Error let
+        # connect_ro's ReadOnlyLedgerError (a RuntimeError) escape and stop the whole walk.
         return ""
     return str(row.get("next_retry_at") or "")
 

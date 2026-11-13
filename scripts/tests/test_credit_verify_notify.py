@@ -4007,6 +4007,30 @@ class ReadOnlyOpenerTests(unittest.TestCase):
         self._no_writes(lambda: verify_notify.read_hold_until(
             self.path, campaign="uvn-status", user_key="a@b.c"))
 
+    def test_a_capped_read_tolerates_a_read_only_ledger_refusal(self):
+        """connect_ro raises ReadOnlyLedgerError - a RuntimeError, so NOT caught by ``except sqlite3.Error``.
+
+        A ledger that needs a migration, or is otherwise unreadable, is exactly the case this read is written to
+        tolerate ("an unreadable ledger is 'not noted'"), so the refusal must return the same default instead of
+        crashing the walk."""
+        from credit_review import verify_notify
+
+        def refuse(*a, **k):
+            raise self.ledger.ReadOnlyLedgerError("verify ledger needs a migration (missing t verify_messages)")
+        with unittest.mock.patch.object(verify_notify.verify_ledger, "connect_ro", refuse):
+            self.assertIs(verify_notify._already_noted_today(
+                self.path, campaign="uvn-status", user_key="a@b.c", user_id="1", day="2026-11-12"), False)
+
+    def test_a_read_failure_hold_read_tolerates_a_read_only_ledger_refusal(self):
+        """Same refusal on the hold read: "no hold", never an exception out of the walk."""
+        from credit_review import verify_notify
+
+        def refuse(*a, **k):
+            raise self.ledger.ReadOnlyLedgerError("verify ledger does not exist (a read-only run never creates it)")
+        with unittest.mock.patch.object(verify_notify.verify_ledger, "connect_ro", refuse):
+            self.assertEqual(verify_notify.read_hold_until(
+                self.path, campaign="uvn-status", user_key="a@b.c"), "")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

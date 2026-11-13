@@ -462,11 +462,14 @@ def _schema_gap(db: sqlite3.Connection, ref: sqlite3.Connection) -> list[str]:
 
 
 def connect_ro(path: str, *, must_exist: bool = False) -> sqlite3.Connection:
-    """QA #1564: the ledger opened READ-ONLY (mode=ro) - never created, never migrated. A missing ledger, or one whose
-    schema lacks any table, index, trigger, view or column connect() would add (it would CREATE / ALTER), raises: the caller that must not
-    write (a dry run under the credit-ops-notes kill, the gate's --check-recipient) then refuses instead.
+    """QA #1564: the ledger opened READ-ONLY (mode=ro) - never created, never migrated. A ledger whose schema lacks any
+    table, index, trigger, view or column connect() would add (it would CREATE / ALTER) raises ReadOnlyLedgerError: the
+    caller that must not write (a dry run under the credit-ops-notes kill, the gate's --check-recipient) then refuses
+    instead, and a caller whose answer may safely default (a durable idempotency check, a read-failure hold read - see
+    `verify_notify._already_noted_today` / `read_hold_until`) catches ReadOnlyLedgerError and continues. It is a
+    RuntimeError, not a sqlite3.Error, so `except sqlite3.Error` around a read does NOT tolerate it.
     A ledger that does not exist yet reads as an EMPTY one (an in-memory copy of the schema: nothing was ever sent, so
-    nothing is recorded) and no file is created; `must_exist` makes a missing ledger an error instead.
+    nothing is recorded) and no file is created; `must_exist` raises ReadOnlyLedgerError for a missing ledger instead.
 
     verify-outbound-migration-race-m1: when the ONLY difference is something _migrate() would add, the check is retried
     RO_RETRY_ATTEMPTS times RO_RETRY_SLEEP_S apart before raising - a live tick's migration is a few ALTERs, and a
