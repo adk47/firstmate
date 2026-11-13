@@ -924,7 +924,7 @@ EOF
 # that record is gone, so the case runs both and asserts the divergence - a
 # dispatcher that ignores the record fails one side, and one that always routes
 test_pi_branch_offer_hands_decision_rows_to_the_branch_while_away() {
-  local repo home plugin log stop out status label verdict
+  local repo home plugin log stop out status label
   repo="$TMP_ROOT/pi-away-decision-root"
   home="$TMP_ROOT/pi-away-decision-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
