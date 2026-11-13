@@ -4352,6 +4352,16 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
+# Beat before any fold, and only once the recovery-marker checks above have
+# passed. The arm layer confirms a fresh watcher only when its beacon is touched
+# inside FM_ARM_CONFIRM_TIMEOUT, and a cold first poll can spend a long time
+# folding status logs before the loop's own top-of-cycle touch; this touch is
+# what keeps a legitimate cold start from being killed as an unconfirmed
+# watcher. It also keeps a previous run's stale beat out of the lag check: a
+# watcher that stopped hours ago is downtime, not lag, and nothing was running
+# to be lagged. It sits after the recovery checks so a watcher that fails them
+# never leaves a fresh beacon vouching for a process that is already gone.
+touch "$STATE/.last-watcher-beat"
 # Side-band ledger publication, detached from the poll loop.
 #
 # The poll loop owns the liveness beacon below, and fm-guard.sh reads that
@@ -5104,24 +5114,13 @@ EOF
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
               working)
-                if status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")"; then
-                  # The crew declared the wait itself, so the declaration outranks
-                  # the run step's working verdict: take the pane onto the long
-                  # pause cadence instead of clearing its tracking and starting the
-                  # wedge timer. A pause appended after the run started (a CI step
-                  # that cannot finish until a human acts) is the common shape, and
-                  # handle_paused_stale still bounds a declaration left behind by a
-                  # run that resumed without lifting it.
-                  handle_paused_stale "$w" "$task" "$h"
-                else
-                  clear_pause_tracking "$key"
-                  printf '%s' "$h" > "$sf"
-                  # The pre-cap shape reset the count here too, through
-                  # clear_pause_tracking, so this route is not a keep-count site.
-                  wedge_episode_end "$key"
-                  date +%s > "$ssf"
-                  triage_log "absorbed non-terminal stale (provably working): $w"
-                fi
+                clear_pause_tracking "$key"
+                printf '%s' "$h" > "$sf"
+                # The pre-cap shape reset the count here too, through
+                # clear_pause_tracking, so this route is not a keep-count site.
+                wedge_episode_end "$key"
+                date +%s > "$ssf"
+                triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
                 handle_paused_stale "$w" "$task" "$h"
@@ -5140,14 +5139,10 @@ EOF
               # declaration was lifted between this branch's read and the check.
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) if status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")"; then
-                           handle_paused_stale "$w" "$task" "$h"
-                         else
-                           clear_pause_state "$key"
-                           printf '%s' "$h" > "$sf"
-                           wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task" "$h" "$dialog"
-                           triage_log "absorbed non-terminal stale (provably working): $w"
-                         fi ;;
+                working) clear_pause_state "$key"
+                         printf '%s' "$h" > "$sf"
+                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task" "$h" "$dialog"
+                         triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else

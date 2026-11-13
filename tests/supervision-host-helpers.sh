@@ -439,8 +439,12 @@ turn_main_only_at_second_offer() {  # <home> [quiet|snapshot]
   if [ "${2:-}" = snapshot ]; then
     # Freeze the accepted queue before the new status can reach the successor.
     # Pi must see the old signal plus the new status, not a later decision wake.
+    # The batch-path record travels with the queue: a coalesced signal row names
+    # its files only through that record, so a snapshot without it reads as an
+    # unresolvable row and vetoes the whole scan.
     snapshot='mkdir -p "$FM_HOME/pi-offer-state"
-      cp "$FM_HOME/state/.wake-queue" "$FM_HOME/state/demo.meta" "$FM_HOME/pi-offer-state/"'
+      cp "$FM_HOME/state/.wake-queue" "$FM_HOME/state/demo.meta" "$FM_HOME/pi-offer-state/"
+      [ ! -e "$FM_HOME/state/.signal-batch-paths" ] || cp "$FM_HOME/state/.signal-batch-paths" "$FM_HOME/pi-offer-state/"'
     turn="$turn"'
       cp "$FM_HOME/state/demo.status" "$FM_HOME/pi-offer-state/"'
   fi

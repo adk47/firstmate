@@ -1124,15 +1124,26 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   grep -qx "$frontend" "$dir/state/phase-1/ancestry" || fail "the healthy chain did not reach the front-end"
   expect_phase_owned "$dir" 1 2 "$frontend" "healthy chain"
 
-  # Recycle the bridge: the daemon ends, the pty-host is reparented to init, and
-  # the front-end that holds the lock stays alive.
+  # Recycle the bridge: the daemon ends, the pty-host is reparented away from it,
+  # and the front-end that holds the lock stays alive. A host running a subreaper
+  # reaps orphans to that process instead of init, so "reparented" means the
+  # pty-host's parent now sits outside the pty-host's own session.
+  reparented() {
+    local ppid sid psid
+    ppid=$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')
+    [ -n "$ppid" ] || return 1
+    [ "$ppid" = 1 ] && return 0
+    sid=$(ps -o sid= -p "$ptyhost" 2>/dev/null | tr -d ' ')
+    psid=$(ps -o sid= -p "$ppid" 2>/dev/null | tr -d ' ')
+    [ -n "$psid" ] && [ "$psid" != "$sid" ]
+  }
   kill -TERM "$daemon"
   i=0
-  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" != 1 ]; }; do
+  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || ! reparented; }; do
     sleep 0.05
     i=$((i + 1))
   done
-  [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the pty-host was not reparented to init after the daemon ended"
+  reparented || fail "the pty-host was not reparented away from the daemon after it ended (ppid $(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' '))"
   kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the daemon, so the recycled case cannot be exercised"
 
   # Phases 2-4: before the spare proves anything, a different id, the right id

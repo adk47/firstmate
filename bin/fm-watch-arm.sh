@@ -821,7 +821,10 @@ trap 'handle_arm_signal HUP 129' HUP
 trap 'handle_arm_signal TERM 143' TERM
 trap 'handle_arm_signal INT 130' INT
 
-child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
+# The child's output is captured outside the state directory: a torn-down home
+# renames that directory away, and a capture file inside it would move with the
+# tree, so the watcher's own exit reason would be lost exactly when it matters.
+child_out=$(mktemp "${TMPDIR:-/tmp}/fm-watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }

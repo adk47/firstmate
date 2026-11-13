@@ -571,13 +571,34 @@ make_fake_herdr_hanging_read() {
 #!/usr/bin/env bash
 set -u
 if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
-  [ "\${3:-}" = "$hangpane" ] && sleep 300
+  if [ "\${3:-}" = "$hangpane" ]; then
+    # The hanging probe records itself so a case can assert on that exact
+    # process rather than on every herdr probe the digest might be running.
+    printf '%s\\n' "\$\$" > "$fakebin/hang.pid"
+    sleep 300
+  fi
   [ "\${3:-}" = "$live" ] && exit 0
   exit 1
 fi
 exit 1
 SH
   chmod +x "$fakebin/herdr"
+}
+
+# assert_hung_probe_ended <fakebin> <message>
+# The per-task read bound must end the probe it hung, leaving nothing behind.
+# It waits for that one recorded process so an unrelated probe cannot be
+# mistaken for a leak from the bounded read.
+assert_hung_probe_ended() {
+  local fakebin=$1 msg=$2 pid i=0
+  pid=$(cat "$fakebin/hang.pid" 2>/dev/null || true)
+  case "$pid" in ''|*[!0-9]*) fail "$msg (the hanging probe never recorded itself)" ;; esac
+  while kill -0 "$pid" 2>/dev/null; do
+    [ "$i" -ge 200 ] && fail "$msg (probe $pid still running)"
+    sleep 0.05
+    i=$((i + 1))
+  done
+  pass "$msg"
 }
 
 # The digest's production runtime bound (FM_SESSION_START_TIMEOUT, 120s) is a
@@ -1483,6 +1504,9 @@ EOF
   printf 'window=sess:p-odd\nkind=ship\nbackend=herdr\n' > "$home/state/task-odd.meta"
   printf 'working: live endpoint fixture\n' > "$home/state/task-live.status"
   printf 'working: dead endpoint fixture\n' > "$home/state/task-dead.status"
+  # The digest lists tasks that are live or waiting, so every case needs a
+  # recent status line to stay on the page it is asserting about.
+  printf 'working: odd endpoint fixture\n' > "$home/state/task-odd.status"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
@@ -1509,6 +1533,7 @@ EOF
   printf 'window=sess:p-doom\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-doom.meta"
   printf 'working: doomed task marker\n' > "$home/state/task-a-doom.status"
   printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
+  printf 'working: live task marker\n' > "$home/state/task-z-live.status"
 
   out=$(FM_SESSION_START_ENDPOINT_TIMEOUT=bogus run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
@@ -1543,7 +1568,9 @@ EOF
   make_fake_herdr_hanging_read "$fakebin" "p-live" "p-slow"
 
   printf 'window=sess:p-slow\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-slow.meta"
+  printf 'working: slow task marker\n' > "$home/state/task-a-slow.status"
   printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
+  printf 'working: live task marker\n' > "$home/state/task-z-live.status"
 
   # The same fake hangs the side-band home summary before the endpoint section.
   # Bound that unrelated refresh at 5s instead of paying its production 60s;
@@ -1562,8 +1589,7 @@ EOF
   assert_not_contains "$out" "STARTUP TRUNCATED - SESSION START" \
     "a bounded endpoint-read hang raised the whole-digest truncation banner"
 
-  stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
-  [ "$stray" -eq 0 ] || fail "the per-task read bound left $stray hung herdr process(es) behind"
+  assert_hung_probe_ended "$fakebin" "the per-task read bound ended the probe it hung"
 
   pass "a hung per-task endpoint read hits its configured bound, reports the task, and leaves nothing stuck"
 }
@@ -1579,7 +1605,9 @@ EOF
   make_fake_herdr_hanging_read "$fakebin" "p-live" "p-slow"
 
   printf 'window=sess:p-slow\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-slow.meta"
+  printf 'working: slow task marker\n' > "$home/state/task-a-slow.status"
   printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
+  printf 'working: live task marker\n' > "$home/state/task-z-live.status"
 
   # Only the unrelated summary gets a shorter fixture budget. The invalid
   # endpoint value must still fall back to the real 10s production bound.
@@ -1593,8 +1621,7 @@ EOF
   assert_contains "$out" "$(printf '\nCONTEXT\n')" \
     "a padded-zero bound cost the digest its context section"
 
-  stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
-  [ "$stray" -eq 0 ] || fail "the fallback bound left $stray hung herdr process(es) behind"
+  assert_hung_probe_ended "$fakebin" "the fallback bound ended the probe it hung"
 
   pass "a padded-zero per-read bound falls back to the 10s default instead of removing the bound"
 }
@@ -2648,7 +2675,9 @@ write_large_fleet_home() {
     case $((10#$i % 4)) in
       0) printf 'needs-decision [key=large-%s]: pick one %s\n' "$i" "${long//STATUS-HISTORY-BODY/DECISION-BODY}" >> "$status" ;;
       1) printf 'done: PR https://github.com/example/repo-%s/pull/%s checks green %s\n' "$i" "$((10#$i))" "$long" >> "$status" ;;
-      2) printf 'paused: waiting on an upstream release %s\n' "$long" >> "$status" ;;
+      # A declared pause needs a wake time: a time-less `paused:` is a blocker that
+      # opens an OPEN DECISIONS entry, so the fixture states when it clears.
+      2) printf 'paused: waiting on an upstream release until 18:00Z %s\n' "$long" >> "$status" ;;
       3) printf 'working: %s\n' "$long" >> "$status" ;;
     esac
   done

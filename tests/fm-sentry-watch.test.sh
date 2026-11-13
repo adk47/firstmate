@@ -24,6 +24,15 @@ make_home() {  # <name>
   local name=$1 home
   home="$TMP_ROOT/$name"
   mkdir -p "$home/state" "$home/config" "$home/fix"
+  # A real home's worktree is a git copy, and the guarded operations these cases
+  # drive (a task PR poll, a check registration) verify the named head against
+  # it, so the fixture has to be one too.
+  git init -q "$home" 2>/dev/null || true
+  git -C "$home" -c user.email=fixture@example.invalid -c user.name=fixture \
+    commit -q --allow-empty -m fixture 2>/dev/null || true
+  # The guarded operations also require the named head to be reachable outside
+  # the disposable copy, which a remote-tracking ref supplies without a network.
+  git -C "$home" update-ref refs/remotes/origin/main HEAD 2>/dev/null || true
   printf '%s\n' "$home"
 }
 

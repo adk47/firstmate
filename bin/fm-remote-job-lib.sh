@@ -906,7 +906,7 @@ fm_remote_job_plist_safe_path() {
 fm_remote_job_render_launchagent() { # <remote-root> <account-home>
   local root=$1 account_home=$2 worker
   worker="$root/bin/fm-remote-job-worker.sh"
-  fm_remote_job_launchagent_paths "$account_home"
+  fm_remote_job_launchagent_paths "$account_home" || return 1
   fm_remote_job_plist_safe_path "$worker" && fm_remote_job_plist_safe_path "$account_home" &&
     fm_remote_job_plist_safe_path "$FM_REMOTE_JOB_LAUNCH_AGENT_LOG" || return 1
   cat <<XML
@@ -944,7 +944,7 @@ XML
 
 fm_remote_job_launchagent_contract_matches() { # <remote-root> <account-home>
   local root=$1 account_home=$2 actual expected
-  fm_remote_job_launchagent_paths "$account_home"
+  fm_remote_job_launchagent_paths "$account_home" || return 1
   [ -f "$FM_REMOTE_JOB_LAUNCH_AGENT_PLIST" ] && [ ! -L "$FM_REMOTE_JOB_LAUNCH_AGENT_PLIST" ] || return 1
   actual=$(tr -d ' \t\r\n' < "$FM_REMOTE_JOB_LAUNCH_AGENT_PLIST" 2>/dev/null) || return 1
   expected=$(fm_remote_job_render_launchagent "$root" "$account_home" | tr -d ' \t\r\n') || return 1
@@ -958,7 +958,7 @@ fm_remote_job_gui_available() { # <uid>
 
 fm_remote_job_launchagent_loaded() { # <remote-root> <account-home> <uid>
   local root=$1 account_home=$2 uid=$3 worker loaded compact
-  fm_remote_job_launchagent_paths "$account_home"
+  fm_remote_job_launchagent_paths "$account_home" || return 1
   worker="$root/bin/fm-remote-job-worker.sh"
   loaded=$(launchctl print "gui/$uid/$FM_REMOTE_JOB_LABEL" 2>/dev/null) || return 1
   compact=$(printf '%s' "$loaded" | tr -d ' \t\r\n') || return 1
@@ -1232,7 +1232,7 @@ fm_remote_job_wait_for_probe() { # <remote-root> <account-home>
 
 fm_remote_job_write_launchagent() { # <remote-root> <account-home>
   local root=$1 account_home=$2 tmp
-  fm_remote_job_launchagent_paths "$account_home"
+  fm_remote_job_launchagent_paths "$account_home" || return 1
   if ! mkdir -p "$FM_REMOTE_JOB_LAUNCH_AGENT_DIR" 2>/dev/null ||
     ! mkdir -p "$FM_REMOTE_JOB_LAUNCH_AGENT_LOG_DIR" 2>/dev/null; then
     FM_REMOTE_JOB_ERROR="cannot create the remote job LaunchAgent directories"
@@ -1359,7 +1359,7 @@ fm_remote_job_launchagent_owner_current() { # <remote-root> <account-home> <uid>
 
 fm_remote_job_reload_launchagent() { # <account-home> <uid>
   local account_home=$1 uid=$2 out i=0
-  fm_remote_job_launchagent_paths "$account_home"
+  fm_remote_job_launchagent_paths "$account_home" || return 1
   launchctl bootout "gui/$uid/$FM_REMOTE_JOB_LABEL" >/dev/null 2>&1 || true
   while launchctl print "gui/$uid/$FM_REMOTE_JOB_LABEL" >/dev/null 2>&1; do
     if [ "$i" -ge 100 ]; then

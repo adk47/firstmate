@@ -131,6 +131,9 @@ test_runner_reaps_what_a_concurrent_script_leaked() {
   marker="$TMP_ROOT/leak.dir"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-test-reap-lib.sh" "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/"
+  # The runner isolates each fixture's Git configuration from the host's, so the
+  # stand-in repository needs that helper exactly as a real checkout has it.
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
   # Both names are individually proven isolated, so the runner schedules them
   # concurrently, each with its own TMPDIR.
   for script in fm-cd-pretool-check.test.sh fm-pr-merge.test.sh; do

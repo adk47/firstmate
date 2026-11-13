@@ -1417,7 +1417,13 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   cmp -s "$CASE_DIR/charter-before" "$sm/data/charter.md" || fail "secondmate launch rewrote the charter"
   assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "< '$sm/data/charter.md'" "secondmate launch lost its original charter"
+  # The launch carries the charter either as an inline redirect or, by default,
+  # as the constant-size pointer that names the same file, so accept both forms
+  # and require the charter path itself to be present.
+  case "$launch" in
+    *"< '$sm/data/charter.md'"*|*"Read the brief at $sm/data/charter.md and follow it exactly."*) ;;
+    *) fail "secondmate launch lost its original charter" ;;
+  esac
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --approve -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape and seeded-home --approve"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
@@ -2367,6 +2373,15 @@ SH
     sed -n '/FIRSTMATE_OP: v1 launch-brief:/,$p' "$envelope" > "$encoded"
     "$ROOT/bin/fm-operational-input.sh" body < "$encoded" > "$prompt" ||
       fail "could not decode $kind launch-brief envelope"
+    # A launch may hand the harness a pointer to the rendered brief instead of
+    # the brief itself, so resolve that pointer before reading the interface.
+    pointer=$(sed -n '1p' "$prompt")
+    case "$pointer" in
+      "Read the brief at "*" and follow it exactly.")
+        prompt=${pointer#Read the brief at }
+        prompt=${prompt% and follow it exactly.}
+        ;;
+    esac
     # The final prompt delivered to the harness is the generated interface.
     # The current identity must precede the authored task, because a Firstmate
     # worktree's own AGENTS.md assigns the unrelated supervisor identity.

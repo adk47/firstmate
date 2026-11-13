@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
@@ -108,14 +108,23 @@ async function isPrimaryRoot(root, home) {
   return gitDir.stdout.trim() === commonDir.stdout.trim();
 }
 
-function shouldArm(paths) {
+// The shared predicate owns what counts as supervision need - task metadata,
+// registered process-event sources, registered checks, and the rest - so this
+// plugin asks it rather than keeping a second copy that drifts. Only the two
+// local overrides live here: an away record declines because the away daemon
+// owns supervision, and an x-mode home arms before its relay poll registers.
+async function shouldArm(paths) {
   if (existsSync(`${paths.state}/.afk`)) return false;
   if (existsSync(`${paths.config}/x-mode.env`)) return true;
-  try {
-    return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
-  } catch {
-    return false;
-  }
+  if (!paths.root) return false;
+  const probe = await runProcess("bash", [
+    "-c",
+    '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2"',
+    "predicate-probe",
+    paths.root,
+    paths.state,
+  ]);
+  return probe.code === 0;
 }
 
 async function sessionOwnsLock(paths) {
@@ -483,7 +492,7 @@ async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
-  if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
+  if (!(await shouldArm(paths))) return { status: "not-needed", armChild: null };
   return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid) };
 }
 

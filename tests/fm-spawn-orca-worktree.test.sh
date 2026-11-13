@@ -13,14 +13,13 @@
 # the worktree Orca actually created, proving the skip does not just avoid an
 # error but lets a genuine Orca launch complete.
 #
-# The matching relaunch-side carve-out at the `[ "$RELAUNCH" -eq 1 ] &&
-# [ "$BACKEND" = orca ]` branch is guarded by an earlier, unconditional gate:
-# fm_control_backend_state_verified (bin/fm-control-lib.sh) only recognizes
-# tmux and herdr as having a recovery-grade agent-state classifier, so any
-# `--relaunch` on backend=orca is refused before that branch can ever run.
-# The second test below pins that refusal so a future change that starts
-# routing orca through the classifier does not silently reach the untested
-# branch without also covering it.
+# The relaunch-side carve-out at the `[ "$RELAUNCH" -eq 1 ] &&
+# [ "$BACKEND" = orca ]` branch is reached only for a terminal Orca itself
+# reports gone: an in-place relaunch is unproven, but a terminal Orca no longer
+# has provably hosts no agent. Every other Orca terminal state refuses before
+# that branch can run. The second test below pins that refusal so a future
+# change that starts relaunching into a live Orca terminal does not silently
+# reach the untested branch without also covering it.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -64,6 +63,16 @@ case "$1 $2" in
     mkdir -p "$DIR/orca-worktrees"
     git -C "$DIR/project" worktree add --quiet -b "orca-$name" "$wt" >&2 || exit 1
     printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' "$name" "$wt"
+    exit 0
+    ;;
+  "worktree show")
+    sel=
+    prev=
+    for a in "$@"; do
+      [ "$prev" = --worktree ] && sel=$a
+      prev=$a
+    done
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-1","path":"%s"}}}\n' "${sel#*::}"
     exit 0
     ;;
   "terminal create")
@@ -184,7 +193,7 @@ EOF
 }
 
 test_orca_relaunch_is_refused_before_the_worktree_carveout_could_run() {
-  local case_dir home proj wt id=orca-relaunch-a2 out status
+  local case_dir home proj wt id=orca-relaunch-a2 out status fb
   case_dir="$TMP_ROOT/relaunch"
   home="$case_dir/home"
   proj="$case_dir/proj"
@@ -215,17 +224,18 @@ EOF
     echo "orca_worktree_id=wt-1::$wt"
     echo "terminal=term-1"
   } > "$home/state/$id.meta"
+  fb=$(make_orca_fakebin "$case_dir")
 
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$case_dir/user-home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 \
+    FM_SPAWN_NO_GUARD=1 FM_TEST_ORCA_DIR="$case_dir" PATH="$fb:$PATH" \
     "$SPAWN" "$id" --relaunch 2>&1)
   status=$?
 
   expect_code 1 "$status" "a relaunch against a recorded Orca task should refuse"$'\n'"$out"
-  assert_contains "$out" "no recovery-grade agent-state classifier" \
-    "the refusal should name the missing classifier, proving relaunch never reaches the worktree carve-out"
+  assert_contains "$out" "Orca relaunch only replaces a terminal Orca no longer has" \
+    "the refusal should name the Orca terminal state, proving relaunch never reaches the worktree carve-out"
   pass "a relaunch against an Orca-backed task is refused before the RELAUNCH+orca worktree carve-out could run"
 }
 

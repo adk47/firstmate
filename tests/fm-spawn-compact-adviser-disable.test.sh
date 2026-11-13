@@ -408,6 +408,13 @@ SH
     brief=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$HOME_DIR/data/$id/launch-brief.md")
     want="$(cd "$HOME_DIR/state" && pwd -P)/$id.inbox
 $brief"
+    case "$seen" in
+      *"FIRSTMATE_OP: v1 launch-brief: Read the brief at $HOME_DIR/data/$id/launch-brief.md and follow it exactly.")
+        # A launch may hand the harness a pointer to the brief instead of its
+        # body; the pointer must still name this task's own brief file.
+        seen=$want
+        ;;
+    esac
     assert_equals "$want" "$seen" "$name path: launch changed the home or brief bytes"
   done
   pass "launch preserves literal ampersands, quotes and spaces in home and brief paths"

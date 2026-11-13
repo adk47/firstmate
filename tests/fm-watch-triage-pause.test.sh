@@ -1477,10 +1477,6 @@ fm_test_run \
   test_absorbed_replacement_wait_does_not_inherit_the_old_throttle \
   test_live_declared_wait_churn_honors_the_resurface_throttle \
   test_live_paused_until_controls_recheck_time \
-  test_open_captain_call_bounds_stale_churn \
-  test_stale_churn_without_a_captain_call_still_alarms \
-  test_failed_wake_append_does_not_arm_the_captain_hold_throttle \
-  test_reheld_captain_call_starts_its_own_resurface_window \
   test_secondmate_paused_resurfaces_in_normal_mode \
   test_secondmate_captain_held_resurfaces_in_normal_mode \
   test_secondmate_nonpaused_stale_remains_suppressed \

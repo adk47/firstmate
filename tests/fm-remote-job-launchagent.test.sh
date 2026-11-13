@@ -9,6 +9,13 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+# Darwin-only: the library refuses the launch-agent path on any other host
+# because launchd does not exist there, so there is nothing to assert. Skip
+# visibly (after lib.sh so `pass`/`fail` exist) rather than silently.
+if [ "$(uname)" != Darwin ]; then
+  pass "Darwin-only test: the remote job LaunchAgent path requires launchd; skipping on $(uname -s)"
+  exit 0
+fi
 TMP_ROOT=$(fm_test_tmproot fm-remote-job-launchagent)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 REMOTE_ROOT="$TMP_ROOT/remote-root"

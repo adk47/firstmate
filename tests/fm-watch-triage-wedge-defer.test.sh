@@ -637,7 +637,7 @@ arm_worker_wait() {  # <case-dir>
 }
 
 test_wedge_threshold_defers_to_a_worker_blocker() {
-  local dir state fakebin out capture window key n reported case_log
+  local dir state fakebin out capture window key n reported case_log case_n
   local working='state: working · source: run-step · ci running'
   window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
 
@@ -690,7 +690,11 @@ blocked: need the API key for the staging account' 0 600)
 
   # Each of these ends or never starts the deferral, so the lane keeps the ladder:
   # a newer worker line, a resolved line, a supervisor-reserved key, and an inbox
-  # record the worker acknowledged after writing the blocker.
+  # record the worker acknowledged after writing the blocker. Each case gets its
+  # own fixture directory: the re-alarm backstop reads the escalation count and
+  # the alarmed marker a previous case left behind, so a shared directory would
+  # turn the later cases into absorbed repeats of the first one's escalation.
+  case_n=0
   for case_log in \
     'blocked: need the API key for the staging account
 working: resumed without it' \
@@ -698,7 +702,8 @@ working: resumed without it' \
 resolved: firstmate supplied the key' \
     'blocked [key=remote-reply-continuity-mate1]: the remote reply mirror stopped' \
     'blocked: need the API key for the staging account|handled'; do
-    dir=$(wedge_threshold_fixture worker-blocker-ended "${case_log%|handled}" 2000 600)
+    case_n=$((case_n + 1))
+    dir=$(wedge_threshold_fixture "worker-blocker-ended-$case_n" "${case_log%|handled}" 2000 600)
     arm_worker_wait "$dir"
     state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
     case "$case_log" in

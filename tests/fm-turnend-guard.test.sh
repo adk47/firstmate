@@ -2573,7 +2573,14 @@ record_pi_extension_session() {  # <dir> <session_pid> [omit-part]
     [ "$omit" = "${pair##*:}" ] && continue
     version=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pi_extension_version "$2"' \
       _ "$dir/bin/fm-wake-lib.sh" "$root/.pi/extensions/$source") || return 1
-    printf '%s\n%s\n' "$version" "$session_pid" > "$dir/state/$marker"
+    # The watcher marker carries the generation phase the ownership predicate
+    # requires; the turn-end marker is a plain version/pid pair.
+    case "$source" in
+      fm-primary-pi-watch.ts)
+        printf '%s\n%s\ngeneration=1 phase=active\n' "$version" "$session_pid" > "$dir/state/$marker" ;;
+      *)
+        printf '%s\n%s\n' "$version" "$session_pid" > "$dir/state/$marker" ;;
+    esac
   done
   [ -n "$session_pid" ] && printf '%s\n' "$session_pid" > "$dir/state/.lock"
   return 0

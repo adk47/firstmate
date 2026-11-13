@@ -250,7 +250,13 @@ fm_backend_tmux_target_exists() {  # <target>
       session=$target
       case "$session" in =*) session=${session#=} ;; esac
       [ -n "$session" ] || return 1
-      tmux has-session -t "=$session" 2>/dev/null
+      tmux has-session -t "=$session" 2>/dev/null && return 0
+      # A bare name is the shape a task records when it was placed without an
+      # explicit session, and then the name is a window in whatever session
+      # tmux resolves it against. The exact-session match above stays first so
+      # a real session still wins, and this fallback asks tmux itself rather
+      # than guessing, so a session-only name is never read as a live window.
+      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
       ;;
   esac
 }
