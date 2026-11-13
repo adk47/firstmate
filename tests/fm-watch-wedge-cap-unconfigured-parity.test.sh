@@ -60,18 +60,21 @@ upstream_tree() {  # <dest-dir>
   # a silent skip, not a failure. Report here and return non-zero so the
   # caller's guard aborts the whole test with the specific reason.
   #
-  # In the upstream repository origin/main IS the main this branch targets. A
-  # fork that carries local patches and syncs from an `upstream` remote targets
-  # that remote instead, so its main is the parity reference; falling back to
-  # origin/main keeps a fork without that remote working as before.
-  for ref in upstream/main origin/main; do
+  # The parity reference is this repository's OWN main: it is the tree whose
+  # behavior this branch intends to match, because it carries the fork's wedge
+  # cap as well as the newer re-alarm backstop that also arrived here. The
+  # `upstream` remote is only the fork-sync merge source, so its main is OLDER
+  # in exactly the places this scenario walks - comparing against it would
+  # report the re-alarm backstop as a ladder divergence. origin/main is the
+  # fallback for a checkout without a fork main of its own.
+  for ref in origin/main upstream/main; do
     if git -C "$ROOT" rev-parse --verify --quiet "$ref" >/dev/null; then
       break
     fi
     ref=''
   done
   if [ -z "$ref" ]; then
-    printf 'not ok - no upstream/main or origin/main ref in %s - the parity baseline cannot be resolved; fetch one and re-run\n' "$ROOT" >&2
+    printf 'not ok - no origin/main or upstream/main ref in %s - the parity baseline cannot be resolved; fetch one and re-run\n' "$ROOT" >&2
     return 1
   fi
   ref=$(git -C "$ROOT" rev-parse --verify "$ref")
@@ -113,12 +116,30 @@ IDLE_CREW='state: idle · source: none'
 parity_run() {  # <dir> <watch> <label> <crew-state> <cap-assignment> [extra-env...]
   local dir=$1 watch=$2 label=$3 crew=$4 cap_assignment=$5
   shift 5
-  local out pid
+  local out pid absorbed triage_log triage_mark
   local -a cap_args=()
   [ -n "$cap_assignment" ] && cap_args+=("$cap_assignment")
   out="$dir/watch.out"
   echo $(( $(date +%s) - 500 )) > "$dir/state/.stale-since-$PARITY_KEY"
+  # Each round is an independent watcher start against the same counter: only the
+  # wedge ladder is meant to carry across rounds. The rows and the downtime
+  # episode an earlier round left behind are artefacts of stopping the watcher
+  # between rounds, and a watcher that reads them as real spends its round
+  # recovering a hand-back instead of walking the ladder - upstream's own rule,
+  # applied to state the ladder never asked to keep.
+  rm -f "$dir/state/.watcher-down" "$dir/state/.watcher-down.lock" \
+    "$dir/state/.wake-queue" "$dir/state/.wake-queue.seq" \
+    "$dir/state/.wake-queue.lock" "$dir/state/.watch-deliveries.log"
   : > "$out"
+  # A round either delivers a wake - and the watcher then leaves - or absorbs a
+  # repeat that the re-alarm backstop has already reported, in which case it keeps
+  # polling because it has nothing left to hand over. Both settle the round. The
+  # triage log is read past this round's own offset so an absorb recorded by an
+  # earlier round can never excuse a round that really did hang.
+  triage_log="$dir/state/.watch-triage.log"
+  triage_mark=0
+  [ -f "$triage_log" ] && triage_mark=$(wc -c < "$triage_log" 2>/dev/null || echo 0)
+  case "$triage_mark" in ''|*[!0-9]*) triage_mark=0 ;; esac
   # The successor mode is what lets one watcher run carry a whole ladder: it
   # keeps the watcher in its poll loop instead of handing the wake to a
   # supervisor, so the next round's poll finds the pane still wedged and
@@ -134,7 +155,16 @@ parity_run() {  # <dir> <watch> <label> <crew-state> <cap-assignment> [extra-env
     bash "$watch" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || {
-    reap "$pid"; fail "$label: watcher did not settle ($(basename "$(dirname "$watch")")): $(cat "$out")"
+    # Absorbed here means the backstop reported this pane again inside its
+    # window, so no wake was owed and the watcher stayed in its loop by design.
+    absorbed=0
+    if [ -f "$triage_log" ]; then
+      tail -c +$((triage_mark + 1)) "$triage_log" 2>/dev/null \
+        | grep -F 'absorbed repeat wedge escalation' >/dev/null && absorbed=1
+    fi
+    reap "$pid"
+    [ "$absorbed" -eq 1 ] \
+      || fail "$label: watcher did not settle ($(basename "$(dirname "$watch")")): $(cat "$out")"
   }
   record_outcome "$dir" "$label" "$out"
 }
@@ -230,16 +260,23 @@ $(cat "$TMP_ROOT/parity.diff")"
   # The scenario itself must be the proof the maintainer asked for, not just a
   # pair of matching failures: the re-wedge after the first-sight surface
   # reaches escalation 3 with the demand-deep-inspection prompt on BOTH
-  # watchers, the ladder continues to 4, and no round fires PERMANENTLY-WEDGED.
+  # watchers, the counter then STANDS at 3 for the unchanged pane because the
+  # re-alarm backstop absorbs the repeat, and no round fires PERMANENTLY-WEDGED.
   grep -F 'rung3-after-surface esc=3 inspect=1 capped=0' "$cand_trace" >/dev/null \
     || fail "scenario did not reach escalation 3 with demand-deep-inspection after the first-sight surface: $(cat "$cand_trace")"
-  grep -F 'rung4 esc=4 inspect=1 capped=0' "$cand_trace" >/dev/null \
-    || fail "the ladder did not continue to escalation 4: $(cat "$cand_trace")"
+  # The re-alarm backstop ends the ladder on an unchanged pane: rung4 is absorbed
+  # rather than reset, so it delivers no new wake. A watcher that reset the
+  # counter there would go back to 1 and re-alarm, which is the divergence this
+  # case exists to catch.
+  grep -F 'rung4 esc=- inspect=0 capped=0' "$cand_trace" >/dev/null \
+    || fail "the unchanged-pane repeat was not absorbed by the re-alarm backstop, so the ladder reset instead of standing: $(cat "$cand_trace")"
   if grep -F 'capped=1' "$cand_trace" >/dev/null; then
     fail "unconfigured scenario fired PERMANENTLY-WEDGED: $(cat "$cand_trace")"
   fi
-  grep -F 'final counter=4 marker=0' "$cand_trace" >/dev/null \
-    || fail "scenario did not end at counter 4 with no cap marker: $(cat "$cand_trace")"
+  # The counter stands where the last delivered escalation left it: an absorbed
+  # repeat restarts the backstop timer without advancing the ladder.
+  grep -F 'final counter=3 marker=0' "$cand_trace" >/dev/null \
+    || fail "scenario did not end at counter 3 with no cap marker: $(cat "$cand_trace")"
   pass "unconfigured-home wedge ladder is observably identical to upstream main across the busy ladder and the first-sight surface, and still reaches the demand-deep-inspection prompt"
 }
 
@@ -277,10 +314,10 @@ $(cat "$TMP_ROOT/shape-$shape.diff")"
     if grep -F 'capped=1' "$shape_trace" >/dev/null; then
       fail "shape $shape fired PERMANENTLY-WEDGED: $(cat "$shape_trace")"
     fi
-    grep -F 'final counter=4 marker=0' "$shape_trace" >/dev/null \
-      || fail "shape $shape did not end at counter 4 with no cap marker: $(cat "$shape_trace")"
+    grep -F 'final counter=3 marker=0' "$shape_trace" >/dev/null \
+      || fail "shape $shape did not end at counter 3 with no cap marker: $(cat "$shape_trace")"
   done
-  pass "FM_WEDGE_MAX_ESCALATIONS at 0, empty, negative, non-numeric, and out-of-range all keep the unchanged ladder through the keep-count routes: 1 2 3 4 with demand-deep-inspection at 3, no PERMANENTLY-WEDGED, no cap marker, no crash"
+  pass "FM_WEDGE_MAX_ESCALATIONS at 0, empty, negative, non-numeric, and out-of-range all keep the unchanged ladder through the keep-count routes: 1 2 3 with demand-deep-inspection at 3 and the unchanged-pane repeat absorbed, no PERMANENTLY-WEDGED, no cap marker, no crash"
 }
 
 test_unconfigured_value_shapes_match_the_unset_case

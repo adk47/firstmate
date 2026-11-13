@@ -2044,7 +2044,11 @@ fixture_alarm_present=0
 eval "$(declare -f fm_lock_release | sed '1s/fm_lock_release/fixture_lock_release/')"
 fm_lock_release() {
   fixture_lock_release "$@"
-  if [ "$fixture_alarm_present" -eq 0 ] \
+  # Only the auto-arm TERMs itself here. The guard charges the same budget lock
+  # and sources this same library, so an ungated kill would race the auto-arm
+  # and let the guard exit 143 instead of the status this case asserts.
+  if [ "${0##*/}" = fm-claude-stop-autoarm.sh ] \
+    && [ "$fixture_alarm_present" -eq 0 ] \
     && [ "$1" = "$FM_HOME/state/.turnend-claude-blocks.lock" ] \
     && [ -e "$FM_HOME/state/.claude-autoarm-failure-alarmed" ]; then
     kill -TERM "${BASHPID:-$$}"
