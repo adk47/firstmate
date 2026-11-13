@@ -140,8 +140,8 @@ board audit: clear
 ## Automated tests
 
 `bin/fm-test-run.sh tests/fm-board.test.sh tests/fm-board-audit.test.sh` reported `FM_TEST_SUMMARY total=2 failed=0`.
-`tests/fm-board.test.sh` covers the driver and the agenda line a real `bin/fm-wake-drain.sh` run prints, including that a home with no board prints none.
-`tests/fm-board-audit.test.sh` covers every condition above plus the stale-board condition, the reminder cadence, the secondmate and left-stopped exemptions, a captain hold closing a repeated key, and a missing or invalid board.
+`tests/fm-board.test.sh` covers the driver and the agenda line a real `bin/fm-wake-drain.sh` run prints, including that a home with no board prints none and that a drain with a queued wake prints its one agenda line before the first wake row.
+`tests/fm-board-audit.test.sh` covers every condition above plus the stale-board condition, the reminder cadence, the secondmate and left-stopped exemptions, a captain hold closing a repeated key, a missing or invalid board, and timestamp-first and indented `needs-decision` lines counted like plain ones, because the repeat pre-filter shares the parser's verb rule.
 Both are plain bash tests on the repository's own `tests/lib.sh` harness; the repository has no bats dependency and this change adds none.
 
 The neighbouring suites that read the same drain output were rerun and stayed green: the `fm-wake-drain-*` suites, the `fm-classify-*` suites, `tests/fm-session-start.test.sh`, and `tests/fm-afk-return.test.sh`.

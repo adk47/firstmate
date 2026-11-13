@@ -730,7 +730,7 @@ Each has an acceptance check, a one-line current state, and a next bounded actio
 It is plain Markdown a person can read, but a line that is not the exact shape makes the whole board invalid, so change it through `bin/fm-board.sh` rather than by hand.
 A home with no board file is unaffected: the wake drain prints no agenda line and nothing else changes.
 
-A main wake drain on a home that keeps a board prints one `BOARD NEXT`, `BOARD BLOCKED`, `BOARD EMPTY`, or `BOARD INVALID` line ahead of its other sections, including when no wake is queued, and the session-start digest carries it through that drain.
+A main wake drain on a home that keeps a board prints exactly one `BOARD NEXT`, `BOARD BLOCKED`, `BOARD EMPTY`, or `BOARD INVALID` line first, ahead of its wake rows and its other sections, including when no wake is queued, and the session-start digest carries it through that drain.
 The Pi supervision branch's drain never prints it, because the branch does not drive the agenda.
 
 The audit check prints one line, `board audit: <condition>; <condition> -> <what to do>`, when any of these holds, and nothing otherwise:
