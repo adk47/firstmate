@@ -328,6 +328,64 @@ test_arm_writes_and_binds_the_shim
 
 # --- the terminal-claim comparison uses the shared landed-work rule --------
 
+# --- the required dead-lane line is never starved by optional probes ---------
+
+# A git wrapper whose merge-tree (only the landed-work content probe runs it)
+# blocks far longer than the check's bound, so every terminal lane that needs a
+# landed test spends its whole cap.
+make_slow_landed_git() {  # <dir>
+  local toolbin=$1 real_git
+  real_git=$(command -v git) || return 1
+  mkdir -p "$toolbin" || return 1
+  cat >"$toolbin/git" <<EOF
+#!/bin/bash
+for a in "\$@"; do
+  [ "\$a" != merge-tree ] || sleep 30
+done
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$toolbin/git" || return 1
+}
+
+test_dead_lane_is_reported_inside_the_timeout_despite_slow_landed_probes() {
+  local d start elapsed out
+  d="$TMP_ROOT/slow-landed-dead"
+  mkdir -p "$d/dead-a" "$d/done-b" "$d/done-c"
+  make_home "$d" "lane-dead:$d/dead-a" "lane-b:$d/done-b" "lane-c:$d/done-c"
+  spawn_shell_in "$d/dead-a" >/dev/null || fail "could not spawn the dead lane's shell"
+  git_worktree_with_unlanded_commit "$d/done-b" || fail "could not prepare lane-b's worktree"
+  git_worktree_with_unlanded_commit "$d/done-c" || fail "could not prepare lane-c's worktree"
+  printf 'done: shipped\n' >"$d/state/lane-b.status"
+  printf 'done: shipped\n' >"$d/state/lane-c.status"
+  spawn_named_process "$d/bin" pi "$d/done-b" >/dev/null || fail "could not spawn lane-b's agent"
+  spawn_named_process "$d/bin" claude "$d/done-c" >/dev/null || fail "could not spawn lane-c's agent"
+  make_slow_landed_git "$d/toolbin" || fail "could not build the slow git wrapper"
+  sleep 0.2
+  start=$(date +%s)
+  out=$(PATH="$d/toolbin:$PATH" FM_CHECK_TIMEOUT=6 run_check "$d")
+  elapsed=$(($(date +%s) - start))
+  [ "$elapsed" -lt 6 ] \
+    || fail "the poll must finish inside FM_CHECK_TIMEOUT, took ${elapsed}s"
+  assert_contains "$out" "lane-dead" \
+    "the required dead-lane line must be printed even when every optional landed probe is slow"
+  pass "a slow landed probe cannot starve the dead-lane line or overrun the timeout"
+}
+
+test_all_live_fleet_is_silent_despite_slow_landed_probes() {
+  local d out
+  d="$TMP_ROOT/slow-landed-live"
+  mkdir -p "$d/done-a"
+  make_home "$d" "lane-a:$d/done-a"
+  git_worktree_with_unlanded_commit "$d/done-a" || fail "could not prepare lane-a's worktree"
+  printf 'done: shipped\n' >"$d/state/lane-a.status"
+  spawn_named_process "$d/bin" pi "$d/done-a" >/dev/null || fail "could not spawn lane-a's agent"
+  make_slow_landed_git "$d/toolbin" || fail "could not build the slow git wrapper"
+  sleep 0.2
+  out=$(PATH="$d/toolbin:$PATH" FM_CHECK_TIMEOUT=6 run_check "$d")
+  [ -z "$out" ] || fail "a fleet with every lane live must stay silent, got: $out"
+  pass "a live fleet is silent even when the optional landed probes are slow"
+}
+
 # A squash merge whose head branch was deleted must not read as a disagreement.
 test_squash_merged_and_deleted_lane_is_silent() {
   local d out
@@ -408,5 +466,7 @@ test_squash_merged_and_deleted_lane_is_silent
 test_local_only_merged_lane_is_silent
 test_genuinely_unlanded_lane_is_reported
 test_unprovable_landing_is_silent
+test_dead_lane_is_reported_inside_the_timeout_despite_slow_landed_probes
+test_all_live_fleet_is_silent_despite_slow_landed_probes
 
 echo "all fm-fleet-integrity-check tests passed"

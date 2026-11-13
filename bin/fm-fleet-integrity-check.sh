@@ -63,10 +63,11 @@
 #
 # SELF-THROTTLED. A stamp file keeps the scan off every watcher poll; the
 # default cadence is 300s and FM_FLEET_INTEGRITY_INTERVAL overrides it. The
-# whole poll is one lsof scan, one `ps` per matching process, one local
-# `git status` per lane, and one local `git log` plus a bounded landed test for
-# the few lanes that would otherwise be reported, so it ends inside the
-# watcher's FM_CHECK_TIMEOUT.
+# required dead-lane line is computed from the one bounded lsof scan alone and
+# printed and recorded BEFORE any claim comparison, so an optional probe can
+# never starve it. The claim comparisons then spend at most half of the watcher's
+# FM_CHECK_TIMEOUT, every git read is bounded by bin/fm-timeout-lib.sh, and a
+# read that hits its bound leaves the lane silent rather than guessing.
 set -u
 export LC_ALL=C
 
@@ -100,12 +101,18 @@ MAX_LINE=1500
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
 case "$CHECK_TIMEOUT" in ''|*[!0-9]*) CHECK_TIMEOUT=30 ;; esac
 [ "$CHECK_TIMEOUT" -ge 1 ] || CHECK_TIMEOUT=30
-# A landed test per lane is capped so one slow lane cannot eat the poll, and the
-# poll keeps a margin below the watcher's own kill deadline.
+# A landed test per lane is capped so one slow lane cannot eat the poll. The
+# optional claim comparison is budgeted at half the watcher's own kill deadline,
+# the same split bin/fm-fleet-stall-check.sh uses, and at most 15 seconds, so the
+# required dead-lane line always has room.
 LANDED_CAP=$((CHECK_TIMEOUT / 4))
 [ "$LANDED_CAP" -ge 1 ] || LANDED_CAP=1
-POLL_BUDGET=$((CHECK_TIMEOUT - 3))
-[ "$POLL_BUDGET" -ge 1 ] || POLL_BUDGET=1
+GIT_READ_CAP=$((CHECK_TIMEOUT / 4))
+[ "$GIT_READ_CAP" -ge 1 ] || GIT_READ_CAP=1
+[ "$GIT_READ_CAP" -le 3 ] || GIT_READ_CAP=3
+POLL_BUDGET=$((CHECK_TIMEOUT / 2))
+[ "$POLL_BUDGET" -le 15 ] || POLL_BUDGET=15
+[ "$POLL_BUDGET" -ge 3 ] || POLL_BUDGET=3
 
 usage() {
   awk '
@@ -176,13 +183,20 @@ lane_worktrees() {
 }
 
 # lane_worktree_work: "<uncommitted-files>\t<unpushed-commits>" for a worktree.
-# Local git reads only: no fetch, no network, no write. A worktree that is not a
-# git checkout, or a git read that fails, contributes zero rather than a guess.
-lane_worktree_work() {  # <worktree>
-  local wt=$1 dirty unpushed
-  dirty=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+# Local git reads only: no fetch, no network, no write. Each read is bounded by
+# the repo's timeout owner so one hung repository cannot consume the poll; a
+# read that hits the bound returns 1 (unknown) rather than a guess. A worktree
+# that is not a git checkout, or a git read that fails outright, contributes zero.
+lane_worktree_work() {  # <worktree> <seconds>
+  local wt=$1 seconds=$2 dirty=0 unpushed out rc
+  out=$(fm_run_timed "$seconds" git -C "$wt" status --porcelain 2>/dev/null)
+  rc=$?
+  [ "$rc" -ne 124 ] || return 1
+  [ -z "$out" ] || dirty=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
   case "$dirty" in ''|*[!0-9]*) dirty=0 ;; esac
-  unpushed=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || unpushed=0
+  unpushed=$(fm_run_timed "$seconds" git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null)
+  rc=$?
+  [ "$rc" -ne 124 ] || return 1
   case "$unpushed" in ''|*[!0-9]*) unpushed=0 ;; esac
   printf '%s\t%s\n' "$dirty" "$unpushed"
 }
@@ -208,7 +222,7 @@ lane_landed_verdict() {  # <worktree> <branch> <pr> <seconds>
 }
 
 action_check() {
-  local now stamp interval rows dead ids wt id claim pr branch line findings dirty unpushed
+  local now stamp interval rows dead ids wt id claim pr branch line findings extra dirty unpushed work
   local landed_rc deadline remaining seconds
   now=$(now_epoch)
   interval=$(interval_secs)
@@ -238,20 +252,43 @@ EOF
   # broken probe is not evidence that every lane is dead.
   dead=$(fm_lane_dead_worktrees "${worktrees[@]}") || return 0
 
+  # The required line first: it comes from the bounded scan alone and is printed
+  # and recorded before any optional claim comparison runs, so a slow landed test
+  # can never starve the intent's one dead-lane wake.
   ids=
+  if [ -n "$dead" ]; then
+    while IFS=$'\t' read -r id wt claim pr; do
+      [ -n "$wt" ] || continue
+      printf '%s\n' "$dead" | grep -Fqx -- "$wt" || continue
+      ids="${ids:+$ids,}$id"
+    done <<EOF
+$rows
+EOF
+  fi
   findings=
+  extra=
+  if [ -n "$ids" ]; then
+    line="fleet-integrity: no live agent process in the worktree of $ids - each is a dead lane still holding its worktree; read it with bin/fm-crew-state.sh <id>, then relaunch or tear it down"
+    line=$(printf '%s' "$line" | cut -c1-"$MAX_LINE")
+    findings=$line
+    printf '%s\n' "$findings" > "$RECORD" 2>/dev/null || true
+    printf '%s\n' "$findings"
+  fi
+
   deadline=$(($(date +%s) + POLL_BUDGET))
   while IFS=$'\t' read -r id wt claim pr; do
     [ -n "$wt" ] || continue
-    if [ -n "$dead" ] && printf '%s\n' "$dead" | grep -Fqx -- "$wt"; then
-      ids="${ids:+$ids,}$id"
-    fi
     case "$claim" in
       done|failed) ;;
       *) continue ;;
     esac
+    remaining=$((deadline - $(date +%s)))
+    [ "$remaining" -ge 1 ] || continue
+    seconds=$GIT_READ_CAP
+    [ "$seconds" -le "$remaining" ] || seconds=$remaining
+    work=$(lane_worktree_work "$wt" "$seconds") || continue
     IFS=$'\t' read -r dirty unpushed <<EOF
-$(lane_worktree_work "$wt")
+$work
 EOF
     if [ "$dirty" -gt 0 ]; then
       line="fleet-integrity: lane $id claims $claim and its worktree $wt has $dirty uncommitted file(s) - the claim and the worktree disagree; read it with bin/fm-crew-state.sh $id, then land, relaunch, or tear it down"
@@ -260,7 +297,8 @@ EOF
       [ "$remaining" -ge 1 ] || continue
       seconds=$LANDED_CAP
       [ "$seconds" -le "$remaining" ] || seconds=$remaining
-      branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+      branch=$(fm_run_timed "$seconds" git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=HEAD
+      [ -n "$branch" ] || branch=HEAD
       landed_rc=0
       lane_landed_verdict "$wt" "$branch" "$pr" "$seconds" || landed_rc=$?
       [ "$landed_rc" -eq 1 ] || continue
@@ -269,21 +307,19 @@ EOF
       continue
     fi
     line=$(printf '%s' "$line" | cut -c1-"$MAX_LINE")
-    findings="${findings:+$findings$'\n'}$line"
+    extra="${extra:+$extra$'\n'}$line"
   done <<EOF
 $rows
 EOF
 
-  if [ -n "$ids" ]; then
-    line="fleet-integrity: no live agent process in the worktree of $ids - each is a dead lane still holding its worktree; read it with bin/fm-crew-state.sh <id>, then relaunch or tear it down"
-    line=$(printf '%s' "$line" | cut -c1-"$MAX_LINE")
-    findings="${line}${findings:+$'\n'$findings}"
+  if [ -n "$extra" ]; then
+    printf '%s\n' "$extra"
+    findings="${findings:+$findings$'\n'}$extra"
   fi
 
   [ -n "$findings" ] || { rm -f -- "$RECORD" 2>/dev/null; return 0; }
 
   printf '%s\n' "$findings" > "$RECORD" 2>/dev/null || true
-  printf '%s\n' "$findings"
 }
 
 action_status() {

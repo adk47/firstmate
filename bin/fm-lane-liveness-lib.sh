@@ -39,10 +39,33 @@
 # this vocabulary cannot classify, is UNDETERMINABLE - never dead - because a
 # false dead verdict is what launches a duplicate agent onto a live worktree.
 #
+# PATH FORMS. A recorded worktree keeps the logical path bin/fm-spawn.sh wrote,
+# while a process's kernel cwd is always physical, so every recorded worktree is
+# resolved physically before it is compared, and a match must be the worktree
+# itself or a true path-component descendant - never a bare string prefix of an
+# unrelated sibling like /x/fm-a versus /x/fm-ab.
+#
 # Sourcing: requires bin/fm-backend.sh already sourced (for
 # fm_backend_source and FM_BACKEND_LIB_DIR). set -u safe.
 
 FM_LANE_LIVENESS_LIB_VERSION=v1
+
+# fm_lane_physical_path: the physical form of a directory path, so a recorded
+# worktree and a kernel cwd can be compared. bin/fm-spawn.sh records the
+# worktree with bash's LOGICAL pwd, which keeps any symlinked component; a
+# process's cwd from lsof is always the PHYSICAL path. A path that no longer
+# resolves is returned as recorded, which can only leave it unmatched when the
+# directory is genuinely gone.
+fm_lane_physical_path() {  # <path>
+  local path=$1 physical
+  [ -n "$path" ] || return 1
+  physical=$(cd "$path" 2>/dev/null && pwd -P) || physical=
+  if [ -n "$physical" ]; then
+    printf '%s\n' "$physical"
+  else
+    printf '%s\n' "$path"
+  fi
+}
 
 # fm_lane_cwd_scan: one bounded read-only scan of every process's current
 # working directory, printed as "<pid>\t<cwd>" lines. Returns 1 when the scan
@@ -129,6 +152,7 @@ fm_lane_pid_class() {  # <pid>
 fm_lane_worktree_verdict() {  # <scan> <worktree>
   local scan=$1 wt=$2 pid cwd class saw_other=0
   [ -n "$wt" ] || { printf 'undeterminable'; return 0; }
+  wt=$(fm_lane_physical_path "$wt")
   while IFS=$'\t' read -r pid cwd; do
     [ -n "$pid" ] || continue
     [ "$pid" != "$$" ] || continue
@@ -198,22 +222,35 @@ fm_lane_snapshot_class() {  # <snapshot> <pid>
 # process table. That is what keeps a fleet-wide poll bounded: one lsof scan,
 # one awk pass, and one `ps` per matching process.
 fm_lane_dead_worktrees() {  # <worktree>...
-  local scan roots matched classified
+  local scan roots matched classified wt entry
   scan=$(fm_lane_cwd_scan) || return 1
   [ -n "$scan" ] || return 1
-  # \034 (FS) cannot appear in a path, so it is a safe list separator.
-  roots=$(printf '%s\034' "$@")
+  # Each entry is "<recorded>\035<physical>"; entries are separated by \034.
+  # Neither control byte can appear in a path, so both are safe separators.
+  roots=
+  for wt in "$@"; do
+    entry=$(fm_lane_physical_path "$wt") || continue
+    roots="${roots}${wt}\035${entry}\034"
+  done
   matched=$(printf '%s\n' "$scan" | LC_ALL=C awk -v roots="$roots" '
-    BEGIN { n = split(roots, r, "\034") }
+    BEGIN {
+      n = split(roots, r, "\034")
+      for (i = 1; i <= n; i++) {
+        if (r[i] == "") continue
+        split(r[i], pair, "\035")
+        orig[++m] = pair[1]
+        phys[m] = pair[2]
+      }
+    }
     {
       p = index($0, "\t")
       if (p == 0) next
       pid = substr($0, 1, p - 1)
       cwd = substr($0, p + 1)
-      for (i = 1; i <= n; i++) {
-        w = r[i]
+      for (i = 1; i <= m; i++) {
+        w = phys[i]
         if (w == "") continue
-        if (cwd == w || index(cwd, w "/") == 1) { print pid "\t" w; break }
+        if (cwd == w || index(cwd, w "/") == 1) { print pid "\t" orig[i]; break }
       }
     }
   ') || return 1
@@ -245,7 +282,11 @@ EOF
   printf '%s\n' "$classified" | LC_ALL=C awk -F '\t' -v roots="$roots" '
     BEGIN {
       n = split(roots, r, "\034")
-      for (i = 1; i <= n; i++) if (r[i] != "") order[++m] = r[i]
+      for (i = 1; i <= n; i++) {
+        if (r[i] == "") continue
+        split(r[i], pair, "\035")
+        order[++m] = pair[1]
+      }
     }
     $2 == "agent" { state[$1] = "live" }
     $2 == "other" { if (state[$1] != "live") state[$1] = "other" }

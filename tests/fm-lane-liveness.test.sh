@@ -178,6 +178,67 @@ test_missing_lsof_is_undeterminable() {
   pass "a missing lsof reads undeterminable, never dead"
 }
 
+# --- path forms -------------------------------------------------------------
+
+# bin/fm-spawn.sh records the worktree with bash's LOGICAL pwd, so a project
+# reached through a symlinked component is recorded logically while the agent's
+# kernel cwd is the physical path. The liveness match must still see it live.
+test_live_agent_through_symlinked_record_reads_live() {
+  local d real link pid rc out
+  d="$TMP_ROOT/symlink-live"
+  real="$d/real"
+  link="$d/link"
+  mkdir -p "$real/wt"
+  ln -s "$real" "$link" || fail "could not create the symlinked component"
+  pid=$(spawn_named_process "$d/bin" pi "$real/wt") || fail "could not spawn the agent fixture"
+  wait_for_process "$pid"
+  fm_lane_agent_live_in_worktree "$link/wt"
+  rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "a live agent whose physical cwd is a symlinked record's target must read live (got $rc)"
+  out=$(fm_lane_dead_worktrees "$link/wt") || fail "the fleet scan must succeed"
+  assert_not_contains "$out" "$link/wt" "a live symlinked lane must not be reported dead"
+  pass "a live agent in a symlinked-record worktree reads live"
+}
+
+# /x/fm-a must never claim the process that actually sits in /x/fm-ab: a bare
+# string prefix is not a path-component boundary.
+test_sibling_path_prefix_is_not_live() {
+  local d a ab pid rc out
+  d="$TMP_ROOT/prefix-sibling"
+  a="$d/fm-a"
+  ab="$d/fm-ab"
+  mkdir -p "$a" "$ab"
+  pid=$(spawn_named_process "$d/bin" pi "$ab") || fail "could not spawn the agent fixture"
+  wait_for_process "$pid"
+  fm_lane_agent_live_in_worktree "$a"
+  rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "a sibling whose path only starts with the recorded path must not read live (got $rc)"
+  out=$(fm_lane_dead_worktrees "$a" "$ab") || fail "the fleet scan must succeed"
+  assert_contains "$out" "$a" "the empty sibling worktree must be reported dead"
+  assert_not_contains "$out" "$ab" "the worktree holding the live agent must not be reported dead"
+  pass "a bare path prefix does not make a sibling worktree live"
+}
+
+# A symlinked record pointing at a worktree with only a leftover shell is still
+# provably dead; canonicalising the record must not turn that into unknown.
+test_dead_lane_with_symlinked_record_reads_dead() {
+  local d real link pid rc
+  d="$TMP_ROOT/symlink-dead"
+  real="$d/real"
+  link="$d/link"
+  mkdir -p "$real/wt"
+  ln -s "$real" "$link" || fail "could not create the symlinked component"
+  pid=$(spawn_shell_in "$real/wt") || fail "could not spawn the shell fixture"
+  wait_for_process "$pid"
+  fm_lane_agent_live_in_worktree "$link/wt"
+  rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "a shell-only worktree reached through a symlinked record must read dead (got $rc)"
+  pass "a dead lane with a symlinked record still reads dead"
+}
+
 # --- the fleet view ---------------------------------------------------------
 
 test_dead_worktrees_names_only_the_dead_ones() {
@@ -237,6 +298,9 @@ test_shell_only_worktree_is_dead
 test_empty_worktree_is_dead
 test_unclassifiable_process_is_undeterminable
 test_missing_lsof_is_undeterminable
+test_live_agent_through_symlinked_record_reads_live
+test_sibling_path_prefix_is_not_live
+test_dead_lane_with_symlinked_record_reads_dead
 test_dead_worktrees_names_only_the_dead_ones
 test_dead_worktrees_never_names_an_unknown_class_dead
 
