@@ -38,6 +38,7 @@ The policy prefers holding the very work item a question gates, so the backlog r
 On 0 only the close changes: after cleanup and still under the task's own lock, teardown records one `Deliverable of the finished work: ...` line at the end of the task body and runs `tasks-axi reopen`, so the row returns to Queued with its hold intact and remains on the appropriate Captain's Call or Charted Next decision surface instead of reading as work still under way.
 The pending-close record teardown already stages before destructive cleanup carries that intent as a `mode=retain` line, so an interrupted cleanup replays the retention at the next session start through the same record, validator, and lock as an ordinary close and never closes the row; an answer that closed the row first simply retires the record.
 `--force` does not lift the deferral, because it authorizes discarding unlanded work, never the captain's question, and `answer` remains the only act that closes the call.
+Every other automatic close shares that predicate instead of re-deriving it: the stale-decision sweep reads the same open captain calls once per run through `bin/fm-captain-hold.sh open-ids` and closes none of them, and `bin/fm-decisions-sweep.sh`'s header owns what it does close.
 `bin/fm-backlog-transition-lib.sh` owns the transition and its record, and `bin/fm-captain-hold.sh --help` owns the predicate's contract.
 
 ## Answer-time closure

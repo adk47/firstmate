@@ -656,8 +656,9 @@ gateway_stall_check() {  # <window> <task> <kind> <tail40>
 # delegates to the unchanged all-tasks authoritative proof.
 #
 # It exists because the first two are unreachable for a harness whose semantic
-# busy state has no verified source: bin/fm-crew-state.sh can only answer unknown
-# for such an adapter, crew_is_provably_working is therefore never satisfiable,
+# busy state has no verified source: bin/fm-crew-state.sh can answer at best a
+# liveness state (alive, idle, or dead) for such an adapter and never a `working`
+# verdict, crew_is_provably_working is therefore never satisfiable,
 # and every worker turn boundary surfaced a wake with nothing to act on - the cost
 # scaling with the number of workers in flight. Pane churn needs no harness
 # cooperation, so it restores the absorb branch for those adapters without
