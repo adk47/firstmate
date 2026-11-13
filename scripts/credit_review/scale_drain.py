@@ -73,6 +73,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -183,7 +184,44 @@ class DrainError(RuntimeError):
 
 
 class DrainWriteError(DrainError):
-    """A write through the reviewed path did not land. The row is NOT committed."""
+    """A write through the reviewed path did not land. The row is NOT committed.
+
+    ``failure_class`` says WHY in a word a person can act on. ``apply`` counts it in
+    ``stats["error_classes"]``, so 3,326 failures read as one cause and not as 3,326
+    lines: on 2026-11-11 every approve of the pass failed for the same reason and the
+    summary said only ``errors``.
+    """
+
+    failure_class = "write_failed"
+
+    def __init__(self, message: str = "", failure_class: str | None = None):
+        super().__init__(message)
+        if failure_class:
+            self.failure_class = failure_class
+
+
+class DrainConfigError(DrainWriteError):
+    """The RUN cannot write, whichever row it tries: no admin env, no token, a kill file.
+
+    It is not a fact about the request, so retrying it on the next row only repeats it.
+    ``apply`` stops at the first one and says why, instead of recording an intent for
+    every remaining row and failing each of them the same way.
+    """
+
+    failure_class = "run_misconfigured"
+
+
+class DrainRefusedByCore(DrainWriteError):
+    """core-backend's agent guard refused the approve (``agent_cannot_approve_declined``).
+
+    This is NOT a generic 400 and it is not retryable as it stands. core lets an agent
+    token approve a row its validator did not approve only for a registered automation
+    bound to that token account, on a row inside its scope. The drain's wrapper gate and
+    ``policies/credit-approval-automation.json`` are hydra's half; core has its own
+    register, and the fix is a registration there, not a code change here.
+    """
+
+    failure_class = "core_automation_not_registered"
 
 
 # ── the idempotency key ─────────────────────────────────────────────────────
@@ -980,6 +1018,107 @@ def drain_evidence(d: Decision) -> str:
             f"{d.evidence_anchor};{d.profile_id or '-'}")
 
 
+#: What the reviewed wrapper's ``check_env`` needs before it will make ANY call. The
+#: drain reads none of them itself: they are the wrapper's inputs, and the wrapper dies
+#: ``ERROR: MUSO_API_URL not set`` without them. A shell on the host does not carry them
+#: (they live in the gateway's systemd ``EnvironmentFile``), which is exactly how the
+#: 2026-11-11 pass failed every one of its 3,326 approves: ``apply`` was started from a
+#: bare shell, each write died in ``check_env`` before the gate was even reached, and the
+#: summary said ``errors``. ``test_scale_drain`` runs the wrapper with each of these
+#: unset and holds this tuple to what it actually refuses.
+ADMIN_ENV_REQUIRED = ("MUSO_API_URL", "MUSO_ADMIN_EMAIL", "MUSO_ADMIN_PASSWORD")
+#: With an identity named, the wrapper loads the account's email and password itself from
+#: ``/etc/openclaw/agents/<identity>.env`` and refuses a missing file on its own.
+ADMIN_IDENTITY_ENV = "MUSO_ADMIN_IDENTITY"
+#: The drain's kill file. The wrapper refuses both drain writes while it exists.
+DRAIN_KILL_FILE = "/etc/hydra/scale-drain.disabled"
+
+#: core-backend's refusal of an agent approve its validator did not approve.
+CORE_AGENT_GUARD_CODE = "agent_cannot_approve_declined"
+
+#: The wrapper's refusal text -> (failure class, is it about the RUN and not the row).
+#: First match wins, so the run-level causes are listed before the row-level ones: a
+#: refusal carries the drain's own reason first and anything after it is commentary.
+_WRAPPER_REFUSALS: tuple[tuple[str, str, bool], ...] = (
+    (r"MUSO_(?:API_URL|ADMIN_EMAIL|ADMIN_PASSWORD) not set|admin identity '"
+     r"|is not a known automation identity",
+     "admin_env_missing", True),
+    (r"scale-drain\.disabled is present", "drain_kill_file", True),
+    (r"scale_drain: .*(?:SCALE_DRAIN_TOKEN|root-only token|must be mode 600)",
+     "drain_token", True),
+    (r"scale_drain: .*(?:is not approved in|registry is pinned|tree cannot be located)",
+     "drain_registry", True),
+    (r"scale_drain: anchor verif|anchor verification failed", "anchor_unverified", False),
+    (r"scale_drain:", "drain_gate_refused", False),
+    (r"credit_approve_gate:", "approve_gate_refused", False),
+)
+
+
+def classify_refusal(text: str) -> tuple[str, bool]:
+    """``(failure class, run-level?)`` for what the wrapper printed when it refused."""
+    for pattern, failure_class, run_level in _WRAPPER_REFUSALS:
+        if re.search(pattern, text or ""):
+            return failure_class, run_level
+    return "wrapper_failed", False
+
+
+def _wrapper_failure(request_id: str, proc: Any) -> DrainWriteError:
+    """The error for a wrapper that exited non-zero, classified from its own words."""
+    text = (proc.stderr or proc.stdout or "").strip()
+    failure_class, run_level = classify_refusal(text)
+    message = f"{request_id}: wrapper rc={proc.returncode}: {text[:300]}"
+    return (DrainConfigError if run_level else DrainWriteError)(message, failure_class)
+
+
+def admin_preflight(script: str | None = None, *, token_file: str = DRAIN_TOKEN_FILE,
+                    kill_file: str = DRAIN_KILL_FILE,
+                    environ: dict[str, str] | None = None) -> list[tuple[str, str]]:
+    """Why this process could not land a single drain write, before it tries 3,326.
+
+    Returns ``(failure class, what to do)`` pairs; empty means nothing here stops a write.
+    Every check is one the wrapper makes on EVERY row anyway, so a miss is not a row's
+    failure, it is the run's. Asking once, before an intent is recorded, is the
+    difference between one line and a ledger full of ``planned`` rows nobody can read a
+    cause from. It reads no secret and calls nothing: it cannot tell a WRONG credential
+    from a right one, only an absent one. A wrong one still fails at the first write,
+    which now stops the run (``DrainConfigError``) instead of repeating itself.
+    """
+    env = os.environ if environ is None else environ
+    script = script or env.get("CREDIT_REVIEW_ADMIN_SCRIPT", ADMIN_WRITER_SCRIPT)
+    problems: list[tuple[str, str]] = []
+    if not os.path.isfile(script):
+        problems.append(("admin_script_missing",
+                         f"the reviewed wrapper {script} does not exist on this host"))
+    needed = [name for name in ADMIN_ENV_REQUIRED if not (env.get(name) or "").strip()]
+    if env.get(ADMIN_IDENTITY_ENV):
+        # The wrapper loads the account from the identity file; only the URL is ours.
+        needed = [name for name in needed if name == "MUSO_API_URL"]
+    if needed:
+        problems.append((
+            "admin_env_missing",
+            f"{', '.join(needed)} not set: the wrapper refuses every call without the "
+            "admin env, so no approve or duplicate close can land. Start apply with the "
+            "environment the admin wrapper is given on this host (a bare shell does not "
+            "carry it)"))
+    if DRAIN_TOKEN_FILE_ENV in env:
+        problems.append(("drain_token",
+                         f"{DRAIN_TOKEN_FILE_ENV} is set, but the token path is pinned to "
+                         f"{DRAIN_TOKEN_FILE} and cannot be redirected"))
+    try:
+        with open(token_file, encoding="utf-8") as fh:
+            if not fh.read().strip():
+                problems.append(("drain_token", f"{token_file} is empty"))
+    except OSError as exc:
+        problems.append(("drain_token",
+                         f"{token_file} cannot be read ({exc.strerror or exc}): both drain "
+                         "writes present it, and nothing creates it but an operator"))
+    if os.path.exists(kill_file):
+        problems.append(("drain_kill_file",
+                         f"{kill_file} is present: the drain is held, and lifting it is "
+                         "not this command's decision"))
+    return problems
+
+
 def admin_writer(script: str | None = None, *, timeout: int = 120,
                  runner: Callable[..., Any] | None = None,
                  token_file: str = DRAIN_TOKEN_FILE) -> Writer:
@@ -1010,15 +1149,15 @@ def admin_writer(script: str | None = None, *, timeout: int = 120,
         if DRAIN_TOKEN_FILE_ENV in os.environ:
             # Refused, not ignored. The wrapper refuses it too (the variable reaches it
             # through ``env``); saying so here names the cause before a process is spawned.
-            raise DrainWriteError(
+            raise DrainConfigError(
                 f"{d.request_id}: {DRAIN_TOKEN_FILE_ENV} is set, but the token path "
-                f"is pinned to {DRAIN_TOKEN_FILE} and cannot be redirected")
+                f"is pinned to {DRAIN_TOKEN_FILE} and cannot be redirected", "drain_token")
         try:
             with open(token_file, encoding="utf-8") as fh:
                 env["SCALE_DRAIN_TOKEN"] = fh.read().strip()
         except OSError as exc:
-            raise DrainWriteError(
-                f"{d.request_id}: {what} needs {token_file}: {exc}") from exc
+            raise DrainConfigError(
+                f"{d.request_id}: {what} needs {token_file}: {exc}", "drain_token") from exc
 
     def write(d: Decision) -> None:
         status = WRITE_STATUS.get(d.outcome)
@@ -1050,10 +1189,8 @@ def admin_writer(script: str | None = None, *, timeout: int = 120,
             proc = run(argv, capture_output=True, text=True, timeout=timeout, env=env,
                        check=False)
             if proc.returncode != 0:
-                raise DrainWriteError(
-                    f"{d.request_id}: wrapper rc={proc.returncode}: "
-                    f"{(proc.stderr or proc.stdout).strip()[:300]}")
-            _assert_written(d, proc.stdout)
+                raise _wrapper_failure(d.request_id, proc)
+            _assert_written(d, proc.stdout, account=_account(env))
             return
         body = json.dumps({"requestIds": [d.request_id], "status": status}, sort_keys=True)
         if status == "approved":
@@ -1076,11 +1213,18 @@ def admin_writer(script: str | None = None, *, timeout: int = 120,
         argv += ["--requester", SERVICE_REQUESTER, "call", "PUT", "/admin/credit-requests", body]
         proc = run(argv, capture_output=True, text=True, timeout=timeout, env=env, check=False)
         if proc.returncode != 0:
-            raise DrainWriteError(
-                f"{d.request_id}: wrapper rc={proc.returncode}: {(proc.stderr or proc.stdout).strip()[:300]}")
-        _assert_written(d, proc.stdout)
+            raise _wrapper_failure(d.request_id, proc)
+        _assert_written(d, proc.stdout, account=_account(env))
 
     return write
+
+
+def _account(env: dict[str, str]) -> str:
+    """The admin account the wrapper logs in as, for an error a person has to act on."""
+    identity = env.get(ADMIN_IDENTITY_ENV)
+    if identity:
+        return f"{ADMIN_IDENTITY_ENV}={identity}"
+    return env.get("MUSO_ADMIN_EMAIL") or "<unknown>"
 
 
 def live_reconciler(admin: Any = None) -> Reconciler:
@@ -1107,6 +1251,16 @@ def live_reconciler(admin: Any = None) -> Reconciler:
             raise Abandon(exc.reason_code, str(exc)) from exc
         except (va.Refused, va.Unavailable) as exc:
             raise DrainError(f"{d.request_id}: could not reconcile: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - the batch client's own error, by text
+            # The read goes through the same wrapper as the write, so it dies of the same
+            # causes. The batch client's error is not one of the verifier's, and before
+            # this it reached ``apply`` as an anonymous exception: a resumed pass with no
+            # admin env reported ``errors: 1, unreconciled: 1`` and printed nothing at all.
+            failure_class, run_level = classify_refusal(str(exc))
+            message = f"{d.request_id}: could not reconcile: {type(exc).__name__}: {exc}"
+            if run_level:
+                raise DrainConfigError(message, failure_class) from exc
+            raise DrainError(message) from exc
         return LANDED if verdict == va.LANDED else NOT_LANDED
 
     return reconcile
@@ -1129,7 +1283,41 @@ def _updated_ids(envelope: dict[str, Any]) -> list[str] | None:
     return [str(i).lower() for i in ids]
 
 
-def _assert_written(d: Decision, stdout: str) -> None:
+def _error_body(envelope: Any) -> dict[str, Any]:
+    """The backend's error object from a non-2xx envelope, or ``{}``."""
+    body = envelope.get("body") if isinstance(envelope, dict) else None
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except ValueError:
+            return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _refused_by_core(d: Decision, status: Any, body: dict[str, Any], account: str) -> DrainWriteError:
+    """A non-2xx answer, as the cause it names rather than as a number."""
+    code = str(body.get("errorCode") or "")
+    said = str(body.get("message") or "").strip()
+    if code == CORE_AGENT_GUARD_CODE or "autonomous agent cannot approve" in said:
+        why = ""
+        for row in body.get("refused") or []:
+            if isinstance(row, dict) and str(row.get("id") or "").lower() == d.request_id.lower():
+                reasons = ",".join(str(r) for r in row.get("reasons") or []) or "-"
+                why = f" (band={row.get('band') or '-'} reasons={reasons})"
+        return DrainRefusedByCore(
+            f"{d.request_id}: core refused the approve with {CORE_AGENT_GUARD_CODE}{why}: "
+            f"HTTP {status}, nothing written. The admin account the drain logged in as "
+            f"({account}) is not a registered automation bound to that account in "
+            "core-backend for this row. hydra's registry entry verification-scale-drain "
+            "and /etc/hydra/scale-drain.token only satisfy the wrapper's gate; core keeps "
+            "its own register, and this needs a registration there, not a retry")
+    detail = " ".join(part for part in (code, said[:200]) if part)
+    return DrainWriteError(
+        f"{d.request_id}: wrapper reported HTTP {status}" + (f": {detail}" if detail else ""),
+        "http_error")
+
+
+def _assert_written(d: Decision, stdout: str, *, account: str = "<unknown>") -> None:
     """The backend's per-row report, not the HTTP code, is the proof the write landed."""
     text = (stdout or "").strip()
     if not text:
@@ -1140,7 +1328,7 @@ def _assert_written(d: Decision, stdout: str) -> None:
         raise DrainWriteError(f"{d.request_id}: unreadable wrapper output: {text[:200]}") from exc
     status = envelope.get("http_status") if isinstance(envelope, dict) else None
     if not isinstance(status, int) or not 200 <= status < 300:
-        raise DrainWriteError(f"{d.request_id}: wrapper reported HTTP {status}")
+        raise _refused_by_core(d, status, _error_body(envelope), account)
     updated = _updated_ids(envelope)
     if updated is None:
         raise DrainWriteError(
@@ -1193,8 +1381,20 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
     lock = threading.Lock()
     stats = {"applied": 0, "skipped": 0, "told": 0, "errors": 0, "would_write": 0,
              "unmatched": 0, "reconciled": 0, "abandoned": 0, "unreconciled": 0,
-             "stopped": False}
+             "stopped": False, "error_classes": {}}
     committed = [0]
+
+    def fail(failure_class: str) -> None:
+        """Count one error under its cause. The caller holds ``lock``."""
+        stats["errors"] += 1
+        classes = stats["error_classes"]
+        classes[failure_class] = classes.get(failure_class, 0) + 1
+
+    def halt(exc: DrainConfigError) -> None:
+        """Stop the run: this failure is the run's, so every later row would repeat it.
+        The caller holds ``lock``. The first cause is the one reported."""
+        stats["stopped"] = True
+        stats.setdefault("stopped_reason", f"{exc.failure_class}: {exc}")
 
     def run_shard(shard: int, items: list[Decision]) -> None:
         for d in items:
@@ -1235,7 +1435,7 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
                         # No intent on disk, so no API call: a side effect the ledger
                         # never heard about cannot be recovered from.
                         print(f"INTENTFAIL {d.request_id}: {type(exc).__name__}: {exc}", file=sys.stderr)
-                        stats["errors"] += 1
+                        fail("ledger_error")
                         continue
             if open_since is not None:
                 # An earlier run meant to write this row and never confirmed it. Find out
@@ -1251,19 +1451,26 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
                             _abandon_intent(db, d, stamp, gone.reason_code)
                             stats["abandoned"] += 1
                         except (sqlite3.Error, DrainError):
-                            stats["errors"] += 1
+                            fail("ledger_error")
                     continue
-                except Exception:  # noqa: BLE001 - unread is not a verdict: the intent stays open
+                except Exception as exc:  # noqa: BLE001 - unread is not a verdict: the intent stays open
+                    # Said out loud. This branch used to count and move on, so a resumed
+                    # pass that could not read a single request reported ``errors`` and
+                    # ``unreconciled`` with an empty stderr and no cause anywhere.
+                    print(f"RECONCILEFAIL {d.request_id}: {type(exc).__name__}: {exc}",
+                          file=sys.stderr)
                     with lock:
-                        stats["errors"] += 1
+                        fail(getattr(exc, "failure_class", "unreconciled"))
                         stats["unreconciled"] += 1
+                        if isinstance(exc, DrainConfigError):
+                            halt(exc)
                     continue
                 if verdict == LANDED:
                     with lock:
                         try:
                             fresh = _confirm_intent(db, d, shard, stamp, RECONCILED)
                         except (sqlite3.Error, DrainError):
-                            stats["errors"] += 1
+                            fail("ledger_error")
                             continue
                         if fresh:
                             stats["applied"] += 1
@@ -1276,7 +1483,7 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
                     # An answer this code does not know, or a retry with nothing to
                     # retry it with. Neither is permission to mark the row done.
                     with lock:
-                        stats["errors"] += 1
+                        fail("unreconciled")
                         stats["unreconciled"] += 1
                     continue
                 # NOT_LANDED: the request is still pending, so the write is retried below,
@@ -1289,7 +1496,9 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
                 except Exception as exc:  # noqa: BLE001 - a writer failure is counted, never fatal
                     print(f"WRITERFAIL {getattr(d,'request_id','?')}: {type(exc).__name__}: {exc}", file=sys.stderr)
                     with lock:
-                        stats["errors"] += 1
+                        fail(getattr(exc, "failure_class", "writer_exception"))
+                        if isinstance(exc, DrainConfigError):
+                            halt(exc)
                     continue  # no confirm: the intent stays open and the next run settles it
             with lock:
                 # Re-check under the commit lock: a worker that passed the first check
@@ -1304,7 +1513,7 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
                     else:
                         fresh = _commit(db, d, shard, stamp)
                 except (sqlite3.Error, DrainError):
-                    stats["errors"] += 1
+                    fail("ledger_error")
                     continue
                 if fresh:
                     stats["applied"] += 1
@@ -1737,6 +1946,19 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     # rehearsal (and for the chaos test, which must not touch the API); it is never the
     # default, because an apply that performs no side effect does not drain anything.
     writer = None if args.no_write else admin_writer(args.admin_script)
+    if writer is not None:
+        # Ask ONCE whether this process can write at all, before an intent is recorded.
+        # Only when there is a write left to make: a plan of asks needs no admin env.
+        writes = [d for d in decisions if d.outcome in WRITING_OUTCOMES]
+        done = already_applied(db, [d.decision_key for d in writes])
+        problems = admin_preflight(args.admin_script) if len(done) < len(writes) else []
+        if problems:
+            for failure_class, what in problems:
+                print(f"PREFLIGHT {failure_class}: {what}", file=sys.stderr)
+            print(json.dumps({"preflight_failed": sorted({c for c, _ in problems}),
+                              "writes_pending": len(writes) - len(done),
+                              "applied": 0, "errors": len(problems)}, sort_keys=True))
+            return 2
     # The reconciler settles any intent an earlier run recorded and never confirmed. It
     # is a read, through the verifier's pinned admin source; it is not optional on a real
     # apply, because without it such a row can only be retried blind or left forever.

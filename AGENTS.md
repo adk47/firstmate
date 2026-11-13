@@ -1163,6 +1163,15 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   request could be expired because a different request for the same user was asked). The
   admin API is the
   write path.
+- **hydra's gate is half of an approve; core keeps its own register, and `apply` needs the
+  admin env.** The registry entry and `/etc/hydra/scale-drain.token` only satisfy the
+  wrapper's gate. core approves a validator-declined row only for an automation in ITS
+  table, bound to the logged-in account and named in `X-Credit-Automation-Id`, which no
+  drain call carries: that approve fails as `core_automation_not_registered`, a
+  registration in core and never a retry. `apply` also preflights the admin env before it
+  records an intent and counts every failure by cause (`error_classes`). Causes, and what
+  a caller can do about each: `docs/credit-verification/scale-drain.md` §"What `apply`
+  needs".
 - **`scripts/credit_review/batch_admin.py`** is the hoist: `muso-admin-api.sh call-batch`
   is ONE process, ONE token resolve, N requests, with the same gate chain `call` runs.
   Never add a direct-HTTP batch client — it would bypass the approve/reject/removal/

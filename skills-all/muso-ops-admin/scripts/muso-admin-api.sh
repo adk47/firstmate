@@ -2191,6 +2191,27 @@ EOF
             ;;
     esac
 
+    # Trailing-flag guard (2026-11-13). The same mistake one slot further right: a
+    # global flag left AFTER the json body is never parsed (the dispatcher stops at the
+    # command), so the call ran as if the flag had not been passed at all. For an approve
+    # that meant the gate answered "--evidence-excerpt is required" to a caller that HAD
+    # passed --evidence-excerpt - 62 rows of exactly that are in the credit-review ledger,
+    # each one read as "the caller sent no evidence". Nothing after the body is ever
+    # read, so a flag there is always a mistake: refuse it and name it.
+    local extra
+    for extra in "${@:4}"; do
+        case "$extra" in
+            --*)
+                cat >&2 <<EOF
+muso-admin-api: refusing — '${extra}' comes after the request body and was NOT read
+  Global flags go BEFORE the command (nothing after the body is parsed). Did you mean:
+    bash $0 ${extra} <value> call ${method} ${path} '<json-body>'
+EOF
+                return 2
+                ;;
+        esac
+    done
+
     # Admin list bounds (incident 2026-10-19): refuse unfiltered big/deep credit-request
     # list pulls and pace list calls per identity. Reads only; never touches writes.
     if ! enforce_admin_list_bounds "$method" "$path"; then

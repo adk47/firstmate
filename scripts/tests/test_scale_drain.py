@@ -2158,6 +2158,298 @@ class RealDataShapeTests(unittest.TestCase):
         self.assertEqual(summary["unmatched"], 1)
 
 
+class FailureClassTests(unittest.TestCase):
+    """A failed write names its cause, and a cause that is the RUN's stops the run.
+
+    2026-11-11: the pass recorded 3,326 approve intents and landed none. Every one failed
+    the same way - ``apply`` was started from a shell that did not carry the admin env, so
+    the wrapper died in ``check_env`` before its gate ran - and the summary said only
+    ``errors``. Nothing in the code told one cause from 3,326 different ones, or a cause
+    that the next row would repeat from one it would not.
+    """
+
+    WRAPPERS = ("skills-all/muso-ops-admin/scripts/muso-admin-api.sh",
+                "workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh")
+
+    def test_the_wrappers_own_refusals_are_told_apart(self):
+        token = "scale_drain: /etc/hydra/scale-drain.token is missing - refusing (an approval needs the root-only token)"
+        cases = [
+            ("ERROR: MUSO_API_URL not set", ("admin_env_missing", True)),
+            ("ERROR: MUSO_ADMIN_PASSWORD not set", ("admin_env_missing", True)),
+            ("ERROR: admin identity 'fable': /etc/x/fable.env is missing or unreadable (no fallback)",
+             ("admin_env_missing", True)),
+            ("ERROR: MUSO_ADMIN_IDENTITY 'scale-drain' is not a known automation identity "
+             "(credit-decider, uvn-cron, fable)", ("admin_env_missing", True)),
+            ("scale_drain: /etc/hydra/scale-drain.disabled is present - refusing",
+             ("drain_kill_file", True)),
+            (token, ("drain_token", True)),
+            ("scale_drain: SCALE_DRAIN_TOKEN does not match /etc/hydra/scale-drain.token - refusing",
+             ("drain_token", True)),
+            ("scale_drain: verification-scale-drain is not approved in /x/registry.json - refusing",
+             ("drain_registry", True)),
+            ("scale_drain: anchor verification failed: anchor is not approved",
+             ("anchor_unverified", False)),
+            ("scale_drain: exactly one requestId per call (one digest carries one anchor) - refusing",
+             ("drain_gate_refused", False)),
+            ("credit_approve_gate: --evidence-excerpt is required for autonomous approves.",
+             ("approve_gate_refused", False)),
+            ("Segmentation fault", ("wrapper_failed", False)),
+            ("", ("wrapper_failed", False)),
+        ]
+        for text, want in cases:
+            with self.subTest(text=text[:50]):
+                self.assertEqual(sd.classify_refusal(text), want)
+        # A refused drain predicate falls through to the generic gate, which adds a second
+        # line of its own. The drain's reason is the cause; the second line is not.
+        both = token + "\ncredit_approve_gate: no active openclaw session log (mtime <10 min) found; refusing autonomous approve."
+        self.assertEqual(sd.classify_refusal(both), ("drain_token", True))
+
+    def test_an_unknown_identity_is_classified_from_what_the_wrapper_prints(self):
+        """The drain's writer is the workspace wrapper. Run it with a plausible typo for
+        an identity and classify its own refusal, so a message that changes shape cannot
+        silently fall back to a row-level cause."""
+        wrapper = SCRIPTS.parent / "workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh"
+        env = {k: v for k, v in os.environ.items()
+               if k not in sd.ADMIN_ENV_REQUIRED and k != sd.ADMIN_IDENTITY_ENV}
+        env.update({"MUSO_API_URL": "https://example.invalid",
+                    sd.ADMIN_IDENTITY_ENV: "scale-drain"})
+        proc = subprocess.run(["bash", str(wrapper), "call", "PUT",
+                               "/admin/credit-requests", "{}"],
+                              capture_output=True, text=True, env=env, check=False)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(sd.classify_refusal(proc.stderr + proc.stdout),
+                         ("admin_env_missing", True))
+
+    def test_the_env_the_preflight_asks_for_is_the_env_the_wrapper_dies_without(self):
+        """``ADMIN_ENV_REQUIRED`` is a copy of the wrapper's ``check_env``. Run the real
+        wrapper with each variable unset and hold the preflight to what it actually
+        refuses, in both copies, or a variable the wrapper starts requiring is one the
+        preflight waves through."""
+        base = {"MUSO_API_URL": "https://example.invalid", "MUSO_ADMIN_EMAIL": "a@b.c",
+                "MUSO_ADMIN_PASSWORD": "x"}
+        for wrapper in self.WRAPPERS:
+            for name in sd.ADMIN_ENV_REQUIRED:
+                with self.subTest(wrapper=wrapper, name=name):
+                    env = {k: v for k, v in os.environ.items()
+                           if k not in sd.ADMIN_ENV_REQUIRED and k != sd.ADMIN_IDENTITY_ENV}
+                    env.update({k: v for k, v in base.items() if k != name})
+                    proc = subprocess.run(["bash", str(SCRIPTS.parent / wrapper), "login"],
+                                          capture_output=True, text=True, env=env, check=False)
+                    self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                    self.assertIn(f"{name} not set", proc.stdout + proc.stderr)
+                    problems = self._preflight(env)
+                    self.assertEqual([c for c, _ in problems], ["admin_env_missing"])
+                    self.assertIn(name, problems[0][1])
+
+    def _preflight(self, env, *, token=True, kill=False):
+        td = Path(tempfile.mkdtemp())
+        script = td / "wrapper.sh"
+        script.write_text("#!/bin/sh\n")
+        token_file = td / "scale-drain.token"
+        if token:
+            token_file.write_text("s3cret\n")
+        kill_file = td / "scale-drain.disabled"
+        if kill:
+            kill_file.write_text("")
+        return sd.admin_preflight(str(script), token_file=str(token_file),
+                                  kill_file=str(kill_file), environ=env)
+
+    GOOD_ENV = {"MUSO_API_URL": "https://example.invalid", "MUSO_ADMIN_EMAIL": "a@b.c",
+                "MUSO_ADMIN_PASSWORD": "x"}
+
+    def test_a_process_that_can_write_passes_the_preflight(self):
+        self.assertEqual(self._preflight(dict(self.GOOD_ENV)), [])
+
+    def test_a_bare_shell_fails_the_preflight_once_and_by_name(self):
+        """The 2026-11-11 shell: no admin env at all."""
+        problems = self._preflight({"PATH": "/usr/bin"})
+        self.assertEqual([c for c, _ in problems], ["admin_env_missing"])
+        for name in sd.ADMIN_ENV_REQUIRED:
+            self.assertIn(name, problems[0][1])
+
+    def test_a_blank_value_is_a_missing_value(self):
+        problems = self._preflight({**self.GOOD_ENV, "MUSO_API_URL": "  "})
+        self.assertEqual([c for c, _ in problems], ["admin_env_missing"])
+        self.assertIn("MUSO_API_URL", problems[0][1])
+        self.assertNotIn("MUSO_ADMIN_EMAIL", problems[0][1])
+
+    def test_a_named_identity_supplies_the_account_but_not_the_url(self):
+        """The wrapper loads email + password from the identity file itself."""
+        self.assertEqual(self._preflight(
+            {"MUSO_API_URL": "https://example.invalid", "MUSO_ADMIN_IDENTITY": "fable"}), [])
+        problems = self._preflight({"MUSO_ADMIN_IDENTITY": "fable"})
+        self.assertEqual([c for c, _ in problems], ["admin_env_missing"])
+        self.assertIn("MUSO_API_URL", problems[0][1])
+        self.assertNotIn("MUSO_ADMIN_PASSWORD", problems[0][1])
+
+    def test_no_token_an_empty_token_and_a_redirected_token_all_fail(self):
+        self.assertEqual([c for c, _ in self._preflight(dict(self.GOOD_ENV), token=False)],
+                         ["drain_token"])
+        td = Path(tempfile.mkdtemp())
+        (td / "w.sh").write_text("")
+        (td / "t").write_text("\n")
+        problems = sd.admin_preflight(str(td / "w.sh"), token_file=str(td / "t"),
+                                      kill_file=str(td / "nope"), environ=dict(self.GOOD_ENV))
+        self.assertEqual([c for c, _ in problems], ["drain_token"])
+        problems = self._preflight({**self.GOOD_ENV, sd.DRAIN_TOKEN_FILE_ENV: "/tmp/mine"})
+        self.assertEqual([c for c, _ in problems], ["drain_token"])
+
+    def test_a_held_drain_fails_the_preflight(self):
+        self.assertEqual([c for c, _ in self._preflight(dict(self.GOOD_ENV), kill=True)],
+                         ["drain_kill_file"])
+
+    def test_a_missing_wrapper_fails_the_preflight(self):
+        problems = sd.admin_preflight("/nonexistent/muso-admin-api.sh",
+                                      token_file="/nonexistent/t", kill_file="/nonexistent/k",
+                                      environ=dict(self.GOOD_ENV))
+        self.assertEqual([c for c, _ in problems], ["admin_script_missing", "drain_token"])
+
+    # -- apply(): what a classified failure does to the run -------------------------
+
+    def _decisions(self, n):
+        return [sd.Decision(rid(i), "precedent", "approve", "precedent_match",
+                            sd.decision_key(rid(i), "precedent", "approve"),
+                            evidence_anchor=rid(900 + i), profile_id=rid(7))
+                for i in range(1, n + 1)]
+
+    def _ledger(self):
+        return sd.open_ledger(str(Path(tempfile.mkdtemp()) / "ledger.sqlite"))
+
+    def test_a_run_level_failure_stops_the_run_at_the_first_row(self):
+        """3,326 rows that would each fail for the same reason: one write is tried, one
+        intent is recorded, and the summary says why it stopped."""
+        calls = []
+
+        def writer(d):
+            calls.append(d.request_id)
+            raise sd.DrainConfigError(f"{d.request_id}: wrapper rc=1: ERROR: MUSO_API_URL not set",
+                                      "admin_env_missing")
+
+        db = self._ledger()
+        stats = sd.apply(self._decisions(40), db, shards=1, write_pool=1, writer=writer)
+        self.assertEqual(calls, [rid(1)])
+        self.assertTrue(stats["stopped"])
+        self.assertEqual(stats["error_classes"], {"admin_env_missing": 1})
+        self.assertEqual(stats["errors"], 1)
+        self.assertTrue(stats["stopped_reason"].startswith("admin_env_missing: "), stats)
+        self.assertIn("MUSO_API_URL not set", stats["stopped_reason"])
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM intents").fetchone()[0], 1)
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM applied").fetchone()[0], 0)
+
+    def test_a_run_level_failure_stops_every_worker_not_only_the_one_that_met_it(self):
+        calls = []
+
+        def writer(d):
+            calls.append(d.request_id)
+            raise sd.DrainConfigError("no token", "drain_token")
+
+        stats = sd.apply(self._decisions(60), self._ledger(), shards=6, write_pool=6,
+                         writer=writer)
+        self.assertTrue(stats["stopped"])
+        # at most one in-flight write per worker when the first failure lands
+        self.assertLessEqual(len(calls), 6)
+        self.assertEqual(stats["error_classes"], {"drain_token": len(calls)})
+
+    def test_a_row_level_failure_is_counted_by_cause_and_does_not_stop_the_run(self):
+        """core refusing one row says nothing about the next: the run goes on, and the
+        summary carries the cause 3 times instead of the word ``errors``."""
+        def writer(d):
+            if d.request_id in (rid(2), rid(4), rid(5)):
+                raise sd.DrainRefusedByCore(f"{d.request_id}: core refused")
+            if d.request_id == rid(3):
+                raise sd.DrainWriteError(f"{d.request_id}: wrapper reported HTTP 503", "http_error")
+            if d.request_id == rid(6):
+                raise RuntimeError("not one of ours")
+
+        db = self._ledger()
+        stats = sd.apply(self._decisions(7), db, shards=1, write_pool=1, writer=writer)
+        self.assertFalse(stats["stopped"])
+        self.assertNotIn("stopped_reason", stats)
+        self.assertEqual(stats["error_classes"], {"core_automation_not_registered": 3,
+                                                  "http_error": 1, "writer_exception": 1})
+        self.assertEqual((stats["errors"], stats["applied"]), (5, 2))
+        self.assertEqual(sum(stats["error_classes"].values()), stats["errors"])
+
+    def test_an_unreadable_intent_says_why_instead_of_counting_in_silence(self):
+        """The resumed 11-11 pass: every open intent failed its read for one reason, and
+        the run printed nothing. The cause now reaches stderr and the summary, and a
+        cause that is the run's stops it."""
+        import contextlib
+        import io
+        decisions = self._decisions(5)
+        db = self._ledger()
+        for d in decisions:
+            sd._record_intent(db, d, 0, NOW)
+        seen = []
+
+        def reconciler(d, planned_at):
+            seen.append(d.request_id)
+            raise sd.DrainConfigError(
+                f"{d.request_id}: could not reconcile: BatchAdminError: call-batch failed "
+                "rc=1: ERROR: MUSO_API_URL not set", "admin_env_missing")
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            stats = sd.apply(decisions, db, shards=1, write_pool=1,
+                             writer=lambda d: self.fail("wrote without a read"),
+                             reconciler=reconciler)
+        self.assertEqual(seen, [rid(1)])
+        self.assertIn(f"RECONCILEFAIL {rid(1)}: DrainConfigError:", err.getvalue())
+        self.assertIn("MUSO_API_URL not set", err.getvalue())
+        self.assertEqual(stats["error_classes"], {"admin_env_missing": 1})
+        self.assertEqual((stats["unreconciled"], stats["stopped"]), (1, True))
+        self.assertEqual(db.execute(
+            "SELECT COUNT(*) FROM intents WHERE state = 'planned'").fetchone()[0], 5)
+
+    def test_every_error_is_counted_under_exactly_one_cause(self):
+        """``error_classes`` is a breakdown of ``errors``: an error path that forgets its
+        cause would make the two disagree. Driven through the real ``apply`` on each
+        failure path it has."""
+        def row_level(d):
+            raise sd.DrainWriteError(f"{d.request_id}: wrapper reported HTTP 503", "http_error")
+
+        def run_level(d):
+            raise sd.DrainConfigError(
+                f"{d.request_id}: wrapper rc=1: ERROR: MUSO_API_URL not set", "admin_env_missing")
+
+        def unclassified(d):
+            raise RuntimeError("not one of ours")
+
+        for name, writer in (("row_level", row_level), ("run_level", run_level),
+                             ("unclassified", unclassified)):
+            with self.subTest(name):
+                stats = sd.apply(self._decisions(4), self._ledger(), shards=1, write_pool=1,
+                                 writer=writer)
+                self.assertGreater(stats["errors"], 0)
+                self.assertEqual(sum(stats["error_classes"].values()), stats["errors"])
+
+        # An unreadable intent is an error too, and it is counted under its own cause.
+        decisions = self._decisions(3)
+        db = self._ledger()
+        for d in decisions:
+            sd._record_intent(db, d, 0, NOW)
+
+        def reconciler(d, planned_at):
+            raise sd.DrainConfigError(f"{d.request_id}: could not reconcile", "admin_env_missing")
+
+        calls = []
+        stats = sd.apply(decisions, db, shards=1, write_pool=1,
+                         writer=calls.append, reconciler=reconciler)
+        self.assertEqual(calls, [])
+        self.assertGreater(stats["errors"], 0)
+        self.assertEqual(sum(stats["error_classes"].values()), stats["errors"])
+
+        # A ledger that cannot record the intent is an error, not a silent skip.
+        db = self._ledger()
+        db.execute("DROP TABLE intents")
+        calls = []
+        stats = sd.apply(self._decisions(2), db, shards=1, write_pool=1,
+                         writer=calls.append)
+        self.assertEqual(calls, [])
+        self.assertGreater(stats["errors"], 0)
+        self.assertEqual(sum(stats["error_classes"].values()), stats["errors"])
+
+
 class _FakeApi:
     """A `curl` on PATH that answers as core-backend would, and records every request.
 
@@ -2179,7 +2471,7 @@ class _FakeApi:
             'case "$*" in\n'
             '    *"/admin/user/login"*) printf \'{"data":{"authentication":{"accessToken":"t"}}}\' ;;\n'
             '    *"-X GET"*"/admin/credit-requests?"*) cat "$FAKE_API_ITEMS"; printf \'\\n200\' ;;\n'
-            '    *"-X PUT"*) cat "$FAKE_API_PUT"; printf \'\\n200\' ;;\n'
+            '    *"-X PUT"*) cat "$FAKE_API_PUT"; printf \'\\n%s\' "${FAKE_API_PUT_STATUS:-200}" ;;\n'
             '    *) printf \'{"error":"unexpected request"}\\n500\' ;;\n'
             "esac\n")
         stub.chmod(0o755)
@@ -2874,6 +3166,322 @@ sd.apply(sd.parse_plan(open(plan, "rb").read()), sd.open_ledger(ledger),
         self.assertEqual(stats["unreconciled"], 1)
         self.assertFalse(marker.exists())
         self.assertEqual(self.api.requests("PUT"), [])
+
+    # -- a failed write names its cause (2026-11-13) --------------------------------
+    #
+    # Same seam as everything above: the real wrapper, the real gate, the real verifier,
+    # and only the network replaced. What is pinned here is the text the REAL files
+    # print, because the classification reads that text and a reworded refusal would
+    # otherwise fall back to ``wrapper_failed`` with every test still green.
+
+    def _serve_approvable(self):
+        self.api.serve([_api_request(rid(1), status="user_verification_needed"),
+                        _api_request(rid(9), status="approved")], [rid(1)])
+
+    def _refusal(self, wrapper, extra_env=None, *, drop=()):
+        """The error the drain's writer raises for one approve, in a given environment."""
+        env = self._env(extra_env)
+        for name in drop:
+            env.pop(name)
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(env)
+        try:
+            with self.assertRaises(sd.DrainWriteError) as ctx:
+                self._writer(wrapper)(self.decision)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        return ctx.exception
+
+    def test_a_shell_without_the_admin_env_is_a_run_failure_named_as_one(self):
+        """2026-11-11, reproduced: the wrapper dies in ``check_env`` before its gate, for
+        every row alike. It reaches neither the verifier's read nor the PUT."""
+        for wrapper in self.WRAPPERS:
+            for name in sd.ADMIN_ENV_REQUIRED:
+                with self.subTest(wrapper=wrapper, missing=name):
+                    self._serve_approvable()
+                    exc = self._refusal(wrapper, drop=(name,))
+                    self.assertIsInstance(exc, sd.DrainConfigError)
+                    self.assertEqual(exc.failure_class, "admin_env_missing")
+                    self.assertIn(f"{name} not set", str(exc))
+                    self.assertEqual(self.api.requests("GET"), [])
+                    self.assertEqual(self.api.requests("PUT"), [])
+
+    def test_a_token_the_wrapper_refuses_is_a_run_failure_not_a_gate_riddle(self):
+        """The refused drain predicate falls through to the generic gate, which appends a
+        line about a missing session log. The cause is the token, and it is the run's."""
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                self._serve_approvable()
+                other = self.api.root / "other.token"
+                other.write_text("not-the-token\n")
+                other.chmod(0o600)
+                saved = dict(os.environ)
+                os.environ.clear()
+                os.environ.update(self._env())
+                try:
+                    with self.assertRaises(sd.DrainConfigError) as ctx:
+                        sd.admin_writer(str(self.mirror / wrapper),
+                                        token_file=str(other))(self.decision)
+                finally:
+                    os.environ.clear()
+                    os.environ.update(saved)
+                self.assertEqual(ctx.exception.failure_class, "drain_token")
+                self.assertEqual(self.api.requests("PUT"), [])
+
+    def test_a_token_file_that_is_not_there_is_a_run_failure_before_the_wrapper_runs(self):
+        self._serve_approvable()
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(self._env())
+        try:
+            with self.assertRaises(sd.DrainConfigError) as ctx:
+                sd.admin_writer(str(self.mirror / self.WRAPPERS[0]),
+                                token_file=str(self.api.root / "absent.token"))(self.decision)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        self.assertEqual(ctx.exception.failure_class, "drain_token")
+        self.assertEqual(self.api.log.read_text(), "")
+
+    def test_an_unapproved_anchor_is_a_row_failure_and_the_run_goes_on(self):
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                self.api.serve([_api_request(rid(1), status="user_verification_needed"),
+                                _api_request(rid(9), status="rejected")], [rid(1)])
+                exc = self._refusal(wrapper)
+                self.assertNotIsInstance(exc, sd.DrainConfigError)
+                self.assertEqual(exc.failure_class, "anchor_unverified")
+                self.assertEqual(self.api.requests("PUT"), [])
+
+    # -- cause 2: core refuses an agent approve its validator did not approve --------
+
+    CORE_REFUSAL = {
+        "result": "error", "code": 400, "errorCode": "agent_cannot_approve_declined",
+        "message": "an autonomous agent cannot approve 1 credit request(s) the validator "
+                   "did not approve (only a registered automation bound to this token "
+                   "account, on a row inside its scope, may) \u2014 nothing was written; "
+                   "route them to a credit case or a named human",
+        "refusedRequestIds": [rid(1)],
+        "refused": [{"id": rid(1), "band": "C", "reasons": ["band_not_a_or_b"]}],
+    }
+
+    def _core_answers(self, body, status):
+        self._serve_approvable()
+        self.api.put_body.write_text(json.dumps(body))
+        return {"FAKE_API_PUT_STATUS": str(status)}
+
+    def test_cores_agent_guard_refusal_is_its_own_error_not_a_generic_400(self):
+        """The approve passed hydra's gate - token, registry, verified anchor - and
+        reached core, which refused it: the account is not a registered automation bound
+        to that account THERE. Before this the row read ``wrapper reported HTTP 400``,
+        the same words as a malformed body or an unknown id."""
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                exc = self._refusal(wrapper, self._core_answers(self.CORE_REFUSAL, 400))
+                self.assertIsInstance(exc, sd.DrainRefusedByCore)
+                self.assertEqual(exc.failure_class, "core_automation_not_registered")
+                # it is a fact about core's register, not about this run's environment:
+                # the next row may be one the validator approved
+                self.assertNotIsInstance(exc, sd.DrainConfigError)
+                said = str(exc)
+                self.assertIn(rid(1), said)
+                self.assertIn("agent_cannot_approve_declined", said)
+                self.assertIn("band=C reasons=band_not_a_or_b", said)
+                # who to register, and where: the account the wrapper logged in as, and
+                # the hydra half that is already in place
+                self.assertIn("test@example.com", said)
+                self.assertIn("verification-scale-drain", said)
+                self.assertIn("core-backend", said)
+                self.assertIn("nothing written", said)
+                # the gate let it through: this is the one refusal that costs a PUT
+                self.assertEqual(len(self.api.requests("PUT")), 1)
+
+    def test_the_refusal_names_the_identity_when_the_wrapper_logs_in_by_identity(self):
+        exc = sd._refused_by_core(self.decision, 400, self.CORE_REFUSAL,
+                                  sd._account({"MUSO_ADMIN_IDENTITY": "credit-decider",
+                                               "MUSO_ADMIN_EMAIL": "ignored@example.com"}))
+        self.assertIn("MUSO_ADMIN_IDENTITY=credit-decider", str(exc))
+        self.assertNotIn("ignored@example.com", str(exc))
+
+    def test_the_guard_is_recognised_by_its_message_when_core_sends_no_code(self):
+        """The 93 rows in the credit-review ledger carry the message and no errorCode."""
+        body = {"result": "error", "code": 400, "message": self.CORE_REFUSAL["message"]}
+        exc = self._refusal(self.WRAPPERS[0], self._core_answers(body, 400))
+        self.assertIsInstance(exc, sd.DrainRefusedByCore)
+
+    def test_any_other_4xx_or_5xx_stays_a_plain_http_error(self):
+        """The classification must not swallow every 400: a different refusal is a
+        different cause, and calling it a registration gap would send someone to
+        register an automation that is already registered."""
+        others = [
+            (400, {"result": "error", "code": 400, "errorCode": "invalid_status_transition",
+                   "message": "cannot move an approved request to approved"}),
+            (403, {"result": "error", "code": 403, "message": "Forbidden"}),
+            (503, {"result": "error", "code": 503, "message": "Unavailable service"}),
+        ]
+        for status, body in others:
+            with self.subTest(status=status):
+                exc = self._refusal(self.WRAPPERS[0], self._core_answers(body, status))
+                self.assertNotIsInstance(exc, sd.DrainRefusedByCore)
+                self.assertNotIsInstance(exc, sd.DrainConfigError)
+                self.assertEqual(exc.failure_class, "http_error")
+                self.assertIn(f"HTTP {status}", str(exc))
+                self.assertIn(body["message"], str(exc))
+
+    def test_a_200_that_names_no_row_is_still_not_an_approval(self):
+        """Not a 200: the acceptance is the row the backend names."""
+        self._serve_approvable()
+        self.api.put_body.write_text(json.dumps({"data": {"updatedIds": []}}))
+        exc = self._refusal(self.WRAPPERS[0])
+        self.assertNotIsInstance(exc, sd.DrainRefusedByCore)
+        self.assertIn(rid(1), str(exc))
+
+    def test_a_core_refusal_leaves_the_intent_open_and_the_ledger_unapproved(self):
+        """Through ``apply``: counted by cause, nothing recorded as applied, and the
+        request (still pending in core) is retried by a later run, never marked done."""
+        wrapper = self.WRAPPERS[0]
+        extra = self._core_answers(self.CORE_REFUSAL, 400)
+        db = sd.open_ledger(str(self.api.root / "refused.sqlite"))
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(self._env(extra))
+        try:
+            stats = sd.apply([self.decision], db, shards=1, write_pool=1,
+                             writer=self._writer(wrapper), reconciler=sd.live_reconciler())
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        self.assertEqual(stats["error_classes"], {"core_automation_not_registered": 1})
+        self.assertEqual((stats["applied"], stats["errors"], stats["stopped"]), (0, 1, False))
+        self.assertEqual(db.execute("SELECT state FROM intents").fetchall(), [("planned",)])
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM applied").fetchone()[0], 0)
+
+    # -- the resumed pass, and the command an operator actually runs -----------------
+
+    def test_a_resume_without_the_admin_env_says_so_and_stops(self):
+        """The reconcile read goes through the same wrapper and dies of the same cause.
+        The batch client's error is not one of the verifier's, so it used to reach
+        ``apply`` as an anonymous exception: errors 1, unreconciled 1, stderr empty."""
+        import contextlib
+        import io
+        wrapper = self.WRAPPERS[0]
+        self.api.serve([], [rid(1)])
+        ledger = self._open_intent("no-env.sqlite")
+        self._live("user_verification_needed")
+        db = sd.open_ledger(ledger)
+        env = self._env()
+        env.pop("MUSO_API_URL")
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(env)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                stats = sd.apply([self.decision], db, shards=1, write_pool=1,
+                                 writer=self._writer(wrapper),
+                                 reconciler=sd.live_reconciler())
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        self.assertEqual(stats["error_classes"], {"admin_env_missing": 1}, err.getvalue())
+        self.assertEqual((stats["unreconciled"], stats["stopped"]), (1, True))
+        self.assertIn("MUSO_API_URL not set", stats["stopped_reason"])
+        self.assertIn(f"RECONCILEFAIL {rid(1)}:", err.getvalue())
+        self.assertEqual(db.execute("SELECT state FROM intents").fetchall(), [("planned",)])
+        self.assertEqual(self.api.requests("PUT"), [])
+
+    def _apply_cli(self, env, ledger, *extra):
+        plan = self.api.root / "plan.jsonl"
+        plan.write_bytes(sd.serialize([self.decision]))
+        return subprocess.run(
+            cli("apply", "--plan", str(plan), "--ledger", str(ledger),
+                "--admin-script", str(self.mirror / self.WRAPPERS[0]), *extra),
+            capture_output=True, text=True, cwd=str(SCRIPTS), env=env, check=False)
+
+    def test_apply_refuses_to_start_from_a_shell_that_cannot_write(self):
+        """``scale_drain apply`` from a bare shell: one line per cause, exit 2, and NOT
+        ONE intent recorded. On 2026-11-11 the same command recorded 3,326."""
+        ledger = self.api.root / "cli.sqlite"
+        env = self._env()
+        for name in sd.ADMIN_ENV_REQUIRED:
+            env.pop(name)
+        proc = self._apply_cli(env, ledger)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        out = json.loads(proc.stdout)
+        self.assertIn("admin_env_missing", out["preflight_failed"])
+        self.assertEqual((out["writes_pending"], out["applied"]), (1, 0))
+        self.assertIn("PREFLIGHT admin_env_missing: MUSO_API_URL, MUSO_ADMIN_EMAIL, "
+                      "MUSO_ADMIN_PASSWORD not set", proc.stderr)
+        self.assertFalse(self.api.log.exists(), "the preflight reached the network")
+        db = sd.open_ledger(str(ledger))
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM intents").fetchone()[0], 0)
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM applied").fetchone()[0], 0)
+
+    def test_the_cli_grants_the_approval_and_reads_it_back_from_the_ledger(self):
+        """The acceptance, end to end: ``scale_drain apply`` from a shell that CAN write
+        lands the approve through the real wrapper and gate, and the run's own ledger
+        read-back - not the HTTP code - is what records it as granted.
+
+        Same seam as the class: the network is the only stub (``_FakeApi``); the wrapper,
+        its gate chain, the verifier and the batch client are the real files, and core
+        answers with the row it wrote. The ONE injection is the drain's root-only token
+        path, which no test may create - a mirror token stands in for it (the wrapper in
+        ``self.mirror`` is pointed at the same file). A 200 that named no row is refused
+        by the test next to this one."""
+        from unittest import mock
+        ledger = self.api.root / "granted.sqlite"
+        plan = self.api.root / "plan.jsonl"
+        plan.write_bytes(sd.serialize([self.decision]))
+        real_writer = sd.admin_writer
+        real_preflight = sd.admin_preflight
+        self._serve_approvable()
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(self._env())
+        try:
+            with mock.patch.object(
+                    sd, "admin_writer",
+                    lambda script=None: real_writer(script, token_file=str(self.token))), \
+                    mock.patch.object(
+                        sd, "admin_preflight",
+                        lambda script=None: real_preflight(
+                            script, token_file=str(self.token))):
+                import contextlib
+                import io
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = sd._main(["apply", "--plan", str(plan),
+                                   "--ledger", str(ledger),
+                                   "--admin-script", str(self.mirror / self.WRAPPERS[0])])
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        self.assertEqual(rc, 0)
+        stats = json.loads(out.getvalue().splitlines()[-1])
+        self.assertEqual((stats["applied"], stats["errors"], stats["stopped"]), (1, 0, False))
+        self.assertEqual(stats["error_classes"], {})
+        writes = self.api.requests("PUT")
+        self.assertEqual(len(writes), 1, writes)
+        self.assertIn("requestIds", writes[0])
+        self.assertIn(rid(1), writes[0])
+        db = sd.open_ledger(str(ledger))
+        self.assertEqual(
+            db.execute("SELECT request_id, outcome FROM applied").fetchall(),
+            [(rid(1), "approve")])
+        self.assertEqual(
+            db.execute("SELECT state FROM intents").fetchall(), [("confirmed",)])
+        self.assertTrue(sd.verify([self.decision], db)["ok"])
+
+    def test_the_preflight_is_not_asked_of_a_run_that_writes_nothing(self):
+        """A rehearsal and a dry run need no admin env, and must not start needing one."""
+        env = {k: v for k, v in self._env().items() if k not in sd.ADMIN_ENV_REQUIRED}
+        for flag in ("--no-write", "--dry-run"):
+            with self.subTest(flag=flag):
+                proc = self._apply_cli(env, self.api.root / f"{flag.strip('-')}.sqlite", flag)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertNotIn("PREFLIGHT", proc.stderr)
 
 
 if __name__ == "__main__":

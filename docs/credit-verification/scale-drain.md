@@ -524,6 +524,48 @@ python3 -m credit_review.scale_drain bench --snapshot snap.jsonl
 `plan` writes canonical JSONL: sorted by `request_id`, sorted keys, no timestamp, no run
 id, no shard number. That is what makes "run it twice, diff the bytes" a real test.
 
+### What `apply` needs, and what it says when a write fails
+
+`apply` writes through `muso-admin-api.sh`, and the wrapper refuses every call without
+`MUSO_API_URL`, `MUSO_ADMIN_EMAIL` and `MUSO_ADMIN_PASSWORD` (or `MUSO_ADMIN_IDENTITY`,
+which loads the account itself). A login shell on the host does not carry them. On
+2026-11-11 `apply` was started from such a shell: it recorded 3,326 approve intents, every
+write died in the wrapper's `check_env` before the gate ran, and the summary said only
+`errors`. Those intents are still `planned` in the ledger; none was granted.
+
+So `apply` now asks once, before it records an intent, whether this process can write at
+all (`admin_preflight`: the admin env, the token file, the kill file, the wrapper). A miss
+prints one `PREFLIGHT <class>: ...` line per cause and exits 2 with nothing recorded. It
+reads no secret and calls nothing, so it cannot tell a wrong credential from a right one;
+a wrong one fails at the first write, which stops the run instead of repeating itself.
+
+Every failed write carries a class, and the summary counts them in `error_classes`:
+
+| class | whose failure | what it means |
+| --- | --- | --- |
+| `admin_script_missing`, `admin_env_missing`, `drain_token`, `drain_kill_file` | the run | preflight found it: `apply` exits 2 with nothing recorded |
+| `drain_registry` | the run | the wrapper's registry check refused mid-run; `apply` stops (`stopped_reason`) |
+| `anchor_unverified`, `drain_gate_refused`, `approve_gate_refused` | the row | the wrapper's gate refused this write; nothing reached core |
+| `core_automation_not_registered` | the row | the write passed hydra's gate and **core** refused it (`agent_cannot_approve_declined`) |
+| `http_error`, `wrapper_failed`, `writer_exception` | the row | any other non-2xx or crash |
+| `unreconciled`, `ledger_error` | the row | an open intent could not be read back, or the ledger refused |
+
+`core_automation_not_registered` is not a retry. core lets an agent token approve a row
+its validator did not approve only for an automation registered in **core's own** table
+(`AUTOMATION_APPROVAL_SCOPES` in core-backend `agentApprovalGuard.js`), bound to the admin
+account the call logged in as and named in the `X-Credit-Automation-Id` header. hydra's
+`verification-scale-drain` registry entry and `/etc/hydra/scale-drain.token` satisfy the
+wrapper's gate and are never sent to core. As of 2026-11-13 core registers no scale-drain
+automation and the wrapper sends no such header for the drain, so a precedent or
+proof-verdict approve of a row the validator declined is refused there. Closing that is a
+registration in core plus a decision on which admin account the drain logs in as; neither
+is a change this repo can make on its own.
+
+A global flag goes **before** the command. `call PUT <path> '<body>' --evidence-excerpt X`
+was once read as a call with no excerpt, and the gate answered "--evidence-excerpt is
+required" to a caller that had passed it. The wrapper now refuses a flag after the body by
+name (`scripts/tests/muso-admin-api-trailing-flag.bats`).
+
 ### Reading the plan before you apply it
 
 The plan is the whole forecast, so the two numbers that matter are one `jq` away:
