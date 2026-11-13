@@ -31,7 +31,10 @@
 # evidence of absence. A merged PR is read from the merge outcome this home
 # already recorded (bin/fm-pr-lib.sh), else from the forge with `gh`; a GitLab
 # merge request, a missing `gh`, or `--no-forge` leaves the PR state unknown,
-# which is never a reason to close.
+# which is never a reason to close. A sweep's own close line is bookkeeping
+# about an older record, not the task speaking, so it never selects a last-line
+# reason: a repeat sweep reads through it to a `done` or `failed` line behind
+# it, and otherwise lets the PR and liveness reasons decide.
 #
 # WHY THE 48 HOURS COME FIRST. None of those reasons is about the record
 # itself. A standing lane writes `done` after every item, records the PR of its
@@ -330,7 +333,11 @@ sweep_task() {  # <status-file>
 
   meta="$STATE/$task.meta"
   last=$(last_status_line_behind_sweep "$file")
-  verb=$(status_line_verb "$last")
+  if status_line_is_sweep_close "$last"; then
+    verb=''
+  else
+    verb=$(status_line_verb "$last")
+  fi
   mtime=$(_fm_status_file_mtime "$file")
   case "$mtime" in ''|*[!0-9]*) mtime=$NOW ;; esac
   age=$((NOW - mtime))

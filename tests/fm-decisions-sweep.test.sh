@@ -332,6 +332,50 @@ test_repeat_sweep_reports_the_tasks_own_reason() {
   pass "a repeat sweep reads through its own close line to the reason the task itself earned"
 }
 
+test_repeat_sweep_never_closes_a_live_tasks_record_as_resolved() {
+  local home out status
+  home=$(make_home repeat-live)
+  task "$home" t-live "pr=https://github.com/acme/app/pull/41"
+  log "$home" t-live "$OLD" 'needs-decision [key=kept]: captain call' \
+    'needs-decision [key=other]: also open' 'working: polishing'
+  live_agent "$home" t-live 4301
+  printf '%s\n' 'https://github.com/acme/app/pull/41 MERGED' > "$home/gh-states"
+  printf '%s\n' kept > "$home/hold-ids"
+
+  out=$(FM_FAKE_HOLD_IDS="$home/hold-ids" sweep "$home" --apply 2>&1); status=$?
+  expect_code 0 "$status" "the first --apply must succeed: $out"
+  has_row "$out" held t-live kept captain-call "the held record survives the first pass"
+  has_row "$out" closed t-live other pr-merged "the first pass closes the other record"
+
+  printf '%s\n' 'https://github.com/acme/app/pull/41 OPEN' > "$home/gh-states"
+  out=$(sweep "$home" --task t-live 2>&1); status=$?
+  expect_code 0 "$status" "the repeat sweep must succeed: $out"
+  has_row "$out" kept t-live kept agent-alive "a repeat sweep leaves a live agent's record alone"
+  assert_not_contains "$out" 'last-line-resolved' "a repeat sweep called a live task's record resolved"
+  [ -n "$(status_open_decisions "$home/state/t-live.status")" ] || fail "the repeat sweep closed a live task's record"
+  pass "a repeat sweep reads through its own close line to a live agent and keeps the record"
+}
+
+test_repeat_sweep_closes_a_dead_tasks_record_as_no_process() {
+  local home out status
+  home=$(make_home repeat-dead)
+  task "$home" t-dead
+  log "$home" t-dead "$OLD" 'needs-decision [key=kept]: captain call' \
+    'needs-decision [key=other]: also open' 'working: polishing'
+  printf '%s\n' kept > "$home/hold-ids"
+
+  out=$(FM_FAKE_HOLD_IDS="$home/hold-ids" sweep "$home" --apply 2>&1); status=$?
+  expect_code 0 "$status" "the first --apply must succeed: $out"
+  has_row "$out" held t-dead kept captain-call "the held record survives the first pass"
+  has_row "$out" closed t-dead other no-process-48h "the first pass closes the other record"
+
+  out=$(sweep "$home" --apply 2>&1); status=$?
+  expect_code 0 "$status" "a repeat --apply must succeed: $out"
+  has_row "$out" closed t-dead kept no-process-48h "a repeat sweep closes the record for the liveness reason, not its own line"
+  assert_not_contains "$out" 'last-line-resolved' "a repeat sweep called a dead task's record resolved"
+  pass "a repeat sweep reads through its own close line to the liveness reason"
+}
+
 test_pr_state_comes_from_the_recorded_merge_or_the_forge_and_unknown_never_closes() {
   local home out
   home=$(make_home pr)
@@ -415,6 +459,8 @@ test_recent_or_live_task_is_never_touched
 test_owned_records_are_held
 test_apply_appends_one_closing_line_per_record_and_nothing_else
 test_repeat_sweep_reports_the_tasks_own_reason
+test_repeat_sweep_never_closes_a_live_tasks_record_as_resolved
+test_repeat_sweep_closes_a_dead_tasks_record_as_no_process
 test_pr_state_comes_from_the_recorded_merge_or_the_forge_and_unknown_never_closes
 test_filters_and_refusals
 
