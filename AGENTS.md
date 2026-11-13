@@ -740,6 +740,30 @@ ever PROPOSED, in shadow, in `link_proposals`. That table is never the decider's
 every row as a credit decision. Code never links on a name alone and never relinks:
 `docs/credit-verification/profile-link-proposals.md`.
 
+## Claim documents get one recorded decision, in shadow
+
+`scripts/claim-doc-ladder.py` (`claim-doc-ladder.timer`, every 4 h) is the claim twin of `doc_approve.py`: every open
+claim with a document on file gets ONE row in `/var/lib/hydra/claim-doc-ladder/decisions.sqlite` with an outcome
+(`approved`, `refused`, `needs_human_review`, `unreadable`) and a reason code. Operator doc, the ladder and the
+revert per field: `docs/credit-verification/claim-doc-ladder.md`; first real-row split: `data/claim-doc-ladder-v2/report.md`.
+
+- **It records and nothing else.** No executor, no admin API call, no message. Wiring one is a new approval
+  automation (a `policies/credit-approval-automation.json` row and a recorded captain decision).
+- **The predicates decide; the model's part ends at the extraction**, which is the one doc-verify already recorded.
+  The ladder does not extract, and doc-verify selects a filing by its candidate CREDIT requests, so a claim-only
+  filer's document is `unreadable: not_extracted` until doc-verify selects it (10 of the 12 real replies to the
+  claim ask on 2026-11-12).
+- **No document, no decision; parsed-but-empty is `unreadable`; unmeasured is its own reason, never a pass.**
+- **A credits page is not accepted and a document must name a release on the profile**
+  (`policies/claim-doc-ladder.json`): without those two the first real run approved 15 claims, 11 on a public page.
+- **Page ids are compared by `scripts/lib/page_identity.py` only** (equality, or a truncated prefix of 8+
+  characters); names by `credit_review.roles.names_match`. Do not write either rule again.
+- An `approved` or `refused` row is never replaced by a later pass: a differing re-read is logged as `drift` and
+  the row stands until `release --claim-id N --by NAME --why ...`.
+- A pass retires every standing row it did not decide (the claim closed, or its last document left the file), so
+  `queue` lists open work only. That is why an open-claims read or a `proof_intake` with no rows raises instead of
+  reading as "nothing is open": an empty answer would retire the whole store.
+
 ## Caroline's replies pass a code output guard
 
 Every Caroline reply passes `plugins/intercom/src/caroline-output-guard.ts` (promises, secret sauce,

@@ -1,0 +1,16 @@
+{
+  "version": "cdl-1",
+  "_doc": "docs/credit-verification/claim-doc-ladder.md. Read by scripts/claim_verify/doc_ladder.py; pinned by scripts/tests/test_claim_doc_ladder.py.",
+  "min_confidence": 0.6,
+  "_min_confidence": "Same bar as doc-verify (credit_verify/docverify/extract.py MIN_CONFIDENCE): a name the extractor was not sure of names nobody.",
+  "accepted_doc_types": {
+    "artist": ["split_sheet", "contract", "invoice", "pro_registration", "dashboard_screenshot", "letter"],
+    "professional": ["split_sheet", "contract", "invoice", "pro_registration", "dashboard_screenshot", "letter"],
+    "organization": ["contract", "invoice", "pro_registration", "dashboard_screenshot", "letter"]
+  },
+  "_accepted_doc_types": "Types are doc-verify's DOC_TYPES. The list is what the approved claim proof ask names (split sheet, producer or mixing agreement, invoice, royalty or distributor statement, PRO registration) plus a label or management letter. A credits page is NOT accepted: it is a public page anyone can screenshot, so it shows the profile's name and nothing about who holds the account (11 of the 15 claims the first real run would have approved stood on one). An email, a screenshot of an email, a receipt and 'other' go to a person too. An organization is not shown to be the claimant's by a split sheet that lists people.",
+  "require_release_on_profile": true,
+  "_require_release_on_profile": "The approved ask is for paperwork that shows the claimant's name on one of the PROFILE's releases. true: a document that names no release of the profile goes to a person (no_release_named). false: only a document whose named releases are all somebody else's is stopped (releases_not_on_profile).",
+  "refuse_on_contradiction": ["deceased_self_claim", "test_account"],
+  "_refuse_on_contradiction": "claim_verify/decline_rules classes a document cannot cure. Every other contradiction class is needs_human_review: the document is new evidence the decline rule never saw."
+}

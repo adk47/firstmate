@@ -501,6 +501,10 @@ install -d -m 700 /var/lib/hydra-dr
 [[ -f "$HYDRA_ROOT/scripts/claim-list-build.py" && -f "$HYDRA_ROOT/scripts/credit_review/claim_list.py" \
    && -f "$HYDRA_ROOT/scripts/credit_review/claim_audience.py" ]] \
   || fail "$HYDRA_ROOT/scripts/claim-list-build.py or its credit_review modules are missing"
+[[ -f "$HYDRA_ROOT/scripts/claim-doc-ladder.py" && -f "$HYDRA_ROOT/scripts/claim_verify/doc_ladder.py" \
+   && -f "$HYDRA_ROOT/scripts/claim_verify/doc_sources.py" && -f "$HYDRA_ROOT/scripts/lib/page_identity.py" \
+   && -f "$HYDRA_ROOT/policies/claim-doc-ladder.json" ]] \
+  || fail "$HYDRA_ROOT/scripts/claim-doc-ladder.py, its claim_verify modules or its policy are missing"
 [[ -f "$HYDRA_ROOT/scripts/resolution-matcher.py" ]] \
   || fail "$HYDRA_ROOT/scripts/resolution-matcher.py missing"
 [[ -f "$HYDRA_ROOT/scripts/caroline-behavior-digest.py" ]] \
@@ -3124,6 +3128,57 @@ for mon in claim-list-build.timer claim-list-build.path; do
   log "  $mon: active"
 done
 
+# ─── Claim document ladder: one recorded decision per claim with a document on file ───
+# A claimant's document used to land in proof_intake and no rule ever read it against the claim.
+# claim-doc-ladder.py reads every open claim whose account has a document on file, runs the coded
+# predicates over the extraction doc-verify already recorded (no model call, no spend) and records
+# ONE decision per claim with a reason code, then re-derives every recorded decision from what it
+# stored. READ-ONLY against prod: it changes no claim, calls no admin API and sends nothing. Its only
+# writes are under /var/lib/hydra/claim-doc-ladder (NOT /opt/hydra, which the deploy rsync
+# overwrites). A read that does not answer is exit 1 with nothing recorded, and a recorded decision
+# that cannot be re-derived is exit 1 too: OnFailure (the table below) pages #clio_devops.
+# Stop switch: /etc/hydra/claim-doc-ladder.disabled (exit 0, nothing read, nothing recorded).
+# docs/credit-verification/claim-doc-ladder.md.
+install -d -m 700 /var/lib/hydra/claim-doc-ladder
+
+cat > /etc/systemd/system/claim-doc-ladder.service << CLAIMDOCSVC
+[Unit]
+Description=HYDRA claim document ladder: decide and record every open claim with a document on file
+
+[Service]
+Type=oneshot
+TimeoutStartSec=3600
+Nice=10
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/claim-doc-ladder.py
+CLAIMDOCSVC
+
+cat > /etc/systemd/system/claim-doc-ladder.timer << CLAIMDOCTMR
+[Unit]
+Description=HYDRA claim document ladder, every 4 h
+
+[Timer]
+OnCalendar=*-*-* 0/4:40:00
+Persistent=true
+Unit=claim-doc-ladder.service
+
+[Install]
+WantedBy=timers.target
+CLAIMDOCTMR
+
+systemctl daemon-reload
+# FATAL, not a WARN, for the reason the claim list's triggers are: with the timer down the ladder
+# never runs, a returned document sits unread again, and the service's OnFailure cannot page
+# because the service never starts.
+mon=claim-doc-ladder.timer
+systemctl enable "$mon" >/dev/null 2>&1 || fail "could not enable $mon: claim documents would not be read"
+systemctl start "$mon" >/dev/null 2>&1 || fail "could not start $mon: claim documents would not be read"
+[[ "$(systemctl is-active "$mon" 2>/dev/null)" == active ]] || fail "$mon is not active after start: claim documents would not be read"
+log "  $mon: active"
+
 # ─── Codex OAuth keepalive at 15-min cadence ──────────────────
 # PROACTIVE complement to the watchdog: openclaw-watchdog.sh pages REACTIVELY
 # (journal 401 signature, after the fleet is already on the mini fallback);
@@ -4811,6 +4866,7 @@ AUX_ONFAILURE_UNITS=(
   caroline-monitor.service
   caroline-safety-daily.service
   claim-list-build.service
+  claim-doc-ladder.service
   support-resolution-daily.service
   ops-intake-digest.service
   ops-intake-redteam.service

@@ -2663,6 +2663,11 @@ jobs:
           # C6 claim declines as code (claim_verify/decline_rules): d2's 17 as fixtures (14/3), the related-trio
           # negative, every rail, and the tray round-tripped through the executor loader. Hermetic.
           python3 scripts/tests/test_claim_decline_rules.py
+          # The claim document ladder (claim_verify/doc_ladder + doc_sources): every predicate and every
+          # reason code, no document = no decision, parsed-but-empty = unreadable, one decision per
+          # claim, every recorded decision re-derived from its stored extraction, and the one page-id
+          # rule (lib/page_identity) that ops-intake reads too. Hermetic: no Trino, no model, temp stores.
+          python3 scripts/tests/test_claim_doc_ladder.py
           # Supporting-document forensics (scripts/credit_verify/proof). Synthetic
           # forgeries built in-test; uses the runner's PyMuPDF/Pillow/OpenCV/tesseract.
           python3 scripts/tests/test_credit_proof.py

@@ -217,9 +217,15 @@ _FEAT = re.compile(r"\s*[\(\[](?:feat\.?|ft\.?|featuring|with)\s[^\)\]]*[\)\]]|\
 MIN_CONFIDENCE = 0.6          # below this an extracted field is never evidence
 
 
-def _title_key(t: str | None) -> str:
+def title_key(t: str | None) -> str:
+    """THE track-title key: folded, with only a featured-artist credit dropped. Two titles are one
+    track's when their keys are equal - never a prefix, never a substring. Public because the claim
+    document ladder compares a document's tracks with a profile's catalog under the same rule."""
     from credit_review.roles import fold
     return fold(_FEAT.sub("", t or ""))
+
+
+_title_key = title_key
 
 
 def supports(ex: Extraction, names: list[str], role: str, title: str | None,

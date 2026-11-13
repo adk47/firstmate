@@ -224,18 +224,11 @@ def _matched_asked(page_id: str, asked: Sequence[str]) -> list[str]:
     """Which asked ids this register page id answers for.
 
     Equality, or a truncated prefix of at least 8 characters - never a shorter
-    run that would sweep in unrelated pages.
+    run that would sweep in unrelated pages. The rule itself lives ONCE, in
+    `lib/page_identity.py`; this is a caller.
     """
-    if not page_id:
-        return []
-    hits: list[str] = []
-    for i in asked:
-        if i == page_id:
-            hits.append(i)
-        elif min(len(i), len(page_id)) >= 8 and (
-                page_id.startswith(i) or i.startswith(page_id)):
-            hits.append(i)
-    return hits
+    from lib import page_identity  # noqa: PLC0415
+    return page_identity.matched(page_id, asked)
 
 
 def register_verdict(ids: Sequence[str], *, gdpr_db: str | Path | None = None
