@@ -1,0 +1,60 @@
+
+### A home with no board is unchanged: no agenda line, nothing else moved
+$ bin/fm-board.sh wake-line
+<no output>
+$ bin/fm-wake-drain.sh   # no board, empty queue
+
+
+### The agenda records the goal, its check, its state, and the next bounded action
+$ bin/fm-board.sh next
+1	restore weekly chart freshness	rerun the chart build with the new window	served range equals this week
+$ bin/fm-board.sh wake-line
+BOARD NEXT: item 1 "restore weekly chart freshness" - next: rerun the chart build with the new window | done when: served range equals this week | run it this turn unless this wake carries captain-class content
+
+### A busy main drain puts the agenda line ahead of its wake rows
+$ bin/fm-wake-drain.sh   # one queued wake
+BOARD NEXT: item 1 "restore weekly chart freshness" - next: rerun the chart build with the new window | done when: served range equals this week | run it this turn unless this wake carries captain-class content
+1794585372	1	signal	task-a.status	signal: task-a
+  stderr: WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 511147.1794585372.L5NJsA
+
+### An hour with an unblocked item and no advance wakes firstmate with the item to drive
+$ bin/fm-board-audit.sh check   # +61m, unchanged board
+board audit: no item advanced in 61m while item 1 is unblocked -> drive item 1 "restore weekly chart freshness": rerun the chart build with the new window
+$ bin/fm-board-audit.sh check   # +62m, same state
+<silent: one reminder per cadence>
+
+### The armed check shim is what the watcher polls, and it carries the same line
+$ bin/fm-board-audit.sh arm
+armed: state/board-audit.check.sh
+$ state/board-audit.check.sh   # +92m, past the 30m reminder cadence
+board audit: no item advanced in 92m while item 1 is unblocked -> drive item 1 "restore weekly chart freshness": rerun the chart build with the new window
+record: 1794590892
+idle:1:restore weekly chart freshness
+
+### Driving the item clears the alarm instead of reporting the same state again
+$ bin/fm-board.sh advance 1 "build rerun, served range equals this week" --next "watch the next scheduled build"
+$ bin/fm-board-audit.sh check   # +93m, after the advance
+<silent>
+$ bin/fm-board.sh next
+1	restore weekly chart freshness	watch the next scheduled build	served range equals this week
+
+### A blocker is raised to the captain at most twice, then it is a defect
+$ bin/fm-board.sh block 2 "refund needs captain approval" --captain money
+$ bin/fm-board.sh escalate 2   # raising 1
+escalation 1 of 2 for item 2
+  exit=0
+$ bin/fm-board.sh escalate 2   # raising 2
+escalation 2 of 2 for item 2: this is the last one - solve it or leave it blocked and drive the next item
+  exit=0
+$ bin/fm-board.sh escalate 2   # raising 3
+fm-board: item 2 blocker was already raised 2 times; a third raising is a defect - leave it blocked and drive the next item
+  exit=5
+$ bin/fm-board.sh next   # the blocked item no longer stops the agenda
+1	restore weekly chart freshness	watch the next scheduled build	served range equals this week
+
+### The same needs-decision key raised again in timestamp-first and indented lines is a defect
+$ bin/fm-board-audit.sh check   # +94m
+board audit: no item advanced in 94m while item 1 is unblocked; needs-decision lane-a/dns raised x2 unanswered (answer it or hold it, then move on) -> drive item 1 "restore weekly chart freshness": watch the next scheduled build
+
+### Disarming leaves the home without the check shim or its record
+disarmed: state/board-audit.check.sh

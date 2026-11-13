@@ -1,0 +1,12 @@
+Regression evidence for the two review fixes (target commit 047eea01).
+
+--- BEFORE (bin scripts reverted to 45962fa8, new tests kept) ---
+not ok - the board line came after the wake row (board 2, row 1): 1794585531	1	signal	task-a.status	signal: task-a
+BOARD NEXT: item 1 "charts" - next: rerun the chart build | done when: the charts check passes | run it this turn unless this wake carries captain-class content
+not ok - timestamp-first and indented escalations did not reach the repeat fold (missing: 'board audit: needs-decision lane-a/dns raised x2 unanswered')
+
+--- AFTER (target commit) ---
+ok - every main wake drain prints the board's agenda line, and a home without a board prints none
+ok - a main drain prints its one board line before its wake rows
+ok - a home with no board, or a board that does not parse, is reported instead of read as clear
+ok - arm writes a bound shim that polls its own home, and disarm removes the shim, binding, and record
