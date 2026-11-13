@@ -187,6 +187,25 @@ test_retire_missing_sidecar_is_idempotent() {
 
 # --- stale event rejection ----------------------------------------------------
 
+test_retire_orphan_is_conditional_on_absent_sidecar() {
+  local state gen
+  state=$(new_state_dir retire-orphan)
+  gen=$("$EV" arm "$state" t1)
+  rm -f "$state/t1.busy-gen"
+
+  "$EV" retire "$state" t1 --orphan || fail "orphan retire rejected an absent sidecar"
+  [ ! -e "$state/t1.busy-state" ] || fail "orphan retire left the orphan record behind"
+  "$EV" retire "$state" t1 --orphan || fail "repeated orphan retire was not idempotent"
+
+  gen=$("$EV" arm "$state" t1)
+  if "$EV" retire "$state" t1 --orphan 2>/dev/null; then
+    fail "orphan retire bound to an incarnation armed after the sidecar was read"
+  fi
+  [ -e "$state/t1.busy-state" ] || fail "orphan retire removed a freshly armed record"
+  [ "$(cat "$state/t1.busy-gen")" = "$gen" ] || fail "orphan retire removed a freshly armed generation"
+  pass "orphan retire removes a record only while its sidecar is still absent"
+}
+
 test_stale_gen_event_rejected() {
   local state old_gen new_gen out
   state=$(new_state_dir stale-event)
@@ -445,6 +464,7 @@ test_apply_current_gen_reset
 test_apply_unarmed_refused
 test_retire_serializes_and_rejects_stale_gen
 test_retire_missing_sidecar_is_idempotent
+test_retire_orphan_is_conditional_on_absent_sidecar
 test_stale_lock_broken_under_gnu_stat
 test_stale_gen_event_rejected
 test_stale_gen_record_unknown

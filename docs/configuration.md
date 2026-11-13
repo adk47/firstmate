@@ -388,13 +388,14 @@ Regression coverage executes emitted launch commands with synthetic nonsecret va
 
 ## Per-task temporary directory (config/task-tmpdir)
 
-Every spawned task gets a temp root at `/tmp/fm-<id>/` with Go's build temp at `gotmp/` and, by default, the task's own `TMPDIR` at `tmp/`.
+Every spawned task gets a temp root at `${XDG_CACHE_HOME:-$HOME/.cache}/fm/<id>/` with Go's build temp at `gotmp/` and, by default, the task's own `TMPDIR` at `tmp/`.
+The root lives under the user cache directory rather than `/tmp` because `/tmp` is wiped at boot, which destroys a live task's scratch mid-run, and on many hosts it is a small tmpfs that a fleet's lane scratch can fill.
 `fm-spawn.sh` exports `TMPDIR=$TASK_TMP/tmp` into the worker pane, so a tool that calls `tempfile.mkdtemp()` or `mktemp -d` without a prefix writes inside the root `fm-teardown.sh` already removes instead of into `/tmp` itself.
+The path the task actually used is recorded as `tasktmp=` in its metadata and teardown removes exactly that path, so a task spawned before this move still cleans up its `/tmp/fm-<id>` root, and a relaunch reuses the recorded root instead of stranding it.
 `GOTMPDIR` alone only covers Go; on 2026-11-10 the uncovered leaks had grown `/tmp` to 950,700 entries, which slowed every glob, `ls`, `find`, and test run on the box.
 
 The optional local, gitignored `config/task-tmpdir` restores the old behaviour: write `off` into it and `fm-spawn.sh` stops exporting `TMPDIR`.
 Any other content, or an absent file, leaves the per-task `TMPDIR` enabled.
-The path is kept short because a unix socket path is capped at 108 bytes.
 
 `ak47/guards/guard-producers.sh --systemic` fails when this export disappears, and [`tests/fm-kimi-harness.test.sh`](../tests/fm-kimi-harness.test.sh) covers the export and the opt-out by running the spawn path and inspecting the pane command.
 The `ak47/` hygiene system that measures and reaps what still leaks is documented in [`ak47/README.md`](../ak47/README.md).
@@ -560,8 +561,8 @@ A chair that keeps running an old checkout supervises the fleet with instruction
 It compares the running code root's own `HEAD` with `refs/remotes/origin/main` and prints one line when the two have differed for longer than `FM_DRIFT_PAGE_SECS` (default 86400 seconds, one day).
 A difference in either direction is drift: behind means the chair runs stale code, ahead means it runs code nobody else has, and the line names which.
 
-The comparison is read-only.
-The check never fetches and never moves `HEAD`, because a fetch from a watcher poll would race the fleet sync that owns clone refresh and a network blip must never read as drift; `origin/main` is whatever the last fetch left, and bootstrap refreshes the chair's own `origin/main` at every session start, alongside fleet sync.
+The comparison refreshes this home's own `origin/main` once per probe interval with the same bounded, best-effort fetch bootstrap uses, and never moves `HEAD` or touches a project clone.
+A failed or timed-out fetch leaves the previous ref in place and stays silent, because a network blip must never read as drift.
 A code root that is not a git checkout, or one whose `origin/main` has never been fetched, proves nothing and stays silent rather than paging on a comparison that was never made.
 
 Drift is an episode, not a poll result.
@@ -569,7 +570,7 @@ Drift is an episode, not a poll result.
 A `HEAD` that changes starts a new episode, so a chair that drifts, is updated, and drifts again is reported again.
 An advance of `origin/main` while `HEAD` is unchanged does not restart the clock, because a chair sitting still while the repository moves on is exactly the drift this catches.
 A chair that catches up clears the record.
-The probe itself is gated to once per `FM_DRIFT_INTERVAL` (default 3600 seconds, `0` to probe on every run) so an hourly comparison does not re-read git on every watcher poll; `state/.drift.beat` holds the last probe time.
+The probe itself is gated to once per `FM_DRIFT_INTERVAL` (default 3600 seconds, `0` to probe on every run) so the fetch and comparison happen at most hourly instead of on every watcher poll; `state/.drift.beat` holds the last probe time.
 
 Bootstrap arms the check in every home as one of its local mutating sweeps, because a detector nobody armed is exactly the blind spot it exists to close.
 `bin/fm-drift-check.sh arm` is the same arming step, writing `state/drift.check.sh` and binding its bytes with `bin/fm-check-register.sh` so the existing watcher polls it on its normal cadence and turns its one line into a `check:` wake; `bin/fm-drift-check.sh disarm` removes the shim, its trust binding, the episode record, and the probe beat.

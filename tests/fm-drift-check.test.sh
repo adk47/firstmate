@@ -14,6 +14,9 @@
 #   - the hourly probe gate keeps a poll inside the interval silent;
 #   - a code root with no origin/main never pages on a comparison it could not
 #     make;
+#   - an unreachable origin never turns a failed fetch into a page;
+#   - the hourly probe refreshes origin/main itself, so an upstream advance is
+#     seen without a bootstrap run;
 #   - arm writes and registers the shim, and disarm removes every artifact.
 set -u
 
@@ -34,6 +37,26 @@ make_drifted_repo() {  # <name>
   printf 'one\n' > "$repo/file" || return 1
   git -C "$repo" add file || return 1
   git -C "$repo" commit -qm one || return 1
+  git -C "$repo" update-ref refs/remotes/origin/main HEAD || return 1
+  printf 'two\n' >> "$repo/file" || return 1
+  git -C "$repo" commit -qam two || return 1
+  printf '%s\n' "$repo"
+}
+
+# A throwaway repository with a local bare origin. HEAD is one commit ahead of
+# origin/main, and the bare repository is the live upstream. Echoes the repo path.
+make_repo_with_bare_origin() {  # <name>
+  local base="$TMP_ROOT/$1" bare="$TMP_ROOT/$1/origin.git" repo="$TMP_ROOT/$1/repo"
+  git init -q --bare "$bare" || return 1
+  mkdir -p "$repo" || return 1
+  git -C "$repo" init -q || return 1
+  git -C "$repo" config user.email drift@example.invalid || return 1
+  git -C "$repo" config user.name drift-test || return 1
+  printf 'one\n' > "$repo/file" || return 1
+  git -C "$repo" add file || return 1
+  git -C "$repo" commit -qm one || return 1
+  git -C "$repo" remote add origin "$bare" || return 1
+  git -C "$repo" push -q origin HEAD:main || return 1
   git -C "$repo" update-ref refs/remotes/origin/main HEAD || return 1
   printf 'two\n' >> "$repo/file" || return 1
   git -C "$repo" commit -qam two || return 1
@@ -161,6 +184,50 @@ test_missing_origin_main_never_pages() {
   pass "a code root with no origin/main never pages on a comparison it could not make"
 }
 
+test_probe_refreshes_origin_main_without_a_bootstrap_run() {
+  local base repo state out upstream head origin
+  base="$TMP_ROOT/probe-fetch"
+  repo=$(make_repo_with_bare_origin probe-fetch)
+  state="$base/state"
+  mkdir -p "$state"
+  out=$(run_check "$repo" "$state" 7000000)
+  [ -z "$out" ] || fail "the first poll of a drift episode must be silent, got: $out"
+  # Upstream merges a commit after the first probe, and no bootstrap runs.
+  upstream="$base/upstream"
+  git clone -q -b main "$base/origin.git" "$upstream" || fail "could not clone the upstream"
+  git -C "$upstream" config user.email drift@example.invalid || fail "could not configure upstream"
+  git -C "$upstream" config user.name drift-test || fail "could not configure upstream"
+  printf 'three\n' >> "$upstream/file" || fail "could not write the upstream commit"
+  git -C "$upstream" commit -qam three || fail "could not commit upstream"
+  git -C "$upstream" push -q origin main || fail "could not advance the bare origin"
+  head=$(git -C "$repo" rev-parse HEAD)
+  origin=$(git -C "$upstream" rev-parse HEAD)
+  out=$(run_check "$repo" "$state" $((7000000 + 90000)))
+  [ -n "$out" ] || fail "25h of drift after an upstream advance must print one line"
+  assert_contains "$out" "firstmate drift:" "the drift line does not name itself"
+  [ "$(git -C "$repo" rev-parse refs/remotes/origin/main)" = "$origin" ] \
+    || fail "the hourly probe did not refresh origin/main from the live upstream"
+  [ "$(git -C "$repo" rev-parse HEAD)" = "$head" ] \
+    || fail "the hourly probe moved the running chair's HEAD"
+  pass "the hourly probe refreshes origin/main itself and pages on the upstream advance"
+}
+
+test_unreachable_origin_fetch_is_silent() {
+  local repo state out
+  repo=$(make_drifted_repo unreachable-origin)
+  state="$TMP_ROOT/unreachable-origin/state"
+  mkdir -p "$state"
+  git -C "$repo" update-ref refs/remotes/origin/main HEAD
+  git -C "$repo" remote add origin "$TMP_ROOT/unreachable-origin/missing.git"
+  out=$(run_check "$repo" "$state" 8000000 2>&1)
+  [ -z "$out" ] || fail "a failed fetch must stay silent, got: $out"
+  out=$(run_check "$repo" "$state" $((8000000 + 90000)) 2>&1)
+  [ -z "$out" ] || fail "a failed fetch must never page or error, got: $out"
+  assert_present "$state/.drift.beat" "the probe did not complete after a failed fetch"
+  assert_absent "$state/.drift" "a failed fetch opened a drift episode"
+  pass "an unreachable origin leaves the previous ref and never pages"
+}
+
 test_arm_and_disarm_manage_every_artifact() {
   local repo state out
   repo=$(make_drifted_repo arm)
@@ -192,4 +259,6 @@ test_catching_up_clears_the_episode_and_a_new_drift_reports_again
 test_origin_advance_does_not_restart_the_episode
 test_probe_gate_keeps_a_poll_inside_the_interval_silent
 test_missing_origin_main_never_pages
+test_probe_refreshes_origin_main_without_a_bootstrap_run
+test_unreachable_origin_fetch_is_silent
 test_arm_and_disarm_manage_every_artifact

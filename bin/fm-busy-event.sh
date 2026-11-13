@@ -23,11 +23,13 @@
 #       paths (fm-recovery) may pass --current-gen to bind to the incarnation
 #       armed right now.
 #
-#   retire <state-dir> <id> (--gen G | --current-gen)
+#   retire <state-dir> <id> (--gen G | --current-gen | --orphan)
 #       Remove one incarnation's sidecar and record while holding the same
 #       writer lock used by arm and apply. An exact gen prevents teardown for
 #       an old task from retiring a newly armed incarnation. A missing sidecar
-#       is already retired, so any orphan record is removed idempotently.
+#       is already retired, so --orphan removes an orphan record only when the
+#       sidecar is still absent under the lock, and refuses rather than binding
+#       to an incarnation armed in the meantime.
 #
 # Exit codes: 0 applied; 1 refused (stale gen, unarmed task, lock timeout,
 # invalid input); 2 usage. Adapter hook command lines append `|| true` so a
@@ -39,7 +41,7 @@ usage() {
 usage:
   fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
   fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
-  fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
+  fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen | --orphan)
 See the header comment for the full contract.
 EOF
   exit 2
@@ -65,6 +67,7 @@ case "$ID" in *[!A-Za-z0-9._-]*) echo "error: invalid task id" >&2; exit 1 ;; es
 NEW_STATE=
 GEN=
 USE_CURRENT_GEN=0
+USE_ORPHAN=0
 SOURCE=
 EVENT=
 if [ "$CMD" = apply ]; then
@@ -80,6 +83,7 @@ while [ $# -gt 0 ]; do
     --state) NEW_STATE=${2:-}; shift 2 || usage ;;
     --gen) GEN=${2:-}; shift 2 || usage ;;
     --current-gen) USE_CURRENT_GEN=1; shift ;;
+    --orphan) USE_ORPHAN=1; shift ;;
     --source) SOURCE=${2:-}; shift 2 || usage ;;
     --event) EVENT=${2:-}; shift 2 || usage ;;
     *) usage ;;
@@ -89,6 +93,9 @@ if [ "$CMD" != retire ]; then
   case "$NEW_STATE" in busy|idle|unknown) : ;; *) usage ;; esac
   fm_busy_token_valid "$SOURCE" || { echo "error: invalid --source" >&2; exit 1; }
   fm_busy_token_valid "$EVENT" || { echo "error: invalid --event" >&2; exit 1; }
+fi
+if [ "$USE_ORPHAN" = 1 ] && { [ "$CMD" != retire ] || [ "$USE_CURRENT_GEN" = 1 ] || [ -n "$GEN" ]; }; then
+  usage
 fi
 
 REC=$(fm_busy_record_path "$STATE" "$ID")
@@ -167,11 +174,28 @@ if [ "$USE_CURRENT_GEN" = 1 ] && [ "$CMD" != retire ]; then
     exit 1
   }
 fi
-if [ "$USE_CURRENT_GEN" != 1 ] || [ "$CMD" != retire ]; then
+if [ "$USE_ORPHAN" != 1 ] && { [ "$USE_CURRENT_GEN" != 1 ] || [ "$CMD" != retire ]; }; then
   fm_busy_token_valid "$GEN" || { umask "$old_umask"; echo "error: invalid --gen" >&2; exit 1; }
 fi
 
 lock_acquire || { umask "$old_umask"; exit 1; }
+if [ "$CMD" = retire ] && [ "$USE_ORPHAN" = 1 ]; then
+  if [ -e "$GEN_FILE" ] || [ -L "$GEN_FILE" ]; then
+    lock_release
+    umask "$old_umask"
+    echo "error: busy-state is armed for $ID (orphan retirement refused)" >&2
+    exit 1
+  fi
+  rm -f "$REC" || {
+    lock_release
+    umask "$old_umask"
+    echo "error: busy-state retirement failed for $ID" >&2
+    exit 1
+  }
+  lock_release
+  umask "$old_umask"
+  exit 0
+fi
 CURRENT=$(fm_busy_current_gen "$STATE" "$ID") || {
   if [ "$CMD" = retire ] && [ ! -e "$GEN_FILE" ] && [ ! -L "$GEN_FILE" ]; then
     rm -f "$REC" || {

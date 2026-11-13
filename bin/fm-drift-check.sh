@@ -26,19 +26,20 @@
 # What it measures, and what it deliberately does not:
 #   - HEAD is the running code root's own commit (FM_ROOT), never a project
 #     clone's.
-#   - origin/main is the last fetched value of that ref. This check never
-#     fetches: a fetch from a watcher poll would race the fleet sync that owns
-#     clone refresh, and a network blip must never read as drift. Bootstrap
-#     refreshes the chair's own origin/main at every session start, alongside
-#     fleet sync, so the comparison is against a ref current to within one
-#     session.
+#   - origin/main is refreshed by this check once per probe interval through the
+#     same bounded, best-effort fetch bootstrap runs (bin/fm-origin-refresh-lib.sh
+#     is the one implementation of it), so the comparison is against the current
+#     origin/main rather than a reference frozen at session start. A failed or
+#     timed-out fetch leaves the previous ref in place and is silent: a network
+#     blip must never read as drift. Nothing under projects/ is touched.
 #   - A difference in either direction is drift: a chair behind origin/main runs
 #     stale code, and a chair ahead of it runs code nobody else has.
 #   - Nothing is repaired here. The line names the update path; the operator or
 #     firstmate runs it.
 #
 # The probe is gated to once per FM_DRIFT_INTERVAL (default 3600, 0 disables the
-# gate) so an hourly comparison does not re-read git on every watcher poll.
+# gate) so the check fetches and re-reads git no more than hourly instead of on
+# every watcher poll.
 #
 # Drift is an EPISODE, not a poll result: state/.drift records the first poll
 # that saw this HEAD while it differed from origin/main, and the line is printed
@@ -67,6 +68,8 @@ REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-origin-refresh-lib.sh
+. "$SCRIPT_DIR/fm-origin-refresh-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -76,7 +79,7 @@ Usage:
   fm-drift-check.sh disarm    remove the check shim, its trust binding, and the drift record
   fm-drift-check.sh --help    print this help
 
-The comparison is read-only: this check never fetches and never moves HEAD.
+The comparison is read-only with respect to HEAD and project clones: this check refreshes the home's own origin/main with one bounded, best-effort fetch per probe interval.
 See docs/configuration.md "Running-chair drift check" for the thresholds.
 EOF
 }
@@ -178,6 +181,7 @@ action_check() {
     case "$last" in ''|*[!0-9]*) last=0 ;; esac
     [ $((now - last)) -ge "$INTERVAL" ] || return 0
   fi
+  fm_chair_origin_refresh "$FM_ROOT"
   head=$(git_head) || head=
   origin=$(git_origin_main) || origin=
   # A code root that is not a git checkout, or one whose origin/main has never

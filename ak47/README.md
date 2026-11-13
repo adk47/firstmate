@@ -76,9 +76,12 @@ $ ak47/census.sh --check         # did any producer grow since the baseline?
 The two systemic rows are the ones that matter. 41 of 59 hydra test files call
 `mkdtemp` with no `rmtree`, `addCleanup` or `tearDownClass` — 126 call sites.
 Fixing them one at a time is a losing game, so the source fix is one line in
-`bin/fm-spawn.sh`: every task now gets `TMPDIR=/tmp/fm-<id>/tmp`, and teardown
-removes that whole root. A leak that lands there is removed by the task that
-caused it. A leak that lands in `/tmp` is removed by nobody.
+`bin/fm-spawn.sh`: every task now gets `TMPDIR=${XDG_CACHE_HOME:-$HOME/.cache}/fm/<id>/tmp`,
+and teardown removes that whole root. A leak that lands there is removed by the
+task that caused it. A leak that lands in `/tmp` is removed by nobody.
+Tasks spawned before that move still record and clean up their `/tmp/fm-<id>`
+root, which is what `orphan-task-scratch` below still reaps when the task record
+is gone.
 
 ## 3. The tick
 
@@ -179,7 +182,7 @@ own authority. A new action class needs the captain's word.
 
 - **Never by age alone.** A candidate must match a producer pattern *and* be
   older than its class threshold *and* be held by no live process.
-- **Never a live task's scratch.** `/tmp/fm-<id>` is protected while
+- **Never a live task's scratch.** `/tmp/fm-<id>` from a pre-move task is protected while
   `state/<id>.meta` exists.
 - **Never a named protected path.** `/tmp/fm-move`, `/tmp/ak47-*`, the `:8317`
   forwarder, `orcad-*`, `systemd-*`, `snap*`, X11 sockets and locks, and anything

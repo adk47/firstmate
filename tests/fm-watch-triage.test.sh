@@ -2507,6 +2507,59 @@ SH
   pass "a relaunch armed between the liveness read and the retire is refused"
 }
 
+# An orphan record (no gen sidecar) makes the watcher capture an empty gen. A
+# relaunch can still arm a fresh incarnation between that capture and the retire,
+# so orphan removal must be conditioned under the writer lock on the sidecar
+# still being absent rather than binding to whatever incarnation is current when
+# the retire lands.
+test_relaunch_between_empty_gen_capture_and_orphan_retire_is_preserved() {
+  local dir state fakebin out window pid i
+  dir=$(make_case orphan-relaunch-race); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-orphan-raced"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/orphan-raced.meta"
+  record_pi_busy "$state" orphan-raced
+  rm -f "$state/orphan-raced.busy-gen"
+  assert_present "$state/orphan-raced.busy-state" "fixture did not leave an orphan busy-state record"
+  assert_absent "$state/orphan-raced.busy-gen" "fixture did not remove the orphan's gen sidecar"
+  # The liveness read arms a fresh incarnation, exactly as a relaunch would
+  # between the empty-gen capture and the orphan retire.
+  mv "$fakebin/tmux" "$fakebin/tmux.real"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = display-message ]; then
+  case "\$*" in
+    *pane_id*)
+      "$fakebin/tmux.real" "\$@"
+      rc=\$?
+      "$ROOT/bin/fm-busy-event.sh" arm "\${FM_STATE_OVERRIDE:-}" orphan-raced >/dev/null 2>&1 || true
+      exit "\$rc"
+      ;;
+  esac
+fi
+exec "$fakebin/tmux.real" "\$@"
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="test:other" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ -s "$dir/capture.count" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  sleep 0.3
+  reap "$pid"
+  assert_present "$state/orphan-raced.busy-state" "an orphan retire removed a freshly armed busy-state record"
+  assert_present "$state/orphan-raced.busy-gen" "an orphan retire removed a freshly armed generation"
+  pass "an orphan retire preserves an incarnation armed after the empty-gen capture"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -5226,6 +5279,7 @@ test_uncapturable_busy_window_is_waited_on
 test_dead_endpoint_busy_state_is_retired
 test_unreadable_backend_does_not_retire_busy_state
 test_relaunch_between_liveness_and_retire_is_refused
+test_relaunch_between_empty_gen_capture_and_orphan_retire_is_preserved
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

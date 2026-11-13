@@ -389,8 +389,11 @@ busy_gen_of() {  # <task>
 # poll that observes the death is what keeps a home from accumulating one per
 # exited worker. <gen> is the generation captured before the liveness read and
 # passed explicitly, so a relaunch that armed a fresh incarnation in between is
-# refused rather than retired (bin/fm-busy-lib.sh owns the record contract;
-# bin/fm-busy-event.sh is the only writer).
+# refused rather than retired. An empty capture means the record was already an
+# orphan, and its removal is conditioned under the writer lock on the sidecar
+# still being absent, so an incarnation armed in between is preserved too
+# (bin/fm-busy-lib.sh owns the record contract; bin/fm-busy-event.sh is the only
+# writer).
 retire_dead_busy_state() {  # <task> <gen>
   local task=$1 gen=$2
   [ -n "$task" ] || return 0
@@ -398,7 +401,7 @@ retire_dead_busy_state() {  # <task> <gen>
   if [ -n "$gen" ]; then
     "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$task" --gen "$gen" >/dev/null 2>&1 || true
   else
-    "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$task" --current-gen >/dev/null 2>&1 || true
+    "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$task" --orphan >/dev/null 2>&1 || true
   fi
   return 0
 }
