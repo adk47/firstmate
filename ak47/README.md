@@ -78,7 +78,10 @@ The two systemic rows are the ones that matter. 41 of 59 hydra test files call
 Fixing them one at a time is a losing game, so the source fix is one line in
 `bin/fm-spawn.sh`: every task now gets `TMPDIR=${XDG_CACHE_HOME:-$HOME/.cache}/fm/<id>/tmp`,
 and teardown removes that whole root. A leak that lands there is removed by the
-task that caused it. A leak that lands in `/tmp` is removed by nobody.
+task that caused it when the task reaches teardown. Nothing reaps
+`${XDG_CACHE_HOME:-$HOME/.cache}/fm/<id>` yet, so a root left by a refused or
+aborted spawn stays until removed by hand. A leak that lands in `/tmp` is
+removed by nobody.
 Tasks spawned before that move still record and clean up their `/tmp/fm-<id>`
 root, which is what `orphan-task-scratch` below still reaps when the task record
 is gone.

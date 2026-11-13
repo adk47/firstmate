@@ -392,6 +392,7 @@ Every spawned task gets a temp root at `${XDG_CACHE_HOME:-$HOME/.cache}/fm/<id>/
 The root lives under the user cache directory rather than `/tmp` because `/tmp` is wiped at boot, which destroys a live task's scratch mid-run, and on many hosts it is a small tmpfs that a fleet's lane scratch can fill.
 `fm-spawn.sh` exports `TMPDIR=$TASK_TMP/tmp` into the worker pane, so a tool that calls `tempfile.mkdtemp()` or `mktemp -d` without a prefix writes inside the root `fm-teardown.sh` already removes instead of into `/tmp` itself.
 The path the task actually used is recorded as `tasktmp=` in its metadata and teardown removes exactly that path, so a task spawned before this move still cleans up its `/tmp/fm-<id>` root, and a relaunch reuses the recorded root instead of stranding it.
+Nothing reaps `${XDG_CACHE_HOME:-$HOME/.cache}/fm/<id>/` yet, so a root left by a refused or aborted spawn before `tasktmp=` is recorded stays until removed by hand.
 `GOTMPDIR` alone only covers Go; on 2026-11-10 the uncovered leaks had grown `/tmp` to 950,700 entries, which slowed every glob, `ls`, `find`, and test run on the box.
 
 The optional local, gitignored `config/task-tmpdir` restores the old behaviour: write `off` into it and `fm-spawn.sh` stops exporting `TMPDIR`.
