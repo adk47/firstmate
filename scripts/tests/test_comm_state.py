@@ -1907,6 +1907,65 @@ class MergeClaimFirstWaiverTest(CommStateTest):
         self.assertEqual(res["proof_note"], [], res)
 
 
+class MergeClaimFirstReleaseTest(CommStateTest):
+    """r5 (3) [key=mcf-wait-lines] 2026-11-03 (Fable ruling 144 under Aaron's 18:35Z delegation): the receipt hold on the
+    merge ask EXPIRES at day 14 - a customer we receipted is asked, not parked for good - while a decided/told request
+    stays held and every other wait line keeps the receipt hold."""
+
+    def receipted(self, days):
+        at = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.note("status-doc-received", at=at)
+        return at
+
+    def reason_starts(self, res, prefix):
+        return [r for r in res["reasons"] if r.startswith(prefix)]
+
+    def test_a_receipt_14_days_old_releases_the_merge_ask(self):
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        self.receipted(15)
+        res = self.run_("merge-claim-first", "mergeclaimfirst")
+        self.assertFalse(self.reason_starts(res, "already_acknowledged"), res)
+        self.assertFalse(res["hold"], res)
+
+    def test_a_fresh_receipt_still_holds_the_merge_ask(self):
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        self.receipted(13)
+        res = self.run_("merge-claim-first", "mergeclaimfirst")
+        self.assertTrue(self.reason_starts(res, "already_acknowledged"), res)
+
+    def test_the_boundary_is_day_14_not_day_15(self):
+        at = self.receipted(0)
+        st = {"acked": at}
+        stamped = datetime.fromisoformat(at).timestamp()
+        self.assertFalse(cs.wait_line_released("merge-claim-first", st, now=stamped + 14 * 86400 - 1))
+        self.assertTrue(cs.wait_line_released("merge-claim-first", st, now=stamped + 14 * 86400))
+
+    def test_a_receipt_without_a_readable_stamp_never_releases(self):
+        # fail closed: no stamp is not an old stamp
+        for acked in ("", "not-a-date", None):
+            with self.subTest(acked=acked):
+                self.assertFalse(cs.wait_line_released("merge-claim-first", {"acked": acked}))
+
+    def test_a_decided_request_is_never_released(self):
+        # nothing left to ask: the release touches the receipt hold only
+        self.core = [["r1", "approved", "", ""]]
+        self.receipted(100)
+        res = self.run_("merge-claim-first", "mergeclaimfirst")
+        self.assertTrue(res["hold"], res)
+        self.assertTrue(self.reason_starts(res, "decided_or_told"), res)
+        self.core = [["r1", "unverified", "2026-10-01T00:00:00Z", ""]]        # an approval notice was told
+        res = self.run_("merge-claim-first", "mergeclaimfirst")
+        self.assertTrue(self.reason_starts(res, "decided_or_told"), res)
+
+    def test_the_release_is_merge_claim_first_only(self):
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        self.receipted(100)
+        for camp in ("credit-hold-status", "claim-proof-pending", "uvn-status", "claim-proof-ask"):
+            with self.subTest(camp):
+                res = self.run_(camp, camp)
+                self.assertTrue(self.reason_starts(res, "already_acknowledged"), (camp, res))
+
+
 class ReleaseRowTest(unittest.TestCase):
     """[key=r8-release-row] (r5 + p1 10-31): the latest row by `at` decides; a release clears the hold for asks AND
     approvals only when the lens's current scan agrees; anything doubtful = held. One reader for everyone."""

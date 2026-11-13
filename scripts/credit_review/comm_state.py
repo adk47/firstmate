@@ -61,6 +61,8 @@ INTERCOM = "https://api.intercom.io"
 # the uvn-status proof ask (captain 03:2xZ: L14a retired, its audience gets the ask; p1 115 / l1 [key=l14a-retire-ask]:
 # sent only at state none / asked-with-no-reply).
 # merge-claim-first is a wait line (r5 NO-GO @eb751806 + QA #1566): proof on file, a reply or a decision holds it.
+# Its RECEIPT hold is the one that expires (WAIT_LINE_RELEASE_DAYS, [key=mcf-wait-lines] (3)): Fable ruling 144 under
+# Aaron's 18:35Z delegation, "users can't be waiting on me" - a customer receipted long ago is asked, never parked.
 WAIT_LINES = ("credit-hold-status", "claim-proof-pending", "uvn-status", "claim-proof-ask", "merge-claim-first")
 RECEIPT = "status-doc-received"
 NEED_ASK = "proof-need-ask"
@@ -506,6 +508,15 @@ LAST_PART_WAIVER_CAMPAIGN = MERGE_CLAIM_FIRST
 STATUS_CLASSES = (RECEIPT, "status-team-review", "email-changed", "email-changed-dup", "credit-hold-status",
                   "merge-pending")
 
+# r5 (3) [key=mcf-wait-lines] 2026-11-03 (Fable ruling 144 under Aaron's 18:35Z delegation: "users can't be waiting on
+# me"): the receipt hold is TEMPORAL, never permanent. A customer we receipted a document for was excluded from the
+# merge ask forever (already_acknowledged reads a fact with no age), which parks the very people who proved themselves -
+# so after 14 days the receipt stops holding merge-claim-first and the ask goes out. Only the DECIDED/TOLD hold stays
+# hard (there is nothing left to ask) and our 7-day recency rule self-releases at 7. Scoped to merge-claim-first: every
+# other wait line keeps its receipt hold for good.
+WAIT_LINE_RELEASE_DAYS = 14
+WAIT_LINE_RELEASE = (MERGE_CLAIM_FIRST,)
+
 
 
 def fraud_facts(uid: int, query: Query) -> list[str]:
@@ -632,6 +643,23 @@ def need_facts(uid: int, keys: list[str], doc_sha: str, doc_at: str, need_code: 
     return out
 
 
+def wait_line_released(campaign: str, st: dict[str, Any], now: float | None = None) -> bool:
+    """[key=mcf-wait-lines] (3), in code: the receipt hold on the merge ask EXPIRES after WAIT_LINE_RELEASE_DAYS, so a
+    receipted customer is asked at day 14 instead of never. Measured from the newest receipt in our ledger (the only
+    stamp the hold reads). A missing/unparsable stamp is NOT a release - fail closed, the hold stands. The decided/told
+    hold is untouched here (a decided request is nothing to ask about), and so is the 7-day recency rule."""
+    if campaign not in WAIT_LINE_RELEASE:
+        return False
+    at = _ts(st.get("acked") or "")
+    if not at:
+        return False
+    try:
+        stamped = datetime.fromisoformat(at).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return False
+    return (now if now is not None else time.time()) - stamped >= WAIT_LINE_RELEASE_DAYS * 86400
+
+
 def wait_line_waived(campaign: str, st: dict[str, Any], last_part: dict[str, Any] | None) -> bool:
     """r5 [key=mcf-wait-lines] (2), in code: waive our 7-day recency hold for merge-claim-first ONLY when the last
     customer-visible part IS the newest note in our own ledger - matched by the part's ID against the ledger's
@@ -676,7 +704,8 @@ def decide(campaign: str, copy: str, st: dict[str, Any], core: dict[str, Any], i
         # line keeps the hold - the sentence exists only for that one approved copy.
         if docs and campaign != MERGE_CLAIM_FIRST:
             why.append("proof_on_file:" + ",".join(sorted(set(docs)))[:300])
-        if st["acked"]:
+        # [key=mcf-wait-lines] (3): a receipt older than WAIT_LINE_RELEASE_DAYS no longer holds the merge ask
+        if st["acked"] and not wait_line_released(campaign, st):
             why.append("already_acknowledged")
         if decided or told:
             why.append("decided_or_told")
