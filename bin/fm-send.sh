@@ -65,8 +65,8 @@
 # body renders more than its identity sets FM_SEND_DEDUP_KEY to that canonical
 # identity, and the inbox then collapses on the key rather than on the body, so
 # a rendering difference such as the head's provenance cannot split one event
-# into two records. Firing stays safe for a
-# finding because the producer keeps its own SLA backstop as an ordinary steer
+# into two records. Firing stays safe for a finding because the producer keeps
+# its own SLA backstop as an ordinary steer
 # and a pull-request label, so a worker that never reads the fired record still
 # surfaces; the fired record exists to remove the wait, not the escalation.
 # bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the

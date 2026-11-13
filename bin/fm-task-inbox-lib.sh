@@ -39,6 +39,10 @@
 #   at=<utc timestamp>
 #   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
 #   coalesce=<key>             present only on a coalescing record (below)
+#   dedup=<key>                present only on a record whose caller supplied a
+#                              canonical delivery identity; the idempotent
+#                              dedup then matches that key, not the body
+#                              (fm_task_inbox_write_idempotent)
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
