@@ -1105,6 +1105,91 @@ def left_out(listed: set[str], pending: list[dict[str, Any]], is_ask: bool,
                and (not listed or r["request_id"] in listed) and not (is_ask and r["_no_ask"] in NO_ASK))
 
 
+#: why an ask list's user is not owed the ask (the gate's own by_reason codes; the paid-band builder counts by them)
+DOCUMENTS_ON_FILE = "documents_on_file"
+NO_LONGER_UVN = "no_longer_uvn"
+
+
+def list_hold(documented: dict[str, Any], released: set[str], u: dict[str, Any], *,
+              gmail_fallback_o: bool = False) -> str:
+    """Why an ASK list entry is dropped before any replica read ("" = it goes on): the Gmail-outage hold, or
+    documents already on file that no stage-2 verdict released. ONE function for the gate's scan and for a list
+    builder's count (`still_owing`): a builder that counts people the gate drops here reports asks nobody is owed
+    (2026-11-13: the paid-band lane listed 213, 68 of them with documents on file)."""
+    uid = str(u.get("user_id"))
+    held_o = bool(getattr(documented, "scoped", False)) and uid in documented.support_contacts
+    if gmail_fallback_o and not held_o:
+        return "not_in_gmail_held_set"                  # [key=gmail-o-forward]: an /o run is the held set ONLY
+    if held_o and not gmail_fallback_o:
+        return STALE_GMAIL_REASON                       # held, and LISTED per user (r5 condition 2)
+    listed = [str(r) for r in (u.get("request_ids") or [])]
+    if documents_block(documented, uid, listed, released, u.get("oldest") or None):
+        return DOCUMENTS_ON_FILE
+    return ""
+
+
+def owed_ask(documented: dict[str, Any], released: set[str], uid: str, listed: set[str],
+             pending: list[dict[str, Any]], asked: set[str] | frozenset[str] = frozenset()
+             ) -> tuple[str, list[dict[str, Any]]]:
+    """Does this user still owe proof on an ask? ("", the credits the ask names) or (why not, []): `plan`'s hold
+    (`nothing_to_ask` when every row is on the approval path or already on the profile, `unlisted_request`,
+    `incomplete_fields`), nothing left waiting on them, or documents on file for the rows the ask would name.
+    The gate applies it when it builds a batch and again on a fresh read before each send; a list builder applies
+    it to its count through `still_owing`."""
+    why, live = plan(listed, pending, True, asked)
+    if why:
+        return why, []
+    if not live:
+        return NO_LONGER_UVN, []
+    if documents_block(documented, uid, [r["request_id"] for r in live], released, created_of(pending, live)):
+        return DOCUMENTS_ON_FILE, []
+    return "", live
+
+
+def still_owing(users: list[dict[str, Any]], *, campaign: str = CAMPAIGN, query: Query = trino,
+                ledger_path: str | None = None, proof_path: str | None = None, stage2_path: str | None = None,
+                now: datetime | None = None) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """The users of a list-driven ask list the gate's own rules would still ask, and a count per reason of the
+    ones they drop. Read-only, and it reads what `run` reads the way `run` reads it: the stage-2 release (an
+    unreadable store releases nothing), proof on file (stale or unreadable raises `ProofFileError`: no answer,
+    never "nobody has documents"), the per-role splits, and the users' pending rows.
+
+    It is the list side of the gate only. The fraud lens, the 7-day window and the Intercom-side deferrals are
+    decided per send and can still hold a user this returns."""
+    path = ledger_path or verify_ledger.DEFAULT_PATH
+    dropped: dict[str, int] = {}
+    released: set[str] = set()
+    if campaign in stage2_verdicts.RELEASES:
+        try:
+            released = stage2_released(campaign, stage2_path)
+        except stage2_verdicts.Stage2Error:
+            dropped["stage2_unreadable"] = 0            # named, as the gate names it: nobody is released
+    documented = asks_proof_on_file(proof_path, now=now, ledger_path=ledger_path)
+    past = []
+    for u in users:
+        why = list_hold(documented, released, u)
+        if why:
+            dropped[why] = dropped.get(why, 0) + 1
+        else:
+            past.append(u)
+    partial_roles = partial_pending_roles(path) if campaign == CAMPAIGN else {}
+    reqs = (pending_rows([int(u["user_id"]) for u in past], campaign, released, query,
+                         partial_ids=frozenset(partial_roles)) if past else {})
+    kept = []
+    for u in past:
+        listed = {str(r) for r in (u.get("request_ids") or [])}
+        pending = reqs.get(int(u["user_id"]), [])
+        if str(u.get("class") or "") == "PARTIAL":
+            pending = partial_scoped(pending, partial_roles, u.get("request_ids") or [])
+        why, _ = owed_ask(documented, released, str(u["user_id"]), listed, pending,
+                          asked_ids(path, campaign, listed, pending))
+        if why:
+            dropped[why] = dropped.get(why, 0) + 1
+        else:
+            kept.append(u)
+    return kept, dropped
+
+
 def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", max_users: int = 50,
         ledger_path: str | None = None, proof_path: str | None = None, query: Query = trino,
         wrapper: str = verify_notify.WRAPPER, runner: verify_notify.Runner = verify_notify._run,
@@ -1221,17 +1306,13 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 report.note("excluded_today")
                 continue
             listed = [str(r) for r in (u.get("request_ids") or [])]
-            held_o = is_ask and getattr(documented, "scoped", False) and str(u.get("user_id")) in documented.support_contacts
-            if gmail_fallback_o and not held_o:
-                report.note("not_in_gmail_held_set")                # [key=gmail-o-forward]: an /o run is the held set ONLY
-                continue
-            if held_o and not gmail_fallback_o:
-                report.note(STALE_GMAIL_REASON)                     # held, and LISTED per user (r5 condition 2)
+            why = list_hold(documented, released, u, gmail_fallback_o=gmail_fallback_o) if is_ask else ""
+            if why == STALE_GMAIL_REASON:
                 report.outcomes.append(gmail_held(u.get("user_id"), u.get("paid")))
-                continue
-            if is_ask and documents_block(documented, str(u.get("user_id")), listed, released, u.get("oldest") or None):
+            if why == DOCUMENTS_ON_FILE:
                 report.proof_on_file += 1
-                report.note("documents_on_file")
+            if why:
+                report.note(why)
                 continue
             if is_ask and documented.get(str(u.get("user_id"))):
                 report.stage2_released += 1
@@ -1387,7 +1468,10 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     if str(u.get("class") or "") == "PARTIAL":
                         pending = partial_scoped(pending, partial_roles, u.get("request_ids") or [])
                     asked = asked_ids(path, campaign, listed, pending)
-                    why, live = plan(listed, pending, is_ask, asked)
+                    if is_ask:
+                        why, live = owed_ask(documented, released, str(uid), listed, pending, asked)
+                    else:
+                        why, live = plan(listed, pending, is_ask, asked)
                     why, live, as_count, total = count_copy_of(campaign, listed, pending, why, live)
                     if why in HOLDS:
                         held(why)
@@ -1396,22 +1480,17 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         for r in pending:
                             if r["_no_ask"] and (not listed or r["request_id"] in listed):
                                 setattr(report, r["_no_ask"], getattr(report, r["_no_ask"]) + 1)
+                    if why == DOCUMENTS_ON_FILE:
+                        report.proof_on_file += 1
+                    if why == NO_LONGER_UVN:
+                        report.no_longer_uvn += 1
+                        close(u)
                     if why:
                         report.note(why)
                         continue
-                    if live and is_ask and documents_block(documented, str(uid), [r["request_id"] for r in live], released,
-                                                           created_of(pending, live)):
-                        report.proof_on_file += 1
-                        report.note("documents_on_file")
-                        continue
-                    if not live and not is_ask:
+                    if not live:
                         report.not_pending += 1
                         report.note("not_pending")
-                        continue
-                    if not live:
-                        report.no_longer_uvn += 1
-                        report.note("no_longer_uvn")
-                        close(u)
                         continue
                     if as_count:
                         report.count_copy += 1
@@ -1652,23 +1731,25 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         owed_now = partial_pending_roles(path, request_ids=u.get("request_ids") or [])
                         fresh = partial_scoped(fresh, owed_now, u.get("request_ids") or [])
                     asked = asked_ids(path, campaign, listed, fresh)
-                    why, live = plan(listed, fresh, is_ask, asked)
+                    if is_ask:
+                        why, live = owed_ask(documented, mine, str(uid), listed, fresh, asked)
+                    else:
+                        why, live = plan(listed, fresh, is_ask, asked)
                     why, live, as_count, total = count_copy_of(campaign, listed, fresh, why, live)
                     if why in HOLDS:
                         held(why)
                         continue
                     dropped = 0 if as_count else left_out(listed, fresh, is_ask, asked)
+                    if why == DOCUMENTS_ON_FILE:
+                        report.proof_on_file += 1
+                        report.note(DOCUMENTS_ON_FILE)
+                        continue
                     if not live:
                         if is_ask:
                             report.no_longer_uvn += 1
                         else:
                             report.not_pending += 1
                         report.note("changed_before_send")
-                        continue
-                    if is_ask and documents_block(documented, str(uid), [r["request_id"] for r in live], mine,
-                                                  created_of(fresh, live)):
-                        report.proof_on_file += 1
-                        report.note("documents_on_file")
                         continue
                     # r8 (firstmate 771) (3): a user whose own read failed on a previous tick is HELD - the walk does not
                     # walk into the same unreadable read again until the hold expires (READ_RETRY_H; see verify_ledger).

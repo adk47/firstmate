@@ -29,8 +29,9 @@ directions: not approved (`approve_arm: false`, score-approve cron disabled) and
 ## What ships
 
 `scripts/credit_review/paid_band_ask.py` (read-only): takes `owing_proof`'s signed build (the never-told +
-owes-proof audience the `uvn-status` gate already consumes), keeps only the users who carry band rows, and caps the
-list. It re-signs the facts header for exactly the users kept, so `owing_proof.verify_facts` still passes at send
+owes-proof audience the `uvn-status` gate already consumes), keeps only the users who carry band rows, drops the ones
+the send gate would not ask (`uvn_status.still_owing`, see "The count is an upper bound on what the send gate
+sends"), and caps the list. It re-signs the facts header for exactly the users kept, so `owing_proof.verify_facts` still passes at send
 time.
 
 Bounds — none of them a new switch:
@@ -58,19 +59,76 @@ python3 scripts/credit-review.py uvn-status --campaign uvn-status --list <the fi
 ```
 
 Measured on prod 2026-11-11 (`--dry-run`, after the never-told and 90-day-lock filters): **201 candidates, 201
-listed, 0 deferred, 7 users dropped by the sender's own 90-day ask lock** (1,017 users carry band rows at all). The
-cohort fits inside a single 400-user day, so it completes on the first run — inside the captain's ~1.2-day
-expectation with room to spare.
+listed, 0 deferred, 7 users dropped by the sender's own 90-day ask lock** (1,017 users carry band rows at all).
+**That 201 counted users the send gate does not ask** — see the next section: the old builder said 213 on
+2026-11-13, of whom 18 owed proof. The cohort still fits inside one 400-user day; it is an order of magnitude
+smaller than the number this section first reported.
 
 ## Two filters that are load-bearing (QA 1886)
 
 `class == "uvn"` — `owing_proof` also lists a `uvn_new_rows` follow-up class (already asked, but rows no ask named),
 and `uvn-status` drops those as `already_sent` before spending budget. Counting them would spend the 400-user cap on
 messages that never leave and make any drain estimate false. The never-told class is the whole cohort: excluding
-the follow-up class moved the audience from 474 names to 201 reachable users.
+the follow-up class moved the audience from 474 names to 201 listed users (the pre-2026-11-13 builder's number;
+only 18 of the 213 it listed that day owed proof).
 
 The sender's 90-day lock (`verify_ledger.asked_within`, the same function the sender calls) is applied at build
-time, so a listed name is a name a message can actually reach.
+time. It is the last filter this builder applies on its own: the gate's list-side rules are applied too, and its
+per-send rules can still hold a listed name (next section).
+
+## The count is an upper bound on what the send gate sends (2026-11-13)
+
+"No core `proofRequest` marker" is not "owes proof". The send gate drops two more kinds of user before it
+messages anyone, and until 2026-11-13 the builder applied neither, so `candidates` was measured one filter before
+the gate. On node-8 that day the builder said **213** and the gate's dry run of that list said **15 would be
+messaged** (the apply sent 3). Read-only, on the same list:
+
+| of the 213 listed | users | the gate's reason |
+|---|---|---|
+| documents already on file, no stage-2 verdict releasing the credits | 68 | `documents_on_file` |
+| every listed row on the approval path or already on the profile | 127 | `nothing_to_ask` |
+| **still owe proof** | **18** | |
+
+(116 of the 145 without a blocking document had documents on file that a stage-2 verdict released. The
+documents rule keeps them; at least 98 of them are among the 127.) The documents rule alone would have left
+145. The larger part of the error is the second row: a band row meets the first three conditions of
+`uvn_status.approval_path_admits` by its own predicate (validator-approved, risk under 30, popularity 1-59), and
+the ask never names a row the approval path admits. A band user is asked only when one of their listed rows
+fails the path's remaining conditions or is not a band row at all.
+
+**Those 127 are not told anything by this lane and are not approved either** (`approve_arm` is `false`). The
+builder now reports them instead of counting them as asks; what they are owed is a decision this lane does not
+make.
+
+`scope()` now runs `uvn_status.still_owing` **before the cap**. That function is the gate's own
+`list_hold` + `owed_ask` (the gate's scan, its batch build and its pre-send re-read call the same two), fed by the
+reads the gate makes: the proof-on-file snapshot, the stage-2 verdict store, the per-role splits and the users'
+pending rows. The builder never re-implements a rule, and `test_paid_band_ask.py` runs the real gate's dry run
+over the builder's list to pin the two counts together for the rules the gate decides **from the list**.
+
+`candidates` is an **upper bound**, not the sendable number. The gate also decides per send — the fraud lens,
+the 7-day message window, Intercom-side deferrals and the daily cap — and those holds stay in the gate alone,
+never in the builder. On 2026-11-13 they were 1 fraud-lens hold and 20 deferrals on the old list, and 3 deferrals
+on the 16-user list. Two measured pairs:
+
+| measurement | builder | gate would message | actually sent |
+|---|---|---|---|
+| node-8, 2026-11-13T15:08Z | **16** candidates | **13** (3 deferred by the 7-day window) | — |
+| node-8, earlier list 2026-11-13 | **213** listed | **15** | **3** |
+
+- `candidates` and `listed` keep their meaning and now count people who still owe proof. The summary gains one
+  key, **`not_owed`**: users dropped per gate reason, e.g. `{"documents_on_file": 68, "nothing_to_ask": 128}`
+  on the 2026-11-13T15:08Z run (`127` on the earlier 213-user list; the two are separate reads, so the parts need
+  not sum to the same total).
+- An unreadable or stale proof-on-file snapshot is a **refusal** (`{"error": ...}`, exit 2, no list): "could not
+  read the documents" is never "nobody has documents". An unreadable verdict store releases nobody, as in the
+  gate, and `not_owed` then carries `"stage2_unreadable": 0` to say so.
+- The build makes one more replica read (the listed users' pending rows) and reads two more local files. It still
+  writes only its `--out` list.
+
+The 2026-11-13T15:08Z run, in full: `candidates` **16** (`not_owed`: 68 `documents_on_file`, 128
+`nothing_to_ask`; 1,145 users with band rows). The 3 the window deferred owe proof and are asked on a later day;
+the count does not predict the window.
 
 ## Why the build read is batched
 

@@ -23,24 +23,40 @@ Bounds, all enforced here, none of them a new switch:
 A user already told (a sent `uvn-status` ask) or holding a core proofRequest marker is already out of the
 owing_proof build, so this lane can never re-ask them.
 
+"No core proofRequest marker" is not "owes proof". The send gate also drops a user whose documents are already
+on file (unless a stage-2 verdict released the credits) and a user whose listed rows are all on the approval
+path or already on the profile, so `candidates` used to be measured one filter before the gate: on 2026-11-13
+it said 213 and the gate's dry run would message 15 (68 had documents on file and 127 had nothing to ask about,
+which leaves 18), and the apply sent 3. `candidates` now counts only the users `uvn_status.still_owing` keeps -
+the gate's own functions, never a copy of them - and `not_owed` says how many each gate rule dropped (a
+`stage2_unreadable` key, at 0, says the verdict store could not be read, so nobody was released from the
+documents hold).
+
+`candidates` is therefore an UPPER BOUND on what the gate sends, not the sendable number. The gate also holds a
+user per send, and those holds stay in the gate: the fraud lens, the 7-day message window and the Intercom-side
+deferrals. Measured pairs: on node-8 at 2026-11-13T15:08Z, `candidates` 16 vs 13 would be messaged (3 deferred by
+the 7-day window); on the earlier list that day, 213 listed, 15 would be messaged and 3 actually sent.
+
 READ-ONLY: this writes one runner list. Sending stays with `credit-review.py uvn-status --campaign uvn-status
 --list FILE` (its approved copy, its gate, its ledger, its own daily cap); nothing here approves, arms or sends.
 
 CLI:  paid_band_ask.py --out FILE [--max-users N] [--policy PATH] [--at-risk CSV] [--ledger PATH]
-                         [--account-holds PATH] [--dry-run]
-      paid_band_ask.py --filter-built LIST --out FILE      (re-scope an existing owing_proof build, no replica read)
+                         [--account-holds PATH] [--proof-on-file PATH] [--proof-store PATH] [--dry-run]
+      paid_band_ask.py --filter-built LIST --out FILE      (re-scope an existing owing_proof build: one replica
+                                                           read for the listed users' pending rows)
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from credit_review import owing_proof, verify_ledger, verify_notify  # noqa: E402
+from credit_review import owing_proof, uvn_status, verify_ledger, verify_notify  # noqa: E402
 
 POLICY = os.environ.get("CREDIT_TRUST_DECIDE_POLICY", "/opt/hydra/policies/credit-trust-decide.json")
 CAP_KEY = "max_ask_users_per_day"
@@ -131,10 +147,27 @@ def narrowed_query(user_ids: Any):
     return q
 
 
+#: users -> (the ones the send gate's list-side rules would still ask, {the gate's reason: users dropped})
+Owes = Callable[["list[dict[str, Any]]"], "tuple[list[dict[str, Any]], dict[str, int]]"]
+
+
+def still_owing(ledger_path: str, proof_path: str | None = None, stage2_path: str | None = None) -> Owes:
+    """The send gate's own answer to "does this user still owe proof" (`uvn_status.still_owing`: documents on
+    file, the stage-2 release, the approval path). One rule, the gate's: this never re-implements it."""
+    def fn(users: "list[dict[str, Any]]") -> "tuple[list[dict[str, Any]], dict[str, int]]":
+        return uvn_status.still_owing(users, campaign=uvn_status.CAMPAIGN, query=verify_notify.trino,
+                                      ledger_path=ledger_path, proof_path=proof_path, stage2_path=stage2_path)
+    return fn
+
+
 def scope(build: dict[str, Any], band: dict[int, set[str]], cap: int, *, paid_only: bool = True,
-          asked_recently: Callable[[str], bool] | None = None) -> dict[str, Any]:
-    """The capped runner list: owing_proof's NEVER-TOLD (`class == uvn`) users that carry band rows, paid first,
-    oldest first.
+          asked_recently: Callable[[str], bool] | None = None, owes: Owes | None = None) -> dict[str, Any]:
+    """The capped runner list: owing_proof's NEVER-TOLD (`class == uvn`) users that carry band rows AND still owe
+    proof by the send gate's rules (`owes`), paid first, oldest first.
+
+    `owes` runs before the cap, so `candidates` is people the gate would still ask FROM THE LIST - an upper bound,
+    since its per-send holds (fraud lens, 7-day window, Intercom-side deferrals) stay in the gate - and a slot is
+    never spent on a user it drops for documents on file or for having nothing to ask about.
 
     `class == "uvn"` is load-bearing (QA 1886): `owing_proof` also lists a `uvn_new_rows` follow-up class - users
     who were already asked, but whose new rows no ask named - and uvn-status drops those as `already_sent` before
@@ -155,6 +188,9 @@ def scope(build: dict[str, Any], band: dict[int, set[str]], cap: int, *, paid_on
             else:
                 fresh.append(u)
         users = fresh
+    not_owed: dict[str, int] = {}
+    if owes is not None:
+        users, not_owed = owes(users)
     # paid before free, then the oldest owed request first: the same order the ask lane already uses
     users.sort(key=lambda u: (0 if u.get("paid") else 1, str(u.get("oldest") or "")))
     kept, dropped = users[:cap], users[cap:]
@@ -170,6 +206,7 @@ def scope(build: dict[str, Any], band: dict[int, set[str]], cap: int, *, paid_on
             "listed": len(kept),
             "deferred_to_later_day": len(dropped),
             "recently_asked_inside_90d": locked,
+            "not_owed": dict(sorted(not_owed.items())),
             "paid_only": paid_only,
         },
     }
@@ -180,12 +217,15 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="the paid-band ask lane audience (read-only)")
     ap.add_argument("--out", default="")
     ap.add_argument("--filter-built", default="",
-                    help="an owing_proof build to re-scope instead of reading the replica")
+                    help="an owing_proof build to re-scope instead of building it from the band read "
+                    "(still one replica read for the listed users' pending rows)")
     ap.add_argument("--max-users", type=int, default=None, help="override the policy cap (never above it)")
     ap.add_argument("--policy", default=POLICY)
     ap.add_argument("--at-risk", default=owing_proof.AT_RISK)
     ap.add_argument("--ledger", default=owing_proof.LEDGER)
     ap.add_argument("--account-holds", default=owing_proof.ACCOUNT_HOLDS)
+    ap.add_argument("--proof-on-file", default=None, help="the documents-on-file snapshot (default: the gate's)")
+    ap.add_argument("--proof-store", default=None, help="the stage-2 verdict store (default: the gate's)")
     ap.add_argument("--dry-run", action="store_true", help="report the counts, write nothing")
     a = ap.parse_args(argv)
     try:
@@ -203,15 +243,16 @@ def main(argv: list[str] | None = None) -> int:
             build = owing_proof.build(query=narrowed_query(band), ledger_path=a.ledger,
                                       holds_path=a.account_holds, at_risk_path=a.at_risk)
         day = str(build.get("generated_at") or "")[:10] or verify_ledger.utcnow().date().isoformat()
-        doc = scope(build, band, cap, asked_recently=asked_recently(a.ledger, day))
-    except (BandAskError, owing_proof.OwingProofError, OSError, ValueError, RuntimeError) as exc:
+        doc = scope(build, band, cap, asked_recently=asked_recently(a.ledger, day),
+                    owes=still_owing(a.ledger, a.proof_on_file, a.proof_store))
+    except (BandAskError, owing_proof.OwingProofError, OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         print(json.dumps({"error": str(exc)}))
         return 2
     lane = doc["ask_lane"]
     summary = {"candidates": lane["candidates"], "listed": lane["listed"],
                "deferred_to_later_day": lane["deferred_to_later_day"], "max_users_per_day": cap,
                "recently_asked_inside_90d": lane["recently_asked_inside_90d"],
-               "users_with_band_rows": len(band)}
+               "users_with_band_rows": len(band), "not_owed": lane["not_owed"]}
     if a.dry_run:
         print(json.dumps({**summary, "dry_run": True}))
         return 0

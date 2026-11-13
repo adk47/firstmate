@@ -2630,6 +2630,12 @@ jobs:
           # The stage-2 release from the proof-on-file hold (credit_review/stage2_verdicts.py):
           # uvn-status for no_document, gap-ask for need_more, the gap-ask ledger rules. Stdlib only.
           python3 scripts/tests/test_stage2_asks.py
+          # the paid-band ask lane's audience (credit_review/paid_band_ask.py): its count applies the send gate's
+          # own list-side rules, pinned against the gate's dry run on one list (per-send holds stay in the gate,
+          # so the builder's number is an upper bound: docs/credit-verification/paid-band-ask-lane.md). It ran
+          # nowhere until 2026-11-13, and two of its tests had gone red against owing_proof's status guard
+          # without anyone seeing it.
+          python3 scripts/tests/test_paid_band_ask.py
           python3 scripts/tests/test_uvn_status_caps.py
           # credit-trust band table mirror (scripts/credit_trust): byte-identical to IDP's
           # common/credit_trust_bands.json at the pinned sha. Stdlib only.
