@@ -96,6 +96,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
   captain-shared.md  main-authoritative shared captain preferences propagated read-only to secondmate homes; LOCAL, gitignored, owned by secondmate-provisioning
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
+  board.md           the agenda: at most five ordered goals, each with an acceptance check, a one-line state, and a next bounded action; LOCAL, gitignored; read and written only through bin/fm-board.sh, whose header owns the exact shape (section 8's board loop)
   projects.md        thin fleet navigation registry recording each project's standing delivery posture; firstmate-private, parsed for mechanical sync and seeding by fm-project-mode.sh (section 6)
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
@@ -132,6 +133,7 @@ state/               runtime records and signals; gitignored
   tool-updates.check.sh  generated watched-tool update poll shim and its .check-trust binding; present only after bin/fm-tool-update-check.sh arm; its report record .tool-updates is what keeps one pending update from being reported on every poll
   fable-runway.check.sh  generated Fable-runway poll shim and its .check-trust binding; present only after bin/fm-fable-runway-check.sh arm; its record .fable-runway, the once-per-episode marker .fable-runway-handoff, and the captain's handoff notes fable-runway-handoff-<epoch>.md are owned by that check and bin/fm-fable-runway-alert.sh (docs/configuration.md "Fable runway monitor")
   fleet-stall.check.sh  generated fleet-stall poll shim and its .check-trust binding; present only after bin/fm-fleet-stall-check.sh arm; its record .fleet-stall.json goes with disarm (docs/configuration.md "Fleet stall watch")
+  board-audit.check.sh  generated board-audit poll shim and its .check-trust binding; present only after bin/fm-board-audit.sh arm; its record .board-audit goes with disarm (docs/configuration.md "Board loop")
   sentry-watch.check.sh  generated Sentry watch poll shim and its .check-trust binding; present only after bin/fm-sentry-watch.sh arm; its beat .sentry-watch.beat, armed marker .sentry-watch.armed, and rail record .sentry-watch.rail.json go with disarm, while the shared seen-set sentry-watch.baseline.json survives disarm because the Sentry mobile scout reads it (docs/configuration.md "Sentry watch")
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (section 13)
@@ -201,6 +203,7 @@ When that section reports its checks still in progress it names exactly what is 
    A main drain may also print a bounded, one-shot `STATUS OUTCOME BACKSTOP` when a task's newest captain-facing status event has no covering supervision-branch outcome; handle it as a recovered wake even when no queue row remains.
    The same drain prints every still-unread `note:` line and pending-reply resolution since the last presentation in an unbounded `UNREAD STATUS` section, so an answer buried under a later routine line is not dropped; those lines are not re-printed after that presentation.
    It also prints a bounded `RECORD DIVERGENCE` section naming every captain call the status log reads as resolved while its backlog task is still held; nothing is closed for you, and `captain-hold-lifecycle` owns the reconciliation.
+   A main drain on a home that keeps a board prints its one `BOARD ...` agenda line first, including when the queue is empty; section 8's board loop owns what the turn owes it.
    Ahead of those sections it prints one `SENTRY WATCH DARK` line when `state/.sentry-watch.armed` says this home watches Sentry but the check, its trust binding, or its beat is missing or stale; Sentry visibility is lost until you re-arm it as that line says (docs/configuration.md "Sentry watch").
    When the lock could not be acquired and verified, the queue is left untouched because no session mutation is authorized, and the guard's tangle/watcher-liveness alarms still print in read-only advisory mode without drain, supervision repair, or checkout repair commands.
 4. **Supervision operating instructions** - after the wake queue and before both digests, the digest emits exactly one operating block for the detected primary harness, followed by the read-once contract that governs them.
@@ -471,6 +474,19 @@ Queued wakes must be presented before other action and acknowledged only after h
 The spawn assertion and generated ship brief must both enforce that project work starts in an isolated disposable worktree, never the primary checkout.
 Harness-aware turn-end guards are structural backstops, not permission to omit the live cycle.
 
+### Board loop
+
+`data/board.md` is this home's one agenda: at most five ordered goals, each with an acceptance check, a one-line state, and a next bounded action, read and written only through `bin/fm-board.sh`.
+The session-start digest and every main wake drain print its one `BOARD ...` line.
+When that line is `BOARD NEXT`, run the named action before the turn ends, then record the result with `bin/fm-board.sh advance`, `done`, or `block`.
+A turn never ends with a report, a summary, or a wait while an unblocked board action exists, and a wake about something not on the board is handled without displacing that action.
+Only four things stop a board action for the captain: money, an irreversible action, production DDL, and a legal signature; record one with `block --captain <class>` and drive the next item, and let everything else proceed with its revert stated alongside the result.
+The loop chooses what a turn works on and grants no authority: project work is still delegated, and the merge, discard, destructive, irreversible, and security-sensitive boundaries above stand unchanged, so an action one of them forbids is recorded as blocked rather than taken.
+Raise one blocker to the captain at most twice, through `bin/fm-board.sh escalate`; after that solve it or leave it recorded and drive the next item, because a third raising of the same blocker is a defect.
+Restating an item is not an advance, and neither is a worker that never reported.
+While away mode is active the daemon owns supervision and this loop resumes on return; a secondmate's empty board authorizes nothing.
+Load `board-loop` before creating, reordering, or repairing the board, on any `board audit: ...` check wake, and before raising a board blocker.
+
 ### Away-mode stub
 
 Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
@@ -583,6 +599,7 @@ The skill owns the guarded fleet update and restart procedure; it never touches 
 These skills are not captain-invocable; load them only at their precise triggers.
 
 - `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `HOME_SUMMARY:`, `BACKLOG_RECONCILE:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, or `FMX:`), or when `BOOTSTRAP_INFO:` says an interrupted backlog cleanup may have left an endpoint or local copy; silence and other `BOOTSTRAP_INFO:` facts need no load.
+- `board-loop` - load before creating, reordering, or repairing `data/board.md`, on any `board audit: ...` check wake, on a `BOARD BLOCKED`, `BOARD EMPTY`, or `BOARD INVALID` line from the wake drain, and before raising a board item's blocker to the captain.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi default TOON.

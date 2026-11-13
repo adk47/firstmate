@@ -717,6 +717,47 @@ Arm the check once per home with `bin/fm-fleet-stall-check.sh arm`, which writes
 A whole poll is budgeted at half of `FM_CHECK_TIMEOUT`, at most 15 seconds, because the watcher runs its checks one after another and a check that spends most of its timeout on every sweep holds the whole sweep back; a worker the pane captures do not reach in time is not counted that poll and keeps its history.
 `bin/fm-fleet-stall-check.sh status` prints the last recorded verdict, and `bin/fm-fleet-stall-check.sh disarm` removes the shim, its trust binding, and `state/.fleet-stall.json`.
 
+## Board loop (data/board.md)
+
+The board is a home's one agenda, and the board loop is what keeps firstmate working toward it instead of answering notifications and stopping.
+[`bin/fm-board.sh`](../bin/fm-board.sh) is the only reader and writer of `data/board.md`, and its header owns the exact file shape, every command, and the exit codes.
+[`bin/fm-board-audit.sh`](../bin/fm-board-audit.sh) is the registered watcher check that wakes firstmate when the agenda is not being driven, and its header owns the exact conditions and the record format.
+`AGENTS.md` section 8 owns the rule a turn follows, the `board-loop` skill owns the judgment around it, and this section owns the thresholds and the operator contract.
+
+The board holds at most five ordered goals.
+Each has an acceptance check, a one-line current state, and a next bounded action, and may carry a recorded blocker, one of four captain classes (`money`, `irreversible`, `production-ddl`, `legal-signature`), and a count of how often that blocker was raised.
+`data/board.md` is local, gitignored, and not inherited by secondmate homes.
+It is plain Markdown a person can read, but a line that is not the exact shape makes the whole board invalid, so change it through `bin/fm-board.sh` rather than by hand.
+A home with no board file is unaffected: the wake drain prints no agenda line and nothing else changes.
+
+A main wake drain on a home that keeps a board prints one `BOARD NEXT`, `BOARD BLOCKED`, `BOARD EMPTY`, or `BOARD INVALID` line ahead of its other sections, including when no wake is queued, and the session-start digest carries it through that drain.
+The Pi supervision branch's drain never prints it, because the branch does not drive the agenda.
+
+The audit check prints one line, `board audit: <condition>; <condition> -> <what to do>`, when any of these holds, and nothing otherwise:
+
+- the home armed the check and has no board, or the board does not parse;
+- the board file has not changed for the stale interval;
+- an unblocked item exists and no item advanced for the idle interval;
+- more than the allowed number of tasks have a record and no status line, not counting secondmates, tasks the captain ordered left stopped, and records younger than the grace;
+- a still-open `needs-decision` key was raised twice in one status log without an answer, which reads as a defect from the third raising.
+
+A board whose every item is blocked never raises the idle condition, because there is no action to run.
+The line is printed when the set of conditions changes and again on the reminder interval while it holds, and the next poll after the cause is gone is silent.
+
+The thresholds are environment variables read by the check; there is no config file, and an unset or malformed value falls back to its default.
+The armed shim runs with the watcher's environment, so set an override where the watcher is started.
+
+```sh
+FM_BOARD_STALE_SECS=10800        # a board file unchanged this long is stale
+FM_BOARD_IDLE_SECS=3600          # no item advanced this long while one is unblocked
+FM_BOARD_SILENT_MAX=3            # more tasks than this with a record and no status line raise the condition
+FM_BOARD_SILENT_GRACE_SECS=900   # a task record younger than this is not yet counted as silent
+FM_BOARD_REMIND_SECS=1800        # reminder interval while an unchanged verdict holds
+```
+
+Arm the check once per home with `bin/fm-board-audit.sh arm`, which writes `state/board-audit.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
+`bin/fm-board-audit.sh status` prints the current verdict without recording anything, and `bin/fm-board-audit.sh disarm` removes the shim, its trust binding, and `state/.board-audit`.
+
 ## Fleet watchdog (config/watchdog.env)
 
 [`bin/fm-watchdog-worker.sh`](../bin/fm-watchdog-worker.sh) is the fleet's watchdog: a systemd user timer runs one bounded pass every five minutes, outside the firstmate session, and that pass needs no model and no firstmate turn to act.
