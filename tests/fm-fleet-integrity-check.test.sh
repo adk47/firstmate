@@ -71,8 +71,7 @@ make_idle_lane() {  # <case-dir> <id> <worktree>
     --source claude-hook --event stop
 }
 
-# A worktree holding one commit and no remote: `git rev-list --count HEAD --not
-# --remotes` counts it as unlanded work.
+# A worktree holding one commit and no remote, so its commits are unpushed.
 git_worktree_with_unlanded_commit() {  # <dir>
   mkdir -p "$1" || return 1
   git -C "$1" init -q || return 1
@@ -81,6 +80,29 @@ git_worktree_with_unlanded_commit() {  # <dir>
 
 run_check() {  # <case-dir>
   FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" "$CHECK" check
+}
+
+# A repo whose default branch main holds one commit.
+init_branch_repo() {  # <dir>
+  mkdir -p "$1" || return 1
+  git -C "$1" init -q || return 1
+  git -C "$1" symbolic-ref HEAD refs/heads/main || return 1
+  git -C "$1" -c user.name=fm -c user.email=fm@example.invalid commit -q --allow-empty -m base || return 1
+}
+
+commit_file() {  # <dir> <name> <content>
+  printf '%s\n' "$3" >"$1/$2" || return 1
+  git -C "$1" add "$2" || return 1
+  git -C "$1" -c user.name=fm -c user.email=fm@example.invalid commit -q -m "$2" || return 1
+}
+
+# A home with one lane whose last status-log line is <status-line>, its worktree
+# ready, and a live agent in that worktree so the dead-lane line never fires.
+make_terminal_lane() {  # <case-dir> <worktree> <status-line>
+  local d=$1 wt=$2 status=$3
+  make_home "$d" "lane-a:$wt"
+  printf '%s\n' "$status" >"$d/state/lane-a.status"
+  spawn_named_process "$d/bin" pi "$wt" >/dev/null || return 1
 }
 
 # --- silent when every lane is live ----------------------------------------
@@ -303,5 +325,88 @@ test_remote_secondmate_is_skipped
 test_torn_down_worktree_is_skipped
 test_self_throttles_on_the_stamp
 test_arm_writes_and_binds_the_shim
+
+# --- the terminal-claim comparison uses the shared landed-work rule --------
+
+# A squash merge whose head branch was deleted must not read as a disagreement.
+test_squash_merged_and_deleted_lane_is_silent() {
+  local d out
+  d="$TMP_ROOT/done-squash"
+  mkdir -p "$d"
+  git init -q --bare "$d/remote.git" || fail "could not create the remote"
+  init_branch_repo "$d/seed" || fail "could not seed the project"
+  git -C "$d/seed" remote add origin "$d/remote.git" || fail "could not add the remote"
+  git -C "$d/seed" push -q -u origin main || fail "could not push main"
+  git -C "$d/remote.git" symbolic-ref HEAD refs/heads/main || fail "could not point the remote HEAD at main"
+  git clone -q "$d/remote.git" "$d/lane" || fail "could not clone the lane"
+  git -C "$d/lane" checkout -q -b feat || fail "could not branch the lane"
+  commit_file "$d/lane" feature.txt feature || fail "could not commit the lane work"
+  commit_file "$d/seed" feature.txt feature || fail "could not squash the work"
+  git -C "$d/seed" push -q origin main || fail "could not push the squash"
+  make_terminal_lane "$d" "$d/lane" "done: shipped" || fail "could not prepare the lane"
+  sleep 0.2
+  out=$(run_check "$d")
+  [ -z "$out" ] || fail "a squash-merged lane whose head branch is gone must be silent, got: $out"
+  pass "a squash-merged-then-deleted lane is not reported as unlanded"
+}
+
+# A local-only project whose work is merged into its local default branch must
+# not read as a disagreement.
+test_local_only_merged_lane_is_silent() {
+  local d out
+  d="$TMP_ROOT/done-local-only"
+  init_branch_repo "$d/lane" || fail "could not build the local-only repo"
+  git -C "$d/lane" checkout -q -b feat || fail "could not branch the local repo"
+  commit_file "$d/lane" feature.txt feature || fail "could not commit the local work"
+  git -C "$d/lane" checkout -q main || fail "could not return to main"
+  git -C "$d/lane" merge -q --no-ff -m merge feat || fail "could not merge locally"
+  make_terminal_lane "$d" "$d/lane" "done: shipped" || fail "could not prepare the lane"
+  sleep 0.2
+  out=$(run_check "$d")
+  [ -z "$out" ] || fail "local-only work merged into the local default branch must be silent, got: $out"
+  pass "local-only merged work is not reported as unlanded"
+}
+
+# Work that exists nowhere and is not in the default branch is a real
+# disagreement and must be reported.
+test_genuinely_unlanded_lane_is_reported() {
+  local d out
+  d="$TMP_ROOT/done-unlanded"
+  init_branch_repo "$d/lane" || fail "could not build the unlanded repo"
+  git -C "$d/lane" checkout -q -b feat || fail "could not branch the unlanded repo"
+  commit_file "$d/lane" lost.txt "only here" || fail "could not commit the unlanded work"
+  make_terminal_lane "$d" "$d/lane" "done: shipped" || fail "could not prepare the lane"
+  sleep 0.2
+  out=$(run_check "$d")
+  case "$out" in
+    *"lane lane-a claims done"*) ;;
+    *) fail "a done lane holding provably unlanded work must be reported, got: $out" ;;
+  esac
+  case "$out" in
+    *"not landed"*) ;;
+    *) fail "the report must say the work is not landed, got: $out" ;;
+  esac
+  pass "a done lane whose work exists nowhere and is not in the default branch is reported"
+}
+
+# A repo the landed test cannot read proves nothing, so it stays silent.
+test_unprovable_landing_is_silent() {
+  local d out
+  d="$TMP_ROOT/done-unprovable"
+  init_branch_repo "$d/lane" || fail "could not build the unprovable repo"
+  git -C "$d/lane" checkout -q -b feat || fail "could not branch the unprovable repo"
+  git -C "$d/lane" -c user.name=fm -c user.email=fm@example.invalid commit -q --allow-empty -m work || fail "could not commit the unprovable work"
+  git -C "$d/lane" remote add origin "$d/does-not-exist.git" || fail "could not add the dead remote"
+  make_terminal_lane "$d" "$d/lane" "done: shipped" || fail "could not prepare the lane"
+  sleep 0.2
+  out=$(run_check "$d")
+  [ -z "$out" ] || fail "a lane whose landing cannot be proven must be silent, got: $out"
+  pass "a lane whose landing cannot be proven is not reported"
+}
+
+test_squash_merged_and_deleted_lane_is_silent
+test_local_only_merged_lane_is_silent
+test_genuinely_unlanded_lane_is_reported
+test_unprovable_landing_is_silent
 
 echo "all fm-fleet-integrity-check tests passed"

@@ -30,12 +30,21 @@
 # bin/fm-lane-liveness-lib.sh owns that rule, including why a pane's idle shell
 # does not count. The scan is matched only against the recorded worktree paths;
 # nothing here signals a process or writes anything but its own stamp and
-# record; the claim comparison adds only local `git status` and `git rev-list`
-# reads inside each recorded worktree.
+# record; the claim comparison adds only local `git status` reads inside each
+# recorded worktree, plus - for a lane it would otherwise report - the shared
+# landed-work test in bin/fm-landed-lib.sh.
 # The lane's last status-log line is its CLAIM, and only a TERMINAL claim is
 # compared: done or failed. A done or failed lane that still holds uncommitted
-# files or unlanded commits is reported, because the claim and the worktree
-# disagree. A working claim is not compared (work in progress is expected to
+# files, or whose commits are provably not landed, is reported, because the
+# claim and the worktree disagree. "Landed" is the same rule teardown uses,
+# owned by bin/fm-landed-lib.sh: reachable from a remote-tracking branch, a
+# merged PR whose head contains the work, or content already in the default
+# branch - so a squash-merged-then-deleted branch and a local-only project
+# merged into its local default branch are silent. That test is bounded and
+# only run for a lane with unpushed commits and no uncommitted files; when it
+# cannot prove landed or unlanded (no gh, no network, unreadable repo, the
+# poll's time budget) the lane is silent, because unprovable is never a
+# finding. A working claim is not compared (work in progress is expected to
 # hold work), and neither is a waiting claim (parked, paused, blocked) nor a
 # lane with no claim at all - no status line yet, or a trailing
 # decision-closing `resolved:` that bin/fm-classify-lib.sh deliberately excludes
@@ -54,8 +63,9 @@
 #
 # SELF-THROTTLED. A stamp file keeps the scan off every watcher poll; the
 # default cadence is 300s and FM_FLEET_INTEGRITY_INTERVAL overrides it. The
-# whole poll is one lsof scan, one `ps` per matching process, and one local
-# `git status` plus one local `git rev-list` per lane, well inside the
+# whole poll is one lsof scan, one `ps` per matching process, one local
+# `git status` per lane, and one local `git log` plus a bounded landed test for
+# the few lanes that would otherwise be reported, so it ends inside the
 # watcher's FM_CHECK_TIMEOUT.
 set -u
 export LC_ALL=C
@@ -77,12 +87,25 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-lane-liveness-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-landed-lib.sh
+. "$SCRIPT_DIR/fm-landed-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 CHECK_ID='fleet-integrity'
 STAMP="$STATE/.fleet-integrity.last"
 RECORD="$STATE/.fleet-integrity"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 MAX_LINE=1500
+CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
+case "$CHECK_TIMEOUT" in ''|*[!0-9]*) CHECK_TIMEOUT=30 ;; esac
+[ "$CHECK_TIMEOUT" -ge 1 ] || CHECK_TIMEOUT=30
+# A landed test per lane is capped so one slow lane cannot eat the poll, and the
+# poll keeps a margin below the watcher's own kill deadline.
+LANDED_CAP=$((CHECK_TIMEOUT / 4))
+[ "$LANDED_CAP" -ge 1 ] || LANDED_CAP=1
+POLL_BUDGET=$((CHECK_TIMEOUT - 3))
+[ "$POLL_BUDGET" -ge 1 ] || POLL_BUDGET=1
 
 usage() {
   awk '
@@ -129,14 +152,15 @@ lane_claim() {  # <id>
   esac
 }
 
-# lane_worktrees: the recorded worktree and status-log claim of every in-flight
-# local lane, one per line as "<id>\t<worktree>\t<claim>". In-flight means the
-# lane has a meta record and its worktree still exists; the busy-state record is
-# deliberately not a filter, because a lane between turns can still be dead.
+# lane_worktrees: the recorded worktree, status-log claim, and recorded PR
+# target of every in-flight local lane, one per line as
+# "<id>\t<worktree>\t<claim>\t<pr>". In-flight means the lane has a meta record
+# and its worktree still exists; the busy-state record is deliberately not a
+# filter, because a lane between turns can still be dead.
 # A remote secondmate is skipped: its worktree path names a directory on another
 # host, so a local cwd scan proves nothing about it.
 lane_worktrees() {
-  local meta id wt remote claim
+  local meta id wt remote claim pr
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -146,24 +170,46 @@ lane_worktrees() {
     wt=$(fm_meta_get "$meta" worktree)
     [ -n "$wt" ] && [ -d "$wt" ] || continue
     claim=$(lane_claim "$id")
-    printf '%s\t%s\t%s\n' "$id" "$wt" "$claim"
+    pr=$(fm_meta_get "$meta" pr)
+    printf '%s\t%s\t%s\t%s\n' "$id" "$wt" "$claim" "$pr"
   done
 }
 
-# lane_worktree_work: "<uncommitted-files>\t<unlanded-commits>" for a worktree.
+# lane_worktree_work: "<uncommitted-files>\t<unpushed-commits>" for a worktree.
 # Local git reads only: no fetch, no network, no write. A worktree that is not a
 # git checkout, or a git read that fails, contributes zero rather than a guess.
 lane_worktree_work() {  # <worktree>
-  local wt=$1 dirty unlanded
+  local wt=$1 dirty unpushed
   dirty=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
   case "$dirty" in ''|*[!0-9]*) dirty=0 ;; esac
-  unlanded=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || unlanded=0
-  case "$unlanded" in ''|*[!0-9]*) unlanded=0 ;; esac
-  printf '%s\t%s\n' "$dirty" "$unlanded"
+  unpushed=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || unpushed=0
+  case "$unpushed" in ''|*[!0-9]*) unpushed=0 ;; esac
+  printf '%s\t%s\n' "$dirty" "$unpushed"
+}
+
+# lane_landed_verdict: 0 landed, 1 provably unlanded, 2 unprovable or out of
+# time. bin/fm-landed-lib.sh owns the rule; the bound keeps a slow fetch from
+# running past the poll's budget. The recorded PR target is used only when the
+# lane has one, so a lane without a PR never makes this poll reach GitHub on a
+# branch-name lookup.
+lane_landed_verdict() {  # <worktree> <branch> <pr> <seconds>
+  local wt=$1 branch=$2 pr=$3 seconds=$4
+  # shellcheck disable=SC2016
+  fm_run_timed "$seconds" bash -c '
+    . "$1" || exit 2
+    shift
+    wt=$1 branch=$2 pr=$3
+    if [ -n "$pr" ]; then
+      fm_landed_work_is_landed "$wt" "$branch" "$pr" >/dev/null
+    else
+      fm_landed_content_in_default "$wt" >/dev/null
+    fi
+  ' fm-landed "$SCRIPT_DIR/fm-landed-lib.sh" "$wt" "$branch" "$pr"
 }
 
 action_check() {
-  local now stamp interval rows dead ids wt id claim line findings dirty unlanded
+  local now stamp interval rows dead ids wt id claim pr branch line findings dirty unpushed
+  local landed_rc deadline remaining seconds
   now=$(now_epoch)
   interval=$(interval_secs)
   if [ -f "$STAMP" ] && [ ! -L "$STAMP" ]; then
@@ -180,7 +226,7 @@ action_check() {
   [ -n "$rows" ] || { rm -f -- "$RECORD" 2>/dev/null; return 0; }
 
   local -a worktrees=()
-  while IFS=$'\t' read -r id wt claim; do
+  while IFS=$'\t' read -r id wt claim pr; do
     [ -n "$wt" ] || continue
     worktrees+=("$wt")
   done <<EOF
@@ -194,7 +240,8 @@ EOF
 
   ids=
   findings=
-  while IFS=$'\t' read -r id wt claim; do
+  deadline=$(($(date +%s) + POLL_BUDGET))
+  while IFS=$'\t' read -r id wt claim pr; do
     [ -n "$wt" ] || continue
     if [ -n "$dead" ] && printf '%s\n' "$dead" | grep -Fqx -- "$wt"; then
       ids="${ids:+$ids,}$id"
@@ -203,11 +250,24 @@ EOF
       done|failed) ;;
       *) continue ;;
     esac
-    IFS=$'\t' read -r dirty unlanded <<EOF
+    IFS=$'\t' read -r dirty unpushed <<EOF
 $(lane_worktree_work "$wt")
 EOF
-    [ "$dirty" -gt 0 ] || [ "$unlanded" -gt 0 ] || continue
-    line="fleet-integrity: lane $id claims $claim and its worktree $wt has $dirty uncommitted file(s) / $unlanded unlanded commit(s) - the claim and the worktree disagree; read it with bin/fm-crew-state.sh $id, then land, relaunch, or tear it down"
+    if [ "$dirty" -gt 0 ]; then
+      line="fleet-integrity: lane $id claims $claim and its worktree $wt has $dirty uncommitted file(s) - the claim and the worktree disagree; read it with bin/fm-crew-state.sh $id, then land, relaunch, or tear it down"
+    elif [ "$unpushed" -gt 0 ]; then
+      remaining=$((deadline - $(date +%s)))
+      [ "$remaining" -ge 1 ] || continue
+      seconds=$LANDED_CAP
+      [ "$seconds" -le "$remaining" ] || seconds=$remaining
+      branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+      landed_rc=0
+      lane_landed_verdict "$wt" "$branch" "$pr" "$seconds" || landed_rc=$?
+      [ "$landed_rc" -eq 1 ] || continue
+      line="fleet-integrity: lane $id claims $claim and its worktree $wt has $unpushed commit(s) not on any remote and not landed - the claim and the worktree disagree; read it with bin/fm-crew-state.sh $id, then land, relaunch, or tear it down"
+    else
+      continue
+    fi
     line=$(printf '%s' "$line" | cut -c1-"$MAX_LINE")
     findings="${findings:+$findings$'\n'}$line"
   done <<EOF
