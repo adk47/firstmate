@@ -1588,8 +1588,8 @@ EOF
 # endpoint kill, storing the mode in TEARDOWN_RELEASE_MODE ("orca", "treehouse",
 # or "git") or the concrete missing requirement in TEARDOWN_RELEASE_REFUSAL and
 # returning 1 so the caller leaves the agent alive and the branch intact.
-worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>] [<orca-selector>]
-  local backend=$1 wt=$2 proj=$3 orca_id=${4:-} orca_selector=${5:-} probe=0 reason=
+worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>] [<orca-selector>] [<migrated>]
+  local backend=$1 wt=$2 proj=$3 orca_id=${4:-} orca_selector=${5:-} migrated=${6:-0} probe=0 reason=
   local out code msg='' err='' errfile id resolved resolved_abs wt_abs
   TEARDOWN_RELEASE_MODE=
   TEARDOWN_RELEASE_REFUSAL=
@@ -1635,7 +1635,7 @@ worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>]
       resolved=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path 2>/dev/null || true)
       resolved_abs=$(canonical_existing_dir "$resolved" 2>/dev/null || true)
       wt_abs=$(canonical_existing_dir "$wt" 2>/dev/null || true)
-      if [ -z "$id" ]; then
+      if [ -z "$id" ] && [ "$migrated" = 1 ]; then
         TEARDOWN_RELEASE_REFUSAL="Orca returned no worktree id for $orca_selector, so removing $wt through Orca cannot be verified"
         return 1
       fi
@@ -3411,11 +3411,13 @@ BACKLOG_TRANSITION_FLAGS=()
 # task-worktree cleanup.
 TEARDOWN_RELEASE_MODE=
 ORCA_RELEASE_SELECTOR=$WT
+ORCA_RELEASE_MIGRATED=0
 if [ -n "$WT" ] && migrated_orca_worktree_path "$META" "$WT" >/dev/null 2>&1; then
   ORCA_RELEASE_SELECTOR=$(migrated_orca_prior_path "$META") || ORCA_RELEASE_SELECTOR=$WT
+  ORCA_RELEASE_MIGRATED=1
 fi
 if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -d "$WT" ]; then
-  if ! worktree_release_mode "$BACKEND" "$WT" "$PROJ" "$ORCA_WORKTREE_ID" "$ORCA_RELEASE_SELECTOR"; then
+  if ! worktree_release_mode "$BACKEND" "$WT" "$PROJ" "$ORCA_WORKTREE_ID" "$ORCA_RELEASE_SELECTOR" "$ORCA_RELEASE_MIGRATED"; then
     echo "error: no worktree-return path is available for $WT (backend=${BACKEND:-unset}): $TEARDOWN_RELEASE_REFUSAL; leaving the agent alive and the branch intact" >&2
     exit 1
   fi

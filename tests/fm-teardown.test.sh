@@ -4535,19 +4535,53 @@ SH
   pass "an Orca registry miss without git registration refuses before the agent is killed"
 }
 
-test_orca_show_without_worktree_id_refuses_before_kill() {
-  local case_dir rc wt pid
-  case_dir=$(make_case orca-pre-kill-missing-id)
+test_id_less_orca_show_releases_by_path() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-pre-kill-id-less-ok)
   wt=$(write_orca_workspace_case "$case_dir")
-  cat > "$case_dir/fakebin/orca" <<'SH'
+  cat > "$case_dir/fakebin/orca" <<SH
 #!/usr/bin/env bash
-case "${1:-} ${2:-}" in
+case "\${1:-} \${2:-}" in
   "worktree show")
     selector=
-    for arg in "$@"; do
-      case "$arg" in path:*) selector=${arg#path:} ;; esac
+    for arg in "\$@"; do
+      case "\$arg" in path:*) selector=\${arg#path:} ;; esac
     done
-    printf '{"ok":true,"result":{"worktree":{"path":"%s"}}}\n' "$selector"
+    printf '{"ok":true,"result":{"worktree":{"path":"%s"}}}\n' "\$selector"
+    exit 0 ;;
+  "worktree rm")
+    printf '%s\n' "\$*" >> "$case_dir/orca.log"
+    rm -rf "$wt"
+    git -C "$case_dir/project" worktree prune 2>/dev/null || true
+    printf '{"ok":true}\n'
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "orca-pre-kill-id-less-ok: an id-less Orca worktree should release by path"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "worktree rm --worktree path:$wt" "$case_dir/orca.log" \
+    "orca-pre-kill-id-less-ok: the release did not route through orca by the worktree path"
+  assert_absent "$wt" \
+    "orca-pre-kill-id-less-ok: the worktree was not released"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "orca-pre-kill-id-less-ok: the task records were not removed"
+  pass "an id-less Orca worktree releases by path"
+}
+
+test_migrated_orca_show_without_worktree_id_refuses_before_kill() {
+  local case_dir rc wt pid
+  case_dir=$(make_migrated_orca_case migrated-orca-pre-kill-missing-id)
+  wt=$(migrated_orca_wt "$case_dir")
+  write_migrated_orca_meta "$case_dir" no-mistakes ship
+  cat > "$case_dir/fakebin/orca" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "worktree show")
+    printf '{"ok":true,"result":{"worktree":{"path":"$wt"}}}\n'
     exit 0 ;;
 esac
 exit 0
@@ -4558,24 +4592,24 @@ SH
   pid=$!
   disown
   sleep 0.3
-  kill -0 "$pid" 2>/dev/null || fail "orca-pre-kill-missing-id: setup sleeper did not start"
+  kill -0 "$pid" 2>/dev/null || fail "migrated-orca-pre-kill-missing-id: setup sleeper did not start"
 
   rc=0
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  expect_code 1 "$rc" "orca-pre-kill-missing-id: an Orca answer without a worktree id must refuse before the kill"$'\n'"$(cat "$case_dir/stderr")"
+  expect_code 1 "$rc" "migrated-orca-pre-kill-missing-id: a migrated Orca answer without a worktree id must refuse before the kill"$'\n'"$(cat "$case_dir/stderr")"
   assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
-    "orca-pre-kill-missing-id: the refusal did not report the unproven release path"
+    "migrated-orca-pre-kill-missing-id: the refusal did not report the unproven release path"
   assert_grep 'returned no worktree id' "$case_dir/stderr" \
-    "orca-pre-kill-missing-id: the refusal did not name the missing worktree id"
+    "migrated-orca-pre-kill-missing-id: the refusal did not name the missing worktree id"
   if ! kill -0 "$pid" 2>/dev/null; then
-    fail "orca-pre-kill-missing-id: the agent was killed before the release path was proven"
+    fail "migrated-orca-pre-kill-missing-id: the agent was killed before the release path was proven"
   fi
   kill -KILL "$pid" 2>/dev/null || true
   assert_present "$wt" \
-    "orca-pre-kill-missing-id: the worktree was removed despite the refusal"
+    "migrated-orca-pre-kill-missing-id: the worktree was removed despite the refusal"
   assert_present "$case_dir/state/task-x1.meta" \
-    "orca-pre-kill-missing-id: the task records were removed despite the refusal"
-  pass "an Orca answer without a worktree id refuses before the agent is killed"
+    "migrated-orca-pre-kill-missing-id: the task records were removed despite the refusal"
+  pass "a migrated Orca answer without a worktree id refuses before the agent is killed"
 }
 
 test_orca_path_miss_falls_back_to_guarded_git_release() {
@@ -5298,7 +5332,8 @@ test_plain_git_release_refuses_initialized_submodule
 test_orca_workspace_path_routes_release_to_orca
 test_orca_show_failure_refuses_before_killing_the_agent
 test_orca_selector_miss_without_git_registration_refuses_before_kill
-test_orca_show_without_worktree_id_refuses_before_kill
+test_id_less_orca_show_releases_by_path
+test_migrated_orca_show_without_worktree_id_refuses_before_kill
 test_orca_path_miss_falls_back_to_guarded_git_release
 test_orca_non_selector_failure_refuses_instead_of_plain_git_fallback
 test_orca_empty_failure_output_refuses_instead_of_success
