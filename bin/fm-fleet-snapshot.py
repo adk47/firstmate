@@ -717,7 +717,15 @@ class Snapshot:
     # -- per-task current state ----------------------------------------------------
 
     def native_crew_state(self, t):
-        """fm-crew-state.sh's answer when file reads decide it, else None (delegate)."""
+        """fm-crew-state.sh's answer when file reads decide it, else None (delegate).
+
+        File reads decide a state the task itself claims (a busy record, a
+        done/blocked/paused status line). They never decide that nothing is
+        known, and never that a trailing `working:` line is still true: the
+        owner settles both by asking whether an agent process is running in
+        the worktree, so every such case is delegated rather than answered
+        `unknown` here.
+        """
         wt, kind, harness = t["worktree"], t["kind"], t["harness"]
         if not wt or not os.path.isdir(wt):
             return crew("unknown", "none", "worktree gone (torn down?)")
@@ -727,13 +735,10 @@ class Snapshot:
                 return None
         target, backend = t["target"], t["backend"]
         if not target:
-            return crew("unknown", "none", "no backend target recorded")
-        listed = self.endpoint_listed(backend, target)
-        if listed is None:
             return None
-        if listed is False:
-            # fm-crew-state.sh reads an unreadable Orca terminal as gone.
-            return crew("unknown", "none", "backend target gone: " + target)
+        listed = self.endpoint_listed(backend, target)
+        if not listed:
+            return None
         if kind != "secondmate":
             if backend == "herdr" or harness.startswith(DELEGATED_HARNESS_PREFIXES):
                 return None
@@ -742,13 +747,13 @@ class Snapshot:
             if state == "busy":
                 return crew("working", "pane", "harness busy (%s)" % verdict.split(" ", 1)[1])
             if state != "idle":
-                return crew("unknown", "pane", "harness state unavailable (%s)" % verdict)
+                return None
         line = last_status_line(t["status_capture"]) if os.path.isfile(t["status_capture"]) else ""
         if status_line_verb(line):
             log_state = map_log_state(line)
-            if log_state != "unknown":
+            if log_state not in ("unknown", "working"):
                 return crew(log_state, "status-log", status_line_note(line))
-        return crew("unknown", "none", "no current-state source available")
+        return None
 
     def observe(self, t):
         """prefetch_task_observations for one task, minus the batched fold."""

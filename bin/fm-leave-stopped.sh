@@ -4,6 +4,8 @@
 #
 # Usage:
 #   fm-leave-stopped.sh <task-id> mark --reason "<captain's words>"
+#   fm-leave-stopped.sh <task-id> mark --exit --reason "<captain's words>"
+#   fm-leave-stopped.sh <task-id> mark --force-silence --reason "<captain's words>"
 #   fm-leave-stopped.sh <task-id> clear
 #   fm-leave-stopped.sh --help
 #
@@ -20,6 +22,10 @@
 #   at=<UTC timestamp>
 #   reason=<text, one line>
 # `clear` removes it.
+# `mark --exit` first stops the task's agent through bin/fm-control.sh's `exit`
+# verb, which preserves the endpoint, the worktree, and every uncommitted
+# change, and writes the marker only once the agent is gone. If the agent
+# cannot be stopped, nothing is marked.
 #
 # WHAT THE MARKER MEANS DOWNSTREAM.
 #   - bin/fm-watch.sh skips the task's endpoint in its pane path entirely: no
@@ -36,13 +42,28 @@
 #   - The supervision branch actor (bin/fm-lease-lib.sh's role partition):
 #     this is the captain's call relayed by main, never a branch judgment.
 #   - A `--reason` that is empty or spans lines.
-# A working reading does not refuse `mark`: a dead or dropped-to-shell terminal
-# can keep a stale busy footer that bin/fm-crew-state.sh still reads as working,
-# and that is exactly the endpoint the captain ordered left alone. `mark` records
-# the marker anyway and prints a warning naming the current reading.
+#   - `mark` on a task whose worktree still holds a live agent process
+#     (bin/fm-agent-proc-lib.sh), exit 1. The marker stops the WATCHING, not
+#     the agent: marking a running agent leaves it working with nobody
+#     supervising it, which is the opposite of "left stopped". Stop it with
+#     `mark --exit`, or pass `mark --force-silence` to silence a running agent
+#     on purpose; that still warns and names the process.
+#     Only a process that was found refuses. A process table that cannot be
+#     read is no evidence either way and does not block the captain's order.
+# A working reading with no agent process does not refuse `mark`: a dead or
+# dropped-to-shell terminal can keep a stale busy footer that
+# bin/fm-crew-state.sh still reads as working, and that is exactly the endpoint
+# the captain ordered left alone. `mark` records the marker anyway and prints a
+# warning naming the current reading.
 #
-# It never relaunches, interrupts, exits, trusts, or otherwise drives the
-# worker, and it never touches a project.
+# Without `--exit` it never relaunches, interrupts, exits, trusts, or otherwise
+# drives the worker. It never touches a project, and no form of it removes a
+# task record, a worktree, or an endpoint.
+#
+# Environment: FM_LEAVE_STOPPED_CONTROL_BIN (the control plane `--exit` calls,
+# default bin/fm-control.sh), FM_LEAVE_STOPPED_EXIT_WAIT (seconds to wait for
+# the agent process to leave the worktree after a successful exit, default 10),
+# FM_AGENT_PROC_TABLE (bin/fm-agent-proc-lib.sh).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,8 +79,13 @@ case "${1:-}" in
   -h|--help) usage; exit 0 ;;
 esac
 
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# The live-agent read behind mark's refusal.
+# shellcheck source=bin/fm-agent-proc-lib.sh
+. "$SCRIPT_DIR/fm-agent-proc-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 # The authoritative current-state read behind the working warning
@@ -81,9 +107,21 @@ META="$STATE/$ID.meta"
 MARKER="$STATE/$ID.stopped"
 
 REASON=
+EXIT_AGENT=0
+FORCE_SILENCE=0
 shift 2
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --exit)
+      [ "$VERB" = mark ] || die "--exit applies to 'mark' only"
+      EXIT_AGENT=1
+      shift
+      ;;
+    --force-silence)
+      [ "$VERB" = mark ] || die "--force-silence applies to 'mark' only"
+      FORCE_SILENCE=1
+      shift
+      ;;
     --reason)
       [ "$VERB" = mark ] || die "--reason applies to 'mark' only"
       [ "$#" -ge 2 ] || die "--reason requires a value"
@@ -126,7 +164,45 @@ case "$REASON" in
   *$'\n'*|*$'\r'*) die "--reason must be a single line" ;;
 esac
 
-if [ "$(crew_absorb_class "$ID")" = working ]; then
+[ "$EXIT_AGENT" = 0 ] || [ "$FORCE_SILENCE" = 0 ] || die "--exit and --force-silence are opposite orders; pass one"
+
+# The agent processes in the task's worktree: "<name> pid <pid>" for each,
+# comma-joined, or nothing when none was found or the table could not be read.
+live_agents() {
+  local wt rows
+  wt=$(fm_meta_get "$META" worktree)
+  [ -n "$wt" ] || return 0
+  rows=$(fm_agent_proc_in_worktree "$wt" 2>/dev/null) || return 0
+  printf '%s\n' "$rows" | awk -F '\t' 'NF >= 2 { printf "%s%s pid %s", sep, $2, $1; sep = ", " }'
+}
+
+AGENTS=$(live_agents)
+if [ "$EXIT_AGENT" = 1 ]; then
+  CONTROL_BIN=${FM_LEAVE_STOPPED_CONTROL_BIN:-$SCRIPT_DIR/fm-control.sh}
+  if ! FM_HOME="$FM_HOME" "$CONTROL_BIN" "$ID" exit; then
+    echo "error: task $ID was not marked - its agent could not be stopped${AGENTS:+ ($AGENTS still in its worktree)}; nothing was changed. Resolve the refusal above, or pass --force-silence to silence it while it runs" >&2
+    exit 1
+  fi
+  waited=0
+  exit_wait=${FM_LEAVE_STOPPED_EXIT_WAIT:-10}
+  case "$exit_wait" in ''|*[!0-9]*) exit_wait=10 ;; esac
+  AGENTS=$(live_agents)
+  while [ -n "$AGENTS" ] && [ "$waited" -lt "$exit_wait" ]; do
+    sleep 1
+    waited=$((waited + 1))
+    AGENTS=$(live_agents)
+  done
+  if [ -n "$AGENTS" ]; then
+    echo "error: task $ID was not marked - the exit was reported complete but an agent is still in its worktree ($AGENTS); nothing was marked" >&2
+    exit 1
+  fi
+elif [ -n "$AGENTS" ]; then
+  if [ "$FORCE_SILENCE" = 0 ]; then
+    echo "error: task $ID was not marked - its worktree still holds a live agent ($AGENTS). The marker only stops the watching, so that agent would keep running unsupervised. Stop it and mark with 'fm-leave-stopped.sh $ID mark --exit --reason ...', or silence it while it runs with '--force-silence'" >&2
+    exit 1
+  fi
+  echo "warning: task $ID still has a live agent ($AGENTS); silencing it on --force-silence - the agent keeps running and nothing will watch it until 'fm-leave-stopped.sh $ID clear'" >&2
+elif [ "$(crew_absorb_class "$ID")" = working ]; then
   current=$("$FM_CREW_STATE_BIN" "$ID" 2>/dev/null) || true
   echo "warning: task $ID currently reads as working ($current); recording the captain's order anyway - the marker only silences the watcher and never stops, kills, or relaunches the worker" >&2
 fi

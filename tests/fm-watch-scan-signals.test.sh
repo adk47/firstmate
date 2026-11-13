@@ -49,6 +49,12 @@ test_signal_seen_current_reuses_a_supplied_signature() {
   pass "signal scan: a supplied reported signature is reused, not recomputed"
 }
 
+# The scan paces its beacon check on bash's SECONDS, which keeps counting real
+# time after an assignment.
+# A real second ticking over in the middle of a scan would then read as elapsed
+# time and add a beacon check this test did not ask for.
+# Unsetting SECONDS first turns it into an ordinary variable, so the only time
+# that passes during the scan is what the stand-in beacon check adds.
 scan_signal_counts() {  # <dir> <seconds-each-beacon-check-takes>
   local dir=$1 step=$2 state
   state="$dir/state"
@@ -61,6 +67,7 @@ scan_signal_counts() {  # <dir> <seconds-each-beacon-check-takes>
     . "$1"
     fm_wake_signal_sig() { printf "x\n" >> "$SIGCALLFILE"; printf "sig:%s" "${1##*/}"; }
     watch_beat() { printf "x\n" >> "$BEATCALLFILE"; SECONDS=$((SECONDS + STEP)); }
+    unset SECONDS
     SECONDS=100
     scan_signals >/dev/null
     printf "sigcalls=%s beatcalls=%s\n" \

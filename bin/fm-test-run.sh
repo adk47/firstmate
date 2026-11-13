@@ -246,6 +246,7 @@ family_for_basename() {
     fm-classify-decision-key.test.sh|fm-classify-fold-bounded.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
+    fm-agent-proc-lib.test.sh|fm-decisions-sweep.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
@@ -574,6 +575,7 @@ portable_serial_weight_hints() {
 tests/fm-afk-inject-e2e.test.sh 35792
 tests/fm-afk-pi-herdr-return-e2e.test.sh 100
 tests/fm-afk-return.test.sh 2316
+tests/fm-agent-proc-lib.test.sh 2154
 tests/fm-ask-user-authority.test.sh 152
 tests/fm-backend-cmux-smoke.test.sh 33
 tests/fm-backend-cmux.test.sh 3657
@@ -612,6 +614,7 @@ tests/fm-cursor-harness.test.sh 30113
 tests/fm-cursor-primary-live-e2e.test.sh 21
 tests/fm-cursor-primary.test.sh 57327
 tests/fm-daemon.test.sh 27533
+tests/fm-decisions-sweep.test.sh 8026
 tests/fm-documentation-audiences.test.sh 732
 tests/fm-drift-check.test.sh 4077
 tests/fm-extension-binding.test.sh 12639

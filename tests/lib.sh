@@ -41,6 +41,15 @@ export FM_GATE_REFUSE_BYPASS=1
 # window. tests/fm-send-liveness.test.sh strips this to verify real refusal.
 export FM_SEND_LIVENESS_BYPASS=1
 
+# Keep the suite off the host's real process table (bin/fm-agent-proc-lib.sh).
+# A missing table path reads as "the process table could not be read", which is
+# the documented no-evidence case, so every current-state read in a test answers
+# from its own fixtures alone - never from whatever agents happen to be running
+# on the machine the suite runs on. A test that exercises the process signal
+# points this at its own fake table.
+export FM_AGENT_PROC_TABLE=/nonexistent/fm-agent-proc-table
+export FM_AGENT_PROC_OPEN_FILES=/nonexistent/fm-agent-proc-open-files
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

@@ -1099,7 +1099,13 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
-    | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
+    | ([ $tasks[]
+         # idle, alive, and dead are the liveness answers fm-crew-state.sh
+         # gives for a child that claims no state; like unknown, none of them
+         # says what its in-flight work is doing, so the summary stays
+         # unconfirmed. (No apostrophes here: this is inside a quoted program.)
+         | select(.current_state.state as $s
+                  | $s == "unknown" or $s == "idle" or $s == "alive" or $s == "dead") ]) as $unknown_children
     | ([ $owned_in_flight[]
          | select(.requires_child_metadata)
          | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight

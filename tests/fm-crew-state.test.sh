@@ -198,6 +198,8 @@ reset_fakes() {
   FM_FAKE_HERDR_HUSK=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_ORCA=""
+  export FM_FAKE_ORCA
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
@@ -1976,6 +1978,228 @@ EOF
   pass "runs-list continuation attribution works when axi answers another branch"
 }
 
+# --- the process table: is an agent running in the task's worktree ----------
+# These cases point FM_AGENT_PROC_TABLE at a fake process table. The rest of
+# this file runs with it unreadable (tests/lib.sh), which is the no-evidence
+# case, so the historical answers above stay pinned too.
+
+# A fake `orca` for a task recorded on the Orca backend. FM_FAKE_ORCA=stale
+# answers every call the way Orca answers for a terminal handle it no longer
+# knows; anything else is an Orca that cannot answer at all.
+add_fake_orca() {  # <case-dir>
+  cat > "$1/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_FAKE_ORCA:-}" = stale ]; then
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal handle stale"}}\n'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$1/fakebin/orca"
+}
+
+proc_row() {  # <pid> <comm> <cwd> <args>
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"
+}
+
+run_crew_state_with_procs() {  # <case-dir> <id>   (reads <case-dir>/procs)
+  FM_AGENT_PROC_TABLE="$1/procs" run_crew_state "$1" "$2"
+}
+
+# A status log nobody owns: something appended to state/<id>.status and no task
+# record says whose it is. It must read as that, not as a mistyped id.
+test_status_log_without_a_task_record_is_unowned() {
+  reset_fakes
+  local d out; d=$(new_case unowned)
+  make_fakebin "$d" >/dev/null
+  printf '%s\n' 'working: sweeping the queue' 'done: item 3' > "$d/state/drift.status"
+  # The log was written just now; the clock seam moves "now" instead of the
+  # file's timestamp, which no portable touch can set to an exact second.
+  local wrote; wrote=$(date +%s)
+  printf '%s\t%s\t%s\t%s\n' 6161 pi w "$d/state/drift.status" > "$d/open"
+
+  out=$(FM_CREW_STATE_NOW=$((wrote + 630)) FM_AGENT_PROC_OPEN_FILES="$d/open" run_crew_state "$d" drift)
+  assert_contains "$out" "state: unowned" "a status log with no task record did not read unowned"
+  assert_contains "$out" "source: status-log" "the unowned reading did not name the log as its source"
+  assert_contains "$out" "no task record for drift" "the unowned reading did not say what is missing"
+  assert_contains "$out" "last written 10m ago" "the unowned reading did not say how recently the log was written"
+  assert_contains "$out" "writer: pi pid 6161" "the unowned reading did not name the process writing the log"
+  assert_not_contains "$out" "item 3" "an unowned log's last line was reported as a state nobody vouches for"
+
+  : > "$d/open"
+  out=$(FM_CREW_STATE_NOW=$((wrote + 432630)) FM_AGENT_PROC_OPEN_FILES="$d/open" run_crew_state "$d" drift)
+  assert_contains "$out" "last written 5d ago" "an old unowned log did not report its age in days"
+  assert_contains "$out" "writer not seen" "no held descriptor was not reported as writer not seen"
+
+  out=$(FM_CREW_STATE_NOW=$((wrote + 630)) run_crew_state "$d" drift)
+  assert_contains "$out" "state: unowned" "unreadable open files changed the unowned reading"
+  assert_contains "$out" "writer unknown" "unreadable open files were reported as no writer"
+
+  out=$(run_crew_state "$d" nosuch)
+  assert_contains "$out" "state: unknown" "an id with neither record nor log did not read unknown"
+  assert_contains "$out" "no metadata for nosuch" "a mistyped id lost its no-metadata detail"
+  pass "a status log with no task record reads unowned, with its age and writer"
+}
+
+# The incident this exists for: an Orca task whose terminal handle could not be
+# read while its agent was running. Orca owns no tmux window, so every endpoint
+# read came back empty and the fleet read as gone with hundreds of agents live.
+test_orca_live_agent_is_never_unknown() {
+  reset_fakes
+  local d; d=$(new_case proc-orca-live)
+  make_repo_on_branch "$d/wt" fm/feat-ol
+  make_fakebin "$d" >/dev/null
+  add_fake_orca "$d"
+  fm_write_meta "$d/state/feat-ol.meta" "window=fm-feat-ol" "terminal=term-ol" \
+    "worktree=$d/wt" "kind=scout" "harness=pi" "backend=orca"
+  printf 'note: poll restarted overnight\n' > "$d/state/feat-ol.status"
+  {
+    proc_row 100 bash "$d/wt" "-bash"
+    proc_row 4242 pi "$d/wt" "pi"
+  } > "$d/procs"
+  local mode out
+  for mode in stale down; do
+    FM_FAKE_ORCA=$mode
+    out=$(run_crew_state_with_procs "$d" feat-ol)
+    assert_not_contains "$out" "state: unknown" "orca $mode: a task with a live agent read unknown"
+    assert_contains "$out" "state: alive" "orca $mode: a live agent with an unreadable endpoint -> alive"
+    assert_contains "$out" "source: process" "orca $mode: the answer names the process table"
+    assert_contains "$out" "agent alive (pi pid 4242)" "orca $mode: the answer names the live agent"
+  done
+  pass "an orca task whose worktree has a live agent is never unknown"
+}
+
+test_orca_no_agent_process_is_dead() {
+  reset_fakes
+  local d; d=$(new_case proc-orca-dead)
+  make_repo_on_branch "$d/wt" fm/feat-od
+  make_fakebin "$d" >/dev/null
+  add_fake_orca "$d"
+  fm_write_meta "$d/state/feat-od.meta" "window=fm-feat-od" "terminal=term-od" \
+    "worktree=$d/wt" "kind=scout" "harness=pi" "backend=orca"
+  printf 'working: implementing the fix\n' > "$d/state/feat-od.status"
+  {
+    proc_row 100 bash "$d/wt" "-bash"
+    proc_row 4300 pi "$d/wt-sibling" "pi"
+  } > "$d/procs"
+  FM_FAKE_ORCA=stale
+  local out; out=$(run_crew_state_with_procs "$d" feat-od)
+  assert_contains "$out" "state: dead" "no agent process and a stale orca terminal -> dead"
+  assert_contains "$out" "source: process" "dead names the process table"
+  assert_contains "$out" "no agent process in worktree" "dead says what was not found"
+  assert_contains "$out" "backend target gone: term-od" "dead keeps the endpoint evidence"
+  assert_not_contains "$out" "state: working" "a stale working: line outvoted a dead agent"
+  assert_contains "$out" "last event: working" "dead did not say what the agent last claimed"
+  # A finished task whose agent exited is still dead, not done: the log cannot
+  # vouch that the agent did not pick work up again before it went. What it last
+  # said is the detail that tells a finished task from a stopped one.
+  printf 'done: PR opened\n' >> "$d/state/feat-od.status"
+  out=$(run_crew_state_with_procs "$d" feat-od)
+  assert_contains "$out" "state: dead" "a done line outvoted a dead agent behind a gone endpoint"
+  assert_contains "$out" "last event: done" "dead after done did not say the task had reported done"
+  assert_not_contains "$out" "PR opened" "a dead agent's last note was reported as if current"
+  pass "an orca task with no agent process is dead, not unknown and not working"
+}
+
+# The exact shape measured on 2026-11-13: endpoint readable, harness idle, and a
+# status log whose last line is the continuation of a multi-line entry, so no
+# source claimed a state and the answer was `unknown`.
+test_live_idle_agent_with_no_claimed_state_is_idle() {
+  reset_fakes
+  local d; d=$(new_case proc-idle)
+  make_repo_on_branch "$d/wt" fm/feat-pi
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pi.meta" "window=fm:fm-feat-pi" "worktree=$d/wt" "kind=scout" "harness=claude"
+  printf 'note: window will be taken overnight\n  ALTER->step 6 interval. 038 still not run.\n' \
+    > "$d/state/feat-pi.status"
+  arm_idle_record "$d/state" feat-pi
+  proc_row 5151 claude "$d/wt" "claude" > "$d/procs"
+  local out; out=$(run_crew_state_with_procs "$d" feat-pi)
+  assert_contains "$out" "state: idle" "live agent + idle harness + no claimed state -> idle"
+  assert_contains "$out" "source: process" "idle names the process table"
+  assert_contains "$out" "agent alive (claude pid 5151)" "idle names the live agent"
+  assert_contains "$out" "harness idle" "idle carries the harness verdict"
+  assert_not_contains "$out" "ALTER" "status prose leaked into a liveness answer"
+  # Without process evidence the same task keeps its historical answer.
+  out=$(run_crew_state "$d" feat-pi)
+  assert_contains "$out" "state: unknown" "an unreadable process table must decide nothing"
+  assert_contains "$out" "no current-state source available" "the historical no-evidence answer changed"
+  pass "a live idle agent that claims no state reads idle; an unreadable table decides nothing"
+}
+
+test_claimed_states_outrank_liveness() {
+  reset_fakes
+  local d; d=$(new_case proc-claims)
+  make_repo_on_branch "$d/wt" fm/feat-pc
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pc.meta" "window=fm:fm-feat-pc" "worktree=$d/wt" "kind=scout" "harness=claude"
+  arm_idle_record "$d/state" feat-pc
+  local out
+  # A finished task with no agent left is still done, not dead.
+  printf 'done: report written\n' > "$d/state/feat-pc.status"
+  : > "$d/procs"
+  out=$(run_crew_state_with_procs "$d" feat-pc)
+  assert_contains "$out" "state: done" "a done line was replaced by a liveness answer"
+  assert_contains "$out" "source: status-log" "done did not come from the status log"
+  # A working line is honored while the agent lives.
+  printf 'working: implementing the fix\n' > "$d/state/feat-pc.status"
+  proc_row 6161 claude "$d/wt" "claude" > "$d/procs"
+  out=$(run_crew_state_with_procs "$d" feat-pc)
+  assert_contains "$out" "state: working" "a working line with a live agent did not read working"
+  assert_contains "$out" "source: status-log" "working did not come from the status log"
+  pass "a done line and a live agent's working line outrank the liveness answer"
+}
+
+test_stale_working_line_with_no_agent_is_dead() {
+  reset_fakes
+  local d; d=$(new_case proc-stale-working)
+  make_repo_on_branch "$d/wt" fm/feat-sw
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-sw.meta" "window=fm:fm-feat-sw" "worktree=$d/wt" "kind=scout" "harness=claude"
+  printf 'working: implementing the fix\n' > "$d/state/feat-sw.status"
+  arm_idle_record "$d/state" feat-sw
+  proc_row 100 bash "$d/wt" "-bash" > "$d/procs"
+  local out; out=$(run_crew_state_with_procs "$d" feat-sw)
+  assert_contains "$out" "state: dead" "a working: line with no agent process did not read dead"
+  assert_contains "$out" "last event: working" "dead does not say what the log last claimed"
+  pass "a stale working: line does not outvote an absent agent"
+}
+
+# gemini runs as a bare `node`, which the process table cannot tell from any
+# other node process, so finding nothing proves nothing for it.
+test_unrecognizable_harness_is_never_dead_by_absence() {
+  reset_fakes
+  local d; d=$(new_case proc-blind)
+  make_repo_on_branch "$d/wt" fm/feat-pb
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pb.meta" "window=fm:fm-feat-pb" "worktree=$d/wt" "kind=scout" "harness=gemini"
+  printf 'working: implementing the fix\n' > "$d/state/feat-pb.status"
+  proc_row 7000 node "$d/wt" "node /usr/local/bin/gemini" > "$d/procs"
+  local out; out=$(run_crew_state_with_procs "$d" feat-pb)
+  assert_not_contains "$out" "state: dead" "an unrecognizable harness read dead on an empty lookup"
+  pass "absence in the process table is not death for a harness it cannot recognize"
+}
+
+test_dead_endpoint_with_live_agent_is_alive() {
+  reset_fakes
+  local d; d=$(new_case proc-dead-window)
+  make_repo_on_branch "$d/wt" fm/feat-dw
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dw.meta" "window=firstmate:fm-feat-dw" "worktree=$d/wt" "kind=scout" "harness=pi"
+  printf 'note: still polling\n' > "$d/state/feat-dw.status"
+  FM_FAKE_TMUX_MISSING=1
+  proc_row 8181 pi "$d/wt" "pi" > "$d/procs"
+  local out; out=$(run_crew_state_with_procs "$d" feat-dw)
+  assert_not_contains "$out" "state: unknown" "a live agent behind a missing window read unknown"
+  assert_not_contains "$out" "backend target gone" "a live agent was reported as gone"
+  assert_contains "$out" "agent alive (pi pid 8181)" "the live agent was not named"
+  : > "$d/procs"
+  out=$(run_crew_state_with_procs "$d" feat-dw)
+  assert_contains "$out" "state: dead" "missing window and no agent process -> dead"
+  assert_contains "$out" "backend target gone" "dead keeps the endpoint evidence"
+  pass "a missing window is not the last word: the process table decides alive or dead"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -2046,5 +2270,13 @@ test_active_fix_round_unfetched_pipeline_head_reports_current
 test_unanchored_unfetched_active_row_does_not_match
 test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
+test_orca_live_agent_is_never_unknown
+test_orca_no_agent_process_is_dead
+test_live_idle_agent_with_no_claimed_state_is_idle
+test_claimed_states_outrank_liveness
+test_stale_working_line_with_no_agent_is_dead
+test_unrecognizable_harness_is_never_dead_by_absence
+test_dead_endpoint_with_live_agent_is_alive
+test_status_log_without_a_task_record_is_unowned
 
 echo "all fm-crew-state tests passed"

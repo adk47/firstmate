@@ -157,6 +157,53 @@ last_status_line() {
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
 }
 
+# The note bin/fm-decisions-sweep.sh closes a decision record with. The sweep
+# owns when such a line is written; this is the one place its wording lives, so
+# the writer and the reader below cannot drift apart.
+FM_CLASSIFY_SWEEP_CLOSE_NOTE_PREFIX='auto-closed by sweep ('
+
+# 0 when <status-line> is a decision record the sweep closed mechanically.
+status_line_is_sweep_close() {  # <status-line>
+  status_line_verb_core "$1"
+  [ "$_FM_STATUS_VERB" = "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" ] || return 1
+  status_line_note_core "$1"
+  case "$_FM_STATUS_NOTE" in
+    "$FM_CLASSIFY_SWEEP_CLOSE_NOTE_PREFIX"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The line a task's CLAIMED state is read from: last_status_line, except that a
+# trailing run of sweep closes is looked through when a terminal claim (`done`
+# or `failed`) sits directly behind it. A sweep close is bookkeeping about old
+# decision records, written by firstmate long after the task spoke, so it must
+# not turn a finished task into one that claims nothing. Any other line behind
+# the run is NOT returned: the sweep has just closed what an opening line there
+# was waiting on, and a `working:` or `paused:` line that old claims nothing
+# current, so the close itself stays the answer. Costs nothing beyond
+# last_status_line unless the log really ends in a sweep close, and then reads
+# a bounded tail (FM_STATUS_SWEEP_LOOKBACK_LINES, default 400).
+last_status_line_behind_sweep() {  # <status-file>
+  local f=$1 last line behind=''
+  last=$(last_status_line "$f")
+  [ -n "$last" ] || return 0
+  if ! status_line_is_sweep_close "$last"; then
+    printf '%s\n' "$last"
+    return 0
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    status_line_is_sweep_close "$line" || behind=$line
+  done <<EOF
+$(tail -n "${FM_STATUS_SWEEP_LOOKBACK_LINES:-400}" "$f" 2>/dev/null)
+EOF
+  status_line_verb_core "$behind"
+  case "$_FM_STATUS_VERB" in
+    done|failed) printf '%s\n' "$behind" ;;
+    *) printf '%s\n' "$last" ;;
+  esac
+}
+
 # Bounded tail reader behind last_status_line. Prints the last non-blank line
 # fully inside the final <limit> bytes and exits 0, or exits 1 when that window
 # holds no complete non-blank line. One process, one bounded read, no whole-file
