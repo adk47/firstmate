@@ -1,0 +1,18 @@
+# AGENTS.md "Default to deciding" landing — acceptance evidence
+
+## Verbatim comparison of added block against authoritative intent text
+RESULT: block matches intent verbatim (6 lines, no differences)
+
+## Placement
+Section: 9. Escalation and captain etiquette
+535-
+536:**Default to deciding (captain, 2026-11-12, verbatim: "use fable to clear the way dont rely on me" and "change bob's prompts scripts etc so you stop relying on me").**
+537-The escalation list below is the exception list, not the default path.
+538-Before escalating, restate the decision as one of: reversible with a stated undo, bounded to one repo/service/cap, no spend of the captain's money, no other person's data. A decision meeting all four is firstmate's to make and report, never to ask.
+
+## Fast-forward merge simulation (temp clone at origin/main == base 8e0054af)
+count on origin/main before merge: 0
+git merge --ff-only 428fb3ad -> success
+ACCEPTANCE: git show origin/main:AGENTS.md | grep -c 'Default to deciding' -> 1
+428fb3ad docs(agents): default to deciding instead of escalating reversible calls
+8e0054af feat(bin): add an agentic board loop that keeps firstmate driving its agenda (#86)
