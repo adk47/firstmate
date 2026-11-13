@@ -248,6 +248,25 @@ test_the_wake_drain_prints_the_agenda_line() {
   pass "every main wake drain prints the board's agenda line, and a home without a board prints none"
 }
 
+test_a_wake_drain_prints_the_board_line_before_its_wake_rows() {
+  local dir state out board_line row_line count
+  dir=$(make_case drain-board-first)
+  state="$dir/state"
+  HOME_DIR=$dir
+  add_item charts 'rerun the chart build'
+  append_wake "$state" signal task-a.status 'signal: task-a' || fail "could not append a wake row"
+  out="$dir/drain.out"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2>/dev/null || fail "drain failed with a queued wake"
+  count=$(grep -cF 'BOARD NEXT:' "$out")
+  [ "$count" = 1 ] || fail "the drain printed the board line $count times, want exactly once: $(cat "$out")"
+  board_line=$(grep -nF 'BOARD NEXT:' "$out" | cut -d: -f1)
+  row_line=$(grep -nF "$(printf '\tsignal\ttask-a.status\t')" "$out" | cut -d: -f1)
+  [ -n "$row_line" ] || fail "the drain omitted the queued wake row: $(cat "$out")"
+  [ "$board_line" -lt "$row_line" ] \
+    || fail "the board line came after the wake row (board $board_line, row $row_line): $(cat "$out")"
+  pass "a main drain prints its one board line before its wake rows"
+}
+
 test_next_names_the_first_item_with_its_action_and_check
 test_block_makes_next_skip_the_item
 test_done_removes_the_item_and_renumbers
@@ -260,3 +279,4 @@ test_a_hand_written_board_of_the_exact_shape_is_read
 test_no_board_is_reported_as_no_board
 test_wake_line_names_what_the_turn_owes
 test_the_wake_drain_prints_the_agenda_line
+test_a_wake_drain_prints_the_board_line_before_its_wake_rows

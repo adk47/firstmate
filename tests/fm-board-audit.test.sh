@@ -209,6 +209,21 @@ test_a_repeated_needs_decision_key_is_detected() {
   pass "a needs-decision key raised twice is detected, and a third raising reads as a defect"
 }
 
+test_timestamped_and_indented_repeats_are_detected() {
+  local out status
+  new_home repeat-leading-shape
+  add_item charts
+  status="$HOME_DIR/state/lane-a.status"
+  printf '2026-09-11T02:09Z needs-decision [key=dns]: approve the DNS change\n' > "$status"
+  out=$(audit 60) || fail "the check failed on a single timestamp-first escalation"
+  [ -z "$out" ] || fail "one timestamp-first escalation read as a repeat: $out"
+  printf ' needs-decision [key=dns]: approve the DNS change (again)\n' >> "$status"
+  out=$(audit 60) || fail "the check failed on a repeated timestamp-first key"
+  assert_contains "$out" 'board audit: needs-decision lane-a/dns raised x2 unanswered' \
+    "timestamp-first and indented escalations did not reach the repeat fold"
+  pass "timestamp-first and indented needs-decision lines are counted like plain ones"
+}
+
 test_answering_or_holding_the_decision_clears_the_repeat() {
   local out status
   new_home repeat-clears
@@ -280,5 +295,6 @@ test_more_than_three_silent_tasks_raise_the_alarm
 test_secondmates_and_stopped_tasks_are_not_silent_tasks
 test_a_repeated_needs_decision_key_is_detected
 test_answering_or_holding_the_decision_clears_the_repeat
+test_timestamped_and_indented_repeats_are_detected
 test_a_missing_or_invalid_board_is_reported
 test_arm_binds_a_shim_that_runs_the_check_and_disarm_removes_it

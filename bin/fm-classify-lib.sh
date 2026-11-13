@@ -719,6 +719,20 @@ status_open_decisions() {  # <status-file>
   printf '%s' "$open"
 }
 
+# Count the status lines whose verb is needs-decision, using the same opener
+# rule the repeat fold applies. This is the cheap pre-filter for
+# status_repeat_escalations, and sharing status_line_verb_core keeps it in
+# agreement with that fold for timestamp-first and indented lines.
+status_count_needs_decision() {  # <status-file> -> count
+  local f=$1 line n=0
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { printf '0'; return 0; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    status_line_verb_core "$line"
+    [ "$_FM_STATUS_VERB" != needs-decision ] || n=$((n + 1))
+  done < "$f"
+  printf '%s' "$n"
+}
+
 # Count how often each still-open decision was raised again without an answer.
 # Prints one TAB-separated "<key>\t<count>" line for every key that is open at
 # the end of the stream and was opened by a `needs-decision` line two or more

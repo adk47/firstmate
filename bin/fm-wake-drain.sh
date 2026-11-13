@@ -614,12 +614,13 @@ print_board_line() {
     "$SCRIPT_DIR/fm-board.sh" wake-line 2>/dev/null
 }
 
-print_status_presentation() {  # [<deduped-raw-rows>]
-  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
+print_status_presentation() {  # [<deduped-raw-rows>] [<board-line-printed>]
+  local rows=${1:-} board_line_printed=${2:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   local lock_rc holder_pid
   # Ahead of the presentation lock and independent of the status logs: the
-  # agenda is read on every main drain, including one that carries no wake.
-  print_board_line || true
+  # agenda is read on every main drain, including one that carries no wake. A
+  # drain that prints it before its wake rows passes 1 so it appears exactly once.
+  [ "$board_line_printed" = 1 ] || print_board_line || true
   if fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
     :
   else
@@ -890,6 +891,7 @@ case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   *) sleep "$FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT" ;;
 esac
 if [ -n "$RAW_ROWS" ]; then
+  print_board_line || true
   printf '%s\n' "$RAW_ROWS" || exit "$?"
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
@@ -903,6 +905,6 @@ DRAIN_LOCK_HELD=false
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
-(print_status_presentation "$RAW_ROWS") || true
+(print_status_presentation "$RAW_ROWS" 1) || true
 assert_watcher_liveness
 exit 0

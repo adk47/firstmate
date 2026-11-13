@@ -149,8 +149,7 @@ add_repeat_conditions() {
   local status id raised key count
   for status in "$STATE"/*.status; do
     [ -f "$status" ] && [ ! -L "$status" ] || continue
-    raised=$(grep -c '^needs-decision' "$status" 2>/dev/null) || raised=0
-    case "$raised" in ''|*[!0-9]*) raised=0 ;; esac
+    raised=$(status_count_needs_decision "$status")
     [ "$raised" -ge 2 ] || continue
     id=$(basename "$status" .status)
     while IFS=$TAB read -r key count; do
