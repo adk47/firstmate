@@ -151,7 +151,11 @@ git -C "$WT_DETACHED" checkout -q --detach
 
 orca_task busy pi scout "$WT_SCOUT"
 busy_record busy busy pi-ext
-orca_task idle pi ship "$WT_SHIP" "pr=https://github.com/example/repo/pull/7"
+# The recorded PR and its head are what bin/fm-dod-lib.sh checks before a ship
+# `done:` counts as current-state done, so the fixture records the same PR the
+# status log names, with the head that PR carries.
+orca_task idle pi ship "$WT_SHIP" "pr=https://github.com/example/repo/pull/9" \
+  "pr_head=$(git -C "$WT_SHIP" rev-parse HEAD)"
 busy_record idle idle pi-ext
 printf 'working: first\n2026-10-16T01:02Z done: PR https://github.com/example/repo/pull/9 checks green\n\n' \
   > "$STATE/idle.status"

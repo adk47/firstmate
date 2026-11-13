@@ -289,6 +289,141 @@ Ctrl+c:cancel'
   pass "converted adapters never classify busy from rendered footer text"
 }
 
+# --- launch-prompt backstop (a launch pinned at fm-spawn, parked on a
+# recognized interactive prompt, must classify unknown rather than busy) ------
+
+test_launch_prompt_claude_trust_dialog() {
+  local state out
+  state=$(new_state_dir launch-prompt-claude)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" 'Accessing workspace: /tmp/wt-a
+Quick safety check: Is this a project you created or one you trust?
+Claude Code'"'"'ll be able to read, edit, and execute files here.
+> No, exit
+  Yes, I trust this folder
+Enter to confirm . Esc to cancel')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a launch pinned at fm-spawn parked on Claude's trust dialog must classify unknown launch-prompt, got '$out'"
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" 'Allow external CLAUDE.md file imports?
+This project'"'"'s CLAUDE.md imports files outside the current working directory.
+> No, disable external imports
+  Yes, allow external imports')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a launch pinned at fm-spawn parked on Claude's external-imports dialog must classify unknown launch-prompt, got '$out'"
+  pass "a Claude launch parked on its trust or external-imports dialog classifies unknown launch-prompt"
+}
+
+test_launch_prompt_pi_trust_dialog() {
+  local state out h
+  for h in pi pi-signed omp; do
+    state=$(new_state_dir "launch-prompt-$h")
+    "$EV" arm "$state" t1 >/dev/null
+    out=$(fm_busy_classify tmux w1 "$h" t1 "$state" ' Trust project folder?
+ /tmp/fm-pi-trust-check/wt
+
+ This allows pi to load .pi settings and resources, install missing project packages, and execute project extensions.
+
+ > Trust
+   Trust parent folder (/tmp/fm-pi-trust-check)
+   Trust (this session only)
+   Do not trust
+   Do not trust (this session only)
+
+ up/down navigate  enter select  escape/ctrl+c cancel')
+    [ "$out" = "unknown launch-prompt" ] \
+      || fail "a $h launch pinned at fm-spawn parked on the project-trust dialog must classify unknown launch-prompt, got '$out'"
+  done
+  pass "a Pi-family launch (pi, pi-signed, omp) parked on the project-trust dialog classifies unknown launch-prompt"
+}
+
+test_launch_prompt_pi_requires_both_markers() {
+  local state out
+  state=$(new_state_dir launch-prompt-pi-partial)
+  "$EV" arm "$state" t1 >/dev/null
+  # "trust" alone, with neither the dialog heading nor its decline option, must
+  # not be read as the dialog - it is an ordinary word a worker's own output
+  # could easily contain.
+  out=$(fm_busy_classify tmux w1 pi t1 "$state" 'I trust this approach and will proceed.')
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "ordinary prose containing 'trust' must not classify as a parked launch, got '$out'"
+  pass "the Pi signature requires both the dialog heading and its decline option, not the bare word trust"
+}
+
+test_launch_prompt_gemini_dialogs() {
+  local state out
+  state=$(new_state_dir launch-prompt-gemini-trust)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 gemini t1 "$state" 'Do you trust the files in this folder?
+● 1. Trust folder (worktree)
+  2. Trust parent folder (project)
+  3. Don'"'"'t trust')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a Gemini launch parked on the workspace-trust dialog must classify unknown launch-prompt, got '$out'"
+
+  state=$(new_state_dir launch-prompt-gemini-auth)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 gemini t1 "$state" 'How would you like to authenticate for this project?
+● 2. Use Gemini API Key')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a Gemini launch parked on the auth-method picker must classify unknown launch-prompt, got '$out'"
+
+  state=$(new_state_dir launch-prompt-gemini-apikey)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 gemini t1 "$state" 'Enter Gemini API Key
+> ')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a Gemini launch parked on the API-key entry dialog must classify unknown launch-prompt, got '$out'"
+  pass "a Gemini launch parked on its trust, auth-picker, or API-key dialog classifies unknown launch-prompt"
+}
+
+test_launch_prompt_never_shortens_a_working_launch() {
+  local state out
+  state=$(new_state_dir launch-prompt-working)
+  "$EV" arm "$state" t1 >/dev/null
+  # A genuinely working launch (Claude's ordinary busy footer, rendered before
+  # its own hook has posted a single event yet) must keep the normal busy
+  # bound rather than being shortened by this backstop.
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" '• Working (6s • esc to interrupt)')
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "a genuinely busy launch must not be reclassified, got '$out'"
+  pass "the launch-prompt backstop never reclassifies a genuinely working launch"
+}
+
+test_launch_prompt_scoped_to_armed_harnesses() {
+  local state out
+  # opencode ships no trust dialog (fm-busy-lib.sh header), so it has no
+  # signature at all: even Claude's own dialog text must not reclassify it.
+  state=$(new_state_dir launch-prompt-opencode)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 opencode t1 "$state" \
+    'Quick safety check: Is this a project you created or one you trust?')
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "opencode has no launch-prompt signature and must stay busy fm-spawn, got '$out'"
+  pass "the launch-prompt backstop is scoped to harnesses with a verified signature"
+}
+
+test_launch_prompt_never_reclassifies_an_advanced_record() {
+  local state gen out
+  state=$(new_state_dir launch-prompt-advanced)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event user-prompt-submit
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" \
+    'Quick safety check: Is this a project you created or one you trust?')
+  [ "$out" = "busy claude-hook" ] \
+    || fail "a record that has advanced past fm-spawn must never be reclassified by pane text, got '$out'"
+  pass "the launch-prompt backstop only ever touches the untouched fm-spawn seed"
+}
+
+test_launch_prompt_requires_a_captured_tail() {
+  local state out
+  state=$(new_state_dir launch-prompt-no-tail)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "with no captured tail the record's own state must stand, got '$out'"
+  pass "the launch-prompt backstop never runs without a captured tail"
+}
+
 test_grok_regex_isolated() {
   local state out
   state=$(new_state_dir grok-arm)
@@ -328,6 +463,18 @@ test_kimi_unverified_gate() {
   out=$(fm_busy_classify tmux w1 kimi t1 "$state" '🌒 · thinking')
   [ "$out" = "unknown kimi-unverified" ] || fail "kimi must not classify from footer text, got '$out'"
   pass "standalone kimi classifies unknown until the live verification gate opens"
+}
+
+test_pi_stream_version_floor_accepts_verified_rejects_unverified() {
+  local version
+  version=1.2.0
+  fm_busy_pi_stream_version_supported "$version" \
+    || fail "Pi $version must pass the verified stream gate"
+  for version in '' 1.1.9 0.82.0 1.2 1.2.1 1.3.0 1.10.0 2.0.0 1.4.0 1.x.0 1.2.0.1 1.2.0-beta.3 1.2.0+build .1.2.0 1.2.0. 1000000000.0.0 'pi 1.4.0'; do
+    fm_busy_pi_stream_version_supported "$version" \
+      && fail "Pi '${version:-<empty>}' must not pass the verified stream gate"
+  done
+  pass "Pi stream gate accepts only the verified release, rejects newer, older, prerelease, and malformed"
 }
 
 test_cursor_ignores_rendered_and_native_signals() {
@@ -397,6 +544,29 @@ test_herdr_native_busy_only() {
   pass "herdr's native verdict is trusted for busy only, and records outrank it"
 }
 
+test_tern_native_busy_only() {
+  local state out gen verdict
+  state=$(new_state_dir tern-native)
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf '%s' "$FAKE_NATIVE"; }
+  FAKE_NATIVE=busy
+  out=$(fm_busy_classify tern 7:9 claude t1 "$state")
+  [ "$out" = "busy tern-native" ] || fail "tern native busy with no record must classify busy, got '$out'"
+  for verdict in idle blocked unknown; do
+    FAKE_NATIVE=$verdict
+    out=$(fm_busy_classify tern 7:9 claude t1 "$state")
+    [ "$out" = "unknown missing" ] || fail "tern native '$verdict' must NOT classify as a verdict, got '$out'"
+  done
+  # A valid record outranks the native verdict.
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop
+  FAKE_NATIVE=busy
+  out=$(fm_busy_classify tern 7:9 claude t1 "$state")
+  [ "$out" = "idle claude-hook" ] || fail "the adapter record must outrank tern's native verdict, got '$out'"
+  unset -f fm_backend_busy_state
+  pass "tern's native verdict is trusted for busy only (source tern-native), and records outrank it"
+}
+
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
 # crew-state reader), so it must not disturb their shell: no clobbered
 # positional parameters and no changed glob setting.
@@ -439,6 +609,112 @@ test_boolean_view_never_promotes_unknown() {
   pass "the boolean view reports busy only on an exact busy verdict"
 }
 
+test_progress_is_generation_bound_and_not_semantic_state() {
+  local state gen replacement before
+  state=$(new_state_dir native-progress)
+  gen=$("$EV" arm "$state" t1)
+  before=$(cat "$state/t1.busy-state")
+  "$EV" progress "$state" t1 --gen "$gen" || fail "current progress was refused"
+  [ -f "$state/t1.progress" ] || fail "progress marker missing"
+  [ ! -e "$state/t1.turn-ended" ] || fail "progress emitted a completed turn"
+  [ "$(cat "$state/t1.busy-state")" = "$before" ] || fail "progress changed semantic state"
+  replacement=$("$EV" arm "$state" t1)
+  [ ! -e "$state/t1.progress" ] || fail "arm retained the previous incarnation's progress"
+  if "$EV" progress "$state" t1 --gen "$gen" 2>/dev/null; then fail "stale progress was accepted"; fi
+  [ ! -e "$state/t1.progress" ] || fail "stale progress wrote a marker"
+  "$EV" progress "$state" t1 --gen "$replacement" || fail "replacement progress was refused"
+  "$EV" retire "$state" t1 --gen "$replacement" || fail "retire failed"
+  [ ! -e "$state/t1.progress" ] || fail "retire retained progress"
+  pass "native progress is generation-bound, separately recorded, and cleared on arm and retire"
+}
+
+test_turn_ended_notification_is_generation_bound() {
+  local state gen
+  state=$(new_state_dir turn-ended)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 idle --gen "$gen" --source commandcode-mod --event run-end \
+    || fail "current idle event was refused"
+  [ ! -e "$state/t1.turn-ended" ] || fail "an idle event without --turn-ended notified"
+  "$EV" apply "$state" t1 idle --gen "$gen" --source commandcode-mod --event run-end --turn-ended \
+    || fail "current turn-ended event was refused"
+  [ -f "$state/t1.turn-ended" ] || fail "turn-ended notification missing"
+  rm "$state/t1.turn-ended"
+  "$EV" arm "$state" t1 >/dev/null
+  if "$EV" apply "$state" t1 idle --gen "$gen" --source commandcode-mod --event run-end --turn-ended 2>/dev/null; then
+    fail "stale turn-ended event was accepted"
+  fi
+  [ ! -e "$state/t1.turn-ended" ] || fail "stale turn-ended event woke the replacement"
+  if "$EV" progress "$state" t1 --gen "$gen" --turn-ended 2>/dev/null; then fail "--turn-ended accepted outside apply"; fi
+  pass "the turn-ended notification rides the apply generation check"
+}
+
+test_model_stream_lifecycle_is_fenced() {
+  local state gen next before snapshot
+  state=$(new_state_dir model-stream)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  before=$(cat "$state/t1.busy-state")
+  "$EV" stream "$state" t1 open --gen "$gen" --request 1 || fail "current stream open refused"
+  snapshot=$(fm_busy_stream_read "$state" t1 pi) || fail "current stream unreadable"
+  "$EV" stream "$state" t1 progress --gen "$gen" --request 1 || fail "current progress refused"
+  [ "$(fm_busy_stream_read "$state" t1 pi)" != "$snapshot" ] || fail "progress did not advance evidence"
+  [ -f "$state/t1.model-progress" ] || fail "model progress anchor missing"
+  [ ! -e "$state/t1.progress" ] || fail "model stream changed the default native anchor"
+  [ "$(cat "$state/t1.busy-state")" = "$before" ] || fail "stream changed busy state"
+  [ ! -e "$state/t1.turn-ended" ] || fail "stream fabricated completion"
+  if fm_busy_stream_read "$state" t1 claude >/dev/null; then fail "foreign harness trusted stream"; fi
+  "$EV" stream "$state" t1 close --gen "$gen" --request 1 || fail "stream close refused"
+  [ ! -e "$state/t1.model-stream" ] || fail "close retained active marker"
+  if "$EV" stream "$state" t1 progress --gen "$gen" --request 1 2>/dev/null; then fail "closed progress accepted"; fi
+  if "$EV" stream "$state" t1 open --gen "$gen" --request 1 2>/dev/null; then fail "closed request reopened"; fi
+  "$EV" stream "$state" t1 open --gen "$gen" --request 2 || fail "retry open refused"
+  snapshot=$(fm_busy_stream_read "$state" t1 pi)
+  if "$EV" stream "$state" t1 close --gen "$gen" --request 1 2>/dev/null; then fail "old close accepted"; fi
+  [ "$(fm_busy_stream_read "$state" t1 pi)" = "$snapshot" ] || fail "old close changed retry"
+  "$EV" apply "$state" t1 idle --gen "$gen" --source pi-ext --event agent-settled
+  [ ! -e "$state/t1.model-stream" ] || fail "settled record retained stream"
+  if "$EV" stream "$state" t1 progress --gen "$gen" --request 2 2>/dev/null; then fail "idle progress accepted"; fi
+  next=$("$EV" arm "$state" t1)
+  [ ! -e "$state/t1.model-stream-order" ] || fail "replacement retained stream ordering"
+  [ ! -e "$state/t1.model-progress" ] || fail "replacement retained model progress"
+  if "$EV" stream "$state" t1 open --gen "$gen" --request 3 2>/dev/null; then fail "stale open accepted"; fi
+  "$EV" apply "$state" t1 busy --gen "$next" --source pi-ext --event agent-start
+  "$EV" stream "$state" t1 open --gen "$next" --request 1
+  "$EV" retire "$state" t1 --gen "$next"
+  [ ! -e "$state/t1.model-stream" ] && [ ! -e "$state/t1.model-stream-order" ] && [ ! -e "$state/t1.model-progress" ] || fail "retire left stream evidence"
+  if "$EV" stream "$state" t1 open --gen "$next" --request 2 2>/dev/null; then fail "unarmed open accepted"; fi
+  pass "model streams preserve state and reject stale, closed, superseded, foreign, and retired events"
+}
+
+test_model_stream_close_failure_invalidates_observation() {
+  local state gen fakebin real_mv
+  state=$(new_state_dir model-stream-close-failure)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  "$EV" stream "$state" t1 open --gen "$gen" --request 1
+  fakebin=$(fm_fakebin "$TMP_ROOT/model-stream-close-failure")
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+case "\${!#}" in *.model-stream-order) exit 1 ;; esac
+exec "$real_mv" "\$@"
+SH
+  chmod +x "$fakebin/mv"
+  if PATH="$fakebin:$PATH" "$EV" stream "$state" t1 close --gen "$gen" --request 1; then
+    fail "faulted close reported success"
+  fi
+  if fm_busy_stream_read "$state" t1 pi >/dev/null; then fail "failed close left active observation"; fi
+  if "$EV" stream "$state" t1 progress --gen "$gen" --request 1; then fail "late progress resurrected failed close"; fi
+  if "$EV" stream "$state" t1 open --gen "$gen" --request 1; then fail "failed close admitted duplicate request"; fi
+  "$EV" stream "$state" t1 open --gen "$gen" --request 2 || fail "new request after failed close refused"
+  pass "failed close invalidates observation before persistence and denies late replay"
+}
+
+test_model_stream_close_failure_invalidates_observation
+test_model_stream_lifecycle_is_fenced
+test_progress_is_generation_bound_and_not_semantic_state
+test_turn_ended_notification_is_generation_bound
+
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
 test_apply_current_gen_reset
@@ -453,12 +729,22 @@ test_malformed_record_unknown
 test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
+test_launch_prompt_claude_trust_dialog
+test_launch_prompt_pi_trust_dialog
+test_launch_prompt_pi_requires_both_markers
+test_launch_prompt_gemini_dialogs
+test_launch_prompt_never_shortens_a_working_launch
+test_launch_prompt_scoped_to_armed_harnesses
+test_launch_prompt_never_reclassifies_an_advanced_record
+test_launch_prompt_requires_a_captured_tail
 test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
+test_pi_stream_version_floor_accepts_verified_rejects_unverified
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
+test_tern_native_busy_only
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
 

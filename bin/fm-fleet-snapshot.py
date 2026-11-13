@@ -217,6 +217,24 @@ def key_at_note_head(line):
     return None
 
 
+def status_line_at_epoch(line):
+    """The emission epoch a status line's head carries in [at=<epoch>], or None.
+
+    The head is everything before the first colon, the same region the note and
+    key readers use, so a tag inside the note can never lend an event an age.
+    """
+    head, sep, _ = line.partition(":")
+    if not sep or "[at=" not in head:
+        return None
+    rest = head.split("[at=", 1)[1]
+    value, sep2, tail = rest.partition("]")
+    if not sep2 or "[at=" in tail:
+        return None
+    if not value.isdigit() or (len(value) > 1 and value.startswith("0")) or len(value) > 12:
+        return None
+    return int(value)
+
+
 def status_line_note(line):
     line = strip_leading_timestamp(line)
     if ":" not in line:
@@ -494,6 +512,7 @@ class Snapshot:
         self.config = os.environ.get("CONFIG", "")
         self.projects = os.environ.get("PROJECTS", "")
         self.now = os.environ["SNAPSHOT_NOW"]
+        self.epoch = int(os.environ.get("SNAPSHOT_EPOCH") or 0)
         self.crew_timeout = env_int("FM_SNAPSHOT_CREW_STATE_TIMEOUT", 4)
         self.concurrency = env_int("FM_SNAPSHOT_LOCAL_READ_CONCURRENCY", 16)
         self.prefetch_timeout = env_int("FM_SNAPSHOT_PREFETCH_TIMEOUT", 45)
@@ -882,9 +901,14 @@ class Snapshot:
         current = t["current"]
         present = os.path.isfile(t["status_capture"])
         raw = last_status_line(t["status_capture"]) if present else ""
+        # age_seconds is null, never 0, when the event carries no readable
+        # emission time: a legacy line has an unknown age, not a fresh one.
+        epoch = status_line_at_epoch(raw)
+        age = self.epoch - epoch if epoch is not None and epoch <= self.epoch else None
         event = {"path": os.path.join(self.state, tid + ".status"), "present": present,
                  "kind": "event_history",
-                 "last_event": {"state": status_line_verb(raw), "note": status_line_note(raw), "raw": raw}}
+                 "last_event": {"state": status_line_verb(raw), "note": status_line_note(raw),
+                                "raw": raw, "age_seconds": age}}
         try:
             folded = read_text(t["opendecisions"])
         except OSError:
@@ -938,6 +962,7 @@ class Snapshot:
             "harness": meta_get(meta, "harness"),
             "mode": meta_get(meta, "mode"),
             "yolo": meta_get(meta, "yolo"),
+            "branch": meta_get(meta, "branch") or None,
             "project": meta_get(meta, "project"),
             "spawn_gen": meta_get(meta, "spawn_gen") or None,
             "backend": t["backend"],
@@ -953,7 +978,7 @@ class Snapshot:
             "current_state": cur,
             "endpoint": {"target": t["target"] or None, "exists": exists, "agent_alive": alive,
                          "status": endpoint_status, "observed_at": self.now, "freshness": "fresh"},
-            "pr": {"url": pr or None, "source": pr_source},
+            "pr": {"url": pr or None, "source": pr_source, "head": meta_get(meta, "pr_head") or None},
             "hints": {
                 "pending_decision": any(d["verb"] == "needs-decision" for d in decisions),
                 "blocked_event": any(d["verb"] == "blocked" for d in decisions),

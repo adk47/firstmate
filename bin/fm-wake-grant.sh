@@ -22,27 +22,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-rows_valid() {
-  [ -s "$1" ] && awk 'BEGIN { ok=1 } !/^[0-9]+$/ || seen[$0]++ { ok=0 } END { exit !ok }' "$1"
-}
+# fm-wake-lib.sh owns both the grant row-list shape and the owner-record read.
+rows_valid() { fm_wake_grant_rows_valid "$1"; }
 
-owner_matches() {
-  local expected_pid=${1:-} expected_generation=${2:-} version pid identity generation current
-  [ -f "$BRANCH_OWNER" ] && [ ! -L "$BRANCH_OWNER" ] || return 1
-  exec 8< "$BRANCH_OWNER" || return 1
-  IFS= read -r version <&8 || { exec 8<&-; return 1; }
-  IFS= read -r pid <&8 || { exec 8<&-; return 1; }
-  IFS= read -r identity <&8 || { exec 8<&-; return 1; }
-  IFS= read -r generation <&8 || { exec 8<&-; return 1; }
-  if IFS= read -r _extra <&8; then exec 8<&-; return 1; fi
-  exec 8<&-
-  [ "$version" = fm-branch-eligible-owner-v1 ] || return 1
-  case "$pid" in ''|*[!0-9]*|1) return 1 ;; esac
-  case "$generation" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  [ -z "$expected_pid" ] || [ "$pid" = "$expected_pid" ] || return 1
-  [ -z "$expected_generation" ] || [ "$generation" = "$expected_generation" ] || return 1
-  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
-  [ -n "$current" ] && [ "$current" = "$identity" ]
+owner_matches() { # [<pid>] [<generation>]
+  fm_wake_branch_owner_matches "$BRANCH_OWNER" "${1:-}" "${2:-}"
 }
 
 case "${1:-}" in
@@ -57,7 +41,7 @@ case "${1:-}" in
     TMP=$(mktemp "$STATE/.branch-eligible-owner.tmp.XXXXXX") || exit 1
     printf '%s\n%s\n%s\n%s\n' fm-branch-eligible-owner-v1 "$pid" "$identity" "$generation" > "$TMP" || exit 1
     chmod 0600 "$TMP" || exit 1
-    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
     LOCK_HELD=true
     [ "$(fm_pid_identity "$pid" 2>/dev/null || true)" = "$identity" ] || exit 1
     rm -f -- "$BRANCH_ROWS" || exit 1
@@ -73,7 +57,7 @@ case "${1:-}" in
     printf '%s\n' "$@" > "$TMP" || exit 1
     chmod 0600 "$TMP" || exit 1
     rows_valid "$TMP" || exit 2
-    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
     LOCK_HELD=true
     owner_matches '' "$generation" || exit 1
     replace=1
@@ -102,7 +86,7 @@ case "${1:-}" in
   release)
     generation=${2:-}
     [ "$#" -eq 2 ] || exit 2
-    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
     LOCK_HELD=true
     owner_matches '' "$generation" || exit 1
     rm -f -- "$BRANCH_ROWS" || exit 1
@@ -111,7 +95,7 @@ case "${1:-}" in
     pid=${2:-}
     generation=${3:-}
     [ "$#" -eq 3 ] || exit 2
-    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
     LOCK_HELD=true
     owner_matches "$pid" "$generation" || exit 1
     rm -f -- "$BRANCH_ROWS" "$BRANCH_OWNER" || exit 1
