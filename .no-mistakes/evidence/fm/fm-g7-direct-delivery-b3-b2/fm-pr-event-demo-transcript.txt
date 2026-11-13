@@ -1,0 +1,55 @@
+
+=== author resolved from recorded pr= metadata; event fired (head A) ===
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the requested message WILL still be sent.
+●  repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e /tmp/fm-pr-event-demo.8mT2t6/home/.pi/extensions/fm-primary-turnend-guard.ts -e /tmp/fm-pr-event-demo.8mT2t6/home/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+delivered: author-t1 https://github.com/Muso-AI/H-DevOps/pull/4301 finding
+exit=0
+--- record /tmp/fm-pr-event-demo.8mT2t6/home/state/author-t1.inbox/001.msg ---
+schema=fm-task-inbox.v1
+at=2026-11-13T16:41:46Z
+delivery=fire-and-forget
+dedup=11be3cd7a8748754
+--
+pr-flow: https://github.com/Muso-AI/H-DevOps/pull/4301 finding (head 1bb95a53da10efe1d53ef901d9556a82210fe600 live): no test covers the retry
+=== the record is fire-and-forget and stays OFF the re-ring ladder (grace=0 so a normal record would ring) ===
+delivery=fire-and-forget: yes
+due_action(author-t1, FM_TASK_INBOX_GRACE_SECS=0) = quiet
+
+=== blind retry of the same event collapses onto the same record ===
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+delivered: author-t1 https://github.com/Muso-AI/H-DevOps/pull/4301 finding
+exit=0
+record count = 1
+
+=== the pull request head advances; same kind, same text is a NEW record ===
+head A = 1bb95a53da10efe1d53ef901d9556a82210fe600
+head B = 89c520cf9108a633f4ee72c93cfe41fc88324c91
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+delivered: author-t1 https://github.com/Muso-AI/H-DevOps/pull/4301 finding
+exit=0
+record count = 2
+--- body 002 ---
+pr-flow: https://github.com/Muso-AI/H-DevOps/pull/4301 finding (head 89c520cf9108a633f4ee72c93cfe41fc88324c91 live): no test covers the retry
+
+=== the same head reached via --head <sha> instead of live resolution collapses (identity, not rendering) ===
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+delivered: author-t1 https://github.com/Muso-AI/H-DevOps/pull/4301 finding
+exit=0
+record count = 2
+
+=== a pull request no task records is refused, not guessed (producer keeps its own routing) ===
+no-author: no task in this home records https://github.com/Muso-AI/H-DevOps/pull/9999 as its pull request
+exit=4
+
+=== two tasks recording the same pull request is refused, not guessed ===
+ambiguous-author: 2 tasks in this home record https://github.com/Muso-AI/H-DevOps/pull/4301 as their pull request
+exit=5
+
+=== final inbox state for author-t1 ===
+/tmp/fm-pr-event-demo.8mT2t6/home/state/author-t1.inbox/001.msg
+/tmp/fm-pr-event-demo.8mT2t6/home/state/author-t1.inbox/002.msg
