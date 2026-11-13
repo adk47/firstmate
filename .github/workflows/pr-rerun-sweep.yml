@@ -1,0 +1,120 @@
+name: PR re-run sweep
+
+# Re-runs, in place, the check that holds a VALIDATED head for no reason of its code.
+#
+# WHY THIS EXISTS (2026-11-13, measured): of 177 open PRs on main, 24 were held by a check whose
+# red or cancelled result a re-run of its failed jobs clears, and nothing performed that re-run:
+#   - 3 heads whose suite is green but whose required `validate` is red, because a title/body-edit
+#     run (the NEWER run, so the one GitHub grades) failed before the suite finished;
+#   - 21 heads whose `credit-approval-guard` is red or cancelled on one of its two events although
+#     the PR body passes the guard today.
+# `scripts/pr-doctor.py plan N --apply` has cleared exactly these since #1935, but only when a
+# person ran it. hydra#1886 sat validated and unmergeable for four days. The other way out, an
+# empty commit, re-runs 20-60 minutes of CI and throws away the head's QA verdict.
+#
+# WHAT IT DOES: when a PR Validation run completes (and every 2 hours, as the net under a lost
+# event), it asks `pr-doctor.plan_pr` what is holding the head and performs that plan's re-run:
+# `POST /actions/runs/{id}/rerun-failed-jobs`, at most one per PR per pass.
+#
+# WHAT IT CANNOT DO. It holds `actions: write` and nothing else that writes: it cannot merge,
+# push, edit a PR, post a status or create a check. A re-run reports what is true, so it cannot
+# turn an unvalidated head green. The rule that an unvalidated head cannot merge is untouched: the
+# planner never offers a re-run for a suite that FAILED (a person reads that first), for a head
+# that conflicts, or for a QA NO-GO. Pinned by scripts/tests/test_pr_rerun_sweep.py.
+#
+# NO LOOP: a run is re-run at most twice (`MAX_ATTEMPTS` = 3 in the script). A run that is
+# cancelled or fails the same way a third time is reported as a warning and left for a person.
+#
+# KILL SWITCH: set the repository variable PR_RERUN_SWEEP_DISABLED to 1 (or disable this
+# workflow). Nothing depends on it: every re-run it performs is one a person can perform with
+# `scripts/pr-doctor.py plan N --apply`.
+#
+# workflow_run and schedule both run the DEFAULT-branch copy of this file, and the checkout below
+# is pinned to the default branch, so a PR branch can change neither the trigger nor the planner.
+
+run-name: "re-run sweep: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || (inputs.pr && format('PR {0}', inputs.pr) || 'all open PRs') }}"
+
+on:
+  workflow_run:
+    # Must match the validation workflow's `name:` ("PR Validation"), NOT its filename.
+    workflows: ["PR Validation"]
+    types: [completed]
+  schedule:
+    # The net under a lost or skipped event, and the only trigger for a guard red that no PR
+    # Validation run follows. About 280 API reads for 177 open PRs (measured 2026-11-13).
+    - cron: "23 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to sweep (empty = every open PR on main that GitHub shows as red)"
+        required: false
+        type: string
+      dry_run:
+        description: "Print the plan and re-run nothing"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  actions: write # re-run failed jobs; the only write this workflow has
+  checks: read
+  contents: read
+  pull-requests: read
+  statuses: read
+
+# One pass per head (or one full sweep) at a time, and a pass is never cancelled half-way: a
+# re-run already requested stays requested. A second pass queued behind it re-reads the head.
+concurrency:
+  group: pr-rerun-sweep-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  pr-rerun-sweep:
+    name: pr-rerun-sweep
+    if: vars.PR_RERUN_SWEEP_DISABLED != '1' && (github.event_name != 'workflow_run' || github.event.workflow_run.event == 'pull_request')
+    # In-cluster ARC, off node-8 (see the note above `validate` in pr-validate.yml). python3 only.
+    runs-on: ovh-hydra
+    timeout-minutes: 15
+    steps:
+      - name: Checkout the planner (default branch, never PR code)
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          sparse-checkout: |
+            scripts/ci/pr-rerun-sweep.py
+            scripts/pr-doctor.py
+            .github/credit-approval/guard.py
+          sparse-checkout-cone-mode: false
+
+      - name: Re-run what is holding a validated head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_PR: ${{ inputs.pr }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=(--repo "$REPO")
+          case "$EVENT_NAME" in
+            workflow_run)
+              args+=(--sha "$HEAD_SHA")
+              ;;
+            workflow_dispatch)
+              if [ -n "$INPUT_PR" ]; then
+                [[ "$INPUT_PR" =~ ^[0-9]+$ ]] || { echo "::error::pr must be a number, got '$INPUT_PR'"; exit 2; }
+                args+=(--pr "$INPUT_PR")
+              else
+                args+=(--all)
+              fi
+              ;;
+            *)
+              args+=(--all)
+              ;;
+          esac
+          if [ "$INPUT_DRY_RUN" != "true" ]; then
+            args+=(--apply)
+          fi
+          python3 scripts/ci/pr-rerun-sweep.py "${args[@]}"

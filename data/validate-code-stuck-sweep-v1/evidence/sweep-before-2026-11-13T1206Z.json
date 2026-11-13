@@ -1,0 +1,364 @@
+{
+ "at": "2026-11-13T12:06:32.108999+00:00",
+ "scope": "all: 177 open on main, 96 conflicting, 31 not red, 50 read",
+ "apply": false,
+ "seen": {
+  "open": 177,
+  "conflicting": 96,
+  "not_red": 31
+ },
+ "api_calls": 278,
+ "results": [
+  {
+   "pr": 1936,
+   "sha": "b2b03fc0a6a4718d36961eb7989183488935a839",
+   "outcome": "would-rerun",
+   "why": "`validate` is red only because metadata-edit run 43388110812 outranks the suite's green (run 43387660492); the head IS validated",
+   "run": 43388110812
+  },
+  {
+   "pr": 1927,
+   "sha": "0922b3a0a264379525dea16a6d8517a9a35c026f",
+   "outcome": "would-rerun",
+   "why": "`validate` is red only because metadata-edit run 43372232929 outranks the suite's green (run 43372219982); the head IS validated",
+   "run": 43372232929
+  },
+  {
+   "pr": 1921,
+   "sha": "d61534c762a6bd41b2be6ee8cb6e087a8dabc557",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard's newest pull_request_target run (run 43347172023) was cancelled and never gave a verdict; it stays listed beside the other event's result and the merge queue holds on it",
+   "run": 43347172023
+  },
+  {
+   "pr": 1916,
+   "sha": "0cbc627707840800794aedb523310cf0e19ea45b",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1915,
+   "sha": "2ff885cc558a8b04137cbd19e14c549b6f163dfa",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 43309383982
+  },
+  {
+   "pr": 1886,
+   "sha": "13f7328be7a537ab2dc0b409d0d7ec612708f536",
+   "outcome": "would-rerun",
+   "why": "`validate` is red only because metadata-edit run 43025286085 outranks the suite's green (run 43024617314); the head IS validated",
+   "run": 43025286085
+  },
+  {
+   "pr": 1880,
+   "sha": "b91e5f9e986f72bb459eb506c5d566854217352c",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1877,
+   "sha": "8232419703bb478d23797bb2fc011e27f2244f13",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1874,
+   "sha": "74ecab3d4f61156b98ba13f7ae8588625a0fa555",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1852,
+   "sha": "bf050319de4438f445f2d5df010e2fedb66d0e87",
+   "outcome": "manual",
+   "why": "the suite FAILED (run 42558443453). A re-run reads the same merge commit as that run, so it clears a flake and nothing else; a failure that survives a validation against today's main is real",
+   "run": 0
+  },
+  {
+   "pr": 1830,
+   "sha": "5df6fae87e49c5f119e4c1c5de071cf3aa2c0afe",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1821,
+   "sha": "266a6f00ddadc933549898b4eb7e08879d68037f",
+   "outcome": "manual",
+   "why": "credit-approval-guard: the PR body does not meet it: 'Credit approval impact' section must give a measured BEFORE value (a line mentioning 'before' with the figure, e.g. 'Before: 1,204 approved / 310 declined').",
+   "run": 0
+  },
+  {
+   "pr": 1778,
+   "sha": "b1efa74c1ec342d0cfab3d38c853e742b92a332f",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1777,
+   "sha": "2310cac98d32719e1dbb41ffedd3473463002ce0",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1776,
+   "sha": "25fb7aceaa97a2c61e3cf4d99baf156d7b976cea",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1772,
+   "sha": "8962c40ba39e6a2bc4720f94e5fbca2e0522cb7b",
+   "outcome": "manual",
+   "why": "the suite FAILED (run 42557981607). A re-run reads the same merge commit as that run, so it clears a flake and nothing else; a failure that survives a validation against today's main is real",
+   "run": 0
+  },
+  {
+   "pr": 1768,
+   "sha": "54932eca4d69d9e8d5bd1869ed0c7e91b7454039",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 41939441412
+  },
+  {
+   "pr": 1754,
+   "sha": "b20043bbbb219a68eb6714215445ac2c306b612d",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1734,
+   "sha": "72ddec2a98f41133e6d3b054b4ded09903940cd5",
+   "outcome": "manual",
+   "why": "credit-approval-guard: the PR body does not meet it: PR body has no '## Credit approval impact' section.",
+   "run": 0
+  },
+  {
+   "pr": 1724,
+   "sha": "7dc960a70e603ce91c799ff14c21859324fee985",
+   "outcome": "manual",
+   "why": "the suite FAILED (run 41756022196). A re-run reads the same merge commit as that run, so it clears a flake and nothing else; a failure that survives a validation against today's main is real",
+   "run": 0
+  },
+  {
+   "pr": 1723,
+   "sha": "f65757a464f093bd8245d97997fd7ae46ec5d8be",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1709,
+   "sha": "dadbcbab3e03c6bbfe94e56583715fa4c4cb4a7e",
+   "outcome": "manual",
+   "why": "credit-approval-guard: the PR body does not meet it: PR body has no '## Credit approval impact' section.",
+   "run": 0
+  },
+  {
+   "pr": 1699,
+   "sha": "98122d9f6232cc32c8b64d135aa06c4b71944772",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 41778085097
+  },
+  {
+   "pr": 1694,
+   "sha": "dfeb344dbbdce8c2538f1bb4e750d94411c9648d",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1690,
+   "sha": "aa0caac122a5862de6854c12d4c4f5e721ddb1e8",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 42192997910
+  },
+  {
+   "pr": 1689,
+   "sha": "e94aa14f22dd5dba75b6c401891eda6d0dcaeb12",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1682,
+   "sha": "e9f1029c17212a2281a51c68939c259f9db72b29",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 42121592145
+  },
+  {
+   "pr": 1678,
+   "sha": "bd827d4755e7f7c24d068dfe127a241ada560121",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 41715418204
+  },
+  {
+   "pr": 1675,
+   "sha": "ca27acc5e9269cb8fa118dcb18e48967a3c510ea",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 41888659821
+  },
+  {
+   "pr": 1674,
+   "sha": "e514043db64cef4bccc67dea68975bbfd7cb6158",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 41711536704
+  },
+  {
+   "pr": 1672,
+   "sha": "514c9597f8ca6d5d4a2eda13ee3f0cc9af3343d6",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 41948997445
+  },
+  {
+   "pr": 1646,
+   "sha": "9b6649a6e916efad888a875a367d84848de13678",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 42351178463
+  },
+  {
+   "pr": 1644,
+   "sha": "3654217060a73c9ac34d79478d4dddbf79b329a3",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 41880463284
+  },
+  {
+   "pr": 1640,
+   "sha": "a226e9239b7a693b40de83f71bf3d37df0872789",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 42351225885
+  },
+  {
+   "pr": 1572,
+   "sha": "e73abdaf11f78fcfa5cf4c56ce4cb3193877a306",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 41673733478
+  },
+  {
+   "pr": 1524,
+   "sha": "c7b66e808c15717d53ed49412dcc39dc17639b90",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1522,
+   "sha": "4652d03d88bcdedbb1f6b29857890f13b0e62485",
+   "outcome": "nothing",
+   "why": "`validate` and the guard need no re-run on this head",
+   "run": 0
+  },
+  {
+   "pr": 1510,
+   "sha": "a6b8c4a07466d8c2b2d9f775672e760f466de34f",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 42363994193
+  },
+  {
+   "pr": 1459,
+   "sha": "bf27656f104ed05ba79ce7d49f3a31a57f31f7b4",
+   "outcome": "manual",
+   "why": "the suite FAILED (run 41733066005). A re-run reads the same merge commit as that run, so it clears a flake and nothing else; a failure that survives a validation against today's main is real",
+   "run": 0
+  },
+  {
+   "pr": 1441,
+   "sha": "9dd1e34764578d72a4293245cbbbb243a8bd0a60",
+   "outcome": "manual",
+   "why": "the suite FAILED (run 43106362231). A re-run reads the same merge commit as that run, so it clears a flake and nothing else; a failure that survives a validation against today's main is real",
+   "run": 0
+  },
+  {
+   "pr": 1438,
+   "sha": "72ab35e01d58be2293403d1d3bb0f3dd408c8b6f",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 42445516188
+  },
+  {
+   "pr": 1357,
+   "sha": "d55718e0d0512d4f8ae004e0b01db04b4ce43c20",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 41512900547
+  },
+  {
+   "pr": 1334,
+   "sha": "383dd65f581eaebe07caa9621a6a001c781def5d",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 40119862024
+  },
+  {
+   "pr": 1323,
+   "sha": "d6b5fb76d38b1a0cf8b4231a9a005eece6cafc89",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 39849657356
+  },
+  {
+   "pr": 1286,
+   "sha": "6fbade65d8a4d98ea1324328798e47bca7a50fa9",
+   "outcome": "manual",
+   "why": "credit-approval-guard: the PR body does not meet it: PR body has no '## Credit approval impact' section.",
+   "run": 0
+  },
+  {
+   "pr": 1266,
+   "sha": "4511bbec60459fc38dac4b91c5ba578eff6d3e23",
+   "outcome": "manual",
+   "why": "credit-approval-guard: the PR body does not meet it: PR body has no '## Credit approval impact' section.",
+   "run": 0
+  },
+  {
+   "pr": 1235,
+   "sha": "675649b494d0c2269eb59a0926bacb57967a210c",
+   "outcome": "manual",
+   "why": "credit-approval-guard: the PR body does not meet it: PR body has no '## Credit approval impact' section.",
+   "run": 0
+  },
+  {
+   "pr": 1231,
+   "sha": "34cfbb551532f69700ee33c7445a44a301db27b8",
+   "outcome": "manual",
+   "why": "credit-approval-guard: the PR body does not meet it: 'Credit approval impact' section must give a measured BEFORE value (a line mentioning 'before' with the figure, e.g. 'Before: 1,204 approved / 310 declined'). | 'Credit approval impact' section must give a measured AFTER value (a line mentioning 'after' with the figure, e.g. 'After: 1,204 approved / 310 declined').",
+   "run": 0
+  },
+  {
+   "pr": 1186,
+   "sha": "89b7b063fa1f1c9a4355726d84d0e1ce5f89ecae",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 39259555654
+  },
+  {
+   "pr": 1115,
+   "sha": "2de740eccb659210234d8c399de328dcaed09ff2",
+   "outcome": "would-rerun",
+   "why": "credit-approval-guard is red but the body passes its section check today (the red predates the body edit or the 2026-11-08 guard change)",
+   "run": 39363174922
+  }
+ ],
+ "unread": []
+}

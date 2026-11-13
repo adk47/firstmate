@@ -2688,6 +2688,10 @@ jobs:
           # scripts/pr-doctor.py: reads a head the way GitHub grades it, and the only thing it can
           # perform is a re-run of failed jobs (a re-run reports what is true; it cannot invent a pass).
           python3 scripts/tests/test_pr_doctor.py
+          # scripts/ci/pr-rerun-sweep.py + pr-rerun-sweep.yml: the unattended caller of that planner. Its
+          # one write is a re-run of failed jobs, never of a FAILED suite; it cannot loop (attempt cap);
+          # an unread PR is never a clean pass; the workflow holds `actions: write` and nothing more.
+          python3 scripts/tests/test_pr_rerun_sweep.py
           # L12 executor (fable-decider closes): tray validation, every write-boundary guard (each with a
           # red mutant), daily cap, kill file, registry re-check, read-back, audit. Hermetic.
           python3 scripts/tests/test_credit_fable_executor.py

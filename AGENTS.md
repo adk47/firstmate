@@ -649,6 +649,15 @@ reads the SAME merge commit as the original run, so it clears an interrupted run
 a push made while the base is another branch starts none (`branches: [main]`), and a conflicting
 head starts none at all.
 
+**A validated head held by a stale red is re-run by `pr-rerun-sweep.yml`, not by a person.** It runs
+`scripts/ci/pr-rerun-sweep.py` when a PR Validation run completes and every 2 h: the planner's own
+re-run (`pr-doctor.plan_pr`), one per PR per pass, at most twice per run, with `actions: write` as
+its only write. It never re-runs a suite that FAILED and cannot edit a PR, so a head whose required
+check is "expected" (an `edited` event clears it) stays a person's. `validate-code: skipping` in
+`gh pr checks` is an edit run's placeholder, never proof a head is unvalidated: on 2026-11-13 it
+was read as nine unvalidated heads when none was (`data/validate-code-stuck-sweep-v1/report.md`).
+Off switch: repository variable `PR_RERUN_SWEEP_DISABLED=1`.
+
 **Before concluding a rebase erased base work, check the base first.**
 `git rev-list --left-right --count origin/main...HEAD` — a stale base makes `main`'s newer work
 look like deletions in `git diff origin/main`, and "restoring" it with

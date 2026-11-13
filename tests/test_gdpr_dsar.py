@@ -1309,6 +1309,12 @@ class Wiring(unittest.TestCase):
         late = self.request(4, received="2026-09-01T00:00:00Z", identity_verdict="ASK_LINK", need="link")
         before = {x["row"]: x for x in self.run.asks(NOW)}
         self.assertEqual(set(before), {owed, runway, agent, late}, "before the ladder runs: every one is asked")
+        # Two reads, each against a baseline taken at ITS OWN instant, so the ladder is the only thing between them.
+        # The older ask words itself by the request's date (copy.PROGRESS_LINE once it has passed), ladder or none:
+        # read at the real clock against the baseline above, this test failed for every PR from 2026-11-13T12:00Z,
+        # the moment `runway` and `agent` (received 14 October) reached their date.
+        at = REAL()
+        before_at = {x["row"]: x for x in self.run.asks(at)}
 
         for name, checker in (("pending", pending), ("refused", refuse), ("error", gate_error)):
             with self.subTest(verdict=name):
@@ -1316,9 +1322,10 @@ class Wiring(unittest.TestCase):
                 self.assertEqual(self.s.message(owed, "ack")["state"], "held")
                 self.assertEqual(self.s.messages(runway), [], "inside 3 d of its date the ladder owes it nothing")
                 self.assertEqual(self.s.messages(agent), [])
-                after = {x["row"]: x for x in self.run.asks(REAL())}
+                after, after_at = ({x["row"]: x for x in self.run.asks(t)} for t in (NOW, at))
                 for rid in (runway, agent):
                     self.assertEqual(after[rid], before[rid], "no owed letter: the older ask, unchanged")
+                    self.assertEqual(after_at[rid], before_at[rid], "and unchanged at the clock the store stamps with")
                 self.assertEqual(dsar.ladder_letter(self.s.get(runway), self.s.sends(runway), []), "")
                 # the two the ladder authored for follow the verdict on THEIR letter, and nothing else
                 for rid in (owed, late):

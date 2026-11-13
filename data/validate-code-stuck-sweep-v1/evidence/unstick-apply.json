@@ -1,0 +1,31 @@
+{
+ "at": "2026-11-13T12:17:29.759673+00:00",
+ "scope": "named PRs",
+ "apply": true,
+ "seen": {},
+ "api_calls": 21,
+ "results": [
+  {
+   "pr": 1936,
+   "sha": "b2b03fc0a6a4718d36961eb7989183488935a839",
+   "outcome": "rerun",
+   "why": "`validate` is red only because metadata-edit run 43388110812 outranks the suite's green (run 43387660492); the head IS validated",
+   "run": 43388110812
+  },
+  {
+   "pr": 1927,
+   "sha": "0922b3a0a264379525dea16a6d8517a9a35c026f",
+   "outcome": "rerun",
+   "why": "`validate` is red only because metadata-edit run 43372232929 outranks the suite's green (run 43372219982); the head IS validated",
+   "run": 43372232929
+  },
+  {
+   "pr": 1886,
+   "sha": "13f7328be7a537ab2dc0b409d0d7ec612708f536",
+   "outcome": "rerun",
+   "why": "`validate` is red only because metadata-edit run 43025286085 outranks the suite's green (run 43024617314); the head IS validated",
+   "run": 43025286085
+  }
+ ],
+ "unread": []
+}
