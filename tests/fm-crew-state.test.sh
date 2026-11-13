@@ -199,6 +199,18 @@ spawn_live_agent() {  # <case-dir> <worktree>
   printf '%s\n' "$!"
 }
 
+# A live process shaped like the Gemini CLI: comm and argv[0] say node, and only
+# the script argument names gemini (measured shape in bin/fm-gemini-lib.sh).
+spawn_gemini_shaped_agent() {  # <case-dir> <worktree>
+  local d=$1 wt=$2 bin="$1/agentbin/node" script="$1/agentbin/gemini"
+  mkdir -p "$1/agentbin"
+  cp "$(command -v bash)" "$bin" || return 1
+  chmod +x "$bin" || return 1
+  printf 'read -r -t 300 _ < /dev/zero\n' >"$script" || return 1
+  ( cd "$wt" && exec "$bin" "$script" -y ) &
+  printf '%s\n' "$!"
+}
+
 # Clear the fake-driver vars and (re-)mark them exported, so the per-test plain
 # assignments below stay exported into the fakes without an `export VAR=$(...)`
 # command-substitution assignment (SC2155).
@@ -987,6 +999,33 @@ test_no_run_busy_record_without_live_agent_is_stale() {
   assert_contains "$out" "stale" "the verdict says the record is stale"
   assert_contains "$out" "claude-hook" "the verdict still names the record's source"
   pass "a busy record with no live agent process reads unknown/stale, never working"
+}
+
+# A Gemini worker is a node bundle: its comm and argv[0] name the interpreter,
+# and only argv[1] names gemini. The corroboration must recognise that shape,
+# or every live busy gemini crewmate reads unknown.
+test_no_run_busy_record_with_gemini_shaped_agent_reads_working() {
+  reset_fakes
+  local d; d=$(new_case busy-gemini)
+  make_repo_on_branch "$d/wt" fm/feat-gemini
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gemini.meta" "window=fm:fm-feat-gemini" "worktree=$d/wt" "kind=ship" "harness=gemini"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-gemini)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-gemini busy --gen "$gen" \
+    --source gemini-hook --event BeforeAgent
+  # Only the record survived: the gemini process was hard-killed.
+  local out; out=$(run_crew_state "$d" feat-gemini)
+  assert_not_contains "$out" "state: working" "a gemini busy record with no live process must not read working"
+  assert_contains "$out" "state: unknown" "a stale gemini busy record reads unknown"
+  # The same record with a live node-interpreter gemini process is real work.
+  spawn_gemini_shaped_agent "$d" "$d/wt" >/dev/null || fail "could not spawn the gemini fixture"
+  out=$(run_crew_state "$d" feat-gemini)
+  assert_contains "$out" "state: working" "a gemini busy record with a live gemini-shaped agent reads working"
+  assert_contains "$out" "gemini-hook" "the working verdict names the gemini semantic source"
+  pass "a gemini busy record is corroborated from the node process's arguments"
 }
 
 # A PULL source is last-written evidence too: grok's rendered tail is only
@@ -2324,6 +2363,7 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_busy_record_without_live_agent_is_stale
+test_no_run_busy_record_with_gemini_shaped_agent_reads_working
 test_no_run_grok_pull_source_is_corroborated
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback

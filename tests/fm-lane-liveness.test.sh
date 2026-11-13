@@ -37,6 +37,20 @@ spawn_named_process() {  # <dir> <name> <cwd>
   printf '%s\n' "$!"
 }
 
+# A live process shaped like the Gemini CLI: an interpreter whose comm and
+# argv[0] say node, while only the script argument names gemini (measured shape
+# in bin/fm-gemini-lib.sh). A copy of `bash` running a blocking script keeps the
+# process name `node` while the command line carries the gemini path.
+spawn_gemini_process() {  # <dir> <cwd>
+  local dir=$1 cwd=$2 bin="$1/node" script="$1/gemini"
+  mkdir -p "$dir"
+  cp "$(command -v bash)" "$bin" || return 1
+  chmod +x "$bin" || return 1
+  printf 'read -r -t 300 _ < /dev/zero\n' >"$script" || return 1
+  ( cd "$cwd" && exec "$bin" "$script" -y ) >/dev/null 2>&1 &
+  printf '%s\n' "$!"
+}
+
 # A live shell whose cwd is <dir>: the shape a hard-killed agent leaves behind,
 # because fm-spawn creates the pane with -c <worktree>.
 spawn_shell_in() {  # <cwd>
@@ -100,6 +114,20 @@ test_shell_only_worktree_is_dead() {
   [ "$rc" -eq 1 ] \
     || fail "a worktree holding only a shell must read dead, not live (got $rc)"
   pass "a worktree holding only a shell reads dead - the hard-kill shape"
+}
+
+test_gemini_shaped_agent_in_worktree() {
+  local d wt pid rc
+  d="$TMP_ROOT/gemini"
+  wt="$d/wt"
+  mkdir -p "$wt"
+  pid=$(spawn_gemini_process "$d/bin" "$wt") || fail "could not spawn the gemini fixture"
+  wait_for_process "$pid"
+  fm_lane_agent_live_in_worktree "$wt"
+  rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "a live gemini-shaped node process in the worktree must read live (got $rc)"
+  pass "a live gemini-shaped node process reads live from its arguments"
 }
 
 test_empty_worktree_is_dead() {
@@ -204,6 +232,7 @@ EOF
 
 test_live_agent_in_worktree
 test_live_agent_in_subdirectory_counts
+test_gemini_shaped_agent_in_worktree
 test_shell_only_worktree_is_dead
 test_empty_worktree_is_dead
 test_unclassifiable_process_is_undeterminable

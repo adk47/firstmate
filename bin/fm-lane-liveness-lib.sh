@@ -19,7 +19,11 @@
 # with -c <worktree>), so a cwd match alone would call a shell left behind by a
 # dead agent a live lane. bin/backends/tmux.sh's
 # fm_backend_tmux_classify_process_name owns that name vocabulary, and this
-# library reuses it rather than growing a second one.
+# library reuses it rather than growing a second one. Gemini is identified from
+# its ARGUMENTS instead of its name, because the Gemini CLI is a node bundle
+# whose comm is MainThread and whose argv[0] is the interpreter; the same
+# structural rule the tmux pane probe uses (bin/fm-gemini-lib.sh) is reused
+# here, never reimplemented.
 #
 # BOUNDED AND READ-ONLY. One `lsof -a -d cwd -Fpn` scan answers for every lane
 # at once - bounded by process count, never by walking a worktree's file tree -
@@ -76,27 +80,38 @@ EOF
 # was its first owner; the vocabulary itself is harness-wide, so this library
 # reuses it instead of duplicating the harness name list.
 fm_lane_ensure_process_vocabulary() {
-  command -v fm_backend_tmux_classify_process_name >/dev/null 2>&1 && return 0
+  if command -v fm_backend_tmux_classify_process_name >/dev/null 2>&1 \
+    && command -v fm_gemini_args_are_gemini >/dev/null 2>&1; then
+    return 0
+  fi
   command -v fm_backend_source >/dev/null 2>&1 || return 1
   fm_backend_source tmux >/dev/null 2>&1 || return 1
-  command -v fm_backend_tmux_classify_process_name >/dev/null 2>&1
+  command -v fm_backend_tmux_classify_process_name >/dev/null 2>&1 \
+    && command -v fm_gemini_args_are_gemini >/dev/null 2>&1
 }
 
-# fm_lane_class_from_names: agent|shell|other|unknown from one process's comm
-# and argv[0], through the shared vocabulary. Split out so a caller holding a
-# process snapshot can classify many pids without one `ps` per pid.
-fm_lane_class_from_names() {  # <comm> <argv0>
-  local comm=${1:-} argv0=${2:-}
+# fm_lane_class_from_names: agent|shell|other|unknown from one process's comm,
+# argv[0], and full command line, through the shared vocabulary. Split out so a
+# caller holding a process snapshot can classify many pids without one `ps` per
+# pid. The command line is consulted only to rescue a harness that carries its
+# identity in argv[1] rather than in either name.
+fm_lane_class_from_names() {  # <comm> <argv0> [args]
+  local comm=${1:-} argv0=${2:-} args=${3:-} class
   if [ -z "$comm" ] && [ -z "$argv0" ]; then
     printf 'unknown'
     return 0
   fi
   fm_lane_ensure_process_vocabulary || { printf 'unknown'; return 0; }
-  fm_backend_tmux_classify_process_name "${comm:-$argv0}" "$argv0"
+  class=$(fm_backend_tmux_classify_process_name "${comm:-$argv0}" "$argv0")
+  if [ "$class" != agent ] && [ -n "$args" ] && fm_gemini_args_are_gemini "$args"; then
+    class=agent
+  fi
+  printf '%s' "$class"
 }
 
-# fm_lane_pid_class: agent|shell|other|unknown for one pid, from the same two
-# name sources the tmux liveness probe reads (comm, then argv[0]).
+# fm_lane_pid_class: agent|shell|other|unknown for one pid, from the same
+# sources the tmux liveness probe reads (comm, then argv[0], then the command
+# line for argv[1]-carried harness identity).
 fm_lane_pid_class() {  # <pid>
   local pid=$1 comm args argv0
   case "$pid" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
@@ -104,7 +119,7 @@ fm_lane_pid_class() {  # <pid>
   args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
   args=${args#"${args%%[![:space:]]*}"}
   argv0=${args%%[[:space:]]*}
-  fm_lane_class_from_names "$comm" "$argv0"
+  fm_lane_class_from_names "$comm" "$argv0" "$args"
 }
 
 # fm_lane_worktree_verdict: classify one worktree against a precomputed scan.
@@ -169,7 +184,7 @@ fm_lane_snapshot_class() {  # <snapshot> <pid>
   args=$(printf '%s\n' "$row" | awk '{ sub(/^[[:space:]]*[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]*/, ""); print }')
   args=${args#"${args%%[![:space:]]*}"}
   argv0=${args%%[[:space:]]*}
-  fm_lane_class_from_names "$comm" "$argv0"
+  fm_lane_class_from_names "$comm" "$argv0" "$args"
 }
 
 # fm_lane_dead_worktrees: the fleet view - print each <worktree> argument that
