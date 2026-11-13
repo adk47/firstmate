@@ -1,0 +1,38 @@
+run: 305.9s wall, rc=1, 50 gate call(s) (one per user)
+audience/plan read (outside any gate call): 66 trino invocation(s), 150.4s
+gate call wall, s per user: mean 11.87  p50 14.95  p90 19.98  max 20.03  sum 593.4
+gate calls at/over the 20s read timeout: 6   over 10s: 29
+trino invocations per user: mean 4.30  p50 6  max 6  total 215
+trino wall: 465.9s = 78.5% of gate wall; 2.17s per invocation; 9.32s per user
+curl (Intercom): 165 call(s), 31.4s = 5.3% of gate wall; 0.63s per user
+everything else (bash, jq, python start-up, sqlite): 96.1s = 16.2%; 1.92s per user
+
+trino by the helper that asked (wall includes kubectl get pods + kubectl exec + the CLI's JVM):
+  comm_state check       ?[not sampled]                               n= 104 per-user= 2.08 mean=2.15s sum=  223.7s
+  core_notice check      ?[not sampled]                               n=  87 per-user= 1.74 mean=2.19s sum=  190.2s
+  core_notice check      claiming[plain]                              n=   7 per-user= 0.14 mean=2.06s sum=   14.4s
+  comm_state check       credit_requests[plain]                       n=   6 per-user= 0.12 mean=2.26s sum=   13.6s
+  core_notice check      credit_requests[meta]                        n=   6 per-user= 0.12 mean=2.15s sum=   12.9s
+  comm_state check       users[plain]                                 n=   3 per-user= 0.06 mean=2.14s sum=    6.4s
+  comm_state check       credit_requests[meta]                        n=   2 per-user= 0.04 mean=2.39s sum=    4.8s
+
+helper wall (includes the trino and Intercom it waits on):
+  comm_state check                   n=  29 mean= 11.17s sum=  323.9s (54.6% of gate wall)
+  core_notice check                  n=  50 mean=  4.38s sum=  219.1s (36.9% of gate wall)
+  verify_ledger pending              n=  50 mean=  0.07s sum=    3.7s (0.6% of gate wall)
+  stage2_verdicts gap-credits        n=  16 mean=  0.18s sum=    2.9s (0.5% of gate wall)
+  verify_ledger nothing-needed-overlap n=  36 mean=  0.06s sum=    2.1s (0.4% of gate wall)
+
+check outcome file:
+  mode = dry-run
+  segment = paid
+  max_users = 50
+  recipient_ok = 1
+  unmeasured_users = 5
+  unmeasured_stop_at = 5
+  unmeasured_stop_rule = unmeasured_users >= max(5, 10% of the batch)
+  deployed = 66491d5525b7a5e2994de9937f794d822b8c23e8
+  page = {'start': 762, 'end': 944, 'listed': 958, 'page_end': 958}
+  stopped_on_unmeasured = UNMEASURED STOP: 5 of 50 user(s) could not be measured (gate_timeout / gate error) >= max(5, 10% of the batch) = 5; the run stopped here and
+  outcomes = {'deferred': 33, 'unmeasured': 5} + accepted 1
+  reasons = {'c2_signed_only': 6, 'inapp_not_armed': 1, 'HELD comm_state': 6, 'gate_timeout: a gate call timed out afte': 5, 'messaged_7d': 5, 'core_notice_within_7d': 1, 'run_size': 14}

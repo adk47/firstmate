@@ -163,12 +163,46 @@ def _ids(xs: Iterable[int]) -> str:
     return ",".join(str(int(x)) for x in xs)
 
 
+def emails_sql(chunk: str) -> str:
+    return f"SELECT CAST(id AS varchar), lower(email) FROM postgresql_core.public.users WHERE id IN ({chunk})"
+
+
+def open_requests_sql(chunk: str) -> str:
+    return ("SELECT CAST(userid AS varchar), CAST(profileid AS varchar), CAST(spotifypopularity AS varchar), "
+            "json_format(CAST(verificationdata AS json)) FROM postgresql_core.public.credit_requests "
+            f"WHERE {OPEN} AND userid IN ({chunk})")
+
+
+def velocity_sql(chunk: str) -> str:
+    return ("SELECT CAST(userid AS varchar), CAST(max(n) AS varchar), CAST(max(nbig) AS varchar) FROM ("
+            "SELECT userid, profileid, date(createdat AT TIME ZONE 'UTC') d, count(*) n, "
+            f"sum(CASE WHEN spotifypopularity >= {VEL_BIG_POP} THEN 1 ELSE 0 END) nbig "
+            "FROM postgresql_core.public.credit_requests "
+            f"WHERE createdat > current_timestamp - INTERVAL '{VEL_DAYS}' DAY AND userid IN ({chunk}) "
+            "GROUP BY 1, 2, 3) GROUP BY 1")
+
+
 class Lens:
     """Replica-backed lens: ``lens(user_ids) -> {user_id: Verdict}`` (every id gets a verdict).
     A replica error propagates: the caller sends nothing."""
 
     def __init__(self, query: Query, wl: watchlist_mod.Watchlist, holds: dict[int, str]):
         self.query, self.wl, self.holds = query, wl, holds
+
+    def _reads_emails(self) -> bool:
+        return bool(self.wl.email_sha256 or self.wl.email_domains)
+
+    def statements(self, user_ids: list[int]) -> list[str]:
+        """Every statement __call__ asks about these users, in the order it asks them (the same builders): what the
+        gate's per-person bundle prefetches. It reads nothing."""
+        ids = sorted({int(u) for u in user_ids})
+        out: list[str] = []
+        for i in range(0, len(ids), 400):
+            chunk = _ids(ids[i:i + 400])
+            if self._reads_emails():
+                out.append(emails_sql(chunk))
+            out += [open_requests_sql(chunk), velocity_sql(chunk)]
+        return out
 
     def __call__(self, user_ids: list[int]) -> dict[int, Verdict]:
         ids = sorted({int(u) for u in user_ids})
@@ -184,28 +218,18 @@ class Lens:
                 named[u].append(f"fraud-lens hold: {self.holds[u]}")
         for i in range(0, len(ids), 400):
             chunk = _ids(ids[i:i + 400])
-            if self.wl.email_sha256 or self.wl.email_domains:
-                for uid, email in self.query(f"SELECT CAST(id AS varchar), lower(email) FROM postgresql_core.public.users "
-                                             f"WHERE id IN ({chunk})"):
+            if self._reads_emails():
+                for uid, email in self.query(emails_sql(chunk)):
                     if self.wl.email_hit(email or ""):
                         watch[int(uid)].append("watchlist email")
-            for uid, pid, pop, vd in self.query(
-                    "SELECT CAST(userid AS varchar), CAST(profileid AS varchar), CAST(spotifypopularity AS varchar), "
-                    "json_format(CAST(verificationdata AS json)) FROM postgresql_core.public.credit_requests "
-                    f"WHERE {OPEN} AND userid IN ({chunk})"):
+            for uid, pid, pop, vd in self.query(open_requests_sql(chunk)):
                 u = int(uid)
                 if pid and pid.strip().lower() in self.wl.profile_ids:
                     tier = "fraud" if pid.strip().lower() in self.wl.fraud_profile_ids else "review"
                     watch[u].append(f"watchlist {tier} profile on an open request")
                 if single_signal(pop, vd):
                     single[u] = single.get(u, 0) + 1
-            for uid, mx, mxbig in self.query(
-                    "SELECT CAST(userid AS varchar), CAST(max(n) AS varchar), CAST(max(nbig) AS varchar) FROM ("
-                    "SELECT userid, profileid, date(createdat AT TIME ZONE 'UTC') d, count(*) n, "
-                    f"sum(CASE WHEN spotifypopularity >= {VEL_BIG_POP} THEN 1 ELSE 0 END) nbig "
-                    "FROM postgresql_core.public.credit_requests "
-                    f"WHERE createdat > current_timestamp - INTERVAL '{VEL_DAYS}' DAY AND userid IN ({chunk}) "
-                    "GROUP BY 1, 2, 3) GROUP BY 1"):
+            for uid, mx, mxbig in self.query(velocity_sql(chunk)):
                 rows_day[int(uid)] = int(mx or 0)
                 big_day[int(uid)] = int(mxbig or 0)
         return {u: verdict(named=named[u], watch=watch[u], max_rows_day=rows_day.get(u, 0), max_big_day=big_day.get(u, 0),

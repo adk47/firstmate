@@ -2573,6 +2573,9 @@ jobs:
           python3 scripts/tests/test_verify_ledger_merge_pending.py
           # the send-time communication-state check (captain 18:2xZ; credit_review/comm_state.py).
           python3 scripts/tests/test_comm_state.py
+          # the send gate's per-person replica read (credit_review/replica_batch.py, gate_facts.py): one round trip
+          # per person, the same answer with or without the bundle, no partial answer from a failed batch.
+          python3 scripts/tests/test_gate_facts.py
           # Fable's two owing-proof lines (credit-hold-status / claim-proof-pending; send-locked until L14).
           python3 scripts/tests/test_verify_ledger_owing_proof.py
           # the S1 credit-hold-status audience (credit_review/owing_proof.py; the campaign stays send-locked).

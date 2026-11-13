@@ -1221,6 +1221,23 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   token resolve, per-item failure isolation, writes serialised after reads, gates still
   run).
 
+## A replica question costs ~2 s whatever it asks: ask once per person
+
+A `trino-query.sh` call is ~2 s of fixed cost (`kubectl get pods`, `kubectl exec`, the CLI's JVM); `SELECT 1` costs
+1.85 s. On 2026-11-12 the send gate asked 5-6 questions per person, 10 s of a 13 s call against the 20 s read
+timeout, and the timeouts tripped the unmeasured bar (`UNMEASURED STOP`). Doc and numbers:
+`docs/credit-verification/gate-replica-read.md`.
+
+- **Never fix a slow gate by raising `READ_TIMEOUT_S` or lowering the unmeasured bar.** Count the round trips
+  (`data/node8-fly-gate-v2/tools/proc_sampler.py`) and remove them.
+- **The gate takes one read per person** (`credit_review/gate_facts.py` -> `replica_batch.read_many`, one invocation,
+  no partial answer) and runs `core_notice.py` / `comm_state.py` unchanged behind `scripts/replica-serve.sh`, which
+  answers a statement only on its EXACT text from a read at most 30 s old and runs the real wrapper otherwise. It
+  can only make a call faster; it is never a fact source.
+- **A new or changed replica statement in `core_notice.py` or `comm_state.py` goes in `gate_facts.py` too**, or it
+  is read live (one more round trip per person). `scripts/tests/test_gate_facts.py` fails on the gap.
+- A measurement run on node-8 is load on the same replica path the tick uses: run it between ticks.
+
 ## The bulk send queue: a verdict per person, a durable queue, and it ships unarmed
 
 `scripts/credit_review/bulk_queue.py` (doc `docs/credit-verification/bulk-send-queue.md`, policy

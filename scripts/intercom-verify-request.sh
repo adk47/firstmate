@@ -410,6 +410,16 @@ readonly PROD_DECLINE_CLOSE_HELPER="/opt/hydra/scripts/credit_review/decline_clo
 readonly PROD_CORE_NOTICE_HELPER="/opt/hydra/scripts/credit_review/core_notice.py"
 # The send-time communication-state check for the go-live cohorts (captain 2026-10-28 18:2xZ): comm_state.py.
 readonly PROD_COMM_STATE_HELPER="/opt/hydra/scripts/credit_review/comm_state.py"
+# The per-PERSON replica read (gate_facts.py + replica-serve.sh, 2026-11-12; docs/credit-verification/
+# gate-replica-read.md): what the two helpers above ask the replica about this user, asked in ONE round trip. The
+# helpers then run UNCHANGED with replica-serve.sh as their replica command: it answers a statement whose exact text
+# the read holds and runs the real trino-query.sh for any other - and for all of them when the read failed, is
+# stale or is absent. It only makes the gate faster. Measured on node-8: 5-6 round trips of ~2 s per person were
+# 10.25 s of a 13.47 s gate call, and the calls that crossed the 20 s read timeout tripped the unmeasured bar.
+readonly PROD_GATE_FACTS_HELPER="/opt/hydra/scripts/credit_review/gate_facts.py"
+readonly PROD_REPLICA_SERVE="/opt/hydra/scripts/replica-serve.sh"
+# tmpfs, root-only: the read is never on disk and never outlives a reboot
+readonly PROD_GATE_FACTS_DIR="/run/hydra/gate-facts"
 readonly PROD_PROOF_DB="/var/lib/hydra-credit-verify/proof.sqlite"
 # [key=dated-windows-are-data]: the policy file holds the dated windows (holds.gmail: the /o clause and the Gmail hold).
 readonly PROD_POLICY="/opt/hydra/policies/credit-verify-outbound.json"
@@ -550,7 +560,7 @@ refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 if [ "$TESTABLE" != "1" ]; then
   for v in INTERCOM_VERIFY_TEST_LOG_DIR INTERCOM_VERIFY_TEST_CURL_BIN INTERCOM_VERIFY_TEST_TIMEOUT_BIN \
            INTERCOM_VERIFY_TEST_LEDGER INTERCOM_VERIFY_TEST_LEDGER_HELPER INTERCOM_VERIFY_TEST_DAY \
-           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER INTERCOM_VERIFY_TEST_GMO INTERCOM_VERIFY_TEST_POLICY INTERCOM_VERIFY_TEST_FABLE_RULINGS INTERCOM_VERIFY_TEST_STRIPE_BASE INTERCOM_VERIFY_TEST_JQ_LIB INTERCOM_VERIFY_TEST_STRIPE_ENV_FILE INTERCOM_VERIFY_TEST_API_RETRY_SLEEPS DECLINE_CLOSE_HELPER INTERCOM_VERIFY_TEST_DECLINE_SINCE INTERCOM_VERIFY_TEST_DECLINE_CORE_ROUTE_OFF INTERCOM_VERIFY_TEST_COPY_GATE INTERCOM_VERIFY_TEST_COPY_STORE; do
+           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER INTERCOM_VERIFY_TEST_GATE_FACTS_HELPER INTERCOM_VERIFY_TEST_REPLICA_SERVE INTERCOM_VERIFY_TEST_GMO INTERCOM_VERIFY_TEST_POLICY INTERCOM_VERIFY_TEST_FABLE_RULINGS INTERCOM_VERIFY_TEST_STRIPE_BASE INTERCOM_VERIFY_TEST_JQ_LIB INTERCOM_VERIFY_TEST_STRIPE_ENV_FILE INTERCOM_VERIFY_TEST_API_RETRY_SLEEPS DECLINE_CLOSE_HELPER INTERCOM_VERIFY_TEST_DECLINE_SINCE INTERCOM_VERIFY_TEST_DECLINE_CORE_ROUTE_OFF INTERCOM_VERIFY_TEST_COPY_GATE INTERCOM_VERIFY_TEST_COPY_STORE; do
     [ -z "${!v:-}" ] || die "$v is not settable on a deployed copy of this script. The log, the ledger, the client and the clock are not parameters: a caller-selectable one is a send nobody can audit."
   done
   LOG_DIR="$PROD_LOG_DIR"
@@ -566,6 +576,9 @@ if [ "$TESTABLE" != "1" ]; then
   DISABLED_DIR="/etc/hydra"
   CORE_NOTICE_HELPER="$PROD_CORE_NOTICE_HELPER"
   COMM_STATE_HELPER="$PROD_COMM_STATE_HELPER"
+  GATE_FACTS_HELPER="$PROD_GATE_FACTS_HELPER"
+  REPLICA_SERVE="$PROD_REPLICA_SERVE"
+  GATE_FACTS_DIR="$PROD_GATE_FACTS_DIR"
   PROOF_DB="$PROD_PROOF_DB"
   POLICY_JSON="$PROD_POLICY"
   FABLE_RULINGS_FILE="$PROD_FABLE_RULINGS"
@@ -593,6 +606,11 @@ else
   DISABLED_DIR="${INTERCOM_VERIFY_TEST_DISABLED_DIR:-/etc/hydra}"
   CORE_NOTICE_HELPER="${INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER:-$PROD_CORE_NOTICE_HELPER}"
   COMM_STATE_HELPER="${INTERCOM_VERIFY_TEST_COMM_STATE_HELPER:-$PROD_COMM_STATE_HELPER}"
+  # OFF unless a test names both: a suite that stubs the two helpers must not start a real replica read on a host
+  # that has /opt/hydra (node-8)
+  GATE_FACTS_HELPER="${INTERCOM_VERIFY_TEST_GATE_FACTS_HELPER:-}"
+  REPLICA_SERVE="${INTERCOM_VERIFY_TEST_REPLICA_SERVE:-}"
+  GATE_FACTS_DIR="$LOG_DIR/gate-facts"
   PROOF_DB="${INTERCOM_VERIFY_TEST_PROOF_DB:-$PROD_PROOF_DB}"
   POLICY_JSON="${INTERCOM_VERIFY_TEST_POLICY:-$PROD_POLICY}"
   FABLE_RULINGS_FILE="${INTERCOM_VERIFY_TEST_FABLE_RULINGS:-$PROD_FABLE_RULINGS}"
@@ -609,7 +627,7 @@ else
   API_RETRY_SLEEPS="${INTERCOM_VERIFY_TEST_API_RETRY_SLEEPS:-2 5}"
   DAY="${INTERCOM_VERIFY_TEST_DAY:-$(date -u +%Y-%m-%d)}"
 fi
-readonly LOG_DIR LEDGER LEDGER_HELPER COPY_GATE COPY_STORE STAGE2_HELPER CORE_NOTICE_HELPER PROOF_DB POLICY_JSON FABLE_RULINGS_FILE \
+readonly LOG_DIR LEDGER LEDGER_HELPER COPY_GATE COPY_STORE STAGE2_HELPER CORE_NOTICE_HELPER GATE_FACTS_HELPER REPLICA_SERVE GATE_FACTS_DIR PROOF_DB POLICY_JSON FABLE_RULINGS_FILE \
   CURL_BIN JQ_BIN TIMEOUT_BIN PY_BIN STRIPE_API_BASE DAY STRIPE_ENV_FILE API_RETRIES API_RETRY_SLEEPS
 
 # ---------------------------------------------------------------------------------------
@@ -2001,6 +2019,40 @@ fi
 # or Intercom rejected the post before delivering), 5 = SENT AND ATTEMPTED BUT UNKNOWN (the request was claimed and
 # posted, and either the transport failed or the answer could not be verified - the row is left CLAIMED and is never
 # re-sent automatically). Callers that decide what to retry must key on 5, never on prose.
+# ONE replica read for this person (gate_facts.py), taken here - immediately before the first check that needs the
+# replica. It is an accelerator, never a fact source of its own: core_notice and comm_state run unchanged and ask
+# every statement they always asked; with a read on file their replica command is replica-serve.sh, which answers
+# the statements the read holds (exact text, at most replica_batch.MAX_AGE_S old) and runs trino-query.sh for the
+# rest. A failed or empty read leaves GATE_FACTS_FILE empty and both helpers run exactly as before.
+# Nothing a caller passes selects any of it: the three paths are pinned above. The file lives in a root-only tmpfs
+# directory, is removed when this process exits, and one a SIGKILL left behind (the runner's 20 s read timeout) is
+# swept by the next call.
+GATE_FACTS_FILE=""
+if [ "$LIVE" = "1" ] && [ -n "$GATE_FACTS_HELPER" ] && [ -r "$GATE_FACTS_HELPER" ] \
+   && [ -n "$REPLICA_SERVE" ] && [ -x "$REPLICA_SERVE" ] \
+   && printf '%s' "$USER_ID" | grep -qE '^[0-9]{1,12}$' \
+   && mkdir -p "$GATE_FACTS_DIR" 2>/dev/null && chmod 700 "$GATE_FACTS_DIR" 2>/dev/null; then
+  find "$GATE_FACTS_DIR" -maxdepth 1 -type f -name 'facts.*' -mmin +2 -delete 2>/dev/null || true
+  if GATE_FACTS_FILE="$(mktemp "$GATE_FACTS_DIR/facts.XXXXXXXXXX" 2>/dev/null)"; then
+    trap 'rm -f "$GATE_FACTS_FILE"' EXIT
+    "$PY_BIN" -I "$GATE_FACTS_HELPER" read \
+        --campaign "$(if [ "$CAMPAIGN" = "uvn-new-rows" ]; then echo uvn-status; else printf '%s' "$CAMPAIGN"; fi)" \
+        --copy "$COPY" --user-id "$USER_ID" --request-ids "$(ids_csv "$INPUT")" --reply-due "${REPLY_DUE:-}" \
+        >"$GATE_FACTS_FILE" 2>/dev/null \
+      || : >"$GATE_FACTS_FILE"
+    if [ ! -s "$GATE_FACTS_FILE" ]; then rm -f "$GATE_FACTS_FILE"; GATE_FACTS_FILE=""; fi
+  else
+    GATE_FACTS_FILE=""
+  fi
+fi
+# run a replica-reading helper: through replica-serve.sh when there is a read on file, untouched when there is not
+with_gate_facts() {
+  if [ -n "$GATE_FACTS_FILE" ]; then
+    CORE_NOTICE_TRINO="$REPLICA_SERVE" COMM_STATE_TRINO="$REPLICA_SERVE" REPLICA_BATCH_FACTS="$GATE_FACTS_FILE" "$@"
+  else
+    "$@"
+  fi
+}
 if [ "$LIVE" = "1" ] && [ -n "$REPLY_DUE" ]; then
   # [key=reply-due]: the core-notice cooldown governs our UNSOLICITED notes, never answering the user (comm_state
   # verifies the trigger before anything is claimed or sent)
@@ -2010,7 +2062,7 @@ elif [ "$LIVE" = "1" ]; then
   if printf '%s' "$USER_ID" | grep -qE '^[0-9]{1,12}$'; then cn_who=(--user-id "$USER_ID"); else cn_who=(--email "$EMAIL"); fi
   [ -r "$CORE_NOTICE_HELPER" ] || { echo "CORE NOTICE CHECK NOT POSSIBLE: $CORE_NOTICE_HELPER is missing; nothing was sent or claimed" >&2; exit 4; }
   set +e
-  CN="$("$PY_BIN" -I "$CORE_NOTICE_HELPER" check "${cn_who[@]}" 2>/dev/null)"; cn_rc=$?
+  CN="$(with_gate_facts "$PY_BIN" -I "$CORE_NOTICE_HELPER" check "${cn_who[@]}" 2>/dev/null)"; cn_rc=$?
   set -e
   case "$cn_rc" in
     0) ;;
@@ -3218,7 +3270,7 @@ if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
   [ -r "$COMM_STATE_HELPER" ] || { echo "COMM STATE CHECK NOT POSSIBLE: $COMM_STATE_HELPER is missing; nothing was sent or claimed" >&2; exit 4; }
   set +e
   # uvn-new-rows IS the uvn ask for comm_state (the same owes / documents / decision rules)
-  CS="$("$PY_BIN" -I "$COMM_STATE_HELPER" check --campaign "$(if [ "$CAMPAIGN" = "uvn-new-rows" ]; then echo uvn-status; else printf '%s' "$CAMPAIGN"; fi)" --copy "$COPY" --user-id "$USER_ID" \
+  CS="$(with_gate_facts "$PY_BIN" -I "$COMM_STATE_HELPER" check --campaign "$(if [ "$CAMPAIGN" = "uvn-new-rows" ]; then echo uvn-status; else printf '%s' "$CAMPAIGN"; fi)" --copy "$COPY" --user-id "$USER_ID" \
         --request-ids "$ALL_IDS" --contact-id "$CONTACT_ID" \
         --conversation "$(if [ "$R1LIKE" = "1" ] || [ "$COPY" = "proofneed" ]; then printf '%s' "${fconv:-}"; else printf '%s' "${THREAD:-}"; fi)" \
         --reply-due "${REPLY_DUE:-}" ${NIE_ARGS[@]+"${NIE_ARGS[@]}"} ${C2_ARGS[@]+"${C2_ARGS[@]}"} \
@@ -3789,7 +3841,7 @@ NOTE_VARIANT="$( { [ "${C2:-0}" = "1" ] && echo c2; [ "${RD_PREFIX:-0}" = "1" ] 
 TEMPLATE_SHA="$(printf '%s' "$CAMPAIGN|$KIND|$COPY|$NOTE_VARIANT" | sha256sum | awk '{print $1}')"
 if [ "$KIND" = "initial" ]; then
   REFS_FILE="$(mktemp)"
-  trap 'rm -f "$REFS_FILE"' EXIT
+  trap 'rm -f "$REFS_FILE" "${GATE_FACTS_FILE:-}"' EXIT
   # ask_class (p1 178: core_proof_request is an audit class) + is_approved per request ride into refs_json (QA #1418)
   printf '%s' "$INPUT" | "$JQ_BIN" -c '[.credits[] | {request_id, profile_id, track_id} + (if .ask_class != "" then {ask_class} else {} end) + (if .is_approved != "" then {is_approved} else {} end)]' > "$REFS_FILE"
   CLAIM="$(ledger claim --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" --request-ids "$ALL_IDS" \

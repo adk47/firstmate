@@ -6184,3 +6184,135 @@ _observe_after_verdict() { # <verdict>
   [ "$(sql "SELECT COUNT(*) FROM verify_messages WHERE reason LIKE 'copy_review_hold: copy_review_rewrite:ocv-%'")" = "1" ]
   if grep -rq 'Other words' "$CURL_STUB_PAYLOADS" 2>/dev/null; then false; fi
 }
+
+# --- the per-person replica read (credit_review/gate_facts.py + replica-serve.sh; measured 2026-11-12) -------------
+# The gate reads the replica ONCE per person; core_notice and comm_state then run with replica-serve.sh as their
+# replica command and that read on file. These pin the wiring only (what is served from it: test_gate_facts.py): one
+# read, both helpers asked EXACTLY what they were always asked, a failed read changes nothing, the read is gone when
+# the gate call ends, and a deployed copy cannot be pointed at another reader or server.
+gate_facts_stubs() {
+  cat > "$TEST_TMPDIR/gate_facts.py" <<'PY'
+import os, sys
+here = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(here, "gate-facts-calls"), "a") as fh:
+    fh.write(" ".join(sys.argv[1:]) + "\n")
+m = os.environ.get("STUB_GATE_FACTS", "ok")
+if m == "fail":
+    sys.stdout.write('{"half":"a read"'); sys.exit(2)         # output on a failed read must never be used
+if m == "empty":
+    sys.exit(0)
+sys.stdout.write('{"replica_batch":1,"marker":"THE-READ"}')
+PY
+  for h in core_notice comm_state; do          # the suite's stand-ins, also recording what replica they were given
+    cat > "$TEST_TMPDIR/$h.py" <<PY
+import json, os, sys
+here = os.path.dirname(os.path.abspath(__file__))
+open(os.path.join(here, "$h-argv"), "w").write(" ".join(sys.argv[1:]))
+facts = os.environ.get("REPLICA_BATCH_FACTS", "")
+open(os.path.join(here, "$h-env"), "w").write("|".join(
+    [os.environ.get("CORE_NOTICE_TRINO", ""), os.environ.get("COMM_STATE_TRINO", ""), facts]))
+open(os.path.join(here, "$h-facts"), "w").write(open(facts).read() if facts else "")
+if "$h" == os.environ.get("STUB_HOLD_AT", ""):
+    print(json.dumps({"hold": True, "reason": "core_notice_within_7d", "state": "held", "reasons": ["stub"]})); sys.exit(3)
+print(json.dumps({"hold": False, "state": "asked", "reasons": [], "proof_on_file": False}))
+PY
+  done
+  printf '#!/usr/bin/env bash\nexit 97\n' > "$TEST_TMPDIR/replica-serve.sh"; chmod +x "$TEST_TMPDIR/replica-serve.sh"
+  export INTERCOM_VERIFY_TEST_GATE_FACTS_HELPER="$TEST_TMPDIR/gate_facts.py"
+  export INTERCOM_VERIFY_TEST_REPLICA_SERVE="$TEST_TMPDIR/replica-serve.sh"
+  GF_DIR="$INTERCOM_VERIFY_TEST_LOG_DIR/gate-facts"
+}
+gf_send() { "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
+gf_reset() { rm -f "$TEST_TMPDIR"/*-argv "$TEST_TMPDIR"/*-env "$TEST_TMPDIR"/*-facts "$TEST_TMPDIR/gate-facts-calls" "$INTERCOM_VERIFY_TEST_LEDGER"; }
+
+@test "gate facts: one replica read per person; both helpers run unchanged with replica-serve.sh and that read" {
+  gate_facts_stubs
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  run -0 gf_send
+  [ "$(wc -l < "$TEST_TMPDIR/gate-facts-calls")" -eq 1 ]                       # ONE read for the whole gate call
+  grep -qE -- '^read --campaign uvn-status --copy [a-z0-9]+ --user-id [0-9]+ --request-ids u1 --reply-due $' "$TEST_TMPDIR/gate-facts-calls"
+  for h in core_notice comm_state; do
+    IFS='|' read -r cn cs facts < "$TEST_TMPDIR/$h-env" || true      # no trailing newline in the record
+    [ "$cn" = "$TEST_TMPDIR/replica-serve.sh" ] && [ "$cs" = "$TEST_TMPDIR/replica-serve.sh" ]
+    [ "$(dirname "$facts")" = "$GF_DIR" ]
+    [ "$(cat "$TEST_TMPDIR/$h-facts")" = '{"replica_batch":1,"marker":"THE-READ"}' ]   # the same read, both times
+  done
+  # the helpers are asked exactly what they were always asked: no flag, no stdin, nothing new in argv
+  grep -qE -- '^check --user-id [0-9]+$' "$TEST_TMPDIR/core_notice-argv"
+  grep -q -- "^check --campaign uvn-status --copy " "$TEST_TMPDIR/comm_state-argv"
+  if grep -qi -- "facts\|replica" "$TEST_TMPDIR/core_notice-argv" "$TEST_TMPDIR/comm_state-argv"; then false; fi
+  [ "$(posts)" -eq 1 ]
+  # the read does not outlive the gate call, and its directory is this user's alone
+  [ -z "$(ls -A "$GF_DIR")" ]
+  [ "$(stat -c %a "$GF_DIR")" = "700" ]
+}
+
+@test "gate facts: a failed, empty or absent read changes nothing - both helpers run exactly as before" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  gate_facts_stubs
+  for how in fail empty; do
+    gf_reset
+    STUB_GATE_FACTS="$how" run -0 gf_send
+    [ "$(wc -l < "$TEST_TMPDIR/gate-facts-calls")" -eq 1 ]
+    for h in core_notice comm_state; do
+      [ -s "$TEST_TMPDIR/$h-argv" ]
+      [ "$(cat "$TEST_TMPDIR/$h-env")" = "||" ]                 # no replica command set, no read named
+    done
+    [ "$(posts)" -ge 1 ]
+    [ -z "$(ls -A "$GF_DIR")" ]
+  done
+  # no reader, or no server to answer from it (a half-deployed host): no read is taken at all
+  gf_reset
+  INTERCOM_VERIFY_TEST_GATE_FACTS_HELPER="$TEST_TMPDIR/missing.py" run -0 gf_send
+  [ "$(cat "$TEST_TMPDIR/core_notice-env")" = "||" ] && [ ! -e "$TEST_TMPDIR/gate-facts-calls" ]
+  gf_reset
+  chmod -x "$TEST_TMPDIR/replica-serve.sh"
+  run -0 gf_send
+  [ "$(cat "$TEST_TMPDIR/comm_state-env")" = "||" ] && [ ! -e "$TEST_TMPDIR/gate-facts-calls" ]
+  gf_reset
+  INTERCOM_VERIFY_TEST_REPLICA_SERVE="" run -0 gf_send
+  [ "$(cat "$TEST_TMPDIR/comm_state-env")" = "||" ] && [ ! -e "$TEST_TMPDIR/gate-facts-calls" ]
+}
+
+@test "gate facts: the read is removed when a gate defers, and one a killed call left behind is swept" {
+  gate_facts_stubs
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  mkdir -p "$GF_DIR"
+  echo left > "$GF_DIR/facts.killed"; touch -d '10 minutes ago' "$GF_DIR/facts.killed"
+  echo mine > "$GF_DIR/facts.running"                       # another gate call's, seconds old: not ours to remove
+  STUB_HOLD_AT=core_notice run -3 gf_send                   # deferred at the first check: exit 3
+  [[ "$output" == *"DEFERRED core_notice_within_7d"* ]]
+  [ "$(cat "$TEST_TMPDIR/core_notice-facts")" = '{"replica_batch":1,"marker":"THE-READ"}' ]
+  [ "$(ls -A "$GF_DIR")" = "facts.running" ]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "gate facts: no Muso user id means no read (the core-notice check goes by email, live)" {
+  gate_facts_stubs
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  jq '.user.id = ""' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/n.json"
+  run "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [ ! -e "$TEST_TMPDIR/gate-facts-calls" ]
+  if [ -f "$TEST_TMPDIR/core_notice-env" ]; then [ "$(cat "$TEST_TMPDIR/core_notice-env")" = "||" ]; fi
+}
+
+@test "gate facts: a dry run reads nothing; a deployed copy cannot be pointed at another reader or server" {
+  gate_facts_stubs
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  run "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ ! -e "$TEST_TMPDIR/gate-facts-calls" ]
+  for seam in INTERCOM_VERIFY_TEST_GATE_FACTS_HELPER INTERCOM_VERIFY_TEST_REPLICA_SERVE; do
+    run -2 env -i PATH="$PATH" "$seam=$TEST_TMPDIR/gate_facts.py" \
+      "$REAL_SCRIPT" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --validate
+    [[ "$output" == *"$seam is not settable on a deployed copy"* ]]
+  done
+  grep -q '^  GATE_FACTS_HELPER="\$PROD_GATE_FACTS_HELPER"$' "$REAL_SCRIPT"
+  grep -q '^  REPLICA_SERVE="\$PROD_REPLICA_SERVE"$' "$REAL_SCRIPT"
+  grep -q '^  GATE_FACTS_DIR="\$PROD_GATE_FACTS_DIR"$' "$REAL_SCRIPT"
+  grep -q '^readonly PROD_GATE_FACTS_HELPER="/opt/hydra/scripts/credit_review/gate_facts.py"$' "$REAL_SCRIPT"
+  grep -q '^readonly PROD_REPLICA_SERVE="/opt/hydra/scripts/replica-serve.sh"$' "$REAL_SCRIPT"
+  grep -q '^readonly PROD_GATE_FACTS_DIR="/run/hydra/gate-facts"$' "$REAL_SCRIPT"
+  # the real server takes the wrapper and the logic from its own location, and only the read's path from its caller
+  grep -q 'serve --live "\$here/trino-query.sh"$' "$BATS_TEST_DIRNAME/../replica-serve.sh"
+  [ -x "$BATS_TEST_DIRNAME/../replica-serve.sh" ]
+}

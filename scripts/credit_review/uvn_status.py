@@ -510,6 +510,19 @@ def _row_incomplete(title: str, artist: str, role: str, pid: str, tid: str) -> b
     return any(x and not ID_RE.match(x) for x in (pid, tid))
 
 
+def uvn_requests_sql(chunk: list[int], statuses: tuple[str, ...] = PENDING_STATUSES[CAMPAIGN]) -> str:
+    """The ONE text of the read below: uvn_requests() asks it and the gate's per-person bundle (gate_facts.py)
+    prefetches it, so the bundle can never hold a different question than the one asked."""
+    in_statuses = ", ".join(f"'{s}'" for s in statuses)
+    return ("SELECT CAST(id AS varchar), userid, CAST(profileid AS varchar), CAST(trackid AS varchar), "
+            "spotifytracktitle, json_format(CAST(spotifytrackartists AS json)), "
+            "credits, spotifypopularity, "
+            "json_format(CAST(verificationdata AS json)), json_format(CAST(metadata AS json)), "
+            "CAST(createdat AS varchar) "
+            "FROM postgresql_core.public.credit_requests "
+            f"WHERE status IN ({in_statuses}) AND deletedat IS NULL AND userid IN ({_ids(chunk)})")
+
+
 def uvn_requests(user_ids: list[int], query: Query = trino,
                  statuses: tuple[str, ...] = PENDING_STATUSES[CAMPAIGN]) -> dict[int, list[dict[str, Any]]]:
     """Requests in `statuses` (default: still UVN) by user id, most popular first, from the core replica.
@@ -517,18 +530,10 @@ def uvn_requests(user_ids: list[int], query: Query = trino,
     refuse the row (a blank title, artist or role, a field over the gate's length caps, or a malformed
     profile or track id). Such a row is left out of the note, never shown; a user with nothing else
     to show is held and re-checked next run."""
-    in_statuses = ", ".join(f"'{s}'" for s in statuses)
     reqs: dict[int, list[dict[str, Any]]] = {}
     for i in range(0, len(user_ids), 500):
         chunk = user_ids[i:i + 500]
-        for rid, uid, pid, tid, title, artists, raw_credits, pop, *extra in query(
-                "SELECT CAST(id AS varchar), userid, CAST(profileid AS varchar), CAST(trackid AS varchar), "
-                "spotifytracktitle, json_format(CAST(spotifytrackartists AS json)), "
-                "credits, spotifypopularity, "
-                "json_format(CAST(verificationdata AS json)), json_format(CAST(metadata AS json)), "
-                "CAST(createdat AS varchar) "
-                "FROM postgresql_core.public.credit_requests "
-                f"WHERE status IN ({in_statuses}) AND deletedat IS NULL AND userid IN ({_ids(chunk)})"):
+        for rid, uid, pid, tid, title, artists, raw_credits, pop, *extra in query(uvn_requests_sql(chunk, statuses)):
             # credits is a Postgres text[] literal in a varchar on the replica (2026-10-22: the
             # former CAST(credits AS array(varchar)) fails on Trino, so every live query broke).
             credits = verify_notify.pg_text_array(raw_credits)
