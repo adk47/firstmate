@@ -849,6 +849,30 @@ send, so it is a separate change that needs a ruling, not a side effect of this 
 
 <!-- Reviewed baseline: deploy overwrites - 2026-10-27 (claim-lane-resume-c2, firstmate 035): node-8 holds the #1377-era text of this file, copied outside a deploy at 00:36:52Z; main is the reviewed text (proof ask and gap ask locked, claim status on). -->
 
+## Class C (the /c2 corrected ask) is armed by its own row (`[key=class-c-is-a-row]`, 2026-11-13)
+
+A uvn-status ask to a user whose requests an earlier status line of ours named ("our team is reviewing", "we received
+your documents") opens with the approved correction `fable-copy-1030-r5/c2`. That is class C. The timer passes
+`--no-correction` and the gate answers `DEFERRED c2_signed_only` unless class C is armed.
+
+- **What it cost.** Measured over the 39 uvn-status checks of 12 and 13 November (`data/rapid-verif-final-h3/`):
+  1,685 of 2,732 gate calls (62%) were answered `c2_signed_only`, and on the 13 November 10:39Z owing list the first
+  thing between 949 of 3,251 listed users and an ask was this rule. Nothing could switch it on: the date lived in a
+  code table with no entry, and `read_arming` refused `uvn-status:c2` as an unknown family.
+- **The row.** `armed_families["uvn-status:c2"] = {"live": true, "paid": true, "unsigned_from": "<instant>"}` in
+  `policies/credit-verify-outbound.json`. It is a SUB-class of uvn-status, read per segment (`c2_args`): `paid: false`
+  sends corrected asks to the free segment only. No row, `live: false`, no date, a date still ahead, legacy arming and
+  a malformed policy all keep `--no-correction`. `live: false` stops BOTH segments whatever `paid` says: the paid
+  segment needs `live` and `paid` together (a family row lets `paid` stand alone; this row does not).
+  `CVO_UNSIGNED_ALL=1` does not arm it.
+- **It never arms the family.** A uvn-status family that is dry stays dry; the row only decides whether an armed
+  uvn-status apply may carry the correction. Every other rule a corrected ask passes is unchanged: documents on file,
+  the approval path, the 90-day ask lock, core's own notices, `comm_state`, the caps, one message per user per day.
+  The gate's 7-day rule exempts only the status line being corrected (QA #1565).
+- **A corrected ask goes by email, as its own message** (the gate refuses `--conversation` with /c2).
+- **Disarm.** Remove the row, or set `live` to false. The tick reads the policy at every start; no deploy.
+- This is not the first send of the class: 390 corrected asks went on 2026-11-01 (ledger 6338-6994).
+
 ## What bounds a tick's sends: order, the claim slice, the not-reached page (`[key=claims-never-starved]`, 2026-11-12)
 
 Measured on node-8 on 2026-11-12: 44 sends by 16:35Z, every one of them `uvn-status`. Three things bound a tick, and

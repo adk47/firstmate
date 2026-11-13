@@ -1,0 +1,28 @@
+{
+  "what": "the deployed runner's own recipient check (uvn-status --mode dry-run --check-recipients) over the class C users of the 200-user sample, run WITHOUT --no-correction: what the gate answers a corrected ask today",
+  "measured_at": "2026-11-13T13:09:18Z..13:12:20Z",
+  "host": "node-8, deployed 6e8a65d8b4e1e1ec8e9b0f6eb6a559b7a28a8f1f, between the 12:00Z tick (ended 13:08:43Z) and the 14:00Z fire",
+  "owing_list": "/root/h2-runs/sched/20261113T1200Z/owing-uvn.json (generated 2026-11-13T12:33:35Z), cut to the 57 users by tools/subset_list.py",
+  "writes": "none: dry-run check; 0 verify_messages rows created 13:09Z-13:14Z",
+  "sample_class_c_users": 57,
+  "free": {
+    "listed": 49,
+    "would_be_messaged": 38,
+    "deferred_comm_state_already_acknowledged": 7,
+    "deferred_messaged_7d": 3,
+    "refused_G5_markup_in_a_field": 1,
+    "unmeasured": 0,
+    "unmeasured_bar": 5
+  },
+  "paid": {
+    "listed": 8,
+    "would_be_messaged": 3,
+    "deferred_comm_state_already_acknowledged": 2,
+    "deferred_messaged_7d": 1,
+    "deferred_core_notice_within_7d": 1,
+    "refused_G5_markup_in_a_field": 1,
+    "unmeasured": 0,
+    "unmeasured_bar": 5
+  },
+  "total_would_be_messaged": 41
+}

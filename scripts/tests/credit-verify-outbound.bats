@@ -1420,6 +1420,108 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   grep -q "arming=policy" "$out/tick.log"
 }
 
+c2_policy() {   # <jq object for the "uvn-status:c2" row | "" for no row>: uvn-status armed and dated, class C as given
+  local row="${1:-}"
+  jq --argjson c2 "${row:-null}" '.armed_families = ({"uvn-status": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}
+        + (if $c2 == null then {} else {"uvn-status:c2": $c2} end))' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+  export CVO_POLICY="$TEST_TMPDIR/p.json" CVO_UNSIGNED_ALL=0      # production: the rows and their dates decide
+}
+uvn_calls() { grep -- "--segment $1 --campaign uvn-status " "$CALLS" | grep -c -- "$2" || true; }   # <segment> <pattern>
+
+@test "[key=class-c-is-a-row] with no uvn-status:c2 row the armed uvn-status family still defers every corrected ask, check and apply, both segments" {
+  c2_policy ""
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  for seg in paid free; do
+    [ "$(uvn_calls "$seg" "--no-correction .*--check-recipients")" -ge 1 ]
+    [ "$(uvn_calls "$seg" "--no-correction .*--mode apply")" -ge 1 ]
+    [ "$(uvn_calls "$seg" "--campaign uvn-status --list\|--campaign uvn-status --mode\|--campaign uvn-status --check")" -eq 0 ]
+    grep -q "uvn-status-$seg: class C (/c2 corrected asks) signed-only (--no-correction)" "$out/tick.log"
+  done
+}
+
+@test "[key=class-c-is-a-row] a live, paid, dated uvn-status:c2 row sends the corrected ask on both segments - and only the uvn-status family loses the flag" {
+  c2_policy '{"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}'
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "uvn-status:c2=live/paid from 2020-01-01T00:00Z" "$out/tick.log"
+  for seg in paid free; do
+    grep -q "uvn-status-$seg: class C (/c2 corrected asks) ARMED by its row" "$out/tick.log"
+    [ "$(uvn_calls "$seg" "--mode apply")" -ge 1 ]                 # the family applied...
+    [ "$(uvn_calls "$seg" "--no-correction")" -eq 0 ]              # ...and no call of it, check or apply, defers class C
+  done
+  if grep -q -- "--no-correction" "$CALLS"; then false; fi         # no other family ever carried the flag
+}
+
+@test "[key=class-c-is-a-row] paid:false on the uvn-status:c2 row keeps the paid segment signed-only while free sends" {
+  c2_policy '{"live": true, "paid": false, "unsigned_from": "2020-01-01T00:00Z"}'
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  [ "$(uvn_calls paid "--no-correction .*--mode apply")" -ge 1 ]
+  [ "$(uvn_calls free "--no-correction")" -eq 0 ]
+  [ "$(uvn_calls free "--mode apply")" -ge 1 ]
+  grep -q "uvn-status-paid: class C (/c2 corrected asks) signed-only (--no-correction)" "$out/tick.log"
+  grep -q "uvn-status-free: class C (/c2 corrected asks) ARMED by its row" "$out/tick.log"
+}
+
+@test "[key=class-c-is-a-row] live:false (with paid true or false), a missing date and a future date each leave class C signed-only on BOTH segments (fail closed)" {
+  # QA on #1939: {live:false, paid:true} is the state an operator leaves behind when they disarm by setting live false
+  for row in '{"live": false, "paid": false, "unsigned_from": "2020-01-01T00:00Z"}' \
+             '{"live": false, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}' \
+             '{"live": true, "paid": true}' \
+             '{"live": true, "paid": true, "unsigned_from": "2099-01-01T00:00Z"}'; do
+    : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
+    c2_policy "$row"
+    run -0 "$SCRIPT"
+    for seg in paid free; do
+      [ "$(uvn_calls "$seg" "--no-correction .*--mode apply")" -ge 1 ]
+      [ "$(uvn_calls "$seg" "--mode apply")" -eq "$(uvn_calls "$seg" "--no-correction .*--mode apply")" ]
+      [ "$(uvn_calls "$seg" "--no-correction")" -eq "$(uvn_calls "$seg" "")" ]     # checks too: no call without the flag
+      grep -q "uvn-status-$seg: class C (/c2 corrected asks) signed-only (--no-correction)" "$(ls -d "$CVO_OUT_ROOT"/*)/tick.log"
+    done
+  done
+}
+
+@test "[key=class-c-is-a-row] the uvn-status:c2 row never arms the family: with no uvn-status row nothing applies" {
+  jq '.armed_families = {"uvn-status:c2": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+  export CVO_POLICY="$TEST_TMPDIR/p.json" CVO_UNSIGNED_ALL=0
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"   # legacy files change nothing
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "uvn-status-paid: DRY-RUN tick (no send): arming=policy uvn-status=not armed" "$out/tick.log"
+  if grep -q -- "--mode apply" "$CALLS"; then false; fi
+}
+
+@test "[key=class-c-is-a-row] legacy arming and the harness's unsigned-all seam never arm class C; a malformed uvn-status:c2 row arms NOTHING and pages" {
+  # legacy: no armed_families at all - the code has no date for the sub-class, so the flag is always passed
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  CVO_UNSIGNED_ALL=1 run -0 "$SCRIPT"
+  for seg in paid free; do
+    [ "$(uvn_calls "$seg" "--no-correction .*--mode apply")" -ge 1 ]
+    [ "$(uvn_calls "$seg" "--mode apply")" -eq "$(uvn_calls "$seg" "--no-correction .*--mode apply")" ]
+  done
+  # a row that cannot be read unambiguously is malformed for the whole policy, like any family row
+  for row in '{"live": true, "paid": true, "unsigned_from": "tomorrow"}' '{"live": true}' '"yes"'; do
+    : > "$CALLS"; : > "$CALLS.page-confirmed"; : > "$CALLS.page"; rm -rf "$CVO_OUT_ROOT"
+    c2_policy "$row"
+    run -0 "$SCRIPT"
+    out="$(ls -d "$CVO_OUT_ROOT"/*)"
+    grep -q "ARMING MALFORMED: .*armed_families (or a row of it) is malformed; NOTHING is armed this tick" "$out/tick.log"
+    if grep -q -- "--mode apply" "$CALLS"; then false; fi
+  done
+  # and a look-alike key is not the sub-class
+  : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
+  jq '.armed_families = {"uvn-status": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"},
+                         "uvn-status:c3": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "ARMING MALFORMED" "$out/tick.log"
+  if grep -q -- "--mode apply" "$CALLS"; then false; fi
+}
+
 @test "outbound tick: LIVE applies the FREE segments only; paid needs its own flag (p1: paid after one clean free day)" {
   touch "$CVO_ETC/credit-verify-outbound.live"
   run -0 "$SCRIPT"

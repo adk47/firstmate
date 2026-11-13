@@ -1,0 +1,132 @@
+{
+ "bucket_x_tick": {
+  "already_asked | tick=deferred:run_size": 1,
+  "already_asked | tick=not_reached:-": 8,
+  "held_by_rule | tick=deferred:comm_state": 7,
+  "held_by_rule | tick=deferred:core_notice_within_7d": 6,
+  "held_by_rule | tick=deferred:g1_contact_fresh": 1,
+  "held_by_rule | tick=deferred:messaged_7d": 5,
+  "held_by_rule | tick=deferred:no_channel": 1,
+  "held_by_rule | tick=deferred:run_size": 25,
+  "held_by_rule | tick=failed:rc=2": 1,
+  "held_by_rule | tick=not_reached:-": 23,
+  "held_by_rule | tick=refused_unledgered:G5": 2,
+  "owed_never_asked_nothing_in_the_way | tick=deferred:run_size": 3,
+  "owed_never_asked_nothing_in_the_way | tick=not_reached:-": 4,
+  "told_with_us_never_asked | tick=deferred:c2_signed_only": 33,
+  "told_with_us_never_asked | tick=deferred:core_notice_within_7d": 1,
+  "told_with_us_never_asked | tick=deferred:run_size": 18,
+  "told_with_us_never_asked | tick=not_reached:-": 61
+ },
+ "buckets": {
+  "already_asked": 9,
+  "held_by_rule": 71,
+  "owed_never_asked_nothing_in_the_way": 7,
+  "told_with_us_never_asked": 113
+ },
+ "by_segment": {
+  "free": {
+   "already_asked": 7,
+   "held_by_rule": 48,
+   "owed_never_asked_nothing_in_the_way": 5,
+   "told_with_us_never_asked": 85
+  },
+  "paid": {
+   "already_asked": 2,
+   "held_by_rule": 23,
+   "owed_never_asked_nothing_in_the_way": 2,
+   "told_with_us_never_asked": 28
+  }
+ },
+ "ledger_rows_without_account": 1767,
+ "listed": 3251,
+ "measured_at": "2026-11-13T12:03:13+00:00",
+ "owing_generated_at": "2026-11-13T10:39:33+00:00",
+ "owing_list": "/root/h2-runs/sched/20261113T1000Z/owing-uvn.json",
+ "population_ledger_facts": {
+  "free:document_on_file": 2024,
+  "free:emailed_support_90d": 72,
+  "free:fraud_account_hold": 37,
+  "free:listed": 2299,
+  "free:no_sent_row_ever": 654,
+  "free:sent_ask_any_campaign": 127,
+  "free:sent_row_last_7d": 3,
+  "free:status_line_names_listed_rows(class_c)": 1513,
+  "free:tick_outcome:G5": 4,
+  "free:tick_outcome:HELD": 1,
+  "free:tick_outcome:c2_signed_only": 381,
+  "free:tick_outcome:comm_state": 29,
+  "free:tick_outcome:core_notice_within_7d": 36,
+  "free:tick_outcome:g1_contact_fresh": 6,
+  "free:tick_outcome:gate_timeout:": 11,
+  "free:tick_outcome:inapp_not_armed": 2,
+  "free:tick_outcome:messaged_7d": 34,
+  "free:tick_outcome:no_channel": 11,
+  "free:tick_outcome:none_recorded": 1231,
+  "free:tick_outcome:rc=2": 4,
+  "free:tick_outcome:read_failed_hold": 4,
+  "free:tick_outcome:run_size": 534,
+  "free:tick_outcome:the": 11,
+  "paid:document_on_file": 848,
+  "paid:emailed_support_90d": 35,
+  "paid:fraud_account_hold": 39,
+  "paid:listed": 952,
+  "paid:no_sent_row_ever": 279,
+  "paid:sent_ask_any_campaign": 57,
+  "paid:sent_row_last_7d": 2,
+  "paid:status_line_names_listed_rows(class_c)": 645,
+  "paid:tick_outcome:G5": 2,
+  "paid:tick_outcome:SKIPPED": 2,
+  "paid:tick_outcome:c2_signed_only": 142,
+  "paid:tick_outcome:comm_state": 18,
+  "paid:tick_outcome:core_notice_within_7d": 23,
+  "paid:tick_outcome:credits": 1,
+  "paid:tick_outcome:gate_timeout:": 1,
+  "paid:tick_outcome:inapp_not_armed": 1,
+  "paid:tick_outcome:messaged_7d": 18,
+  "paid:tick_outcome:no_channel": 3,
+  "paid:tick_outcome:none_recorded": 587,
+  "paid:tick_outcome:run_size": 154
+ },
+ "proof_on_file": "read",
+ "sample": 200,
+ "seed": 20261113,
+ "skipped": {
+  "marker_only_notice": {
+   "marker_has_noticeSentAt": 1763,
+   "marker_without_noticeSentAt": 3,
+   "notice_year_month:2026-10": 661,
+   "notice_year_month:2026-11": 1102
+  },
+  "marker_only_replica_users": 1766,
+  "marker_only_users": 1766,
+  "owed_rows_carrying_marker": 7039,
+  "owed_rows_total": 54235,
+  "paid": 1622,
+  "population": 4754,
+  "rests_on": {
+   "ledger_and_marker": 86,
+   "ledger_only": 2902,
+   "marker_only": 1766
+  },
+  "sample": 200,
+  "sample_split": {
+   "core_marker_only:notice_2026-10": 30,
+   "core_marker_only:notice_2026-11": 42,
+   "ledger_sent_uvn_ask:delivered_id": 124,
+   "ledger_sent_uvn_ask:delivered_id:reply_or_proof_stamped": 4
+  }
+ },
+ "sub": {
+  "already_asked/gap-ask": 9,
+  "held_by_rule/document_on_file": 52,
+  "held_by_rule/fraud_lens_account_hold": 2,
+  "held_by_rule/gate:no_channel": 1,
+  "held_by_rule/no_ask:approval_path": 8,
+  "held_by_rule/rows_unshowable": 8,
+  "owed_never_asked_nothing_in_the_way/tick:not_reached": 4,
+  "owed_never_asked_nothing_in_the_way/tick:run_size": 3,
+  "told_with_us_never_asked/class_c:status-doc-received": 28,
+  "told_with_us_never_asked/class_c:status-team-review": 85
+ }
+}

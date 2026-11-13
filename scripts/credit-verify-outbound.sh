@@ -288,8 +288,14 @@ declare -A UNSIGNED_FROM=(
   # +60 health + zero-read clean), but it needed two hand-applied /l2 rules (180-d filing, roles) not yet in the
   # renderer - it is dated only from a clean batch on the deployed /l2 renderer
 )
-# a SUB-class inside a family: uvn-status:c2 = the asks that carry the /c2 correction (class C, never sent yet). Until
-# its date is set the uvn-status family passes --no-correction and the gate defers them (check == send)
+# a SUB-class inside a family: uvn-status:c2 = the asks that carry the /c2 correction (class C). Until it is armed the
+# uvn-status family passes --no-correction and the gate defers them (check == send).
+# [key=class-c-is-a-row] It has no date in this file and is armed ONLY by its own armed_families row
+# ("uvn-status:c2": {live, paid, unsigned_from}), per segment: see c2_args. Why a row and not a constant: on
+# 2026-11-13 the gate's first answer for 949 of the 3,251 users on the uvn-status list was DEFERRED c2_signed_only,
+# and no row could say otherwise (read_arming refused the key as malformed), so sending them took a code change and
+# a deploy. "never sent yet" was also no longer true: 390 /c2 asks went on 2026-11-01 (ledger 6338-6994) and 50 of
+# them carry a returned document. data/rapid-verif-final-h3/report.md has both measurements.
 declare -A FULL_CAP_FROM=()
 # bats only (cfg reads env only under the harness): one dated full-cap entry "family=ISO" to test a REACHED date
 FULL_CAP_FROM_TEST="$(cfg CVO_FULL_CAP_FROM_TEST "")"
@@ -1478,7 +1484,10 @@ import datetime as _dt
 # typo that only logs arms nothing while the tick reports a healthy policy - the family then stalls indefinitely with
 # no page, which is the opposite of what "malformed pages" promises. Both checks below run BEFORE the source line is
 # printed, so a typo arms NOTHING and pages instead of being read as "policy mode, family dry".
-KNOWN = {"r1", "status-doc-received", "uvn-status", "claim-status", "claim-proof-ask", "proof-need-ask", "reply-due"}
+# "uvn-status:c2" is a SUB-class of uvn-status, not a family ([key=class-c-is-a-row]): its row arms the /c2 corrected
+# ask and nothing else, and the uvn-status row still decides whether the family applies at all
+KNOWN = {"r1", "status-doc-received", "uvn-status", "claim-status", "claim-proof-ask", "proof-need-ask", "reply-due",
+         "uvn-status:c2"}
 def _instant(v):
     for fmt in ("%Y-%m-%dT%H:%MZ", "%Y-%m-%dT%H:%M:%SZ"):
         try:
@@ -1531,7 +1540,7 @@ if [ "$ARMING" = "policy" ]; then
     _key="$_fam"; _datekey="$_fam"
     case "$_fam" in
       r1|status-doc-received) _key="r1"; _datekey="status-doc-received" ;;
-      uvn-status|claim-status|claim-proof-ask|proof-need-ask|reply-due) ;;
+      uvn-status|claim-status|claim-proof-ask|proof-need-ask|reply-due|uvn-status:c2) ;;
       *) log "ARMING ROW IGNORED: '$_fam' is not a family this tick runs (r1|status-doc-received, uvn-status, claim-status, claim-proof-ask, proof-need-ask); it arms nothing"
          continue ;;   # read_arming() already fails such a row closed; this is the belt to its braces
     esac
@@ -1561,6 +1570,22 @@ family_armed() {
   esac
   [ "${ZR_MISSING:-0}" = 1 ] && v=0
   printf '%s' "$v"
+}
+# <segment> -> prints "--no-correction" unless class C is armed for that segment ([key=class-c-is-a-row]). Armed means
+# ALL of: the policy is in `policy` mode, the "uvn-status:c2" row says live (and ALSO paid, for the paid segment), and
+# the row's own unsigned_from is reached. `live: false` is the one off switch for BOTH segments: unlike family_armed,
+# the paid bit never stands in for the live bit here (QA on #1939 - {live:false, paid:true} kept paid class C sending
+# after the documented disarm). Legacy and malformed arming, a missing row, a row with no date and a future date
+# all print the flag, so the gate defers a corrected ask at the check and at the send alike. It never arms the
+# family: uvn-status applies only on its own row, and a dry uvn-status with an armed c2 row is still a dry run.
+c2_args() {
+  local v=0
+  if [ "$ARMING" = "policy" ]; then
+    v="${ARMED_LIVE[uvn-status:c2]:-0}"
+    if [ "$1" = "paid" ] && [ "${ARMED_PAID[uvn-status:c2]:-0}" != 1 ]; then v=0; fi
+  fi
+  if [ "$v" = 1 ] && reached "${UNSIGNED_FROM[uvn-status:c2]:-}"; then return 0; fi
+  printf '%s\n' "--no-correction"
 }
 EXCL_ARGS=(); [ -s "$EXCLUDE" ] && EXCL_ARGS=(--exclude-users "$EXCLUDE")
 RUN_START="$(date -u +%FT%TZ)"
@@ -1800,14 +1825,17 @@ credit_families() {
       log "reply-due: the page is NOT done (a segment deferred: budget, fit, sign-off or cap); the cursor stays at $rd_cur"
     fi
   fi
-  local c2=(); reached "${UNSIGNED_FROM[uvn-status:c2]:-}" || c2=(--no-correction)
+  local c2=() seg
+  for seg in paid free; do log "uvn-status-$seg: class C (/c2 corrected asks) $([ -z "$(c2_args "$seg")" ] && echo "ARMED by its row" || echo "signed-only (--no-correction)")"; done
   # a REBUILD that fails still ends the group: the family behind it would read a list the builder did not just write,
   # and messaging from a stale owing list is how a user gets told twice. A family that fails is different - the next
   # family has its own list and its own facts.
   rebuild_owing_uvn "uvn-status paid" || return 1
+  mapfile -t c2 < <(c2_args paid)
   fam family uvn-status paid "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return $?
   fam family r1 paid "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return $?
   rebuild_owing_uvn "uvn-status free" || return 1
+  mapfile -t c2 < <(c2_args free)
   fam family uvn-status free "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return $?
   fam family r1 free "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return $?
   return "$FAM_RC"
