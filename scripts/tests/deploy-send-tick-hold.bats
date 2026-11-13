@@ -210,8 +210,29 @@ drop_lock() { kill "$HOLDER" 2>/dev/null || true; wait "$HOLDER" 2>/dev/null || 
   [[ "$minute" =~ ^[0-9]+$ ]] && [[ "$hour" =~ ^[0-9]+$ ]]   # a fixed time of day, or this check cannot speak for it
   day=$(( 1762300000 / 86400 * 86400 ))
   # GitHub starts a scheduled run late (04:04Z was typical); every minute of the first ten must be a GO.
+  # No --cadence and no --hold-min: the guard's SHIPPED defaults, which the cases below hold to the cron line.
+  # (With --cadence 7200 written here, this case went on passing at 05:00Z after the tick went hourly.)
   for late in 0 1 4 10; do
-    run_hold --now "$(( day + hour * 3600 + minute * 60 + late * 60 ))" --cadence 7200 --hold-min 10
+    run_hold --now "$(( day + hour * 3600 + minute * 60 + late * 60 ))"
     [ "$status" -eq 0 ]
   done
+}
+
+# ── The guard's cadence is the outbound cron's period ───────────────────────
+# The tick went from 2-hourly to hourly on 2026-11-13 by one line in scripts/install-aux-units.sh. The guard and
+# deploy.sh each carried their own 7200; left there, the guard would not know the odd-hour boundaries exist and a
+# deploy would start on them. This case asks the guard with its SHIPPED defaults at every hour of a day, so a
+# default left on 7200 fails on the odd hours.
+@test "with no --cadence, EVERY tick boundary of a day is guarded (an hourly tick has 24, not 12)" {
+  day=$(( 1762300000 / 86400 * 86400 ))
+  n=0
+  for (( b = day; b < day + 86400; b += 3600 )); do
+    run_hold --now "$(( b - 300 ))"         # five minutes before this tick
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"next-tick-in-300s"* ]]
+    run_hold --now "$b"                     # the boundary itself
+    [ "$status" -eq 3 ]
+    n=$(( n + 1 ))
+  done
+  [ "$n" -eq 24 ]
 }

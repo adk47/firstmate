@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# credit-verify-outbound.sh: the 2-hourly outbound tick. Stubs stand in for the deployed builders, runner and health
+# credit-verify-outbound.sh: the outbound tick (hourly cron since 2026-11-13). Stubs stand in for the deployed builders, runner and health
 # check; the tests pin the MODES (kill / dry-run / live / paid gate), the per-family steps and the auto-kill.
 
 setup() {
@@ -612,7 +612,7 @@ PY
   # Explicit pid, never a bare `wait` (bats' BATS_TEST_TIMEOUT watchdog is a child too).
   wait "$holder" || true   # asserts on files, not the child's status
   [ ! -s "$CALLS" ]
-  grep -q "STALE: tick pid 4242 has held .*tick.lock for 9[0-9][0-9][0-9]s (> cadence 7200s); this tick exits, nothing taken over" "$(newest_tick)"
+  grep -q "STALE: tick pid 4242 has held .*tick.lock for 9[0-9][0-9][0-9]s (> 7200s, longer than any tick may run); this tick exits, nothing taken over" "$(newest_tick)"
 }
 
 @test "outbound tick (QA #1587): a started family is bounded in TIME - none starts without its reserve before the deadline, and the apply is cut to what fits" {

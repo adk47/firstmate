@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # credit-verify-outbound.sh: the ONE server-side outbound tick for credit verification (captain 2026-10-30 14:4xZ
 # "durable, on servers, bi-directional"; plan: firstmate data/proof-loop-lead-fable-p1/unattended-1030.md). Every
-# hand-run batch becomes this tick, every 2 h on node-8 (cron from install-aux-units.sh). It never decides anything
-# itself: per campaign family it runs the DEPLOYED audience builder and the DEPLOYED runner, whose gates are code
+# hand-run batch becomes this tick, hourly on node-8 since 2026-11-13 (cron from install-aux-units.sh; every 2 h
+# before that). It never decides anything itself: per campaign family it runs the DEPLOYED audience builder and the
+# DEPLOYED runner, whose gates are code
 # (copy-ref locks, comm_state, R8/account gate, identity G1-G5, email reachability, C11 dry-run == send, refusals
 # recorded with reasons). Per family and segment:
 #
@@ -97,9 +98,13 @@ CLAIM_CAP="$(cfg CVO_CLAIM_CAP 250)"
 REFUSAL_SPIKE="$(cfg CVO_REFUSAL_SPIKE 0.20)"
 FIRST_CAP=100                          # [key=scale-now]: a family's first unsigned ticks, until v1's 10-sample line
 # p1 22:0xZ / 519, b1 518, QA #1587: a live-gate check costs ~6-15 s a user (10-31), and the 20:00Z dry tick ran past
-# 22:00Z holding the lock, so the 22:00Z tick exited. A tick must end inside its 2 h cadence. The per-family SIZE is the
-# family cap (FIRST_CAP before v1's date, the full cap after - #1596 runs read-only checks on 4 workers); the TIME is
-# bounded at every step by a hard deadline inside the cadence:
+# 22:00Z holding the lock, so the 22:00Z tick exited. A tick had to end inside its 2 h cadence.
+# Since 2026-11-13 the cron is HOURLY and the two deadlines below were NOT shortened with it (cutting them is how
+# nothing was sent on 2026-11-11, see [key=tick-deadline-fits-the-send]): a tick may run up to TICK_HARD_S, past the
+# next fire, which then meets the held lock and exits in one line. A tick longer than an hour costs that one fire,
+# never an overlap, and the fire after it runs - so a day never holds fewer ticks than the 2-hourly cron gave it.
+# The per-family SIZE is the family cap (FIRST_CAP before v1's date, the full cap after - #1596 runs read-only checks
+# on 4 workers); the TIME is bounded at every step by a hard deadline:
 #  - no NEW family after TICK_BUDGET_S, and none whose worst case (check + bodies = 2 x cap x CHECK_S_PER_USER, plus
 #    RESERVE_PAD_S) does not fit before TICK_HARD_S;
 #  - the bodies are skipped once TICK_HARD_S is passed; the apply is cut to what fits before it at APPLY_S_PER_USER.
@@ -123,7 +128,8 @@ TICK_HARD_S="$(cfg CVO_TICK_HARD_S 6900)"
 CLAIM_GROUP_BUDGET_S="$(cfg CVO_CLAIM_GROUP_BUDGET_S 1500)"
 # A family that is not reached is counted per family in $STATE/starved-<family>-<segment> and, when ARMED, paged on its
 # STARVED_PAGE_AT-th consecutive unreached tick and again every STARVED_REPAGE_EVERY ticks: "armed" must never again be
-# indistinguishable from "running".
+# indistinguishable from "running". Both count TICKS, so on the hourly cron (2026-11-13) they are 2 h and 12 h of wall
+# clock, where they were 4 h and 24 h; the numbers were not changed with the schedule.
 STARVED_PAGE_AT="$(cfg CVO_STARVED_PAGE_AT 2)"
 STARVED_REPAGE_EVERY="$(cfg CVO_STARVED_REPAGE_EVERY 12)"
 # spec-deploy-lock-deferral-m1 (Fable 2026-11-05 12:4xZ + addenda 14:3xZ/14:4xZ): a TRANSIENT condition is not a
@@ -188,13 +194,16 @@ APPLY_S_PER_USER="$(cfg CVO_APPLY_S_PER_USER 40)"
 APPLY_USER_WORST_S="$(cfg CVO_APPLY_USER_WORST_S 200)"
 APPLY_WORKERS="$(cfg CVO_APPLY_WORKERS 6)"
 TICK_ELAPSED0="$(cfg CVO_TICK_ELAPSED0 0)"     # bats only: the tick started this many seconds ago
-TICK_CADENCE_S=7200
+# How long a lock holder may have run before a fire that meets it calls it STALE: longer than TICK_HARD_S allows any
+# tick. It was named for the cadence while the cron was 2-hourly; the cron is hourly now and this is not the cadence.
+TICK_STALE_S=7200
 TIMEOUT_BIN="$(cfg CVO_TIMEOUT_BIN /usr/bin/timeout)"   # QA #1587: every stage of a started family runs under the deadline
 # The READER alarm for the armed claim-proof-ask family (p1 rule 8 / QA #1758 Important 1 / driver 17:5xZ). The 30h
 # freshness gate refuses NEW asks when the daily code check is stale; it says nothing about the asks already out, whose
 # replies then go unread with no page. These are the alarm's own knobs, never a send's: the limit matches
 # claim_proof_ask.DAILY_CHECK_MAX_AGE_H, the unread window is a day (the class's own dwell), and the repeat is 6h so a
-# reader that stays down is not 12 pages a day but is never silent (model-chain's watchdog precedent).
+# reader that stays down is not a page every tick (24 a day on the hourly cron) but is never silent (model-chain's
+# watchdog precedent).
 CLAIM_PROOF_STATE="$(cfg CVO_CLAIM_PROOF_STATE /var/lib/claim-proof-check)"
 CLAIM_PROOF_LIMIT_H="$(cfg CVO_CLAIM_PROOF_LIMIT_H 30)"
 CLAIM_PROOF_UNREAD_H="$(cfg CVO_CLAIM_PROOF_UNREAD_H 24)"
@@ -540,7 +549,7 @@ install -d -m 700 "$STATE" "$OUT_ROOT" "$OUT" || exit 2
 SEND_WALK=$(( CHECK_ENTRIES > CAP ? CHECK_ENTRIES : CAP ))
 SEND_WORST_S=$(( 2 * SEND_WALK * CHECK_S_PER_USER + RESERVE_PAD_S ))
 if [ "$TICK_HARD_S" -lt "$SEND_WORST_S" ]; then
-  log "TICK DEADLINE TOO SHORT: TICK_HARD_S=${TICK_HARD_S}s cannot fit the send family's worst case ${SEND_WORST_S}s (2 x ${SEND_WALK} entries x ${CHECK_S_PER_USER}s + ${RESERVE_PAD_S}s pad). family() will refuse to start uvn-status on EVERY tick, so NOTHING will be sent. Raise CVO_TICK_HARD_S to at least ${SEND_WORST_S} (the shipped value is 6900, inside the ${TICK_CADENCE_S}s cadence)."
+  log "TICK DEADLINE TOO SHORT: TICK_HARD_S=${TICK_HARD_S}s cannot fit the send family's worst case ${SEND_WORST_S}s (2 x ${SEND_WALK} entries x ${CHECK_S_PER_USER}s + ${RESERVE_PAD_S}s pad). family() will refuse to start uvn-status on EVERY tick, so NOTHING will be sent. Raise CVO_TICK_HARD_S to at least ${SEND_WORST_S} (the shipped value is 6900)."
   # page_confirmed, not page: `page` delegates to notify(), whose last command is slack_notify_critical and whose
   # slack_notify ends `|| true`, so it reports success even when Slack rejected the post or carried no credentials.
   # A warning that cannot be delivered is the same silent failure this guard exists to end, so the undelivered case is
@@ -575,11 +584,12 @@ py -c 'import sys; sys.path.insert(0, sys.argv[1]); from credit_review import ve
 exec 9>>"$STATE/tick.lock"
 if ! flock -n 9; then
   # the measured reason (b1 518 / p1 519 (2)): who holds it and for how long. A held flock is a LIVE tick (it dies with its
-  # holder), possibly mid-apply - so a tick past its cadence is logged STALE for a human, never killed or taken over.
+  # holder), possibly mid-apply - so a tick held past TICK_STALE_S is logged STALE for a human, never killed or taken
+  # over. Under the hourly cron a fire meeting a tick that is still inside its deadline is the ordinary case, not STALE.
   read -r hpid hstart < "$STATE/tick.holder" 2>/dev/null || { hpid="?"; hstart=""; }
   age=$(( $(date -u +%s) - ${hstart:-$(date -u +%s)} ))
-  if [ "$age" -gt "$TICK_CADENCE_S" ]; then
-    log "STALE: tick pid $hpid has held $STATE/tick.lock for ${age}s (> cadence ${TICK_CADENCE_S}s); this tick exits, nothing taken over"
+  if [ "$age" -gt "$TICK_STALE_S" ]; then
+    log "STALE: tick pid $hpid has held $STATE/tick.lock for ${age}s (> ${TICK_STALE_S}s, longer than any tick may run); this tick exits, nothing taken over"
   else
     log "another tick holds $STATE/tick.lock (pid $hpid, ${age}s); exit"
   fi

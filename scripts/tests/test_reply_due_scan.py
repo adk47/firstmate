@@ -1048,6 +1048,7 @@ class TriggerPrefilterTest(ReplyDueScanTest):
         # far fewer threads than a live tick's ~840 - this is the PESSIMISTIC bound. Even so: a day of ticks (every 2 h,
         # 12 x 900 s) at the AFTER cost covers the whole measured backlog several times over (threads_customer_waiting
         # 3,053 on the 02:00Z board; 1,798 candidates carried); at the BEFORE cost one tick reached ~30 of them.
+        # (The tick is hourly since 2026-11-13, so a day holds 24 ticks; 12 is kept as the lower bound it was measured at.)
         day_s = 12 * rds.CHECK_BUDGET_S
         self.assertGreater(day_s / per_thread_after, 3 * 3053)
         self.assertGreater(rds.CHECK_BUDGET_S / per_thread_after, 1000)

@@ -1671,7 +1671,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         report.note("documents_on_file")
                         continue
                     # r8 (firstmate 771) (3): a user whose own read failed on a previous tick is HELD - the walk does not
-                    # walk into the same unreadable read again until the hold expires (READ_RETRY_H inside the cadence).
+                    # walk into the same unreadable read again until the hold expires (READ_RETRY_H; see verify_ledger).
                     hold_ukey = str(p["user"].get("email") or "").strip().lower()
                     hold_until = read_hold_until(path, campaign, hold_ukey, now=now) if mode == "apply" else ""
                     if hold_until:
@@ -1814,7 +1814,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         report.page["end"] = _cap_end
         report.not_walked = n_listed - (report.page["end"] - report.page["start"])
     # r5 / firstmate 764, amended by Fable 2026-11-05 00:1xZ (firstmate 769): a user whose own send-time read
-    # failed is recorded here, once, at the end of the walk - a hold that expires at the NEXT TICK (2 h), never the
+    # failed is recorded here, once, at the end of the walk - a hold that expires after READ_RETRY_H (1 h), so on the
+    # hourly cron the retry lands on the tick after next (see READ_RETRY_H in verify_ledger.py), never the
     # 7-day refusal window, because an unreadable read is not the user refusing anything and a week-long suppression
     # over one bad query is the starvation #1780 exists to end. Three consecutive failed reads page a human.
     # APPLY ONLY (Fable 769): a dry run is a read, so it never writes a hold row. Empty unless something failed, so

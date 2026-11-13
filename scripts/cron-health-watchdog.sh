@@ -193,7 +193,7 @@ fi
 # ──────────────────────────────────────────────────────────────
 COPY_GATE="${CRON_HEALTH_COPY_GATE-$_WATCHDOG_DIR/outbound_copy/gate.py}"   # `-`, not `:-`: "" disarms the block
 COPY_STORE="${CRON_HEALTH_COPY_STORE:-/var/lib/hydra/outbound-copy}"
-COPY_REVIEW_MAX_AGE_S="${CRON_HEALTH_COPY_REVIEW_MAX_AGE_S:-14400}"          # 4h = two send ticks with no review round
+COPY_REVIEW_MAX_AGE_S="${CRON_HEALTH_COPY_REVIEW_MAX_AGE_S:-14400}"          # 4h = four send ticks with no review round on the hourly cron (two when it was 2-hourly)
 COPY_REVIEW_ALERT_STATE="${CRON_HEALTH_COPY_REVIEW_STATE:-/var/lib/cron-health-watchdog/copy-review-last-alert}"
 COPY_REVIEW_SEEN="${CRON_HEALTH_COPY_REVIEW_SEEN:-/var/lib/cron-health-watchdog/copy-review-store-seen}"
 COPY_REVIEW_ALERT_INTERVAL="${CRON_HEALTH_COPY_REVIEW_INTERVAL:-21600}"      # 6h

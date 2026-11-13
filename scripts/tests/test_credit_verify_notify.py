@@ -1603,9 +1603,11 @@ class RunTests(unittest.TestCase):
         row = verify_ledger.read_failure(db, campaign="uvn-status-paid", user_key="jane@example.com", now=t0)
         self.assertEqual(row["failures"], 1)
         self.assertEqual(row["next_retry_at"], "2026-11-05T01:30:00Z",
-                         "READ_RETRY_H is 1 h: inside the 2-hourly cadence, so the NEXT tick always retries")
+                         "READ_RETRY_H is 1 h")
+        # Hourly tick since 2026-11-13: 1 h is no longer INSIDE the cadence, it equals it (verify_ledger.READ_RETRY_H
+        # says what that costs). What still holds, and what this pins, is the wall-clock bound: a retry within 2 h.
         self.assertLess(verify_ledger.READ_RETRY_H * 3600, 7200,
-                        "a horizon equal to the cadence skips every other tick (r5 770 (2))")
+                        "a failed read is retried within 2 h (r5 770 (2))")
         self.assertTrue(row["reason"].startswith("read failed:"), "the reason names the failure, not a refusal")
         self.assertEqual(verify_ledger.refusal_hold(db, "uvn-status-paid", "jane@example.com", None, uid), {},
                          "no refusal hold: a failed read must never suppress an account for RECHECK_DAYS")

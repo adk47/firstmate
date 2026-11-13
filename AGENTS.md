@@ -57,7 +57,7 @@ posts a rollout status, and mobile is Phase 2 — both are silent on purpose, so
 expected silence there is not a watcher failure (details below). Deploy and
 release stay decoupled: the tag + announcement is a labeling event after the
 fact, never a gate. **Merging to `main` does not deploy**: `deploy.yml` runs on
-a 05:00Z schedule or a dispatch only, so a merged fix is not on node-8 until a
+a 05:38Z schedule or a dispatch only, so a merged fix is not on node-8 until a
 deploy run SUCCEEDS on a head containing it (`/opt/hydra/.deployed-sha`). Where
 delivery hours go, and the standing rules: `docs/delivery-velocity.md`
 (`scripts/cycle-time.py` measures it).

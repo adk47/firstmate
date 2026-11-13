@@ -100,7 +100,7 @@
       "scope": "capture-only"
     },
     "credit-verify-outbound": {
-      "description": "scripts/credit-verify-outbound.sh (cron /etc/cron.d/credit-verify-outbound, every 2 h): the server-side OUTBOUND tick for credit verification (captain 2026-10-30 14:4xZ). Sends approved notes (uvn-status ask, R1 receipt; more families as their PRs land) through the deployed gate; it APPROVES NOTHING. Registered for visibility (p1 plan unattended-1030).",
+      "description": "scripts/credit-verify-outbound.sh (cron /etc/cron.d/credit-verify-outbound, hourly since 2026-11-13, every 2 h before): the server-side OUTBOUND tick for credit verification (captain 2026-10-30 14:4xZ). Sends approved notes (uvn-status ask, R1 receipt; more families as their PRs land) through the deployed gate; it APPROVES NOTHING. Registered for visibility (p1 plan unattended-1030).",
       "entrypoints": [
         "credit-verify-outbound.sh"
       ],

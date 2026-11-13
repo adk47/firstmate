@@ -2112,7 +2112,7 @@ class FailedReadHoldTest(UvnStatusTests):
         self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["4"], "user 1 is held: not walked, not sent")
         self.assertTrue(any(o["user"] == "1" and "read_failed_hold" in str(o["reason"]) for o in rep.outcomes))
         self.assertIn("retry after", uvn_status.render(rep, "apply", "paid"))
-        # the hold expires inside the cadence: the next tick after it walks the user again
+        # the hold expires after READ_RETRY_H: a tick after that walks the user again
         later = NOW + timedelta(hours=verify_ledger.READ_RETRY_H + 1)
         rep2, gate2 = self.run_(mode="apply", gate=FakeGate(), query=q, now=later)
         self.assertEqual([p["user"]["id"] for _, p in gate2.calls], ["1", "4"])
@@ -2241,8 +2241,9 @@ class FailedReadHoldTest(UvnStatusTests):
             self.assertEqual(refuses, 0, "never the 7-day refusal hold: an unreadable read is not a refusal")
             expected = (NOW + timedelta(hours=verify_ledger.READ_RETRY_H)).strftime("%Y-%m-%dT%H:%M:%SZ")
             self.assertEqual(str(nxt), expected,
-                             "the hold expires INSIDE the tick cadence (r5 770 (2)), never after days")
-            self.assertLess(verify_ledger.READ_RETRY_H * 3600, 7200, "shorter than the 2-hourly tick")
+                             "the hold expires after READ_RETRY_H (r5 770 (2)), never after days")
+            # not "shorter than the tick": the tick is hourly since 2026-11-13 and 1 h equals it (see verify_ledger)
+            self.assertLess(verify_ledger.READ_RETRY_H * 3600, 7200, "a failed read is retried within 2 h")
 
 
 class ReplyDueListTest(unittest.TestCase):

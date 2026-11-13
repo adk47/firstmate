@@ -14,7 +14,7 @@ as one run. Nothing in it is new policy: the audience rules are the ones of the 
 
 | Trigger | When | Why |
 |---|---|---|
-| `claim-list-build.timer` | every 2 h at :20 (odd hours UTC) | 40 min ahead of the outbound tick (`0 */2`) |
+| `claim-list-build.timer` | every 2 h at :20 (odd hours UTC) | 40 min ahead of the even-hour outbound tick. The tick is hourly since 2026-11-13 and this timer was not moved with it: the odd-hour tick reads the same list, 100 min old |
 | `claim-list-build.path` | `/opt/hydra/.deployed-sha` changed | a deploy gets a list signed on the new head within minutes |
 
 Both start `claim-list-build.service`. All three are written by `scripts/install-aux-units.sh`, which

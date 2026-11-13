@@ -1786,10 +1786,11 @@ def hold_failed_users(db: Any, report: Report, campaign: str, *, now: Any = None
 
     Fable 2026-11-05 00:1xZ (firstmate 769) replaced the first cut of this: a failed read used to write the
     7-day *refusal* hold, which was wrong twice - an unreadable read is not the user refusing anything, and a
-    week-long hold would starve the account over one bad query. The hold now expires at the NEXT TICK
-    (``verify_ledger.READ_RETRY_H``), the failure is counted as CONSECUTIVE across ticks, and the third in a
-    row pages a human (``READ_FAILURES_TO_PAGE``). Best effort per user: a record that cannot be written is
-    reported (flag_failures), never fatal, because the round has already happened."""
+    week-long hold would starve the account over one bad query. The hold now expires after
+    ``verify_ledger.READ_RETRY_H`` (the next tick on the 2-hourly cron; every other tick on the
+    hourly one, see there), the failure is counted as CONSECUTIVE across ticks, and the third in
+    a row pages a human (``READ_FAILURES_TO_PAGE``). Best effort per user: a record that cannot be
+    written is reported (flag_failures), never fatal, because the round has already happened."""
     n = 0
     for h in report.failed_held:
         uid = str(h.get("user") or "")

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""claim-list-build: rebuild, sign and install the claim list. Run by claim-list-build.timer (every 2 h, ahead of the
-outbound tick) and by claim-list-build.path (every deploy), not by hand.
+"""claim-list-build: rebuild, sign and install the claim list. Run by claim-list-build.timer (every 2 h at :20,
+odd hours, so it is ahead of the even-hour outbound tick only - see docs/credit-verification/claim-list-build.md)
+and by claim-list-build.path (every deploy), not by hand.
 
     claim-list-build.py            build on the deployed head, sign, install
     claim-list-build.py --dry-run  build and sign into the run dir; the live list is not touched

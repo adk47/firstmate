@@ -2363,7 +2363,7 @@ fi
 # here, holding nothing, and the gate under the locks keeps its one look and its refusal.
 DEPLOY_TICK_HOLD_MIN="${HYDRA_DEPLOY_TICK_HOLD_MIN:-10}"
 DEPLOY_TICK_HOLD_MAX_S="${HYDRA_DEPLOY_TICK_HOLD_MAX_S:-900}"
-DEPLOY_TICK_CADENCE_S="${HYDRA_DEPLOY_TICK_CADENCE_S:-7200}"
+DEPLOY_TICK_CADENCE_S="${HYDRA_DEPLOY_TICK_CADENCE_S:-3600}"   # the outbound cron's period: hourly since 2026-11-13
 DEPLOY_TICK_PREWAIT_MAX_S="${HYDRA_DEPLOY_TICK_PREWAIT_MAX_S:-900}"
 if [ "${HYDRA_DEPLOY_SKIP_TICK_HOLD:-0}" != "1" ]; then
   prewait_rc=0
@@ -2404,12 +2404,13 @@ else
 fi
 # -- end of the deploy locks: everything below runs under them (QA #1604) --
 
-# firstmate 768 (3), measured 11-04: the credit outbound tick is 2-hourly and a deploy dispatched at 04:00Z ran INTO
+# firstmate 768 (3), measured 11-04: the credit outbound tick was 2-hourly and a deploy dispatched at 04:00Z ran INTO
 # the 04:03Z round - node-8 was mid-rsync while a tick built its audiences and read the ledger this deploy replaces.
 # The apply lock above cannot help: it protects an apply that has ALREADY started, and it says nothing about a tick
 # that begins 3 minutes after the rsync does. #1756 gives the outbound script deploy-lock awareness; until it lands
 # the deploy side holds the line - no deploy STARTS within HOLD_MIN of a tick boundary, and none starts while a tick
 # holds its flock. We WAIT (bounded) for the window, then fail closed: nothing is changed, a human re-dispatches.
+# The tick is hourly since 2026-11-13, so there is a boundary every hour and the cadence default is 3600.
 # This is the GATE, and it is deliberately impatient about a tick in flight (no --poll: the guard answers a whole
 # cadence, which no budget here covers) - the patient wait already happened above, before the locks. Reaching this
 # line with a tick running means one started in the seconds between that wait and the locks.

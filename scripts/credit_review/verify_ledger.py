@@ -206,6 +206,12 @@ RECHECK_DAYS = 7
 # tick counted the SAME failure again and the count only advanced on every OTHER tick - the 3-tick page landed on tick 5.
 # 1 h is inside the cadence with room for a tick that starts later than its boundary: the very next tick always sees an
 # expired hold and counts a new, consecutive failure.
+# 2026-11-13: the tick went HOURLY (scripts/install-aux-units.sh) and this number was NOT changed with it, so the rule
+# above is no longer met: 1 h now EQUALS the cadence. A hold written at 04:20 is live at the 05:03 tick, which skips the
+# user, so a failing read is retried on every OTHER tick. In wall-clock terms that is what the 2-hourly tick did (a retry
+# about every 2 h, the page about 4 h after the first failure); what is lost is "the next tick always retries". The
+# value that restores it has to be under an hour AND outlast the tick that wrote it, and ticks run 10 to 95 minutes:
+# that is a decision, not a constant to halve.
 READ_RETRY_H = 1
 # ... and three consecutive failed reads across ticks is a pattern, not a fluke: it pages a human.
 READ_FAILURES_TO_PAGE = 3
@@ -310,7 +316,8 @@ CREATE TABLE IF NOT EXISTS verify_refusal_holds (
   PRIMARY KEY (campaign, user_key)
 );
 -- Fable 2026-11-05 00:1xZ (firstmate 769), amending #1780: a user whose own send-time READ failed is held
--- until the NEXT TICK (2 h), never for the 7-day refusal window - an unreadable read is not a refusal, and
+-- for READ_RETRY_H (1 h), so on the hourly cron the retry lands on the tick after next (see READ_RETRY_H),
+-- never for the 7-day refusal window - an unreadable read is not a refusal, and
 -- suppressing the account for a week because one query failed is exactly the starvation #1780 exists to end.
 -- Separate table on purpose: the refusal counters must never be polluted by read failures, and a read
 -- failure must be visible (and pageable) for campaigns that do not honour refusal holds at all.
@@ -320,7 +327,7 @@ CREATE TABLE IF NOT EXISTS verify_read_failures (
   user_id TEXT,
   failures INTEGER NOT NULL DEFAULT 1,  -- CONSECUTIVE failures; 3 across ticks pages (firstmate 769)
   reason TEXT,
-  next_retry_at TEXT NOT NULL,       -- now + READ_RETRY_H: the next tick retries, nothing longer
+  next_retry_at TEXT NOT NULL,       -- now + READ_RETRY_H: retried within 2 h (see READ_RETRY_H), nothing longer
   first_failed_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   paged_at TEXT,                     -- set once when it was reported for a human

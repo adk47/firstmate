@@ -2987,7 +2987,11 @@ CRONPAIDSTATUS
 chmod 644 /etc/cron.d/hydra-paid-status
 install -d -m 700 /var/lib/hydra/paid-status
 
-# ─── Credit-verify outbound tick, every 2 h (captain 2026-10-30 14:4xZ) ─────
+# ─── Credit-verify outbound tick, hourly (firstmate 2026-11-13) ───────────────
+# Hourly on the hour since 2026-11-13 (firstmate's request); it was every 2 h from the captain's
+# 2026-10-30 14:4xZ decision until then. THIS heredoc is the schedule: a host edit to the cron file lasts
+# until the next deploy (two were erased on 2026-11-13), so change it here, and move this comment
+# and scripts/tests/install-aux-units-credit-verify-outbound.bats with it.
 # The server-side outbound schedule that replaces hand-run batches (firstmate
 # data/proof-loop-lead-fable-p1/unattended-1030.md): per campaign family the
 # deployed builder -> --check-recipients --outcomes-json -> 5 bodies -> apply up
@@ -2998,7 +3002,7 @@ install -d -m 700 /var/lib/hydra/paid-status
 cat > /etc/cron.d/credit-verify-outbound << CRONCVOUTBOUND
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-0 */2 * * * root $HYDRA_ROOT/scripts/credit-verify-outbound.sh >> /var/log/credit-verify-outbound.log 2>&1
+0 * * * * root $HYDRA_ROOT/scripts/credit-verify-outbound.sh >> /var/log/credit-verify-outbound.log 2>&1
 CRONCVOUTBOUND
 chmod 644 /etc/cron.d/credit-verify-outbound
 install -d -m 700 /var/lib/hydra/credit-verify-outbound
@@ -3065,8 +3069,9 @@ chmod 644 /etc/cron.d/hydra-claim-status
 #
 # claim-list-build.py builds it on the deployed head, signs it and installs it with a backup and one
 # atomic rename. Two triggers, one service:
-#   - claim-list-build.timer: every 2 h at :20, forty minutes ahead of the outbound tick (0 */2),
-#     so each tick reads a list built for it.
+#   - claim-list-build.timer: every 2 h at :20 (odd hours), forty minutes ahead of the even-hour
+#     outbound tick. The tick is hourly since 2026-11-13 and this timer was not moved with it, so
+#     the odd-hour tick reads the list the tick before it read (100 minutes old, limit 30 h).
 #   - claim-list-build.path:  /opt/hydra/.deployed-sha changed. deploy.sh writes that file LAST,
 #     after the sync and this installer, so the new head gets a list signed on it within minutes
 #     instead of at the next timer fire.

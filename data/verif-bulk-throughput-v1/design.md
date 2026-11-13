@@ -116,7 +116,8 @@ the row (3 of 1,000 in the kill run).
 - **The tick still reads the outcomes file.** A run killed at its timeout still leaves the tick without that
   file; the journal now holds the outcomes, but nothing rebuilds the file from it yet.
 - **Other families** (`uvn-status`, `proof-need-ask`, status notes) are not wired to the gate queue.
-- **node-8's policy file differs from the repo** (three extra `tick_cap` rows, hourly cron instead of two-hourly).
+- **node-8's policy file differs from the repo** (three extra `tick_cap` rows, and an hourly cron where the repo
+  still wrote two-hourly on 2026-11-12; the repo's cron is hourly since 2026-11-13).
   The file kept its 11:27Z modification time and its three rows through the deploys at 16:35Z and 21:56Z on
   2026-11-12, so a deploy does not overwrite it and the 25-per-segment claim cap stays until someone edits it on
   the host.

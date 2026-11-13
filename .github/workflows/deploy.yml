@@ -8,12 +8,29 @@ name: Deploy HYDRA
 # deploys" keeps refusing anything that isn't that tip.
 on:
   schedule:
-    # 05:00 UTC = 06:00 Rome (CET) / 07:00 (CEST); one deploy of main per day. It was 04:00 until
-    # 2026-11-12: that is a 2-hourly credit send tick boundary (even hours UTC), so the run met the
-    # tick it must not interrupt and deploy.sh refused it on 4 of 5 nights (11-07, 11-08, 11-10,
-    # 11-11). An odd hour is the furthest point from both boundaries. Keep it on an odd hour:
-    # scripts/tests/deploy-send-tick-hold.bats fails if this minute falls in a tick's hold window.
-    - cron: '0 5 * * *'
+    # 05:38 UTC = 06:38 Rome (CET) / 07:38 (CEST); one deploy of main per day. It was 04:00 until
+    # 2026-11-12: a credit send tick boundary, so the run met the tick it must not interrupt and
+    # deploy.sh refused it on 4 of 5 nights (11-07, 11-08, 11-10, 11-11). It was 05:00 for one day:
+    # the tick went hourly on 2026-11-13 (scripts/install-aux-units.sh), so EVERY hour is a boundary
+    # now and no minute-0 start is clear of one. The guard holds a deploy out of the 10 minutes
+    # before a tick, :50 to :00. Eight scheduled ticks measured 11-12 14:00Z to 11-13 03:02Z ran
+    # about 26, 11, 26, 9, 11, 94, 11 and 19 min: seven ended within 26 min, and the 94-min one
+    # (11-13 00:02Z-01:36Z) ran into the next hour. :38 is after those seven, not after the
+    # longest: a tick starting at 05:00 and running 94 min is still in flight at 05:38.
+    # A deploy takes 17-20 min (six runs, 11-12/13), so a 05:38 start is still running at
+    # 05:55-05:58, and one delayed to :48 is still running at 06:05-06:08 while the 06:00 tick
+    # begins (that tick defers on the deploy's apply lock; the deploy is not refused).
+    # The refusal path remains: a run delayed to :50 or later meets the guard, which waits up to
+    # 660s to the boundary (:50 plus the guard's extra minute) and then polls the tick's flock. The
+    # prewait polls the guard every 60s and proceeds the moment it says GO, so the run is refused
+    # only if the tick is still running when DEPLOY_TICK_PREWAIT_MAX_S=900s is spent, and deploy.sh
+    # then fails closed with main UNDEPLOYED.
+    # TICK_HARD_S (6900s) lets a 05:00 tick run to 06:55, far past any prewait, so a slow tick can
+    # refuse even an early start. The durable fix is for the deploy to wait for the tick to finish
+    # rather than fail, or for the tick to defer on the deploy lock; no start minute removes that
+    # path.
+    # scripts/tests/deploy-send-tick-hold.bats holds this minute to the guard's shipped defaults.
+    - cron: '38 5 * * *'
   workflow_dispatch:
     inputs:
       target:

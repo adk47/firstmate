@@ -209,8 +209,9 @@ whose key is not the pinned reviewer key. Re-run it after any change to `gate.py
 has to be running on the reviewer host before, or the first bodies wait for it.
 
 `scripts/cron-health-watchdog.sh` on node-8 reads `gate.py pending-age` every tick and pages #clio_devops when the
-oldest waiting body has waited more than 4 hours (two send ticks with no round), and when a queue it has measured
-before can no longer be measured (the store is unreadable, or `gate.py` itself is gone from the host: every sender
+oldest waiting body has waited more than 4 hours (four send ticks on the hourly cron with no round; two
+when the tick was 2-hourly), and when a queue it has measured before can no longer be measured (the store is
+unreadable, or `gate.py` itself is gone from the host: every sender
 asks that file, so a missing gate holds them all). The page says how many of the waiting bodies are **held** (their campaign is
 enforced) and never calls an observed campaign's backlog a held customer message. It only reads a number; it releases
 nothing.

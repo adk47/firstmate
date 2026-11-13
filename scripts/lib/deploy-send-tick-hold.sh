@@ -2,7 +2,7 @@
 # deploy-send-tick-hold.sh — refuse to start a hydra deploy inside a credit send tick's window.
 #
 # ── The collision this closes (firstmate 768 (3), measured 2026-11-04) ──────
-# The credit outbound tick is 2-hourly (scripts/credit-verify-outbound.sh, holding
+# The credit outbound tick was 2-hourly then (scripts/credit-verify-outbound.sh, holding
 # /var/lib/hydra/credit-verify-outbound/tick.lock). A deploy dispatched at 04:00Z
 # ran INTO the 04:03Z round: node-8 was mid-rsync while a tick was building its
 # audiences and reading the ledger the deploy was replacing underneath it. The
@@ -38,12 +38,19 @@
 # before a tick would still be syncing when the tick fires) and to the one just
 # passed is irrelevant: a tick that already fired is caught by the lock check.
 #
+# ── The cadence is the cron's, not a choice made here ──────────────────────
+# The default --cadence is the period of the line scripts/install-aux-units.sh writes to
+# /etc/cron.d/credit-verify-outbound: 3600 since 2026-11-13 (`0 * * * *`), 7200 before
+# (`0 */2 * * *`). A guard left on the old period does not know half the boundaries exist
+# and lets a deploy start on them. scripts/tests/deploy-send-tick-hold.bats asks this guard,
+# with its shipped defaults, at every hour of a day: a default left on 7200 fails the odd hours.
+#
 # `--now` exists so the arithmetic is testable without sleeping (bats arms in
 # scripts/tests/deploy-send-tick-hold.bats). The caller (scripts/deploy.sh) uses
 # the real clock, sleeps the returned seconds, and re-checks until its budget.
 set -uo pipefail
 
-NOW=""; CADENCE=7200; HOLD_MIN=10; POLL=""
+NOW=""; CADENCE=3600; HOLD_MIN=10; POLL=""
 LOCK="/var/lib/hydra/credit-verify-outbound/tick.lock"
 
 while [ $# -gt 0 ]; do
@@ -56,7 +63,7 @@ while [ $# -gt 0 ]; do
             # Given but empty or zero is an error, not "no poll": a caller that asked to poll and
             # got the cadence back would refuse at once and never learn why.
             case "$POLL" in ''|*[!0-9]*|0) echo "deploy-send-tick-hold: --poll must be a whole number > 0" >&2; exit 2 ;; esac ;;
-    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,50p' "$0"; exit 0 ;;
     *) echo "deploy-send-tick-hold: unknown argument $1" >&2; exit 2 ;;
   esac
 done

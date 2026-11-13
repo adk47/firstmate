@@ -114,11 +114,29 @@ def journal_path(ledger_path: str) -> str:
 
 # ---------------------------------------------------------------- the journal
 
+def _ensure_wal(db: sqlite3.Connection) -> None:
+    """Set WAL once, retrying the transition.
+
+    `PRAGMA journal_mode=WAL` needs an exclusive lock to CHANGE the mode and answers SQLITE_BUSY at once (it does
+    not wait on the busy handler) when another connection is mid-transition. The mode is persistent, so only the
+    first connections race; a retry is what makes concurrent workers deterministic instead of one of them falling
+    back to the direct path."""
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            db.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+
+
 def connect(path: str) -> sqlite3.Connection:
     if not os.path.exists(path):
         os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
     db = sqlite3.connect(path, timeout=120, isolation_level=None)
-    db.execute("PRAGMA journal_mode=WAL")
+    _ensure_wal(db)
     db.execute("PRAGMA synchronous=FULL")
     db.executescript(SCHEMA)
     return db

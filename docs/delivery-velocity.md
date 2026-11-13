@@ -22,13 +22,29 @@ Not measured, and so not claimed: brief -> worker start, start -> first commit, 
 ## What changed
 
 - **Deploy (rank 2).** The nightly run moved from 04:00Z, a send tick boundary, to
-  05:00Z, and `deploy.sh` now waits up to 15 minutes for a tick before it takes any lock
-  (`scripts/lib/deploy-send-tick-wait.sh`) instead of refusing in the same second.
+  05:00Z (05:38Z since 2026-11-13, below), and `deploy.sh` now waits up to 15 minutes for a
+  tick before it takes any lock (`scripts/lib/deploy-send-tick-wait.sh`) instead of refusing
+  in the same second.
   Before: refused on 11-07, 11-08, 11-10 and 11-11. After: not yet measured on the host.
   The first scheduled run after this merges is the measurement; re-run
   `cycle-time.py record` and read the `merge -> deployed` column.
-  **Limit:** a tick may use 115 of its 120 minutes. A tick still running at 05:15Z is
-  still a refusal, by design. The lasting fix is the tick yielding to a deploy (#1756).
+  **Limit:** a tick may use 115 minutes (`TICK_HARD_S`), which was 115 of its 120-minute
+  cadence and is now longer than the hourly one. A tick still running at 05:38Z is waited
+  on, and refused if it outlasts the prewait. The lasting fix is the tick yielding to a
+  deploy (#1756).
+  **2026-11-13:** the send tick went hourly (`scripts/install-aux-units.sh`), so every hour
+  is a boundary and the nightly run moved again, to 05:38Z; the guard's cadence default
+  went from 7200 to 3600 with it. The tick's 115-minute deadline did not change, so a
+  05:00Z tick may still be running at 06:55Z. A run that starts at or after :50 waits up to 660s
+  to the boundary and then polls the tick's flock until the 900s prewait runs out (about
+  06:05Z for a :50 start), and is refused if the tick is still running. A start before
+  :50 is not refused at that prewait, but it is still refused if the 05:00Z tick is still
+  in flight when it starts, and the gate under the locks reads the clock again after up
+  to 1500s of lock waits, so a :48 start carried past :50 is refused there. A 17-20
+  minute deploy started late is still running at 06:05-06:08Z when the next tick begins.
+  A dispatched deploy meets a boundary twice as often as before: it waits, or is
+  refused, from ten minutes before each hour until that hour's tick ends. Not yet
+  measured on the host.
 - **CI round (rank 3): tried, measured, no gain, reverted.** Putting the two longest
   bats files one per shard moved the slow shard and saved nothing: the round's bats step
   was 39m41s and 42m19s before and 40m32s after (run 43172883117). The floor is one file.
@@ -56,7 +72,7 @@ Not measured, and so not claimed: brief -> worker start, start -> first commit, 
    files locally, then push once. Each push costs a full validation round.
 5. **Merged is not deployed.** A task is done when a deploy run succeeded on a head that
    contains the merge and the change had its first observable effect. Cite the run id.
-   For a fix that matters today, dispatch the deploy instead of waiting for 05:00Z.
+   For a fix that matters today, dispatch the deploy instead of waiting for 05:38Z.
 6. **Read the standing facts file before measuring.** One per domain
    (`data/verif-deterministic-env-p1/plan.md` is the pattern). Add what you learn to it.
 7. **One lane per file region.** Before dispatch, check open branches for the same
