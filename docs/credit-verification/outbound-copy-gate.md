@@ -183,8 +183,13 @@ python3 scripts/outbound_copy/review_pull.py \
     --remote 'ssh -J root@<jump> root@10.0.0.8' --key ~/.config/muso/outbound-copy-reviewer/id_ed25519
 ```
 
-Exit 0 = the round completed, 1 = some bodies are still unreviewed (reviewer down or silent), 2 = the round could not
-run (link down, or the two hosts enforce different rubrics). It sends nothing. If it does not run, every body of an
+Exit 0 = the round completed, 1 = some bodies are still unreviewed (reviewer down or silent, or a message family whose
+rubric this host does not have or holds differently from the sender: `unreviewable` names each campaign, how many
+bodies it holds and why), 2 = the round could not run (link down, or the two hosts enforce different default
+rubrics). A family's rubric is compared per campaign before any of its bodies is reviewed, so one family that cannot
+be reviewed never stops the others and never reads as a clean round. Before this, a host installed without
+`outbound-copy-rubric-gdpr.md` counted every statutory letter as a bad request and reported `ok` for a day
+(2026-11-12: 68 held, none reviewed). It sends nothing. If it does not run, every body of an
 enforced campaign stays held and every observed campaign goes out unread: **the review round is the enforced
 senders' clock and the only thing measuring the rest.**
 

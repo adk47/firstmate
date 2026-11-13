@@ -668,9 +668,10 @@ class Store:
         self.db.commit()
         return self.message(rid, slot)
 
-    def update_message(self, rid: int, slot: str, event: str = "", **cols) -> None:
+    def update_message(self, rid: int, slot: str, event: str = "", event_detail: dict | None = None, **cols) -> None:
         """Record a gate answer or a state change on an authored message. `event` names the audit row to write;
-        an unchanged gate answer (still pending) is recorded on the row without a new event every tick."""
+        an unchanged gate answer (still pending) is recorded on the row without a new event every tick.
+        `event_detail` is written on that audit row only (never a column): the dates of a send, for one."""
         allowed = {"state", "gate_result", "gate_reason", "verdict_id", "verdict_sha256", "reviewer_model",
                    "reviewed_at", "rubric"}
         bad = set(cols) - allowed
@@ -680,7 +681,8 @@ class Store:
         sets = ", ".join(f"{k}=?" for k in cols)
         self.db.execute(f"UPDATE dsar_messages SET {sets} WHERE request_id=? AND slot=?", (*cols.values(), rid, slot))
         if event:
-            self.event(rid, event, slot=slot, **{k: v for k, v in cols.items() if k != "updated_at"})
+            self.event(rid, event, **{**(event_detail or {}), "slot": slot,
+                                      **{k: v for k, v in cols.items() if k != "updated_at"}})
         self.db.commit()
 
     def begin_send(self, rid: int, kind: str, channel: str, target: str, body_sha: str, approved_by: str,

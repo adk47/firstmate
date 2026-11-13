@@ -197,13 +197,23 @@ class Run:
             if c["class"] == "not_erasure":
                 continue
             c["keys"] += [f"clickup:{t}" for t in c["clickup_ids"]]
+            # A row is closed below, by a write of its own with its event, never by its insert: created closed, a
+            # row was out of every pass before anything could ask whether its requester had been answered.
+            closed, c["status"] = c["status"] == "closed", "open"
             rid, how = self.store.upsert(c)
             row = self.store.get(rid)
-            if c["status"] == "closed" and row["status"] != "closed":
-                self.store.update(rid, "closed", status="closed", note="closed on the markdown register")
             if c.get("confirmed") and not row["confirmed_at"]:
                 self.store.update(rid, "confirmed", confirmed_at=c["confirmed"],
                                   confirm_ref="markdown register: CONFIRMATION SENT")
+                row = self.store.get(rid)
+            if closed and row["status"] == "open":
+                # The markdown register closes a row; it cannot close a statutory request nobody has answered. That
+                # is how register #13 left every pass with its requester never told (`reopen_unanswered`).
+                if row["class"] in dsar.STATUTORY and not dsar.final_response_at(row, self.store.sends(rid)):
+                    self.log(f"register #{c['register_no']}: closed on the markdown register with no final response "
+                             "on record, so it stays open")
+                else:
+                    self.store.update(rid, "closed", status="closed", note="closed on the markdown register")
             self.log(f"register #{c['register_no']}: {how}")
 
     def intake_gmail(self, ledger: dict, support_ledger: dict | None = None) -> None:
@@ -514,8 +524,13 @@ class Run:
         # "Changed since we decided it" is a REVISION comparison, not a clock one: `updated_at`/`decided_at` are
         # second-precision, so a page added in the same second as the decision used to keep the stale verdict until
         # the 20-hour refresh (and could not enter the hide batch in between).
+        # A statutory row with no identity chain on it (`gates.v`) is owed no ladder message at all (`dsar.owed`), so
+        # it is selected NOW and not at its next 20-hour refresh: on 2026-11-12 the chain shipped at 21:32Z and 244
+        # open requests decided earlier that day sat outside the ladder for up to 20 hours, 94 of them among the
+        # requests nobody had ever written to.
         rows = [r for r in self.store.all("open") if not stale_hours or not r["decided_at"]
                 or r["identity_verdict"] == identity.UNKNOWN or r["rev"] > r["decided_rev"]
+                or (r["class"] in dsar.STATUTORY and not (r.get("gates") or {}).get("v"))
                 or now - parse_iso(r["decided_at"]) > timedelta(hours=stale_hours)]
         prefixes = sorted({p["id"] for r in rows for p in r["pages"] if len(p["id"]) == 8})
         resolved: dict[str, str] = {}
@@ -534,6 +549,39 @@ class Run:
                 self.decide_row(r, hidden, resolved, conv_reader, stale_hours, half)
             except sources.Unknown as exc:
                 self.fail(f"decide row {r['id']} (#{r['register_no']})", exc)
+                self.chain_unread(r)
+
+    def chain_unread(self, r: dict) -> None:
+        """A statutory request whose identity reads failed still gets its acknowledgement.
+
+        The decision is NOT made (the run has already failed loud, and the row is decided on a later run). What is
+        written is the identity chain in its "nothing could be read" form, and only where the row has none: need
+        `unknown`, which the ladder acknowledges with the date and asks nothing. Without it a source that is down
+        for a day keeps every request that arrived that day outside the ladder, and the first message waits on a
+        read instead of on the request. It never replaces a chain a real read wrote."""
+        if r["class"] not in dsar.STATUTORY or (r.get("gates") or {}).get("v"):
+            return
+        self.store.update(r["id"], "chain_unread",
+                          gates=dsar.gates(r["class"], None, "", False, [], max(len(r["pages"]), 1)))
+
+    def reopen_unanswered(self) -> list[int]:
+        """Reopen every statutory request that is closed with no final response on record. Returns register numbers.
+
+        A closed status with nothing sent is the state the ladder exists to make impossible (`dsar.clock_rows` names
+        it as `closed_without_response`), and naming it sent nobody anything: every pass reads open rows only, so
+        the requester of register #13 (closed on the markdown register on 2026-11-01, its pages already gone) was
+        owed no message by any path. Open again, the request is decided, acknowledged and answered like any other.
+        A duplicate is not a closed request (its answer is the kept row's). The inverse is one write:
+        `status='closed'` on the row, and the `reopened` event keeps who reopened it and why."""
+        out = []
+        for r in self.store.all("closed"):
+            if r["class"] not in dsar.STATUTORY or dsar.final_response_at(r, self.store.sends(r["id"])):
+                continue
+            self.store.update(r["id"], "reopened", status="open",
+                              note="closed with no final response on record: reopened by code")
+            self.log(f"register #{r['register_no']}: reopened (closed with no final response on record)")
+            out.append(r["register_no"])
+        return sorted(out)
 
     def decide_rows(self, rows: list[dict], hidden: set[str], conv_reader=None, prefix_resolver=None,
                     half: dict[str, str] | None = None) -> None:

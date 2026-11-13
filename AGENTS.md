@@ -861,7 +861,9 @@ frame + rubric sha256). Full doc, the sender list and what is deliberately outsi
   reviewer host only; `scripts/outbound_copy/review_pull.py` pulls held bodies, reviews, and writes verdicts back.
   **If that round does not run, an enforced campaign sends nothing and an observed one goes out unread** - a stalled
   round refuses nothing and fails nothing. It runs as a `systemd --user` timer installed by `scripts/outbound_copy/install-reviewer-host.sh`
-  (re-run after any `gate.py` or rubric change: hosts with different rubrics stop the round), and
+  (re-run after any `gate.py` or rubric change: hosts with different default rubrics stop the round, and a family
+  rubric the host lacks or holds differently leaves that family unreviewed, exit 1 with `unreviewable` naming it,
+  never `ok`: on 2026-11-12 a host without the `gdpr` rubric skipped 68 statutory letters as bad requests), and
   `cron-health-watchdog.sh` pages when the oldest waiting body passes 4h (`gate.py pending-age`), and the page
   says how many of them are held: an observed campaign's backlog is never called a held customer message. A queue it
   has measured and can no longer measure pages too, a `gate.py` that went missing from the host included (an EMPTY
@@ -1021,7 +1023,11 @@ force-push. What Caroline answers, does and hands off for billing and hides, the
   recorded with its ruling (`dsar extend`), for 2+ open requests from one requester, while the date is still ahead
   and code cannot send the answer: a count of requests is a ground, not a need. Never to cover lateness.
 The clock (`dsar clock`) names every request inside 7 d of its date, and every one nobody has written to after
-48 h. `gdpr-dsar-clock.timer` reads it hourly on node-8; firstmate's check
+48 h. The first message is due 24 h after arrival (`dsar.FIRST_REPLY_HOURS`; `first_reply_overdue` in the clock
+JSON, and each `dsar_sent` event records when it was due and when it went). A statutory row is owed nothing until it
+has `gates.v`, so a tick decides a chainless one at once, a failed identity read writes an `unknown` chain
+(`Run.chain_unread`), and a row closed with no final response is reopened (`Run.reopen_unanswered`).
+`gdpr-dsar-clock.timer` reads it hourly on node-8; firstmate's check
 `scripts/gdpr-dsar-clock-check.sh` pulls it (node-8 has no route to firstmate), and
 `scripts/gdpr-dsar-clock-register.sh` is what puts it in a firstmate home (`--check` asks whether a home has these
 bytes). The unit pages when no check has read the clock for 26 h, or the one reading it is not the deployed one

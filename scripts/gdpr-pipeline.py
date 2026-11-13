@@ -1018,6 +1018,12 @@ def main() -> int:
         # would silently leave every older Intercom-only request unregistered).
         do_intake(run, a, intercom_hours=INTERCOM_MAX_LOOKBACK_DAYS * 24 if a.cmd == "backfill" else 3, now=now)
         both, half = hidden_now(run)
+        if a.cmd == "tick":
+            # BEFORE the decision pass, so a request reopened this tick is decided and acknowledged in it.
+            reopened = run.reopen_unanswered()
+            if reopened:
+                print(f"tick: reopened {len(reopened)} statutory request(s) closed with no final response on "
+                      f"record: {', '.join('#' + str(n) for n in reopened)}")
         run.decide_all(both, stale_hours=0 if a.cmd == "backfill" else 20, half=half)
         if a.cmd == "tick":
             run.mark_hidden()

@@ -15,7 +15,9 @@ held on node-8 and the next run picks them up; nothing is ever approved by defau
     review_pull.py --remote 'ssh -J root@JUMP root@10.0.0.8' --key ~/.config/muso/outbound-copy-reviewer/id_ed25519
 
 Exit codes: 0 the round completed (including "nothing was waiting"), 1 some bodies are still unreviewed (reviewer
-unavailable or unanswered), 2 the round could not run (link down, the two hosts enforce different rubrics, bad key).
+unavailable or unanswered, or a message family whose rubric this host does not have or holds differently from the
+sender: `unreviewable` names each one), 2 the round could not run (link down, the two hosts enforce different
+default rubrics, bad key). A round is "ok" only when every waiting body was either ruled or is malformed.
 Standard library only.
 """
 from __future__ import annotations
@@ -61,6 +63,28 @@ def local(args: list[str]) -> str:
     return p.stdout
 
 
+def rubric_problem(prefix: list[str], remote_gate: str, campaign: str) -> str:
+    """Why this host cannot review `campaign`'s bodies, or "" when it can.
+
+    Each message family may have its own rubric file. A host that lacks it (or holds another version) cannot rule
+    on that family: a verdict signed under a different rubric is void on the sender. The answer is a reason, never
+    an exception, so one family's missing file does not stop the round reviewing every other family.
+    """
+    try:
+        theirs = remote(prefix, remote_gate, ["rubric-sha256", "--campaign", campaign]).strip()
+    except PullError as exc:
+        return f"the sender cannot read this family's rubric: {exc}"[:300]
+    try:
+        ours = local(["rubric-sha256", "--campaign", campaign]).strip()
+    except PullError as exc:
+        return (f"this host cannot read this family's rubric ({exc}); re-run "
+                "scripts/outbound_copy/install-reviewer-host.sh from the deployed tree")[:400]
+    if theirs != ours:
+        return (f"rubric mismatch for this family: the sender enforces {theirs[:16]} and this host {ours[:16]}; "
+                "re-run scripts/outbound_copy/install-reviewer-host.sh from the deployed tree")
+    return ""
+
+
 def pull_once(prefix: list[str], remote_gate: str, remote_store: str, key: Path, reviewer_cmd: str = "",
               limit: int = 0) -> tuple[int, dict]:
     store_args = ["--store", remote_store] if remote_store else []
@@ -74,6 +98,10 @@ def pull_once(prefix: list[str], remote_gate: str, remote_store: str, key: Path,
     if not lines:
         return 0, {**out, "review": {}, "import": {"stored": 0, "rejected": 0}}
     work = Path(tempfile.mkdtemp(prefix="ocg-pull-"))
+    # campaign -> why its bodies cannot be reviewed here ("" = they can). Asked once per campaign, of BOTH hosts:
+    # the default-rubric check above says nothing about a family with its own rubric file.
+    family_problem: dict[str, str] = {}
+    out["unreviewable"] = {}
     try:
         (work / "pending").mkdir()
         for ln in lines:
@@ -85,6 +113,16 @@ def pull_once(prefix: list[str], remote_gate: str, remote_store: str, key: Path,
             except (ValueError, KeyError, TypeError):
                 out["skipped_bad_line"] += 1
                 continue
+            try:
+                campaign = str(json.loads(request).get("campaign") or "")
+            except (ValueError, AttributeError):
+                campaign = ""               # unreadable: the review step counts it as a bad request
+            if campaign and campaign not in family_problem:
+                family_problem[campaign] = rubric_problem(prefix, remote_gate, campaign)
+            if campaign and family_problem[campaign]:
+                held = out["unreviewable"].setdefault(campaign, {"bodies": 0, "why": family_problem[campaign]})
+                held["bodies"] += 1
+                continue                    # never reviewed under a rubric the sender would not accept
             (work / "pending" / name).write_text(request, encoding="utf-8")
         args = ["review", "--pending-dir", str(work / "pending"), "--out-dir", str(work / "out"), "--key", str(key)]
         if reviewer_cmd:
@@ -112,7 +150,8 @@ def pull_once(prefix: list[str], remote_gate: str, remote_store: str, key: Path,
     finally:
         shutil.rmtree(work, ignore_errors=True)
     rv = out["review"]
-    left = rv.get("reviewer_unavailable", 0) + rv.get("unanswered", 0) + out["import"].get("rejected", 0)
+    left = (rv.get("reviewer_unavailable", 0) + rv.get("unanswered", 0) + out["import"].get("rejected", 0)
+            + rv.get("rubric_unavailable", 0) + sum(h["bodies"] for h in out["unreviewable"].values()))
     return (1 if left else 0), out
 
 

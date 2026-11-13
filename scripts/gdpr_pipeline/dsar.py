@@ -261,6 +261,29 @@ def first_contact_made(row: dict, sends: list[dict]) -> bool:
 FALLBACK_HOURS = 24                      # how long a letter may wait in the gate's review queue before the older ask goes
 CLOCK_UNREAD_HOURS = 26                  # the firstmate check reads every 5 min; a day and a bit unread is "not running"
 NO_FIRST_MESSAGE_HOURS = 48              # a statutory request nobody has written to by then is named on the clock
+FIRST_REPLY_HOURS = 24                   # the first message is due this long after the request arrived
+
+
+def first_reply_due(row: dict) -> datetime:
+    """The date the FIRST message on this request was due: `FIRST_REPLY_HOURS` after it arrived."""
+    return _parse(row["received_at"]) + timedelta(hours=FIRST_REPLY_HOURS)
+
+
+def send_dates(row: dict, sends: list[dict], sent_at: datetime) -> dict:
+    """What a sent ladder message records against its row: the date it was due and the date it went.
+
+    `sends` is the request's ledger BEFORE this message was claimed, so `first_message` says whether this is the
+    first thing we ever sent on the request. A first message was due `FIRST_REPLY_HOURS` after arrival; every
+    message is also recorded against the statutory date. Dates only: no name, address or body.
+    """
+    first = not (contacted_at(row, sends) or first_contact_made(row, sends))
+    out = {"received_at": row["received_at"], "statutory_due_at": _iso(due(row)), "sent_at": _iso(sent_at),
+           "first_message": first}
+    if first:
+        target = first_reply_due(row)
+        out["first_reply_due_at"] = _iso(target)
+        out["first_reply_late_hours"] = max(0.0, round((sent_at - target).total_seconds() / 3600, 1))
+    return out
 
 # What the ladder has for ONE request, read from that request's own rows. The four in the middle are the copy gate's
 # own answers (`copy_gate`: approved | pending | refused | error) for a letter that is authored and not out.
@@ -653,6 +676,13 @@ def clock_rows(rows: list[dict], sends_of, now: datetime, alarm_days: int = ALAR
                              if not x["first_message"] and _unanswered_hours(x["received_at"], now)
                              >= NO_FIRST_MESSAGE_HOURS],
         "no_first_message_hours": NO_FIRST_MESSAGE_HOURS,
+        # The same question at the target itself: the first message is due `FIRST_REPLY_HOURS` after arrival. This
+        # list is the measure of that target (JSON only: the line a pager reads keeps the 48 h list above).
+        "first_reply_overdue": [x["register_no"] for x in sorted(open_rows, key=lambda x: (x["received_at"],
+                                                                                           x["register_no"]))
+                                if not x["first_message"] and _unanswered_hours(x["received_at"], now)
+                                >= FIRST_REPLY_HOURS],
+        "first_reply_hours": FIRST_REPLY_HOURS,
     }
 
 

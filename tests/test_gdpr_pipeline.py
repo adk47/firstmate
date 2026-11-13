@@ -6097,8 +6097,11 @@ class StaleDecisionRevision(unittest.TestCase):
         # clock, so a frozen stamp makes these tests EXPIRE - 2026-11-04 16:00Z, exactly 20h after the old
         # 2026-11-03T20:00:00Z, `test_an_unchanged_row_is_not_re_decided` went red on main and on every branch.
         # NOW also keeps this row's meaning: it was decided in the SAME SECOND its page arrived.
+        # It carries its identity chain, as every decided statutory row does: one with no chain is selected on
+        # every pass until it has one (tests/test_gdpr_dsar.py FirstReply), which is a different reason to decide.
         self.s.update(rid, "decide", identity_verdict=verdict, action="hide first",
-                      verdict_detail=[{"id": ARPAD, "verdict": verdict, "why": "x"}], decided_at=now_iso())
+                      verdict_detail=[{"id": ARPAD, "verdict": verdict, "why": "x"}], decided_at=now_iso(),
+                      gates={"v": 1, "need": "none"})
         self.s.mark_decided(rid)
         return rid
 

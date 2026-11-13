@@ -832,6 +832,70 @@ class ReviewPullTests(unittest.TestCase):
         self.assertIn("rubric mismatch", out["reason"])
         self.assertEqual(self.sender.check(DENIED, "decline")[0], 3)          # still held, nothing signed
 
+    # ---- a family with its own rubric file (2026-11-12: the gdpr rubric was never installed on the reviewer host;
+    # every round skipped all 68 statutory letters as "bad requests" and reported ok, for a day)
+
+    def family_pair(self, host_rubric: str | None):
+        """A sender that enforces a `gdpr` family rubric, and a reviewer host that holds `host_rubric` for it
+        (None: the host was installed before the family's file existed)."""
+        sender = Mirror(self.tmp, "fsender", families={"gdpr-ack": "gdpr"})
+        fam = "outbound-copy-rubric-gdpr.md"
+        (sender.root / "policies" / fam).write_text("# GDPR rubric\nA deadline may be stated.\n")
+        host = self.tmp / "fhost"
+        shutil.copytree(sender.root, host)
+        shutil.copy(PULL, host / "scripts" / "outbound_copy" / "review_pull.py")
+        if host_rubric is None:
+            (host / "policies" / fam).unlink()
+        else:
+            (host / "policies" / fam).write_text(host_rubric)
+        self.sender, self.host = sender, host
+        self.pull_py = host / "scripts" / "outbound_copy" / "review_pull.py"
+        return sender, host / "policies" / fam
+
+    REFUSE_ALL = ("print(json.dumps({'verdicts': [{'i': int(i), 'body_sha256': h, 'verdict': 'refuse', "
+                  "'note': 'rule 7'} for i, h in items]}))\n")
+
+    def test_a_family_rubric_the_host_does_not_have_fails_the_round_and_names_the_family(self):
+        sender, host_file = self.family_pair(None)
+        self.assertEqual(sender.check(VERIFYING, "gdpr-ack")[0], 3)
+        self.assertEqual(sender.check(DENIED, "decline")[0], 3)
+        rc, out = self.pull("--reviewer-cmd", str(reviewer_script(self.tmp, "no3.py", self.REFUSE_ALL)))
+        self.assertEqual((rc, out["result"], out["waiting"]), (1, "incomplete", 2), out)
+        self.assertEqual(list(out["unreviewable"]), ["gdpr-ack"])
+        self.assertEqual(out["unreviewable"]["gdpr-ack"]["bodies"], 1)
+        self.assertIn("install-reviewer-host.sh", out["unreviewable"]["gdpr-ack"]["why"])
+        # the family it CAN review is not held up by the one it cannot
+        self.assertEqual((out["review"]["refuse"], out["import"]["stored"]), (1, 1))
+        self.assertEqual(sender.check(DENIED, "decline")[0], 1)
+        self.assertEqual(sender.check(VERIFYING, "gdpr-ack")[0], 3)          # still held: nothing was signed for it
+        # installing the file is the whole repair: the next round rules on the body
+        host_file.write_text("# GDPR rubric\nA deadline may be stated.\n")
+        rc, out = self.pull("--reviewer-cmd", str(reviewer_script(self.tmp, "no4.py", self.REFUSE_ALL)))
+        self.assertEqual((rc, out["result"], out["unreviewable"], out["import"]["stored"]), (0, "ok", {}, 1), out)
+        self.assertEqual(sender.check(VERIFYING, "gdpr-ack")[0], 1)
+
+    def test_a_family_rubric_that_differs_is_never_reviewed_under_the_hosts_version(self):
+        sender, _ = self.family_pair("# GDPR rubric\nA rule only this host has.\n")
+        sender.check(VERIFYING, "gdpr-ack")
+        seen = self.tmp / "called"
+        rc, out = self.pull("--reviewer-cmd", str(reviewer_script(
+            self.tmp, "rec2.py", f"open({str(seen)!r}, 'a').write('x')\n" + self.REFUSE_ALL)))
+        self.assertEqual((rc, out["result"]), (1, "incomplete"), out)
+        self.assertIn("rubric mismatch for this family", out["unreviewable"]["gdpr-ack"]["why"])
+        self.assertFalse(seen.exists())                  # a verdict the sender would void is never asked for
+        self.assertEqual(out["import"], {"stored": 0, "rejected": 0})
+        self.assertEqual(sender.check(VERIFYING, "gdpr-ack")[0], 3)
+
+    def test_review_counts_an_unreadable_rubric_on_its_own_and_never_as_a_bad_request(self):
+        fam = Mirror(self.tmp, "fam3", families={"gdpr-ack": "gdpr"})
+        rubric = fam.root / "policies" / "outbound-copy-rubric-gdpr.md"
+        rubric.write_text("# GDPR rubric\n")
+        fam.check(VERIFYING, "gdpr-ack")
+        rubric.unlink()
+        stats = fam.review(reviewer_script(self.tmp, "any2.py", "print('{}')\n"))
+        self.assertEqual((stats["queued"], stats["skipped_bad_request"], stats["rubric_unavailable"],
+                          stats["rubric_unavailable_families"]), (0, 0, 1, ["gdpr"]))
+
     def test_a_key_the_sender_does_not_pin_signs_nothing_the_sender_keeps(self):
         self.sender.check(DENIED, "decline")
         stranger = self.tmp / "stranger-key"

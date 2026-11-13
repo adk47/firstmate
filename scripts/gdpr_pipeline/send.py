@@ -666,6 +666,9 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
         approved_by = f"gate:{ans.verdict_id}"
 
     key = idem_key(rid, slot, item["text"])
+    # Read BEFORE the claim: whether this is the first message the request ever had is a fact about the ledger as it
+    # stood, and the claim below writes a row of its own.
+    sends_before = run.store.sends(rid) if gated else []
     # CLAIM BEFORE SEND, carrying the letter's id: from here on a second attempt sees a claim and stands down.
     run.store.claim_send(rid, slot, channel, target, body_sha(item["text"]), approved_by, "sending", idem=key)
     try:
@@ -688,7 +691,12 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
     # only the FINAL letter may do that.
     run.store.stamp_sent(rid, kind, slot, ref)
     if gated:
-        run.store.update_message(rid, slot, "dsar_sent", state="sent")
+        # Recorded against the row with the date it was due and the date it went (`dsar.send_dates`): the register,
+        # not a log line, is where "was the first message inside 24 h" is read back.
+        from datetime import datetime, timezone
+        run.store.update_message(rid, slot, "dsar_sent", state="sent", event_detail={
+            "message": frozen["kind"], "variant": frozen["variant"], "channel": channel,
+            **dsar.send_dates(row, sends_before, datetime.now(timezone.utc))})
         if frozen.get("next_contact_at"):
             # The date this message promised the requester. The ladder times the next message from it.
             run.store.update(rid, "next_contact", next_contact_at=frozen["next_contact_at"])

@@ -2385,5 +2385,216 @@ class ClockRegistration(unittest.TestCase):
         self.assertNotIn("<@", line)
 
 
+class FirstReply(unittest.TestCase):
+    """The first message is due 24 hours after a request arrives, and nothing may keep a request from being owed one.
+
+    Measured on the live register 2026-11-13T02:10Z: 168 open statutory requests had no message after 48 h and one
+    (#13) was closed with nothing sent. Three things in this repository kept them quiet, and each has a test here:
+    a row decided before the identity chain existed waited up to 20 h to be decided again, a request whose identity
+    reads failed got no chain at all, and a closed row is read by no pass. (The fourth, a reviewer host that skipped
+    every statutory letter and reported a clean round, is pinned in scripts/tests/test_outbound_copy_gate.py.)"""
+
+    def setUp(self):
+        self.s = Store(":memory:")
+        self.run = Run(self.s, log=lambda *_: None)
+        self.posted = []
+
+    def writer(self):
+        return mock.patch.object(send, "_intercom_send",
+                                 lambda c, t, a, dry_run=False, key="": self.posted.append((c, t, a)) or "api-log posted")
+
+    def add(self, n=1, cls="privacy_erasure", received="2026-11-11T00:00:00Z"):
+        """A request of its own: its own thread, requester and page (two that share them are one row)."""
+        rid, how = self.s.upsert({"keys": [f"intercom:2154766503954{n:02d}"], "channel": "intercom", "class": cls,
+                                  "received_at": received, "requester_name": "Laczkovszki Arpad",
+                                  "requester_email": f"arpad{n}@example.com",
+                                  "conversation_id": f"2154766503954{n:02d}",
+                                  "pages": [{"id": f"{n:08d}-db2f-49bb-9acf-0d406bfb09ae", "entity": "profile"}]})
+        self.assertEqual(how, "created")
+        return rid
+
+    def tick_decide(self, account=7, fail=False):
+        """One `decide_all` as the hourly tick runs it (20-hour refresh), with the sources stubbed."""
+        def resolve_account(ext, email, trusted):
+            if fail:
+                raise sources.Unknown("core replica: connection refused")
+            return account, "external_id (professional id)"
+
+        def page_facts(pages, hid, cl, half=None, items=False):
+            return [identity.Page(p["id"], found=True, name="Laczkovszki Arpad", hidden=False,
+                                  is_claimed=bool(cl.get(p["id"])), claim_user_ids=frozenset(cl.get(p["id"], ())))
+                    for p in pages]
+
+        conv = {"contact_role": "user", "external_id": "ext-1", "customer_text": "please remove my page"}
+        with mock.patch.object(sources, "resolve_account", resolve_account), \
+                mock.patch.object(sources, "account_names", lambda ids: {i: ("Laczkovszki Arpad",) for i in ids}), \
+                mock.patch.object(sources, "processed_claims", lambda ids: {i: {7} for i in ids}), \
+                mock.patch.object(sources, "page_facts", page_facts):
+            self.run.decide_all(set(), conv_reader=lambda cid: conv, stale_hours=20,
+                                prefix_resolver=lambda prefixes: {})
+
+    def decided_before_the_chain(self, rid):
+        """The row as the live register held 244 of them: decided an hour ago, unchanged since, no chain on it."""
+        self.s.update(rid, "decide", identity_verdict="PASS_A", gates={},
+                      decided_at=(REAL() - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.s.mark_decided(rid)
+
+    # ---- nothing keeps a request outside the ladder
+    def test_a_request_with_no_identity_chain_is_decided_on_the_next_tick_not_at_its_20_hour_refresh(self):
+        erasure, takedown = self.add(1), self.add(2, cls="dmca_takedown")
+        for rid in (erasure, takedown):
+            self.decided_before_the_chain(rid)
+        self.assertIsNone(dsar.owed(self.s.get(erasure), [], NOW), "no chain: the ladder owes it nothing")
+        self.tick_decide()
+        row = self.s.get(erasure)
+        self.assertEqual((row["gates"]["v"], row["gates"]["need"]), (1, "none"))
+        self.assertEqual(dsar.owed(row, [], NOW)["variant"], "ack_none")
+        # the arm is for statutory classes only: every other fresh decision still waits for its refresh
+        self.assertEqual([e["kind"] for e in self.s.events(takedown)].count("decide"), 1)
+        # and it settles: a row that has its chain is not selected again an hour later
+        before = len(self.s.events(erasure))
+        self.tick_decide()
+        self.assertEqual(len(self.s.events(erasure)), before)
+
+    def test_a_request_whose_identity_reads_failed_is_still_owed_its_acknowledgement(self):
+        rid = self.add(received="2026-11-12T09:00:00Z")
+        self.tick_decide(fail=True)
+        row = self.s.get(rid)
+        self.assertTrue(self.run.errors, "the failed read still fails the run: it is not a decision")
+        self.assertEqual((row["decided_at"], row["identity_verdict"]), ("", ""), "and nothing was decided")
+        self.assertEqual((row["gates"]["v"], row["gates"]["need"], row["gates"]["account"]["pass"]),
+                         (1, "unknown", False))
+        want = dsar.owed(row, [], NOW)
+        self.assertEqual((want["kind"], want["variant"]), ("ack", "ack_unknown"))
+        # a second failed run writes nothing more, and the read that works replaces the placeholder
+        events = len(self.s.events(rid))
+        self.tick_decide(fail=True)
+        self.assertEqual(len(self.s.events(rid)), events)
+        self.tick_decide()
+        self.assertEqual(self.s.get(rid)["gates"]["need"], "none")
+
+    def test_a_failed_read_never_replaces_a_chain_a_real_read_wrote_and_touches_no_other_class(self):
+        tied, takedown = self.add(1), self.add(2, cls="dmca_takedown")
+        self.tick_decide()
+        chain = self.s.get(tied)["gates"]
+        self.assertEqual(chain["need"], "none")
+        self.run.chain_unread(self.s.get(tied))
+        self.assertEqual(self.s.get(tied)["gates"], chain)
+        self.run.chain_unread(self.s.get(takedown))
+        self.assertEqual(self.s.get(takedown)["gates"], {})
+
+    # ---- the send is recorded against its row with the date it was due and the date it went
+    def test_an_acknowledgement_inside_24_hours_records_when_it_was_due_and_when_it_went(self):
+        received = (REAL() - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rid = self.add(received=received)
+        self.tick_decide()
+        with self.writer(), mock.patch.object(copy_gate, "check", approve):
+            out = self.run.dsar_send(REAL(), checker=approve)
+        self.assertEqual([o["state"] for o in out], ["sent"])
+        self.assertEqual(len(self.posted), 1)
+        sent = [json.loads(e["detail"]) for e in self.s.events(rid) if e["kind"] == "dsar_sent"]
+        self.assertEqual(len(sent), 1)
+        d = sent[0]
+        self.assertEqual((d["message"], d["variant"], d["slot"], d["first_message"]), ("ack", "ack_none", "ack", True))
+        self.assertEqual(d["received_at"], received)
+        self.assertEqual(dsar._parse(d["first_reply_due_at"]), dsar._parse(received) + timedelta(hours=24))
+        self.assertEqual(dsar._parse(d["statutory_due_at"]), dsar.due(self.s.get(rid)))
+        self.assertLess(abs((dsar._parse(d["sent_at"]) - REAL()).total_seconds()), 120)
+        self.assertEqual(d["first_reply_late_hours"], 0.0)
+        # read back from the register: the request is no longer one nobody has written to
+        clock = self.run.dsar_clock(REAL() + timedelta(days=3))
+        self.assertEqual((clock["first_reply_overdue"], clock["no_first_message"]), ([], []))
+        # the trail carries it, and it holds dates only
+        trail = self.run.dsar_trail(self.s.get(rid)["register_no"])
+        self.assertIn("first_reply_due_at", next(e["detail"] for e in trail["events"] if e["kind"] == "dsar_sent"))
+        self.assertNotIn("arpad", json.dumps(sent).lower())
+
+    def test_a_first_message_that_went_late_says_how_late_and_a_later_message_is_not_a_first_one(self):
+        row = {"id": 1, "class": "privacy_erasure", "status": "open", "received_at": "2026-10-01T00:00:00Z"}
+        late = dsar.send_dates(row, [], utc(2026, 11, 13, 0, 0))
+        self.assertEqual((late["first_message"], late["first_reply_due_at"], late["first_reply_late_hours"]),
+                         (True, "2026-10-02T00:00:00Z", 42 * 24.0))
+        self.assertEqual((late["statutory_due_at"], late["sent_at"]), ("2026-10-31T00:00:00Z", "2026-11-13T00:00:00Z"))
+        asked = [{"kind": "ask", "state": "sent", "at": "2026-10-03T00:00:00Z"}]
+        later = dsar.send_dates(row, asked, utc(2026, 11, 13, 0, 0))
+        self.assertFalse(later["first_message"])
+        self.assertNotIn("first_reply_due_at", later)
+        # a send that MAY be out is a first contact too: the next message is never counted as the first
+        self.assertFalse(dsar.send_dates(row, [{"kind": "ack", "state": "unknown", "at": ""}],
+                                         utc(2026, 11, 13, 0, 0))["first_message"])
+
+    def test_the_clock_measures_the_24_hour_target_and_keeps_the_48_hour_list_it_pages_on(self):
+        mk = lambda i, hours, **kw: {"id": i, "register_no": i, "class": "privacy_erasure", "status": "open",  # noqa: E731
+                                     "received_at": dsar._iso(NOW - timedelta(hours=hours)),
+                                     "gates": {"v": 1, "need": "none"}, **kw}
+        rows = [mk(1, 60), mk(2, 30), mk(3, 10), mk(4, 60, ack_sent_at=dsar._iso(NOW - timedelta(hours=50)))]
+        clock = dsar.clock_rows(rows, lambda _: [], NOW)
+        self.assertEqual((clock["first_reply_hours"], clock["first_reply_overdue"]), (24, [1, 2]))
+        self.assertEqual((clock["no_first_message_hours"], clock["no_first_message"]), (48, [1]))
+        self.assertEqual(dsar.first_reply_due(rows[2]), NOW + timedelta(hours=14))
+        # a ledger row counts like a stamp: the 24 live requests whose ask is only in the ledger are not "quiet"
+        ledger = dsar.clock_rows(rows, lambda rid: [{"kind": "ask", "state": "sent", "at": "2026-11-11T00:00:00Z"}]
+                                 if rid == 2 else [], NOW)
+        self.assertEqual(ledger["first_reply_overdue"], [1])
+
+    # ---- a closed request nobody answered
+    def test_a_statutory_request_closed_with_no_final_response_is_reopened_and_then_acknowledged(self):
+        unanswered = self.add(1, received="2026-10-20T19:41:00Z")
+        confirmed = self.add(2, received="2026-10-20T00:00:00Z")
+        ledgered = self.add(3, cls="privacy_access", received="2026-10-20T00:00:00Z")
+        takedown = self.add(4, cls="dmca_takedown", received="2026-10-20T00:00:00Z")
+        dup = self.add(5, received="2026-10-20T00:00:00Z")
+        self.s.update(unanswered, "closed", status="closed", note="closed on the markdown register")
+        self.s.update(confirmed, "confirmed", confirmed_at="2026-10-23T00:00:00Z", status="closed")
+        self.s.claim_send(ledgered, "access", "intercom", "c", "ab" * 32, "gate:v-1", state="sending")
+        self.s.finish_send(ledgered, "access", "sent", ref="r")
+        self.s.update(ledgered, "closed", status="closed")
+        self.s.update(takedown, "closed", status="closed")
+        self.s.update(dup, "merged", status="duplicate")
+        no = self.s.get(unanswered)["register_no"]
+        now = utc(2026, 11, 13, 2, 0)
+        self.assertEqual(self.run.dsar_clock(now)["closed_without_response"], [no])
+        self.assertIsNone(dsar.owed({**self.s.get(unanswered), "gates": {"v": 1, "need": "none"}}, [], now),
+                          "closed: no pass reads it, which is why naming it on the clock sent nobody anything")
+
+        self.assertEqual(self.run.reopen_unanswered(), [no])
+        self.assertEqual({rid: self.s.get(rid)["status"] for rid in (unanswered, confirmed, ledgered, takedown, dup)},
+                         {unanswered: "open", confirmed: "closed", ledgered: "closed", takedown: "closed",
+                          dup: "duplicate"})
+        reopened = [json.loads(e["detail"]) for e in self.s.events(unanswered) if e["kind"] == "reopened"]
+        self.assertEqual(len(reopened), 1)
+        self.assertIn("no final response", reopened[0]["note"])
+        self.assertEqual(self.run.reopen_unanswered(), [], "once: an open row is not reopened again")
+
+        self.tick_decide()
+        clock = self.run.dsar_clock(now)
+        self.assertEqual(clock["closed_without_response"], [])
+        self.assertIn(no, clock["no_first_message"], "and it is counted with the others until its message goes")
+        want = dsar.owed(self.s.get(unanswered), [], now)
+        self.assertEqual((want["kind"], want["facts"]["due"]), ("ack", "19 November 2026"))
+
+    def test_the_markdown_register_cannot_close_a_statutory_request_nobody_answered(self):
+        md = ("| # | received | Intercom | CU | who | request | ack | promised | status |\n"
+              "|---|---|---|---|---|---|---|---|---|\n"
+              "| 13 | 20 Oct 19:41Z | 215476481954575 | 869fkctdp | Maxime | URGENT GDPR erasure | acked | 19 Nov | open |\n"
+              "| 16 | 26 Aug | 215476481954576 | - | x | GDPR erasure | profile f8b294d0 | 26 Sep | completed |\n"
+              "- 10-21 21:0xZ #13: firstmate ruled the deletion STANDS. COMPLETED 21 Oct 2026.\n"
+              "- 10-23 08:4xZ #16 CONFIRMATION SENT on its due date\n")
+        self.run.intake_register(md)
+        rows = {r["register_no"]: r for r in self.s.all()}
+        self.assertEqual((rows[13]["class"], rows[16]["class"]), ("privacy_erasure", "privacy_erasure"))
+        self.assertEqual((rows[13]["status"], rows[13]["confirmed_at"]), ("open", ""))
+        self.assertEqual((rows[16]["status"], rows[16]["confirmed_at"]), ("closed", "2026-10-23T00:00:00Z"))
+        self.run.intake_register(md)        # and a second read of the same file does not close it either
+        self.assertEqual(self.s.get(rows[13]["id"])["status"], "open")
+        self.assertEqual(self.run.dsar_clock(utc(2026, 11, 13))["closed_without_response"], [])
+
+    def test_the_tick_reopens_before_it_decides_so_the_request_is_acknowledged_in_the_same_run(self):
+        src = (ROOT / "scripts" / "gdpr-pipeline.py").read_text()
+        tick = src[src.index('if a.cmd in ("backfill", "tick"):'):]
+        self.assertLess(tick.index("run.reopen_unanswered()"), tick.index("run.decide_all("))
+        self.assertLess(tick.index("run.decide_all("), tick.index("dsar_ladder(run, now, a.ladder_limit"))
+
+
 if __name__ == "__main__":
     unittest.main()

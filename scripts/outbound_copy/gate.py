@@ -563,7 +563,7 @@ def review(pending_dir: Path, out_dir: Path, key: Path, cmd: str = "", limit: in
     rubrics: dict[str, str] = {}                     # family -> text, read once from this tree
     items: list[dict] = []
     stats = {"queued": 0, "approve": 0, "rewrite": 0, "refuse": 0, "lint_refuse": 0, "skipped_bad_request": 0,
-             "unanswered": 0, "reviewer_unavailable": 0}
+             "unanswered": 0, "reviewer_unavailable": 0, "rubric_unavailable": 0, "rubric_unavailable_families": []}
     for p in sorted(pending_dir.glob("*.json")):
         try:
             it = json.loads(p.read_bytes())
@@ -581,7 +581,14 @@ def review(pending_dir: Path, out_dir: Path, key: Path, cmd: str = "", limit: in
         try:        # the rubric is chosen HERE from the campaign, by this tree's table; the request's claim is ignored
             family, text, rsha = rubric_read(str(it["campaign"]))
         except GateError:
-            stats["skipped_bad_request"] += 1
+            # NOT a bad request: the body is well formed and this host cannot read the rubric it must be judged by.
+            # Counted on its own and named, because the caller turns it into a failed round. Counted as a bad
+            # request it read as "ok, nothing to do" while every body of the family waited (2026-11-12: the gdpr
+            # rubric was never installed on the reviewer host and 68 statutory letters were skipped for a day).
+            stats["rubric_unavailable"] += 1
+            fam = rubric_for(str(it["campaign"]))[0]
+            if fam not in stats["rubric_unavailable_families"]:
+                stats["rubric_unavailable_families"].append(fam)
             continue
         rubrics[family] = text
         try:        # already ruled under today's rubric: one verdict per body, never a second opinion
