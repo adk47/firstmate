@@ -10,6 +10,7 @@ import io
 import json
 import os
 import sqlite3
+import threading
 import time
 import sys
 import tempfile
@@ -489,6 +490,17 @@ class ReplyDueTest(unittest.TestCase):
                    (str(UID), conversation, json.dumps(list(ids))))
         db.commit(); db.close()
 
+    def ask_message(self, message_id, ids=("r1",), uid=UID):
+        """An ask sent as an Intercom MESSAGE: a ledger row with a message id and NO conversation (the reply opens a
+        new conversation whose source id is this message id)."""
+        db = sqlite3.connect(cs.LEDGER)
+        db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, message_id, "
+                   "request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, sent_at) "
+                   "VALUES ('uvn-status','initial',?,?,'2026-11-01','sent','email',?,?,1,'U','ref',"
+                   "'2026-11-01T00:00:00Z','2026-11-01T00:00:00Z','2026-11-01T00:00:00Z')",
+                   (f"u{uid}@x.com", str(uid), str(message_id), json.dumps(list(ids))))
+        db.commit(); db.close()
+
     def thread(self, cid, *, title="Credit Verification", last_user_age_h=78, contact="c1", after=None):
         parts = [{"id": "1", "part_type": "comment", "author": {"type": "admin"}, "body": "status update",
                   "created_at": self.now - 10 * 86400},
@@ -675,15 +687,19 @@ class ReplyDueTest(unittest.TestCase):
             return {"source": {"author": {"type": "user"}, "body": "hi", "created_at": now - 300 * 86400},
                     "conversation_parts": {"conversation_parts": ps}}
         dolby = "Hello- just checking, is there a way to register Dolby Atmos credits into the system database? I haven't heard"
-        # captain 2026-11-10: a customer part stays answerable for STATUS_PART_DAYS (365, was 30), so the 190-day-old
-        # question is refused by its product cue and only a part past the window is refused as stale
-        self.assertEqual(cs.STATUS_PART_DAYS, 365)
-        self.assertEqual(tc(conv(dolby, 190), "9")["class"], "non_status")
-        self.assertIn("product cue", tc(conv(dolby, 190), "9")["why"])
+        # codify 2026-11-11: the answerable window is 365 days, not 30. 30 days sent 1,771 threads where the
+        # customer wrote and got silence to a handoff bucket no one works; a late answer is not a wrong answer.
+        self.assertEqual(tc(conv(dolby, 400), "9")["class"], "non_status")
         self.assertIn("stale", tc(conv(dolby, 400), "9")["why"])
+        # a 190-day part is inside the window now: still a product question, but NOT refused for its age
+        self.assertEqual(tc(conv(dolby, 190), "9")["class"], "non_status")
+        self.assertNotIn("stale", tc(conv(dolby, 190), "9")["why"])
+        self.assertIn("product cue", tc(conv(dolby, 190), "9")["why"])
+        self.assertEqual(cs.STATUS_PART_DAYS, 365)
         self.assertEqual(tc(conv("where is my request?", 190), "9")["class"], "status")      # late, still answered
         self.assertIn("stale", tc(conv("where is my request?", 400), "9")["why"])
-        # 'immersive' alone is no product cue (it names a credit role); dolby / atmos / spatial still are
+        # 'immersive' before a role word is no product cue (it names a credit role: see PRODUCT_RE); dolby / atmos /
+        # spatial still are
         self.assertIsNone(cs.PRODUCT_RE.search("where is my immersive mix engineer request?"))
         for cue in ("dolby", "atmos", "spatial"):
             self.assertIsNotNone(cs.PRODUCT_RE.search(f"where is my {cue} request?"), cue)
@@ -704,6 +720,20 @@ class ReplyDueTest(unittest.TestCase):
         self.assertEqual((r["class"], r["why"].startswith("product cue")), ("non_status", True))
         self.assertEqual(tc(conv("my request is pending - is the feature available in the app?", 2), "9")["class"], "non_status")
         self.assertEqual(tc(conv("When will my credit be supported on Spotify?", 2), "9")["class"], "non_status")
+        # QA on #1920: 'immersive' is a product cue, so a product question mixed with a status one is handed off ...
+        for mixed in ("Is immersive audio part of my credit request? Any update on my credit request?",
+                      "Do you do immersive yet? Any update on my request?",
+                      "Any update on my request? Also is immersive audio a thing on Muso"):
+            r = tc(conv(mixed, 2), "9")
+            self.assertEqual((r["class"], r["why"]), ("non_status", "product cue 'immersive'"), mixed)
+        # ... and a customer NAMING their own role (roles.py: Immersive Mixing / Immersive Mastering) is still answered
+        for role in ("Any update on my Immersive Mixing Engineer request?",
+                     "Any update on my request? It is for Immersive Mastering.",
+                     "any update on my immersive audio mix engineer request?"):
+            self.assertEqual(tc(conv(role, 2), "9")["class"], "status", role)
+        # the role carve-out excuses that one word only: a second cue in the same part still vetoes
+        self.assertEqual(tc(conv("Any update on my Immersive Mixing request? Is Dolby Atmos next?", 2), "9")["class"],
+                         "non_status")
         # b1 270: no filed request of theirs linked to this thread = never a status answer
         r = cs.trigger_class(conv("Is my request approved yet?", 2), "9", filed=[])
         self.assertEqual((r["class"], r["why"]), ("non_status", "no open request of theirs is linked to this thread"))
@@ -742,12 +772,25 @@ class ReplyDueTest(unittest.TestCase):
         res = cs.check("uvn-status", "uvnstatus", UID, ["r2"], "c1", conversation="215473681300331",
                        reply_due_part="57000000001", query=self.q, ic=self.ic, fraud=lambda uid, q: [])
         self.assertTrue(any(unlinked in r for r in res["reasons"]), res)
-        # 2026-11-09: r1 was named by a note we sent this account in ANOTHER conversation; a reply that opens a new
-        # thread still links to the account's own sent asks, so that reason no longer holds it
         self.core = [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
-        res = cs.check("uvn-status", "uvnstatus", UID, ["r1"], "c1", conversation="215473681300331",
-                       reply_due_part="57000000001", query=self.q, ic=self.ic, fraud=lambda uid, q: [])
-        self.assertFalse(any(unlinked in r for r in res["reasons"]), res)
+        # QA on #1920 (review 5884277203), the two-thread case: the account HAS a sent ask naming r1 (setUp linked it
+        # in thread ...330) and has a second ask sent as a message, and this is another thread that neither opened.
+        # A request named in an old ask is not filed HERE, so the status question is handed off, never answered.
+        self.ask_message("880777")
+        def due():
+            return cs.check("uvn-status", "uvnstatus", UID, ["r1"], "c1", conversation="215473681300331",
+                            reply_due_part="57000000001", query=self.q, ic=self.ic, fraud=lambda uid, q: [])
+        unlinked = "no open request of theirs is linked to this thread"
+        self.assertTrue(any(unlinked in r for r in due()["reasons"]))
+        # the one link a message-only ask has: the customer's reply to it opens a conversation whose source id is
+        # that message's id. Only then is the request it named filed in this thread.
+        self.ic.convs["215473681300331"]["source"] = {"id": "880777", "author": {"type": "admin"}}
+        self.assertFalse(any(unlinked in r for r in due()["reasons"]))
+        # ...and only for the account that was sent it: another account's ask with that message id links nothing
+        db = sqlite3.connect(cs.LEDGER)
+        db.execute("UPDATE verify_messages SET account_id='4242' WHERE message_id='880777'")
+        db.commit(); db.close()
+        self.assertTrue(any(unlinked in r for r in due()["reasons"]))
 
     def test_status_team_review_reply_due_takes_the_full_path(self):
         # QA #1517 (critical): the nothing-is-needed fast path never short-circuits a reply_due answer - a closed thread,
@@ -1506,31 +1549,38 @@ class FiledRequestEvidenceTest(unittest.TestCase):
 
     def test_open_and_linked_only(self):
         self.assertEqual(cs.filed_requests(UID, ["r1"], "777", self.q(["r1"])), ["r1"])
-        # 2026-11-09: no sent note names thread 888, so the account's own sent asks stand in (an ask sent as an
-        # Intercom message has no conversation id, and the reply to it opens a new conversation)
-        self.assertEqual(cs.filed_requests(UID, ["r1"], "888", self.q(["r1"])), ["r1"])
+        # QA on #1920 (review 5884277203): the ask named r1 in thread 777; a NEW thread 888 is not linked by it
+        self.assertEqual(cs.filed_requests(UID, ["r1"], "888", self.q(["r1"])), [])
         self.assertEqual(cs.filed_requests(UID, ["r1"], "777", self.q([])), [])          # decided / deleted / not theirs
         self.assertEqual(cs.filed_requests(UID, ["r2"], "777", self.q(["r2"])), [])      # open but never named in 777
         self.assertEqual(cs.filed_requests(UID, ["x'; drop"], "777", self.q(["r1"])), [])  # never reaches the SQL
         self.assertEqual(cs.filed_requests(UID, ["r1"], "", self.q(["r1"])), [])
 
-    def test_the_account_fallback_adds_only_this_accounts_asks_and_only_when_the_thread_names_none(self):
+    def test_a_message_only_ask_links_only_the_thread_it_opened(self):
+        # an ask sent as an Intercom MESSAGE has no conversation of its own: the reply opens a new conversation whose
+        # source id is that message's id, and that is the only thread it links
+        ReplyDueTest.ask_message(self, "990001", ids=("r2",))
+        ReplyDueTest.ask_message(self, "990002", ids=("r3",), uid=4242)              # another account's ask
+        q = self.q(["r1", "r2", "r3"])
+        self.assertEqual(cs.filed_requests(UID, ["r2"], "888", q, "990001"), ["r2"])   # the thread r2's ask opened
+        self.assertEqual(cs.filed_requests(UID, ["r2"], "888", q), [])                 # a thread it did not open
+        self.assertEqual(cs.filed_requests(UID, ["r2"], "888", q, "0"), [])            # a customer-opened thread
+        self.assertEqual(cs.filed_requests(UID, ["r2"], "888", q, "990009"), [])       # opened by a message we never sent
+        self.assertEqual(cs.filed_requests(UID, ["r3"], "888", q, "990002"), [])       # opened by ANOTHER account's ask
+        self.assertEqual(cs.filed_requests(UID, ["r2"], "888", q, "990001' OR '1'='1"), [])  # never reaches the SQL
+        # the thread's own notes still count beside the opening ask
+        self.assertEqual(cs.filed_requests(UID, ["r1", "r2"], "777", q, "990001"), ["r1", "r2"])
+        # a row that is not a SENT ask links nothing
         db = sqlite3.connect(cs.LEDGER)
-        for account, conversation, ids, status in ((str(UID + 1), "901", ["r9"], "sent"),     # another account's ask
-                                                   (str(UID), "902", ["r5"], "sent"),         # a thread with its own note
-                                                   (str(UID), None, ["r6"], "sent"),          # an ask sent as a message
-                                                   (str(UID), None, ["r7"], "planned")):      # never sent
-            db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, "
-                       "conversation_id, request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, "
-                       "sent_at) VALUES ('uvn-status','initial',?,?,?,?,'comment',?,?,1,'U','ref',"
-                       "'2026-09-02T00:00:00Z','2026-09-02T00:00:00Z','2026-09-02T00:00:00Z')",
-                       (f"k-{ids[0]}", account, f"2026-09-{ids[0][1:].zfill(2)}", status, conversation, json.dumps(ids)))
+        db.execute("UPDATE verify_messages SET status='failed' WHERE message_id='990001'")
         db.commit(); db.close()
-        self.assertEqual(cs.linked_request_ids(UID, "888"), {"r1", "r5", "r6"})     # this account's sent asks, no other's
-        self.assertEqual(cs.filed_requests(UID, ["r9"], "888", self.q(["r9"])), [])
-        self.assertEqual(cs.filed_requests(UID, ["r7"], "888", self.q(["r7"])), [])
-        self.assertEqual(cs.linked_request_ids(UID, "902"), {"r5"})                 # the thread's own note decides
-        self.assertEqual(cs.filed_requests(UID, ["r1"], "902", self.q(["r1"])), [])
+        self.assertEqual(cs.filed_requests(UID, ["r2"], "888", q, "990001"), [])
+
+    def test_the_opening_message_id_is_the_conversations_source_id(self):
+        self.assertEqual(cs.opening_message_id({"source": {"id": "990001"}}), "990001")
+        self.assertEqual(cs.opening_message_id({"source": {"id": 990001}}), "990001")
+        for conv in ({}, {"source": None}, {"source": {}}, {"source": {"id": None}}, {"source": {"id": "abc"}}):
+            self.assertEqual(cs.opening_message_id(conv), "", conv)
 
     def test_a_filing_in_the_thread_links_the_request(self):
         db = sqlite3.connect(cs.PROOF_STORE)
@@ -1632,10 +1682,12 @@ class LinkedTitlesTest(unittest.TestCase):
     def test_status_trigger_scopes_titles_to_filed(self):
         from unittest import mock
         got = {}
-        with mock.patch.object(cs, "filed_requests", lambda uid, keys, conv, q: ["rb"]), \
+        with mock.patch.object(cs, "filed_requests",
+                               lambda uid, keys, conv, q, src="": got.setdefault("src", src) and ["rb"]), \
                 mock.patch.object(cs, "open_titles", lambda uid, q, only=None: got.setdefault("only", only) and ["T"]), \
                 mock.patch.object(cs, "trigger_class", lambda conv, part, titles=(), filed=(), other_titles=(): {"titles": titles, "filed": filed}):
-            r = cs.status_trigger(7, ["ra", "rb"], "777", "9", lambda sql: [], None, conv={})
+            r = cs.status_trigger(7, ["ra", "rb"], "777", "9", lambda sql: [], None, conv={"source": {"id": "880777"}})
+        self.assertEqual(got["src"], "880777")           # the thread's opening message id reaches the linkage read
         self.assertEqual(got["only"], ["rb"])
         self.assertEqual(r["filed"], ["rb"])
 
@@ -2111,6 +2163,74 @@ class CorrectionCooldownTest(unittest.TestCase):
         self.assertFalse(any(r.startswith("messaged_7d") for r in fixed["reasons"]), fixed)
         other = cs.check("gap-ask", "gap", UID, ["r1"], "c1", query=q, ic=self.ic, fraud=lambda u, qq: [], correction=True)
         self.assertTrue(any(r.startswith("messaged_7d") for r in other["reasons"]), other)       # uvn-status only
+
+
+class ReadsBesideTest(unittest.TestCase):
+    """[key=gate-reads-beside]: the fraud lens is read BESIDE the request / store / Intercom reads, not after them. On
+    node-8 a check() was 12.7 s serial and 7.0 s with the lens beside (user 98255, 2026-11-12), which is the difference
+    between a gate call that fits the runner's one 20 s attempt and five gate_timeouts a tick. The verdict must not
+    move: same reads, same holds, same errors, raised from the same call."""
+
+    Q = staticmethod(lambda sql: [["0", "0"]] if "proof_required_owed" in sql else (
+        [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]] if "credit_requests" in sql else []))
+
+    def setUp(self):
+        CommStateTest.setUp(self)
+        cs.ACCOUNT_HOLDS = str(Path(tempfile.mkdtemp()) / "h.jsonl"); Path(cs.ACCOUNT_HOLDS).write_text("")
+
+    def test_the_lens_and_the_request_read_are_in_flight_together(self):
+        lens_started, core_started = threading.Event(), threading.Event()
+        saw: dict[str, bool] = {}
+
+        def q(sql):
+            core_started.set()
+            saw.setdefault("core_saw_lens", lens_started.wait(5))    # serial code: the lens has not started yet
+            return self.Q(sql)
+
+        def lens(uid, qq):
+            lens_started.set()
+            saw["lens_saw_core"] = core_started.wait(5)
+            return []
+
+        res = cs.check("uvn-status", "uvn", UID, ["r1"], "c1", query=q, ic=self.ic, fraud=lens)
+        self.assertEqual(saw, {"core_saw_lens": True, "lens_saw_core": True})
+        self.assertFalse(res["hold"], res)
+
+    def test_a_lens_hold_still_holds_and_a_lens_error_is_still_unknown(self):
+        held = cs.check("uvn-status", "uvn", UID, ["r1"], "c1", query=self.Q, ic=self.ic,
+                        fraud=lambda u, qq: ["R8_fraud_lens_held"])
+        self.assertTrue(held["hold"], held)
+        self.assertTrue(any("R8_fraud_lens_held" in r for r in held["reasons"]), held)
+
+        def broken(uid, qq):
+            raise cs.Unknown("fraud lens unreadable: no watchlist")
+        with self.assertRaises(cs.Unknown) as cm:
+            cs.check("uvn-status", "uvn", UID, ["r1"], "c1", query=self.Q, ic=self.ic, fraud=broken)
+        self.assertIn("fraud lens unreadable", str(cm.exception))
+
+    def test_a_failed_request_read_does_not_wait_for_the_lens(self):
+        release = threading.Event()
+
+        def q(sql):
+            raise cs.Unknown("replica read failed: EOF")
+
+        def slow_lens(uid, qq):
+            release.wait(30)
+            return []
+
+        t0 = time.monotonic()
+        try:
+            with self.assertRaises(cs.Unknown) as cm:
+                cs.check("uvn-status", "uvn", UID, ["r1"], "c1", query=q, ic=self.ic, fraud=slow_lens)
+        finally:
+            release.set()
+        self.assertIn("replica read failed", str(cm.exception))
+        self.assertLess(time.monotonic() - t0, 10)
+
+    def test_beside_hands_back_the_value_or_the_error(self):
+        self.assertEqual(cs.beside(lambda a, b: a + b, 2, 3)(), 5)
+        with self.assertRaises(KeyError):
+            cs.beside(lambda: {}["missing"])()
 
 
 if __name__ == "__main__":

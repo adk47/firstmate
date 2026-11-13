@@ -380,7 +380,7 @@ def build(*, ic: Intercom = comm_state.intercom, query: Query = comm_state.trino
           checker: Callable[..., dict[str, Any]] = comm_state.check, ledger_path: str | None = None,
           upstream_resume: dict[str, Any] | None = None,
           trigger: Callable[..., dict[str, Any]] = comm_state.trigger_class,
-          linked: Callable[[int, str], "set[str]"] = comm_state.linked_request_ids) -> dict[str, Any]:
+          linked: Callable[[int, str, str], "set[str]"] = comm_state.linked_request_ids) -> dict[str, Any]:
     """`trigger` / `linked`: the deployed trigger_class and linked_request_ids (comm_state), injectable for tests only.
     The scan runs them over the thread it already holds plus the batched replica reads (trigger_inputs) so the full
     check is spent on STATUS parts only; the gate re-runs its own status_trigger at send time regardless."""
@@ -519,7 +519,9 @@ def build(*, ic: Intercom = comm_state.intercom, query: Query = comm_state.trino
                 continue
             try:
                 rows = [(rid, st, titles.get((u, rid), "")) for rid, st, *_ in facts.get(u, [])]
-                t, f, o = comm_state.trigger_inputs(req.get(u, []), rows, linked(int(u), str(first[u]["conv"])))
+                t, f, o = comm_state.trigger_inputs(
+                    req.get(u, []), rows,
+                    linked(int(u), str(first[u]["conv"]), comm_state.opening_message_id(conv)))
                 first[u]["trigger"] = {**trigger(conv, first[u]["part"], titles=t, now=now, filed=f, other_titles=o),
                                        "inputs": "replica"}
             except Exception as exc:  # noqa: BLE001 - unknown inputs: the full check decides this user, as before

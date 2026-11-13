@@ -3551,5 +3551,107 @@ class PerRolePartialAskTests(unittest.TestCase):
         self.assertEqual(rep.no_longer_uvn, 1, rep.note)
 
 
+class ClassCPrecheckTest(unittest.TestCase):
+    """[key=class-c-precheck]: on the timer (--no-correction) a class C user - one whose every request in the ask was
+    already named by a status line of ours - is set aside by the runner and costs no gate call. On node-8 2026-11-12
+    those deferrals took 77 of the paid check's 85 gate calls and the segment accepted nobody on three ticks."""
+    setUp = UvnStatusTests.setUp
+    write_list = UvnStatusTests.write_list
+    run_ = UvnStatusTests.run_
+    gate_file = UvnStatusTests.gate_file
+
+    def status_line(self, uid, rids, campaign="status-team-review", status="sent"):
+        db = verify_ledger.connect(self.ledger)
+        try:
+            old = (NOW - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type,"
+                       " message_id, request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at,"
+                       " sent_at) VALUES (?, 'initial', ?, ?, ?, ?, 'email', ?, ?, ?, 't', 't', ?, ?, ?)",
+                       (campaign, f"u{uid}@x.com", str(uid), old[:10], status, f"m{uid}", json.dumps(rids), len(rids),
+                        old, old, old))
+            db.commit()
+        finally:
+            db.close()
+
+    def people(self, n, requests=None):
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": (requests or {}).get(u, [f"r{u}"])}
+                      for u in range(1, n + 1)]
+        self.write_list()
+        return replica(range(1, n + 1), requests=requests)
+
+    def test_class_c_users_cost_no_gate_call_and_the_walk_reaches_the_users_behind_them(self):
+        """The defect as measured: with a cap of 1 the run has MAX_CALLS_PER_USER gate calls. Six class C users at the
+        head of the list used to spend all of them, so the sendable seventh was never asked about."""
+        q = self.people(7)
+        for u in range(1, 7):
+            self.status_line(u, [f"r{u}"])
+        class TimerGate(FakeGate):
+            """The real gate's two answers on the timer: class C deferred (exit 3), anyone else accepted."""
+            def __call__(self, argv):
+                res = super().__call__(argv)
+                if self.calls[-1][1]["user"]["id"] != "7":
+                    return subprocess.CompletedProcess(argv, 3, "DEFERRED c2_signed_only credits=1 (class C)", "")
+                return res
+        gate = TimerGate(out="RECIPIENT OK")
+        rep, gate = self.run_(mode="dry-run", check_recipients=True, max_users=1, query=q, no_correction=True, gate=gate)
+        self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["7"], rep)
+        self.assertEqual(rep.users, 1, rep)
+        self.assertEqual(rep.class_c_signed_only, 6)
+        self.assertEqual(rep.by_reason.get("c2_signed_only"), 6)
+        rows = [o for o in rep.outcomes if o["reason"].startswith("c2_signed_only credits=1 ")]
+        self.assertEqual(sorted(o["user"] for o in rows), [str(u) for u in range(1, 7)])
+        self.assertTrue(all(o["result"] == "deferred" for o in rows))
+        self.assertIn("6 class C, set aside before the gate", uvn_status.render(rep, "dry-run", "paid"))
+
+    def test_a_partial_overlap_is_left_to_the_gate(self):
+        """The gate narrows the ask to the still-pending requests before it looks, and may narrow the named row away.
+        Only the gate knows, so only a FULL overlap is set aside here."""
+        q = self.people(1, requests={1: ["r1", "r2"]})
+        self.status_line(1, ["r1"])
+        rep, gate = self.run_(mode="dry-run", check_recipients=True, query=q, no_correction=True,
+                              gate=FakeGate(out="RECIPIENT OK"))
+        self.assertEqual(len(gate.calls), 1, rep)
+        self.assertEqual(rep.class_c_signed_only, 0)
+
+    def test_without_no_correction_the_gate_is_asked_because_it_would_send_the_correction(self):
+        q = self.people(1)
+        self.status_line(1, ["r1"])
+        rep, gate = self.run_(mode="dry-run", check_recipients=True, query=q, gate=FakeGate(out="RECIPIENT OK"))
+        self.assertEqual(len(gate.calls), 1, rep)
+        self.assertEqual(rep.class_c_signed_only, 0)
+
+    def test_only_a_sent_status_line_counts(self):
+        """An ask of ours, or a status line that never went out, is not something a /c2 corrects."""
+        q = self.people(2)
+        self.status_line(1, ["r1"], status="rejected")
+        self.status_line(2, ["r2"], campaign="proof-need-ask")
+        rep, gate = self.run_(mode="dry-run", check_recipients=True, query=q, no_correction=True,
+                              gate=FakeGate(out="RECIPIENT OK"))
+        self.assertEqual(rep.class_c_signed_only, 0, rep)
+
+    def test_a_reply_due_answer_and_an_in_thread_note_are_never_set_aside(self):
+        """The gate skips the class C rule for a reply-due answer (it may send) and REFUSES an in-thread correction (a
+        different answer from a deferral), so both go to the gate."""
+        db = verify_ledger.connect(self.ledger)
+        try:
+            self.status_line(1, ["r1"])
+            base = {"user": {"id": "1"}, "credits": [{"request_id": "r1"}]}
+            self.assertEqual(uvn_status.class_c_signed_only(db, uvn_status.CAMPAIGN, base, True), 1)
+            self.assertEqual(uvn_status.class_c_signed_only(db, uvn_status.CAMPAIGN, base, False), 0)
+            self.assertEqual(uvn_status.class_c_signed_only(db, uvn_status.NEW_ROWS, base, True), 0)
+            for extra in (["--conversation", "9", "--reply-due", "8"], ["--conversation", "9"]):
+                self.assertEqual(uvn_status.class_c_signed_only(db, uvn_status.CAMPAIGN, {**base, "extra": extra}, True), 0)
+            self.assertEqual(uvn_status.class_c_signed_only(db, uvn_status.CAMPAIGN, {**base, "credits": []}, True), 0)
+        finally:
+            db.close()
+
+    def test_an_unreadable_ledger_leaves_the_decision_with_the_gate(self):
+        class Broken:
+            def execute(self, *a, **k):
+                raise sqlite3.OperationalError("attempt to write a readonly database")
+        base = {"user": {"id": "1"}, "credits": [{"request_id": "r1"}]}
+        self.assertEqual(uvn_status.class_c_signed_only(Broken(), uvn_status.CAMPAIGN, base, True), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

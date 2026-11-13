@@ -316,6 +316,7 @@ class UvnReport(verify_notify.Report):
     ask_only: int = 0
     watchlisted: int = 0               # on the approval watchlist; messaged normally (reported, never a hold)
     refused_no_fact: int = 0           # [key=apology-fact]: the live state was not F1/F2/F3 - this user is refused
+    class_c_signed_only: int = 0       # [key=class-c-precheck]: class C users set aside by the runner, no gate call spent
     by_reason: dict[str, int] = field(default_factory=dict)
 
     def note(self, why: str) -> None:
@@ -1209,6 +1210,42 @@ def still_owing(users: list[dict[str, Any]], *, campaign: str = CAMPAIGN, query:
     return kept, dropped
 
 
+def class_c_signed_only(db: sqlite3.Connection, campaign: str, payload: dict[str, Any], no_correction: bool) -> int:
+    """[key=class-c-precheck]: the number of requests in `payload` when the gate is CERTAIN to answer
+    `DEFERRED c2_signed_only` for it, else 0 (0 = ask the gate, as before).
+
+    Why (node-8, 2026-11-12): the timer runs uvn-status with --no-correction, so the gate defers every ask that would
+    correct an earlier status line of ours (class C). Each of those deferrals still cost one of the run's
+    MAX_CALLS_PER_USER * max_users gate calls: 77 of 85 on the 14:00Z paid check and 67 of 85 at 16:33Z, and the paid
+    segment accepted nobody on three ticks running while 200+ users further down the same page were never looked at
+    (`deferred run_size`). The gate's answer is a pure ledger read (verify_ledger.nothing_needed_overlap), so the
+    runner reads it first and keeps its gate calls for users the gate can accept.
+
+    It is deliberately NARROWER than the gate's rule, so it can never set aside a user the gate would have sent to.
+    The gate narrows the payload to the still-pending requests and defers when ANY of those was named by a status
+    line; it only ever narrows. So when EVERY request in the payload was named, every non-empty narrowing overlaps and
+    the gate cannot send. A partial overlap is left to the gate (it may narrow the named rows away). Measured on the
+    same day's checks: 393 of 437 class-C deferrals had every listed request named; none had no overlap.
+
+    Not applied to: any campaign but uvn-status (the gate's class-C rule is that campaign's), a run without
+    --no-correction (the gate then SENDS the /c2 correction), a reply-due answer (the gate skips the rule) or an
+    in-thread note (the gate refuses it, which is a different answer). An unreadable ledger is 0: the gate decides."""
+    if not no_correction or campaign != CAMPAIGN:
+        return 0
+    extra = payload.get("extra") or []
+    if "--reply-due" in extra or "--conversation" in extra:
+        return 0
+    ids = {str(c.get("request_id") or "").strip().lower() for c in payload.get("credits") or []} - {""}
+    uid = str((payload.get("user") or {}).get("id") or "")
+    if not ids or not uid:
+        return 0
+    try:
+        named = set(verify_ledger.nothing_needed_overlap(db, uid, sorted(ids))["overlap"])
+    except sqlite3.Error:
+        return 0
+    return len(ids) if named == ids else 0
+
+
 def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", max_users: int = 50,
         ledger_path: str | None = None, proof_path: str | None = None, query: Query = trino,
         wrapper: str = verify_notify.WRAPPER, runner: verify_notify.Runner = verify_notify._run,
@@ -1533,6 +1570,16 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         # QA #1517: the row is classified on the PAYLOAD's own request ids - exactly what the gate's
                         # comm_state receives at send (the raw list row has request_ids, not credits)
                         report.reply_due_rows.append(reply_due_row(uid, {**u, "credits": payload.get("credits") or []}, query=query))
+                    n_c = class_c_signed_only(db, campaign, payload, no_correction)
+                    if n_c:
+                        # [key=class-c-precheck]: the gate's own word first, so every reader of the outcome rows keeps
+                        # counting class C as one reason whichever side answered
+                        report.class_c_signed_only += 1
+                        report.note("c2_signed_only")
+                        report.outcomes.append({"user": str(uid), "result": "deferred", "reason": (
+                            f"c2_signed_only credits={n_c} (runner pre-check: an earlier status line of ours named every "
+                            "request in this ask - class C stays signed-only on the timer; no gate call spent)")})
+                        continue
                     batch.append((listed, payload, 0 if as_count else left_out(listed, pending, is_ask, asked), u))
         finally:
             db.close()
@@ -2103,6 +2150,9 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
                          if report.campaign == CAMPAIGN else "") + ")", cooldown_7d),
                      (f"deferred (asked in the last {lock_days} days)", report.recently_asked),
                      (other_reason, report.deferred_users - cooldown_7d),
+                     ("class C, set aside before the gate (an earlier status line of ours named every request in "
+                      "the ask; the correction is signed-only on the timer, so no gate call was spent)",
+                      report.class_c_signed_only),
                      ("refused: the live request state is not one of the three the approved copy can name "
                       "(F1 waiting on them / F2 in review / F3 decided) - no message beats a wrong one",
                       report.refused_no_fact),

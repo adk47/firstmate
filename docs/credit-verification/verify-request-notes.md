@@ -873,9 +873,9 @@ your documents") opens with the approved correction `fable-copy-1030-r5/c2`. Tha
 - **Disarm.** Remove the row, or set `live` to false. The tick reads the policy at every start; no deploy.
 - This is not the first send of the class: 390 corrected asks went on 2026-11-01 (ledger 6338-6994).
 
-## What bounds a tick's sends: order, the claim slice, the not-reached page (`[key=claims-never-starved]`, 2026-11-12)
+## What bounds a tick's sends: order, the claim slice, the not-reached page, class C, the gate's reads (`[key=claims-never-starved]`, `[key=class-c-precheck]`, `[key=gate-reads-beside]`, 2026-11-12)
 
-Measured on node-8 on 2026-11-12: 44 sends by 16:35Z, every one of them `uvn-status`. Three things bound a tick, and
+Measured on node-8 on 2026-11-12: 44 sends by 16:35Z, every one of them `uvn-status`. Five things bound a tick, and
 the configured caps were not among the ones that bound:
 
 - **Group order.** `credit-verify-outbound.sh` runs the claim families FIRST on every day, then the credit families,
@@ -901,6 +901,25 @@ the configured caps were not among the ones that bound:
   and pages on the `STARVED_PAGE_AT`-th (2) consecutive unreached tick, again every `STARVED_REPAGE_EVERY` (12). The
   marker is written only on a confirmed delivery; a reached family clears both files. "Armed" and "running" are
   different facts, and tick.log was the only place that said so.
+- **Gate calls, not the cap, bound `uvn-status`.** A check run may make `MAX_CALLS_PER_USER x tick_cap` gate calls
+  (85 at a cap of 17). On the paid segment 67 to 77 of those 85 went to users the gate answers
+  `DEFERRED c2_signed_only` (an earlier status line of ours named the requests, and the timer passes
+  `--no-correction`), so the segment accepted nobody on three consecutive ticks with ~950 people on its list.
+  `uvn_status.class_c_signed_only` now sets those users aside before the gate from the same ledger read
+  (`verify_ledger.nothing_needed_overlap`), with the same `c2_signed_only` reason, at no gate call. It is deliberately
+  NARROWER than the gate: only a FULL overlap is set aside (the gate narrows the ask to pending requests before it
+  looks, so a partial overlap can still send and is left to the gate), and never with `--reply-due` or
+  `--conversation`. A ledger that cannot be read sets nobody aside.
+- **A gate call has to fit the runner's one 20 s read attempt** (`READ_TIMEOUT_S`, sized at about twice a ~10 s
+  check). Measured 2026-11-12 18:2xZ by replaying the 18:00Z paid `uvn-status` check read-only: a gate call for a user
+  with an Intercom contact took 15 to 19.6 s, because its reads ran one after another and every replica round trip
+  costs 1.9 s before the replica does any work (`trino-query.sh` = `kubectl get pods` + `kubectl exec` + the CLI's
+  start): core's notice read (one trip), then `comm_state.check` (the request read, up to 17 Intercom reads, then the
+  fraud lens's three trips; 12.7 s for user 98255). Five of every twenty calls timed out, the SAME users each tick,
+  and the segment ended at the unmeasured bar on the 17:03Z and 18:00Z ticks having sent nobody. `comm_state.beside`
+  now reads the lens beside the other reads (`[key=gate-reads-beside]`): 12.7 s to 7.0 s for that user, 8.2 s to 6.0 s
+  for six others, the same verdict each time. The timeout and the bar are unchanged. A check that stops at the
+  unmeasured bar on the same users twice is a slow gate, not slow accounts: time one call before touching either.
 - **The other reasons the claim families sent nothing from 11-07 to 11-12 were not the order**: through 11-12 04:35Z
   every tick skipped them at `list_signed_on_stale` (fixed by the `claim-list-build.timer`, #1903), and the
   `shared_daily_cap.claim` row on node-8 is 25 a DAY across both claim campaigns. Read the tick's own line before

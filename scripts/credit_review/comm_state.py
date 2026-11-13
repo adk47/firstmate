@@ -2,8 +2,12 @@
 # Reviewed baseline: deploy overwrites - 2026-11-13 (hydra-deploy-drift-unblock-u1). node-8 held a hand-edited copy
 # (sha256 b45150eb5e1b, written 2026-11-10 02:54Z) with three hunks the repo did not have: STATUS_PART_DAYS 30 -> 365
 # with the CREDIT_STATUS_PART_DAYS override, 'immersive' out of PRODUCT_RE, and linked_request_ids' fallback to the
-# account's own sent asks. All three are in this file now, merged with #1682's wait-line release, so the overwrite
-# drops no live behaviour. While this line stands, a later hand edit of this file on node-8 is overwritten without a halt.
+# account's own sent asks. #1953 put all three in this file as they ran, merged with #1682's wait-line release.
+# #1920 then kept the first and NARROWED the other two on review (QA 5884277203, 5885541990; see PRODUCT_RE and
+# linked_request_ids): 'immersive' is a cue again except before a role word, and a message-only ask links only the
+# thread it opened, never every thread of the account. So overwriting a copy that still runs the hand edits DOES
+# change live behaviour on those two. While this line stands, a later hand edit of this file on node-8 is overwritten
+# without a halt.
 """Where is this user in the conversation, right now? The send-time communication-state check (captain 2026-10-28
 18:2xZ, hard precondition before any go-live batch: "make sure we dont communicate again if someone sent in proof
 already - think about each com status"). READ-ONLY. The gate calls it immediately before every real send of a
@@ -49,6 +53,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 import urllib.error
@@ -108,6 +113,37 @@ class Unknown(RuntimeError):
 def _ts(v: Any) -> str:
     s = str(v or "").strip().replace(" UTC", "").replace(" ", "T")
     return s[:19] if len(s) >= 19 else ""
+
+
+def beside(read: Callable[..., Any], *args: Any) -> Callable[[], Any]:
+    """Start one READ-ONLY fact read now, beside the reads that follow; the returned call waits for it and hands back
+    what it returned - or raises what it raised, at the line the serial code would have raised it.
+
+    [key=gate-reads-beside] (measured on node-8, 2026-11-12 18:3xZ, user 98255, uvn-status): one check() was 13.1 s of
+    reads done one after another - the request read (one replica round trip, 2.1 s), 17 Intercom reads (4.5 s), then the
+    fraud lens (three more round trips, 6.1 s; a round trip costs 1.9 s before the replica does any work). With core's
+    own notice read in front of it the gate call was 15-19.6 s against the runner's one 20 s attempt (READ_TIMEOUT_S,
+    sized at "about twice the ~10 s a check costs"), so 5 of every 20 calls timed out and the paid uvn-status family
+    stopped at the unmeasured bar on two ticks running. The lens needs nothing the other reads produce, so it runs
+    beside them. The thread is a daemon on purpose: a check that fails early must still exit at once, as it did."""
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["value"] = read(*args)
+        except BaseException as exc:  # noqa: BLE001  (handed to the caller's thread, never swallowed)
+            box["error"] = exc
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+    def result() -> Any:
+        t.join()
+        if "error" in box:
+            raise box["error"]
+        return box["value"]
+
+    return result
 
 
 def trino(sql: str) -> list[list[str]]:
@@ -879,8 +915,14 @@ ACTION_RE = re.compile(
     r"wrong (role|credit|person|account)|not (me|mine)|"
     # b1 (QA #1517): a correction to what they SENT ("I uploaded the wrong document; can you replace it?") is an action
     r"wrong|replac\w*|instead|mistake\w*|resend\w*|re-?upload\w*|swap\w*)\b", re.I)
+# QA on #1920 (review 5885541990): node-8's hand edit dropped 'immersive' from the cues outright, so "Is immersive audio
+# part of my credit request? Any update on my credit request?" read as a status question and could get a canned line.
+# 'immersive' is a cue again - except where it is the first word of a credit ROLE ("Immersive Mixing", "Immersive
+# Mastering", "Immersive Mix Engineer": roles.py), which is the customer naming their own request, not asking about the
+# product. The role reading is this change's inference from the roles table; the hand edit's own note gives no reason.
 PRODUCT_RE = re.compile(
-    r"\b(support(s|ed|ing)?|feature|features|dolby|atmos|spatial|integrat\w*|roadmap|plans? to|"
+    r"\b(support(s|ed|ing)?|feature|features|dolby|atmos|spatial|"
+    r"immersive(?!\s+(?:audio\s+)?(?:mix\w*|master\w*|engineer\w*))|integrat\w*|roadmap|plans? to|"
     r"add(ing)? (a |an |the )?(new )?(field|option|role|category|feature)|available in|availability|pricing|price|"
     r"subscription|upgrade|premium|bug|crash\w*|error|log ?in|password|api|app store|android|ios|iphone)\b", re.I)
 # R9: the SAME pattern as the gate's thread_on_topic (intercom-verify-request.sh). Bare 'verification' / 'under review'
@@ -1108,10 +1150,12 @@ def assignee_state(conversation: str, aid: str, parts: list[dict[str, Any]], ic:
     return st
 
 
-def filed_requests(uid: int, keys: list[str] | tuple[str, ...], conversation: str, query: Query) -> list[str]:
+def filed_requests(uid: int, keys: list[str] | tuple[str, ...], conversation: str, query: Query,
+                   source_id: str = "") -> list[str]:
     """b1 270: the FILED-REQUEST evidence a status answer needs - the named requests that exist for this user, are
     still open on the replica (not approved / rejected / deleted), and are linked to THIS conversation: one of our
-    sent notes in it named the request (ledger), or a filing in it was taken against the request (proof_intake)."""
+    sent notes in it named the request (ledger), the ask that OPENED it named the request (`source_id`, see
+    linked_request_ids), or a filing in it was taken against the request (proof_intake)."""
     want = sorted({str(k).lower() for k in keys if re.fullmatch(r"[a-z0-9-]{1,64}", str(k).lower())})   # no quotes: SQL-safe
     if not want or not str(conversation).isdigit():
         return []
@@ -1120,42 +1164,51 @@ def filed_requests(uid: int, keys: list[str] | tuple[str, ...], conversation: st
                  f"WHERE userid = {int(uid)} AND deletedat IS NULL AND status NOT IN ('approved', 'rejected') "
                  f"AND lower(CAST(id AS varchar)) IN ({lst})")
     open_ids = {str(r[0]).lower() for r in rows if r}
-    return sorted(open_ids & linked_request_ids(uid, conversation))
+    return sorted(open_ids & linked_request_ids(uid, conversation, source_id))
 
 
-def linked_request_ids(uid: int, conversation: str) -> set[str]:
-    """The request ids LINKED to this conversation (filed_requests' two local reads): one of our sent notes in it named
-    the request (ledger), or a filing in it was taken against the request (proof_intake). Unreadable = Unknown."""
+def opening_message_id(conv: dict[str, Any]) -> str:
+    """The id of the message that OPENED this conversation (Intercom's `source.id`), or "" when it has none."""
+    sid = str((conv.get("source") or {}).get("id") or "")
+    return sid if sid.isdigit() else ""
+
+
+def linked_request_ids(uid: int, conversation: str, source_id: str = "") -> set[str]:
+    """The request ids LINKED to this conversation (filed_requests' local reads): one of our sent notes in it named
+    the request (ledger), the ask that OPENED it named the request (ledger, by `source_id`), or a filing in it was
+    taken against the request (proof_intake). Unreadable = Unknown.
+
+    `source_id`: the conversation's opening message id (opening_message_id). An ask we send as an Intercom MESSAGE
+    creates no conversation, so its ledger row has no conversation_id; the customer's reply to it opens a new
+    conversation whose `source.id` IS that message's id (the same fact _is_o_thread reads). That is the only link
+    a message-only ask has to a thread, so it is the one this reads.
+
+    QA on #1920 (review 5884277203): the first form of this fallback linked EVERY sent ask of the account to any
+    thread that had no note of ours in it, so a request named in an old ask read as filed in an unrelated thread and
+    a status question there could be answered with a canned line instead of handed off. Measured on node-8
+    (2026-11-13 02:3xZ, the 00:00Z scan's 115 hand-off rows): 23 were for an account with a sent ask, and in 23 of 23
+    the thread was not opened by it (20 customer-initiated, 3 opened by another admin message, every one created months
+    before the ask). The reply shape is real too: of 30 message-only asks searched by `source.id`, 7 had opened a
+    conversation. No `source_id`, or one that is not this account's own sent ask, links nothing: the thread stays a
+    hand-off."""
     if not str(conversation).isdigit():
         return set()
     linked: set[str] = set()
     try:
-        for (rj,) in _ro(LEDGER).execute("SELECT request_ids_json FROM verify_messages WHERE conversation_id=? "
-                                         "AND status='sent'", (str(conversation),)):
+        db = _ro(LEDGER)
+        rows = db.execute("SELECT request_ids_json FROM verify_messages WHERE conversation_id=? AND status='sent'",
+                          (str(conversation),)).fetchall()
+        if str(source_id).isdigit():
+            # account_id is the Muso user id: only the replying account's OWN ask counts, never another account's
+            rows += db.execute("SELECT request_ids_json FROM verify_messages WHERE message_id=? AND status='sent' "
+                               "AND account_id=?", (str(source_id), str(int(uid)))).fetchall()
+        for (rj,) in rows:
             try:
                 linked |= {str(x).lower() for x in json.loads(rj or "[]")}
             except ValueError:
                 continue
     except sqlite3.Error as exc:
         raise Unknown(f"ledger unreadable: {exc}") from exc
-    # 2026-11-09: an ask we sent as an Intercom MESSAGE never creates a conversation, so its
-    # ledger row has no conversation_id and the reply opens a NEW conversation that can never
-    # link back. 8,237 such rows exist. The ledger still knows which user and which requests:
-    # account_id is the Muso user id and every system campaign writes request_ids_json. When the
-    # conversation-named join found nothing, fall back to the account's own sent asks. It only
-    # ever ADDS the requests of the account that replied, never another account's.
-    if not linked:
-        try:
-            for (rj,) in _ro(LEDGER).execute(
-                    "SELECT request_ids_json FROM verify_messages WHERE status='sent' "
-                    "AND account_id=? AND coalesce(request_ids_json,'') NOT IN ('','[]') "
-                    "ORDER BY sent_at DESC LIMIT 200", (str(uid),)):
-                try:
-                    linked |= {str(x).lower() for x in json.loads(rj or "[]")}
-                except ValueError:
-                    continue
-        except sqlite3.Error as exc:
-            raise Unknown(f"ledger unreadable: {exc}") from exc
     try:
         db = _ro(PROOF_STORE)
         cols = {r[1] for r in db.execute("PRAGMA table_info(proof_intake)")}
@@ -1182,7 +1235,7 @@ def trigger_inputs(keys: list[str] | tuple[str, ...], rows: list[tuple[str, str,
     full check only for the parts the deployed trigger_class reads as a STATUS question.
     `rows`: this user's OPEN requests as (request_id lowercased, status, track title) - the same filter as
     filed_requests / open_titles (deletedat IS NULL AND status NOT IN ('approved', 'rejected')); `linked`:
-    linked_request_ids(uid, conversation). Pinned equal to status_trigger's own reads by test_reply_due_scan."""
+    linked_request_ids(uid, conversation, opening_message_id(conv)). Pinned equal to status_trigger's own reads by test_reply_due_scan."""
     want = {str(k).lower() for k in keys if re.fullmatch(r"[a-z0-9-]{1,64}", str(k).lower())}
     open_ids = {str(rid).lower() for rid, _, _ in rows}
     filed = sorted(open_ids & want & set(linked)) if want else []
@@ -1198,7 +1251,7 @@ def status_trigger(uid: int, keys: list[str] | tuple[str, ...], conversation: st
     filed-request evidence for this thread."""
     if conv is None:
         conv = ic("GET", f"/conversations/{conversation}?display_as=plaintext", None)
-    filed = filed_requests(uid, keys, conversation, query)
+    filed = filed_requests(uid, keys, conversation, query, opening_message_id(conv))
     # b1 (QA 11:36): a title counts only for a request LINKED to this conversation - naming the track of another open
     # request (filed in another thread) is not a status part about THIS thread's request
     linked = open_titles(uid, query, only=filed)
@@ -1329,6 +1382,8 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
                     reply_due_part=reply_due_part)
         owe = owes_proof(uid, query)
         return {**res, "hold": bool(res["hold"] or owe), "reasons": list(res["reasons"]) + [f"nothing_needed_body:{w}" for w in owe]}
+    # [key=gate-reads-beside]: the lens reads nothing the reads below produce; it is collected where it always was
+    fraud_read = beside(fraud or fraud_facts, uid, query)
     core = core_facts(uid, keys, query)
     st = store_facts(uid, keys, core["created"])
     need = None
@@ -1352,7 +1407,7 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
         ic_found = []
     last_part: dict[str, Any] = {}
     thread = thread_facts(conversation, ic, extra=last_part)
-    fr = (fraud or fraud_facts)(uid, query)
+    fr = fraud_read()
     if campaign in ASKS or campaign in VOLUME_PASS_CAMPAIGNS:
         # [key=r8-hold-due]: a volume-only hold holds approvals and keeps the 'nothing is needed' family off - never the
         # ask that resolves it; a hard hold (or an unknown kind) still holds the ask

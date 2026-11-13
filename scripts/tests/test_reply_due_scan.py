@@ -137,7 +137,7 @@ class ReplyDueScanTest(unittest.TestCase):
         # check as the oracle, so the default trigger here reads every part as a status question (the production
         # default, comm_state.trigger_class, is pinned by TriggerPrefilterTest below).
         kw.setdefault("trigger", lambda conv, part, **k: {"class": "status", "why": "test: every part is a status question"})
-        kw.setdefault("linked", lambda uid, conv: set())
+        kw.setdefault("linked", lambda uid, conv, src="": set())
         return rds.build(query=self.q, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW, **kw)
 
     def test_builder_equals_send_the_gates_own_check_sorts_them(self):
@@ -186,8 +186,9 @@ class ReplyDueScanTest(unittest.TestCase):
         self.assertEqual(json.loads(Path(cfp).read_text())["user"]["id"], "1")
 
     def test_a_stale_part_is_a_handoff_without_the_full_check(self):
-        # the deployed trigger_class decides a part past comm_state.STATUS_PART_DAYS (365 since 2026-11-10, was 30) from
-        # the thread alone; the slow check is never called for it
+        # the deployed trigger_class decides a part older than comm_state.STATUS_PART_DAYS from the thread alone; the
+        # slow check is never called for it. The window is 365 days (it was 30 until 2026-11-10: see comm_state), so
+        # the stale part here is 400 days old.
         self.ic.convs["101"]["conversation_parts"]["conversation_parts"][0]["created_at"] = NOW - 400 * DAY
         self.ic.search[0]["statistics"]["last_contact_reply_at"] = NOW - 400 * DAY
         self.ic.convs["101"]["source"]["created_at"] = NOW - 401 * DAY
@@ -200,6 +201,21 @@ class ReplyDueScanTest(unittest.TestCase):
         self.assertIn("stale part", doc["handoff"][0]["why"])
         self.assertNotIn(1, calls)
         self.assertEqual([u["user_id"] for u in doc["users"]], [2])
+
+    def test_a_part_inside_the_year_is_not_handed_off_for_its_age(self):
+        # 40 days was a handoff under the 30-day window, and the handoff bucket is worked by no one (1,771 threads
+        # where the customer wrote and got silence). Inside the year the part goes to the full check like any other.
+        self.ic.convs["101"]["conversation_parts"]["conversation_parts"][0]["created_at"] = NOW - 40 * DAY
+        self.ic.search[0]["statistics"]["last_contact_reply_at"] = NOW - 40 * DAY
+        self.ic.convs["101"]["source"]["created_at"] = NOW - 41 * DAY
+        calls = []
+        def check(campaign, copy, uid, keys, cid, **kw):
+            calls.append(uid)
+            return {"hold": False, "reasons": []}
+        doc = self.build(checker=check)
+        self.assertEqual([u for u in doc["handoff"] if "stale part" in u.get("why", "")], [])
+        self.assertIn(1, calls, "the full check decides a 40-day part; its age does not")
+        self.assertIn(1, [u["user_id"] for u in doc["users"]])
 
     def test_other_holds_and_unreadable_checks_are_listed_never_sent(self):
         def check(campaign, copy, uid, keys, cid, **kw):
@@ -921,7 +937,7 @@ class TriggerPrefilterTest(ReplyDueScanTest):
             for keys in (["ra", "rb", "rc", "rd"], ["ra"], ["zz"], [], ["RB", "bad key!"]):
                 with self.subTest(linked=sorted(linked), keys=keys):
                     saved = cs.linked_request_ids
-                    cs.linked_request_ids = lambda uid, conv, _l=linked: set(_l)
+                    cs.linked_request_ids = lambda uid, conv, src="", _l=linked: set(_l)
                     try:
                         filed = cs.filed_requests(7, keys, "555", q)
                         titles = cs.open_titles(7, q, only=filed)
@@ -946,7 +962,7 @@ class TriggerPrefilterTest(ReplyDueScanTest):
             checked.append(uid)
             return {"hold": False, "reasons": []}
         doc = self.build(checker=check, trigger=cs.trigger_class,
-                         linked=lambda uid, conv: {"r1"} if (uid, conv) == (1, "101") else ({"r9a"} if uid == 902 else set()))
+                         linked=lambda uid, conv, src="": {"r1"} if (uid, conv) == (1, "101") else ({"r9a"} if uid == 902 else set()))
         self.assertEqual(sorted(checked), [1])
         self.assertEqual([u["user_id"] for u in doc["users"]], [1])
         whys = {h["user_id"]: h["why"] for h in doc["handoff"]}
@@ -957,8 +973,32 @@ class TriggerPrefilterTest(ReplyDueScanTest):
         self.assertEqual(doc["counts"]["check_skipped:trigger_non_status"], 3)
         self.assertEqual(doc["counts"]["checked"], 4)     # a skipped check is still an examined entry (cursor, page)
 
+    def test_the_scan_links_by_the_ask_that_opened_the_thread_never_by_the_account(self):
+        # QA on #1920 (review 5884277203), through the scan with the PRODUCTION linkage: users 1 and 2 each have a
+        # sent ask on the ledger naming their open request, sent as a message (no conversation). User 1's thread was
+        # opened by the customer, so the ask does not link it and the status question is a hand-off. User 2's thread
+        # was opened by that ask (its source id is the ask's message id), so the full check runs.
+        db = sqlite3.connect(cs.LEDGER)
+        for uid, mid, rid in (("1", "770001", "r1"), ("2", "770002", "r2")):
+            db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, "
+                       "message_id, request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, sent_at) "
+                       "VALUES ('uvn-status','initial',?,?,'2026-10-20','sent','email',?,?,1,'U','ref',"
+                       "'2026-10-20T00:00:00Z','2026-10-20T00:00:00Z','2026-10-20T00:00:00Z')",
+                       (f"u{uid}@x.com", uid, mid, json.dumps([rid])))
+        db.commit(); db.close()
+        self.ic.convs["102"]["source"]["id"] = "770002"
+        checked = []
+        def check(campaign, copy, uid, keys, cid, **kw):
+            checked.append(uid)
+            return {"hold": False, "reasons": []}
+        doc = self.build(checker=check, trigger=cs.trigger_class, linked=cs.linked_request_ids)
+        self.assertEqual(checked, [2])
+        whys = {h["user_id"]: h["why"] for h in doc["handoff"]}
+        self.assertIn("no open request of theirs is linked", whys[1])
+        self.assertNotIn(2, whys)
+
     def test_a_replica_trigger_that_cannot_be_read_falls_back_to_the_full_check(self):
-        def linked(uid, conv):
+        def linked(uid, conv, src=""):
             raise cs.Unknown("ledger unreadable: test")
         checked = []
         def check(campaign, copy, uid, keys, cid, **kw):
@@ -988,7 +1028,7 @@ class TriggerPrefilterTest(ReplyDueScanTest):
         kw = dict(ic=self.ic, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW,
                   checker=lambda *a, **k: {"hold": False, "reasons": []},
                   trigger=lambda conv, part, **k: {"class": "status", "why": "test"},
-                  linked=lambda uid, conv: set())
+                  linked=lambda uid, conv, src="": set())
         doc = rds.build(query=counting, **kw)
         facts_q = [s for s in queries if "credit_requests" in s and "spotifytracktitle" not in s]
         titles_q = [s for s in queries if "spotifytracktitle" in s]
@@ -1032,7 +1072,7 @@ class TriggerPrefilterTest(ReplyDueScanTest):
             checks.append(uid)
             return {"hold": False, "reasons": []}
         doc = rds.build(ic=ic, query=q, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW, checker=check,
-                        trigger=cs.trigger_class, linked=lambda uid, conv: {"r1"} if uid == 1 else set())
+                        trigger=cs.trigger_class, linked=lambda uid, conv, src="": {"r1"} if uid == 1 else set())
         threads = len(gets)
         due = doc["counts"]["checked"]
         replica_q = [s for s in queries if "credit_requests" in s or "firstname" in s]
