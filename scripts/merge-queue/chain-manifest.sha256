@@ -1,0 +1,25 @@
+# The pinned bytes of the profile-merge queue chain that runs on node-8.
+#
+# The code is owned by core-backend, not by hydra:
+#   github.com/Muso-AI/core-backend  scripts/ops/merge-queue/
+# but the WALL-CLOCK schedule that runs it lives on our host, so hydra owns the cron
+# writer (scripts/merge-queue/install-cron.sh) and this pin.
+#
+# Why a pin and not "whatever is in /root/q1": the deployed copies are made by hand.
+# A stale copy silently sends last month's approved copy, or reads a plan.json whose
+# shape changed, and nothing in the run reports it. scripts/merge-queue/chain-preflight.sh
+# compares the deployed files against these sums and the variant-queue run REFUSES to
+# send on any mismatch - a drifted chain is a human's decision, never a silent send.
+#
+# To bump: copy the six files from a core-backend checkout whose tree you have read,
+# update the sums below and PIN_SOURCE, then run
+#   scripts/merge-queue/chain-preflight.sh --chain-dir /root/q1     # must be clean
+# on node-8 after publishing the same bytes there.
+#
+# PIN_SOURCE: github.com/Muso-AI/core-backend scripts/ops/merge-queue @ 4d9cbe5f38d0698f27d38bc2a84e2ab82d199f5b (2026-11-11)
+a6d86aa53cedecaa587407354a9c1d97d14317aef93c55564daed59a8391ca9a  plan.py
+3916bf5a4a7cc579ce6f58c15570d3e5c69025bf07d919a495f6d6070881efdd  variant_plan.py
+f37b0dab6874bb58c0c4b059abf98154acdb4b438bd75dbe980f420db79ccbdd  send_variant_copy.py
+f26b1c2a600a79955b17744b6cd1460b36cff2505199544962a03209f0eeba10  clickup_merges.py
+ced5b6dca9b9848f6efd0d8d53e2d55cc6d81220e272555c8911e3060d8f2e10  sql.py
+924417b4c35aa2280f14258b808358e0fd4e0368ed564b9cb4ee02046993703a  same_person.py

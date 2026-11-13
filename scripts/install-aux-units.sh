@@ -388,6 +388,15 @@ if [ "${HYDRA_STOP_AFTER:-}" = "churn-cron" ]; then
   exit 0
 fi
 
+# TEST SEAM (HYDRA_STOP_AFTER=merge-queue-cron): install ONLY the two profile-merge
+# queue cron files and exit. Same reason as the churn seam above: the suite must prove
+# that this script's argv decides which tree the cron lines name, and the cron files are
+# otherwise only reachable through a root run that writes systemd units.
+if [ "${HYDRA_STOP_AFTER:-}" = "merge-queue-cron" ]; then
+  bash "$HYDRA_ROOT/scripts/merge-queue/install-cron.sh"
+  exit 0
+fi
+
 # Runtime-aware install gate: on openclaw >= 2026.8 the codex-token-refresh
 # timer below must NOT be installed (see its own block for why). Resolve
 # once, here, so both the (non-)install and the active-teardown share one
@@ -3023,6 +3032,18 @@ install -d -m 700 /var/lib/hydra/credit-verify-outbound
 # (not copied as a heredoc) so the churn suite can install it into a temp root and
 # assert the RESULT rather than grepping this file's text.
 bash "$HYDRA_ROOT/scripts/churn/install-cron.sh"
+# ─── Profile-merge queue: census (*/30) + approved reply pass (10:17Z) ────────
+# The queue's code is core-backend's scripts/ops/merge-queue/; the clock that runs it is
+# on our host, so the schedule is ours. Both cron files (merge-queue-census,
+# merge-queue-variant-queue) were hand-installed until now, which is how a 2026-11-05 hand
+# edit turned the variant line into `plan.py ... > plan.daily.json && cp ... plan.json`:
+# plan.py writes plan.json itself, so every downstream step read a 267-byte summary as if
+# it were the ~457 KB plan (firstmate inbox 087). The cron files now have ONE author,
+# scripts/merge-queue/install-cron.sh, and each line runs a versioned runner that refuses
+# to send when the deployed chain (/root/q1) does not match chain-manifest.sha256.
+# Kill switches: /etc/hydra/merge-queue-variant.disabled, /etc/hydra/merge-queue-census.disabled.
+# See scripts/merge-queue/README.md.
+bash "$HYDRA_ROOT/scripts/merge-queue/install-cron.sh"
 # ─── Verifier eval, nightly (verifier-eval-v1) ───────────────────────────
 # The shared SHADOW evaluation of every credits / claims / merges verifier: replays each
 # registered verifier over the frozen labelled sets (scripts/verifier_eval/sets/) plus every
