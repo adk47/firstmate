@@ -106,6 +106,25 @@ if (data.ok === false) {
 '
 }
 
+fm_backend_orca_json_succeeded() {
+  node -e '
+const fs = require("fs");
+const input = fs.readFileSync(0, "utf8").trim();
+let data;
+try {
+  data = JSON.parse(input);
+} catch (err) {
+  console.error("invalid Orca JSON: " + err.message);
+  process.exit(2);
+}
+if (data.ok !== true) {
+  const msg = data.error && (data.error.message || data.error.code);
+  if (msg) console.error(msg);
+  process.exit(2);
+}
+'
+}
+
 # Print error.code from an ok:false Orca JSON envelope on stdin; exit 1 when the
 # envelope is not such a failure or names no code. Callers branch on this code
 # rather than on the rendered prose, whose message field wins over the code.

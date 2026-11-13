@@ -1790,7 +1790,7 @@ fm_backend_orca_remove_worktree_by_path() {  # <worktree>
     *[![:space:]]*) ;;
     *) out= ;;
   esac
-  if [ -n "$out" ] && msg=$(printf '%s' "$out" | fm_backend_orca_json_ok 2>&1); then
+  if [ -n "$out" ] && msg=$(printf '%s' "$out" | fm_backend_orca_json_succeeded 2>&1); then
     return 0
   fi
   code=$(printf '%s' "$out" | fm_backend_orca_json_error_code 2>/dev/null || true)
@@ -2389,12 +2389,6 @@ require_orca_worktree_path_match() {
     echo "Cannot verify dirty or unlanded work for the worktree Orca would remove; preserving metadata." >&2
     return 1
   fi
-}
-
-require_orca_worktree_path_match_if_present() {
-  local worktree_id=$1 inspected=$2
-  [ -n "$inspected" ] && [ -e "$inspected" ] || return 0
-  require_orca_worktree_path_match "$worktree_id" "$inspected"
 }
 
 # --- migrated Orca worktrees -------------------------------------------------
