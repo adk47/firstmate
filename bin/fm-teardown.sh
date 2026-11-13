@@ -1769,9 +1769,11 @@ restore_worktree_branch() {  # <worktree> <branch>
 # An ok:false answer prints the error code and the rendered error on two stdout
 # lines so the caller can branch on the parsed code, never on the prose message.
 # Orca prints that envelope on stdout while exiting nonzero, so stdout is captured
-# regardless of exit status and only the envelope decides the outcome; empty or
-# unparseable stdout is a failure, never an implicit successful removal, and the
-# CLI's stderr is kept so a failure reported only there is still named concretely.
+# regardless of exit status and only an explicit ok:true envelope counts as a
+# successful removal; any other answer, including empty, whitespace-only,
+# unparseable, or parseable non-envelope output, is a failure, never an implicit
+# successful removal, and the CLI's stderr is kept so a failure reported only
+# there is still named concretely.
 fm_backend_orca_remove_worktree_by_path() {  # <worktree>
   local wt=${1:-} out code msg='' err='' errfile
   [ -n "$wt" ] || {
