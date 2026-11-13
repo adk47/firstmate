@@ -1628,6 +1628,9 @@ class EntrypointFailures(unittest.TestCase):
         self.assertFalse(os.path.exists(state))
 
 
+DOCS_IN_OWNER = "verification worker, creds home (firstmate-assigned 2026-11-13)"
+
+
 class HeldByCaptainOrder(unittest.TestCase):
     """Captain 2026-10-27 00:52Z: four lanes are held by his own order. They stay visible and
     page once per CHANGE, never per tick, and never as "backlog forming" — while a breach in
@@ -1646,7 +1649,7 @@ class HeldByCaptainOrder(unittest.TestCase):
         msgs, state, _ = self.page([("user:1", "2026-10-27T00:00:00Z")])
         self.assertEqual(len(msgs), 1)
         self.assertTrue(msgs[0].startswith("BACKLOG HELD BY CAPTAIN ORDER"))
-        self.assertIn("owner user-decisions-fable-d1 + doc-verify-build-b1", msgs[0])
+        self.assertIn("owner " + DOCS_IN_OWNER, msgs[0])
         self.assertIn("unblock:", msgs[0])
         self.assertIn("credits_docs_in", state["held"])
 
@@ -1780,8 +1783,23 @@ class HeldLanesFromLiveState(unittest.TestCase):
     def test_the_repo_policy_file_covers_every_held_lane(self):
         lanes = vqr.read_held_lanes()
         self.assertEqual(set(lanes), set(vqr.CAPTAIN_HELD))
-        self.assertIn("doc-verify-build-b1", lanes["credits_docs_in"]["owner"])
-        self.assertIn("user-decisions-fable-d1", lanes["credits_docs_in"]["owner"])
+        self.assertEqual(lanes["credits_docs_in"]["owner"], DOCS_IN_OWNER)
+
+    def test_the_docs_in_page_names_the_write_back_and_no_closed_lane(self):
+        """2026-11-13: the page said the reader was not live for 17 days after it went live,
+        and named two lanes that had already closed. Both are asserted on the rendered page."""
+        facts = {"doc_reader_state": "live", "doc_writeback_approved": False,
+                 "doc_reader_last_step": "2026-11-13T15:58:00Z"}
+        msgs, _ = self.page(self.ITEMS, facts=facts)
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("nothing writes its verdict back", msgs[0])
+        self.assertNotIn("not live", msgs[0])
+        self.assertNotIn("2026-10-27", msgs[0])
+        for closed_lane in ("doc-verify-build-b1", "user-decisions-fable-d1"):
+            self.assertNotIn(closed_lane, msgs[0])
+        self.assertIn("owner " + DOCS_IN_OWNER, msgs[0])
+        # an ETA is a decision or nothing, never a date (a date goes stale; this one did)
+        self.assertIn("ETA when the captain decides", msgs[0])
 
     def test_live_facts_read_the_real_locks_and_switch(self):
         d = tempfile.mkdtemp()
@@ -1790,11 +1808,556 @@ class HeldLanesFromLiveState(unittest.TestCase):
         sa = os.path.join(d, "sa.py"); open(sa, "w").write("from x import account_gate\n")
         gate = os.path.join(d, "account_gate.py"); open(gate, "w").write("")
         sw = os.path.join(d, "decide.disabled"); open(sw, "w").write("")
+        reg = os.path.join(d, "registry.json")
+        with open(reg, "w") as fh:
+            json.dump({"automations": {vqr.DOC_APPROVAL_AUTOMATION: {"approved": False}}}, fh)
         with mock.patch.multiple(vqr, VERIFY_REQUEST_SH=sh, SCORE_APPROVE_PY=sa, GATE_SCRIPT=gate,
-                                 DECIDE_SWITCH=sw):
+                                 DECIDE_SWITCH=sw, APPROVAL_REGISTRY=reg,
+                                 DOC_VERIFY_STORE=os.path.join(d, "no-such-store.sqlite")):
             f = vqr.held_facts()
         self.assertEqual(f, {"account_gate_live": True, "decide_switch": True,
-                             "claim_status_on": True, "claim_proof_ask_on": False})
+                             "claim_status_on": True, "claim_proof_ask_on": False,
+                             "doc_reader_state": "unknown", "doc_reader_last_step": None,
+                             "doc_writeback_approved": False})
+
+
+class DocsInHeldSentenceFromLiveState(unittest.TestCase):
+    """2026-11-13: the docs_in page went on saying the reader was "not live yet" for 17 days
+    after the reader went live, because this lane was the one held lane whose
+    sentence was never read from the box. The reader's own store and the approval registry
+    now decide it; the policy file is what is said when the store cannot be read."""
+
+    NOW = datetime(2026, 11, 13, 16, 0, tzinfo=timezone.utc)
+    ITEMS = [("user:1", "2026-10-26T00:00:00Z"), ("user:2", "2026-11-10T00:00:00Z")]
+    LIVE = {"doc_reader_state": "live", "doc_reader_last_step": "2026-11-13T15:58:00Z",
+            "doc_writeback_approved": False}
+    STOPPED = {"doc_reader_state": "stopped", "doc_reader_last_step": "2026-11-09T04:00:00Z",
+               "doc_writeback_approved": False}
+    CAUGHT_UP = {"doc_reader_state": "caught_up", "doc_reader_last_step": "2026-11-13T10:00:00Z",
+                 "doc_writeback_approved": False}
+    BLIND = {"doc_reader_state": "unknown", "doc_reader_last_step": None,
+             "doc_writeback_approved": False}
+    BYTES_OWED = {"doc_reader_state": "bytes_owed",
+                  "doc_reader_last_step": "2026-11-09T04:00:00Z",
+                  "doc_writeback_approved": False}
+    # the other lanes' facts, as the box reads today
+    OTHERS = {"account_gate_live": True, "decide_switch": True,
+              "claim_status_on": True, "claim_proof_ask_on": False}
+
+    def store(self, step_at=None, outcomes=(), steps=(), blobs=()):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "doc-verify.sqlite")
+        db = sqlite3.connect(path)
+        db.execute("create table dv_steps (id integer primary key autoincrement, at text, "
+                   "proof_id text)")
+        db.execute("create table dv_outcomes (id integer primary key autoincrement, at text, "
+                   "user_id integer)")
+        db.execute("create table dv_blobs (sha256 text primary key, at text, source text)")
+        if step_at:
+            db.execute("insert into dv_steps (at) values (?)", (step_at,))
+        db.executemany("insert into dv_steps (at, proof_id) values (?, ?)", list(steps))
+        db.executemany("insert into dv_outcomes (at, user_id) values (?, ?)", list(outcomes))
+        db.executemany("insert into dv_blobs (sha256, at, source) values (?, '2026-11-01T00:00:00Z', "
+                       "'intercom')", [(sha,) for sha in blobs])
+        db.commit()
+        db.close()
+        return path
+
+    def blobs(self, stored=()):
+        """The blob store the reader reads bytes from, `<root>/<sha[:2]>/<sha>`."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        for sha in stored:
+            os.makedirs(os.path.join(d, sha[:2]), exist_ok=True)
+            with open(os.path.join(d, sha[:2], sha), "wb") as fh:
+                fh.write(b"%PDF-1.4")
+        return d
+
+    def blob_root(self, stored=()):
+        old = vqr.DOC_BLOB_ROOT
+        vqr.DOC_BLOB_ROOT = self.blobs(stored)
+        self.addCleanup(setattr, vqr, "DOC_BLOB_ROOT", old)
+
+    def proof_store(self, filings=()):
+        """The returned documents: (file_sha256, received_at, candidate_request_ids_json,
+        subject, conversation_id). intake_id is `<user_id>:<sha256 prefix>` and subject defaults
+        to credit, as production files them, so a join on the wrong identifier cannot pass
+        here."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "proof.sqlite")
+        db = sqlite3.connect(path)
+        db.execute("create table proof_intake (intake_id text primary key, subject text, "
+                   "file_sha256 text, received_at text, candidate_request_ids_json text, "
+                   "conversation_id text)")
+        rows = []
+        for n, filing in enumerate(filings, start=1):
+            sha, at, cands = filing[:3]
+            subject = filing[3] if len(filing) > 3 else "credit"
+            convo = filing[4] if len(filing) > 4 else "conv-1"
+            rows.append((f"{n}:{sha[:32]}", subject, sha, at, cands, convo))
+        db.executemany(
+            "insert into proof_intake (intake_id, subject, file_sha256, received_at, "
+            "candidate_request_ids_json, conversation_id) values (?, ?, ?, ?, ?, ?)", rows)
+        db.commit()
+        db.close()
+        return path
+
+    def registry(self, entry):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "registry.json")
+        with open(path, "w") as fh:
+            json.dump({"automations": {vqr.DOC_APPROVAL_AUTOMATION: entry}}, fh)
+        return path
+
+    def page(self, facts, prev=None, now=None):
+        now = now or self.NOW
+        ev = vqr.sentinel_evaluate({"items": {"credits_docs_in": self.ITEMS},
+                                    "unmeasured": set()}, now)
+        msgs, state, page_map = vqr.sentinel_page(ev, prev, now, False, facts,
+                                                  vqr.read_held_lanes())
+        return msgs, vqr.record_paged(state, page_map, [True] * len(page_map))
+
+    # -- the sentence ------------------------------------------------------------------
+
+    def test_a_live_reader_names_the_missing_write_back(self):
+        spec = vqr.held_lane("credits_docs_in", self.LIVE, vqr.read_held_lanes())
+        self.assertNotIn("not live", spec["reason"])
+        self.assertIn("reader is live and reading", spec["reason"])
+        self.assertIn("nothing writes its verdict back", spec["reason"])
+        self.assertIn(vqr.DOC_APPROVAL_AUTOMATION + " is approved=false", spec["reason"])
+        self.assertIn("write-back", spec["unblock"])
+        self.assertEqual(spec["owner"], DOCS_IN_OWNER)
+        self.assertEqual(spec["eta"], "when the captain decides")
+
+    def test_a_live_reader_with_no_policy_file_still_says_so(self):
+        spec = vqr.held_lane("credits_docs_in", self.LIVE, {})
+        self.assertIn("reader is live and reading", spec["reason"])
+        self.assertIn("nothing writes its verdict back", spec["reason"])
+        self.assertEqual(spec["eta"], "when the captain decides")
+
+    def test_a_stopped_reader_is_named_and_never_called_live(self):
+        spec = vqr.held_lane("credits_docs_in", self.STOPPED, vqr.read_held_lanes())
+        self.assertIn("returned-document reader has stopped reading", spec["reason"])
+        self.assertIn("2026-11-09T04:00:00Z", spec["reason"])
+        self.assertNotIn("reader is live", spec["reason"])
+        self.assertIn("restart the reader", spec["unblock"])
+        self.assertIn("write-back", spec["unblock"])
+
+    def test_a_stopped_reader_says_the_write_back_as_measured(self):
+        """A stopped reader is one claim; whether anything writes a verdict back is another,
+        and it is read from the same registry on this path as on every other."""
+        lanes = vqr.read_held_lanes()
+        off = vqr.held_lane("credits_docs_in", self.STOPPED, lanes)["reason"]
+        self.assertIn("nothing writes a doc-verify verdict back", off)
+        on = vqr.held_lane("credits_docs_in", dict(self.STOPPED, doc_writeback_approved=True),
+                           lanes)["reason"]
+        self.assertIn("registered approved", on)
+        self.assertNotIn("nothing writes", on)
+        blind = vqr.held_lane("credits_docs_in", dict(self.STOPPED, doc_writeback_approved=None),
+                              lanes)["reason"]
+        self.assertIn("was not measured", blind)
+        self.assertNotIn("nothing writes", blind)
+
+    def test_a_reader_with_nothing_to_read_is_caught_up_not_stopped(self):
+        spec = vqr.held_lane("credits_docs_in", self.CAUGHT_UP, vqr.read_held_lanes())
+        self.assertIn("in the newest filings", spec["reason"])
+        self.assertNotIn("stopped", spec["reason"])
+        self.assertNotIn("restart the reader", spec["unblock"])
+        self.assertIn("nothing writes its verdict back", spec["reason"])
+
+    def test_a_reader_left_only_with_bytes_owed_filings_is_neither_stopped_nor_caught_up(self):
+        """The reader cannot read a filing whose bytes were never stored, so a restart clears
+        nothing: the page must not call it stopped, and must not say there was nothing left."""
+        spec = vqr.held_lane("credits_docs_in", self.BYTES_OWED, vqr.read_held_lanes())
+        self.assertIn("not the blocker", spec["reason"])
+        self.assertNotIn("stopped", spec["reason"])
+        self.assertIn("in the newest filings", spec["reason"])
+        self.assertNotIn("every returned credit document it can read has been read",
+                         spec["reason"])
+        self.assertIn("blob-backfill", spec["unblock"])
+        self.assertNotIn("restart the reader", spec["unblock"])
+        self.assertIn("nothing writes its verdict back", spec["reason"])
+        self.assertIn("write-back", spec["unblock"])
+        self.assertEqual(spec["owner"], DOCS_IN_OWNER)
+
+    def test_an_unmeasured_reader_is_never_called_live_or_stopped(self):
+        lanes = vqr.read_held_lanes()
+        for facts in ({}, {"doc_reader_state": None, "doc_writeback_approved": False},
+                      self.BLIND):
+            spec = vqr.held_lane("credits_docs_in", facts, lanes)
+            self.assertIn("was not measured", spec["reason"])
+            self.assertNotIn("reader is live", spec["reason"])
+            self.assertNotIn("has stopped reading", spec["reason"])
+            self.assertNotIn("caught up", spec["reason"])
+            self.assertNotIn(lanes["credits_docs_in"]["reason"], spec["reason"])
+            self.assertEqual(spec["owner"], DOCS_IN_OWNER)
+
+    def test_an_unread_registry_is_said_as_unmeasured(self):
+        spec = vqr.held_lane("credits_docs_in", dict(self.LIVE, doc_writeback_approved=None),
+                             vqr.read_held_lanes())
+        self.assertIn("reader is live and reading", spec["reason"])
+        self.assertIn("was not measured", spec["reason"])
+        self.assertNotIn("nothing writes", spec["reason"])
+
+    def test_an_approved_document_path_is_not_called_missing(self):
+        spec = vqr.held_lane("credits_docs_in", dict(self.LIVE, doc_writeback_approved=True),
+                             vqr.read_held_lanes())
+        self.assertIn("registered approved", spec["reason"])
+        self.assertNotIn("nothing writes", spec["reason"])
+        self.assertNotIn("captain decides", spec["unblock"])
+
+    def test_no_reader_state_brings_the_false_sentence_back(self):
+        lanes = vqr.read_held_lanes()
+        for state in ("live", "stopped", "caught_up", "bytes_owed", "unknown", None):
+            for armed in (True, False, None):
+                facts = {"doc_reader_state": state, "doc_writeback_approved": armed,
+                         "doc_reader_last_step": "2026-11-09T04:00:00Z"}
+                for file_lanes in (lanes, {}):
+                    spec = vqr.held_lane("credits_docs_in", facts, file_lanes)
+                    self.assertNotIn("not live", json.dumps(spec), (state, armed))
+                    self.assertNotIn("2026-10-27", json.dumps(spec), (state, armed))
+                    self.assertTrue(spec["reason"], (state, armed))
+
+    # -- the page ----------------------------------------------------------------------
+
+    def test_the_page_carries_the_live_sentence(self):
+        msgs, _ = self.page(self.LIVE)
+        self.assertEqual(len(msgs), 1)
+        self.assertTrue(msgs[0].startswith("BACKLOG HELD BY CAPTAIN ORDER"))
+        self.assertIn("reader is live and reading", msgs[0])
+        self.assertIn("nothing writes its verdict back", msgs[0])
+        self.assertIn("owner " + DOCS_IN_OWNER, msgs[0])
+        self.assertNotIn("not live", msgs[0])
+
+    def test_a_working_reader_does_not_page_again_as_its_latest_step_moves(self):
+        """The reason is part of the held signature, so nothing that moves while the reader
+        works may be in it: 6 ticks an hour would be 6 pages an hour."""
+        _, state = self.page(self.LIVE)
+        for minutes in (5, 30, 65, 600):
+            now = self.NOW + timedelta(minutes=minutes)
+            facts = dict(self.LIVE, doc_reader_last_step=now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            msgs, state = self.page(facts, prev=state, now=now)
+            self.assertEqual(msgs, [], f"re-paged {minutes} min later with a newer step")
+
+    def test_a_reader_that_stops_pages_once(self):
+        _, state = self.page(self.LIVE)
+        msgs, state = self.page(self.STOPPED, prev=state, now=self.NOW + timedelta(hours=30))
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("has stopped reading", msgs[0])
+        msgs, state = self.page(self.STOPPED, prev=state, now=self.NOW + timedelta(hours=31))
+        self.assertEqual(msgs, [])
+
+    def test_a_store_that_cannot_be_read_for_one_tick_pages_once_not_every_tick(self):
+        _, state = self.page(self.LIVE)
+        msgs, state = self.page(self.BLIND, prev=state, now=self.NOW + timedelta(minutes=5))
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("was not measured", msgs[0])
+        self.assertNotIn("not live", msgs[0])
+        msgs, state = self.page(self.BLIND, prev=state, now=self.NOW + timedelta(minutes=10))
+        self.assertEqual(msgs, [])
+
+    # -- the report's held block --------------------------------------------------------
+
+    STORED = {"credits_docs_in": {
+        "count": 296, "items_sha": "abc", "oldest_h": 446, "label": "credit documents back",
+        "owner": "user-decisions-fable-d1 (review) + doc-verify-build-b1 (reader go-live)",
+        "eta": "backfill the night of 2026-10-27",
+        "unblock": "doc-verify-build-b1 takes the reader live",
+        # the stored sentence, split so a grep for it across the repo stays empty
+        "reason": "no paperwork asks until a returned document can be accepted: "
+                  "the returned-document reader is " "not live yet"}}
+
+    def test_the_report_says_todays_sentence_not_the_last_delivered_one(self):
+        """The state file keeps the words of the last DELIVERED page. A dry run, a rejected
+        page or the sentinel kill switch leave them there, and the report printed them."""
+        shown = vqr.held_words_now(self.STORED, self.LIVE, vqr.read_held_lanes())
+        row = shown["credits_docs_in"]
+        self.assertNotIn("not live", json.dumps(shown))
+        self.assertNotIn("2026-10-27", json.dumps(shown))
+        self.assertIn("reader is live and reading", row["reason"])
+        self.assertIn("write-back", row["unblock"])
+        self.assertEqual(row["owner"], DOCS_IN_OWNER)
+        # the dedupe record is the stored one: only the words are today's
+        self.assertEqual(row["count"], 296)
+        self.assertEqual(row["items_sha"], "abc")
+        self.assertEqual(row["oldest_h"], 446)
+        # and the stored row itself is not rewritten
+        self.assertIn("not live", self.STORED["credits_docs_in"]["reason"])
+
+    def test_the_held_block_prints_this_ticks_count_and_age(self):
+        """The stored numbers are the dedupe record of the last delivered page; the report
+        prints what this tick measured, next to the sentence this tick derived."""
+        shown = vqr.held_words_now(self.STORED, self.CAUGHT_UP, vqr.read_held_lanes(),
+                                   {"credits_docs_in": (312, 470)})
+        row = shown["credits_docs_in"]
+        self.assertEqual((row["count"], row["oldest_h"]), (312, 470))
+        self.assertEqual(row["items_sha"], "abc")
+        self.assertIn("in the newest filings", row["reason"])
+        self.assertNotIn("not live", row["reason"])
+
+    def test_a_lane_whose_words_did_not_change_is_shown_as_stored(self):
+        lanes = vqr.read_held_lanes()
+        spec = vqr.held_lane("intercom_customer_last", self.OTHERS, lanes)
+        stored = {"intercom_customer_last": {
+            "count": 49, "items_sha": "def", "oldest_h": 44, "label": "Intercom",
+            "owner": spec["owner"], "eta": spec["eta"], "unblock": spec["unblock"],
+            "reason": spec["reason"]}}
+        for reader in (self.LIVE, self.STOPPED, self.CAUGHT_UP, self.BLIND, {}):
+            self.assertEqual(vqr.held_words_now(stored, dict(self.OTHERS, **reader), lanes), stored)
+        self.assertEqual(vqr.held_words_now({}, self.LIVE, lanes), {})
+        self.assertEqual(vqr.held_words_now(stored, None, None)["intercom_customer_last"]["count"], 49)
+
+    # -- the reads ---------------------------------------------------------------------
+
+    def test_a_step_inside_the_hour_is_live(self):
+        f = vqr.doc_reader_facts(self.store("2026-11-13T15:20:00Z"), self.NOW)
+        self.assertEqual(f["doc_reader_state"], "live")
+        self.assertEqual(f["doc_reader_last_step"], "2026-11-13T15:20:00Z")
+
+    def test_a_user_judged_inside_24_hours_is_live_without_a_fresh_step(self):
+        f = vqr.doc_reader_facts(
+            self.store("2026-11-13T02:00:00Z", [("2026-11-12T17:00:00Z", 7)]), self.NOW)
+        self.assertEqual(f["doc_reader_state"], "live")
+
+    def test_an_old_step_with_a_document_waiting_is_stopped(self):
+        f = vqr.doc_reader_facts(
+            self.store("2026-11-09T04:00:00Z", [("2026-11-09T03:00:00Z", 7)]), self.NOW,
+            self.proof_store([("doc-1", "2026-11-13T10:00:00Z", '["req-1"]')]))
+        self.assertEqual(f["doc_reader_state"], "stopped")
+        self.assertEqual(f["doc_reader_last_step"], "2026-11-09T04:00:00Z")
+
+    def test_a_quiet_step_with_nothing_waiting_is_caught_up(self):
+        path = self.store("2026-11-09T04:00:00Z", steps=[
+            ("2026-11-13T10:00:00Z", "doc-1")])
+        read = self.proof_store([("doc-1", "2026-11-13T10:00:00Z", '["req-1"]')])
+        self.assertEqual(vqr.doc_reader_facts(path, self.NOW, read)["doc_reader_state"],
+                         "caught_up")
+        # a claim filing is not work the credit pass was given, and an empty feed is no work
+        for filings in ([("doc-3", "2026-11-09T00:00:00Z", '["req-2"]', "claim")], []):
+            self.assertEqual(
+                vqr.doc_reader_facts(path, self.NOW, self.proof_store(filings))
+                ["doc_reader_state"], "caught_up", filings)
+
+    def test_a_filing_with_no_usable_request_is_not_evidence_the_reader_stopped(self):
+        """The reader skips a filing whose candidates carry no usable id, so no step will ever
+        appear for it: it is unreadable, never a sign that the reader stopped."""
+        path = self.store("2026-11-09T04:00:00Z", steps=[("2026-11-09T03:00:00Z", "doc-9")])
+        for cands in ("[]", "[null]", '[""]', "not json"):
+            self.assertEqual(
+                vqr.doc_reader_facts(path, self.NOW,
+                                     self.proof_store([("doc-2", "2026-11-13T10:00:00Z", cands)]))
+                ["doc_reader_state"], "bytes_owed", cands)
+
+    def test_a_filing_whose_bytes_were_never_stored_is_owed_not_waiting(self):
+        """A support@ filing keeps no bytes, and no run pulls Gmail: the reader is not the
+        blocker and restarting it clears nothing. An Intercom filing with no stored blob is
+        still fetched from the conversation attachment, so that one is readable work."""
+        path = self.store("2026-11-09T04:00:00Z", steps=[("2026-11-09T03:00:00Z", "doc-9")])
+        self.blob_root()
+        owed = vqr.doc_reader_facts(
+            path, self.NOW, self.proof_store([("doc-1", "2026-11-13T10:00:00Z", '["req-1"]',
+                                               "credit", "gmail:18f")]))
+        self.assertEqual(owed["doc_reader_state"], "bytes_owed")
+        readable = vqr.doc_reader_facts(
+            path, self.NOW, self.proof_store([("doc-2", "2026-11-13T10:00:00Z", '["req-1"]',
+                                               "credit", "1283312")]))
+        self.assertEqual(readable["doc_reader_state"], "stopped")
+
+    def test_stored_bytes_are_readable_work_and_a_deleted_one_is_owed(self):
+        """Selection follows the reader's own rule: bytes on file are work; a registration whose
+        blob was deleted is never re-fetched, so it is owed."""
+        path = self.store("2026-11-09T04:00:00Z", steps=[("2026-11-09T03:00:00Z", "doc-9")],
+                          blobs=["b" * 64])
+        stored, deleted = "a" * 64, "b" * 64
+        self.blob_root([stored])
+        self.assertEqual(
+            vqr.doc_reader_facts(
+                path, self.NOW,
+                self.proof_store([(stored, "2026-11-13T10:00:00Z", '["req-1"]', "credit",
+                                   "gmail:1")]))["doc_reader_state"], "stopped")
+        self.assertEqual(
+            vqr.doc_reader_facts(
+                path, self.NOW,
+                self.proof_store([(deleted, "2026-11-13T10:00:00Z", '["req-1"]', "credit",
+                                   "1283312")]))["doc_reader_state"], "bytes_owed")
+
+    def test_a_readable_filing_older_than_the_window_never_reads_as_whole_store_read(self):
+        """The waiting read inspects only the newest DOC_READER_WAIT_ROWS filings. An older
+        readable filing left unread while the newest ones are all owed is outside that window,
+        so the bytes_owed sentence may claim only the newest filings -- never the whole store."""
+        path = self.store("2026-11-09T04:00:00Z", steps=[("2026-11-09T03:00:00Z", "doc-9")])
+        self.blob_root(["old-readable"])
+        filings = [("old-readable", "2026-11-13T10:00:00Z", '["req-1"]', "credit",
+                    "1283312")]
+        filings += [(f"owed-{n}", "2026-11-13T10:00:00Z", '["req-1"]', "credit",
+                     "gmail:1") for n in range(vqr.DOC_READER_WAIT_ROWS)]
+        facts = vqr.doc_reader_facts(path, self.NOW, self.proof_store(filings))
+        self.assertEqual(facts["doc_reader_state"], "bytes_owed")
+        spec = vqr.held_lane("credits_docs_in", facts, vqr.read_held_lanes())
+        self.assertIn("in the newest filings", spec["reason"])
+        self.assertNotIn("every returned credit document it can read has been read",
+                         spec["reason"])
+
+    def test_a_quiet_step_with_an_unreadable_blob_registry_is_unmeasured(self):
+        """Whether a filing's bytes were ever stored is what separates readable work from a blob
+        the reader skips. An unreadable registry must not silently call every filing readable
+        and page a healthy reader as stopped: the state is unmeasured."""
+        path = self.store("2026-11-09T04:00:00Z", steps=[("2026-11-09T03:00:00Z", "doc-9")])
+        db = sqlite3.connect(path)
+        db.execute("drop table dv_blobs")
+        db.commit()
+        db.close()
+        self.blob_root()
+        proof = self.proof_store([("doc-1", "2026-11-13T10:00:00Z", '["req-1"]',
+                                   "credit", "1283312")])
+        self.assertEqual(vqr.doc_reader_facts(path, self.NOW, proof)["doc_reader_state"],
+                         "unknown")
+
+    def test_a_document_sent_days_ago_and_filed_now_is_still_waiting(self):
+        """`received_at` is when the customer sent the document, not when the feeder filed it:
+        a feeder that paused for days files old documents, and the reader is idle on them."""
+        path = self.store("2026-11-09T04:00:00Z", steps=[("2026-11-09T03:00:00Z", "doc-9")])
+        for received in ("2026-11-06T10:00:00Z", "2026-11-11T10:00:00Z"):
+            self.assertEqual(
+                vqr.doc_reader_facts(path, self.NOW,
+                                     self.proof_store([("doc-1", received, '["req-1"]')]))
+                ["doc_reader_state"], "stopped", received)
+
+    def test_a_read_document_is_matched_by_its_sha_not_its_intake_id(self):
+        """doc-verify keys every step by the document's sha256; intake_id is
+        `<user_id>:<sha256 prefix>` and equals no step, so joining on it can never see a read."""
+        path = self.store("2026-11-09T04:00:00Z", steps=[("2026-11-13T10:00:00Z", "doc-1")])
+        read = self.proof_store([("doc-1", "2026-11-13T10:00:00Z", '["req-1"]')])
+        self.assertEqual(vqr.doc_reader_facts(path, self.NOW, read)["doc_reader_state"],
+                         "caught_up")
+
+    def test_a_quiet_step_with_an_unreadable_proof_feed_is_unmeasured(self):
+        path = self.store("2026-11-09T04:00:00Z")
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        foreign = os.path.join(d, "other.sqlite")
+        sqlite3.connect(foreign).execute("create table t (x)").connection.close()
+        for proof in ("/nonexistent/proof.sqlite", foreign):
+            self.assertEqual(vqr.doc_reader_facts(path, self.NOW, proof)["doc_reader_state"],
+                             "unknown")
+
+    def test_the_thresholds_are_the_named_constants(self):
+        proof = self.proof_store([("doc-1", "2026-11-13T10:00:00Z", '["req-1"]')])
+        edge = self.NOW - vqr.DOC_READER_STEP_FRESH
+        inside = vqr.doc_reader_facts(self.store(edge.strftime("%Y-%m-%dT%H:%M:%SZ")), self.NOW,
+                                      proof)
+        self.assertEqual(inside["doc_reader_state"], "live")
+        past = edge - timedelta(seconds=1)
+        outside = vqr.doc_reader_facts(self.store(past.strftime("%Y-%m-%dT%H:%M:%SZ")), self.NOW,
+                                       proof)
+        self.assertEqual(outside["doc_reader_state"], "stopped")
+        self.assertEqual(vqr.DOC_READER_STEP_FRESH, timedelta(hours=1))
+        self.assertEqual(vqr.DOC_READER_JUDGED_WINDOW, timedelta(hours=24))
+
+    def test_an_empty_store_is_caught_up_and_a_missing_or_foreign_one_is_unknown(self):
+        self.assertEqual(
+            vqr.doc_reader_facts(self.store(), self.NOW, self.proof_store())["doc_reader_state"],
+            "caught_up")
+        missing = vqr.doc_reader_facts("/nonexistent/doc-verify.sqlite", self.NOW)
+        self.assertEqual(missing["doc_reader_state"], "unknown")
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        foreign = os.path.join(d, "other.sqlite")
+        sqlite3.connect(foreign).execute("create table t (x)").connection.close()
+        self.assertEqual(vqr.doc_reader_facts(foreign, self.NOW)["doc_reader_state"], "unknown")
+
+    def test_the_read_is_bounded_and_opens_the_store_read_only(self):
+        """dv_steps holds 2.46M rows with no index on `at`: the read must walk the rowid, and a
+        tail that carries no recent row must not turn into a scan of the whole table."""
+        old = [("2026-11-01T00:00:00Z", n) for n in range(40)]
+        path = self.store("2026-11-09T04:00:00Z", [("2026-11-13T15:00:00Z", 1)] + old)
+        proof = self.proof_store()
+        with mock.patch.object(vqr, "DOC_READER_TAIL_ROWS", 10):
+            f = vqr.doc_reader_facts(path, self.NOW, proof)
+        self.assertEqual(f["doc_reader_state"], "caught_up")
+        before = os.stat(path).st_mtime_ns
+        vqr.doc_reader_facts(path, self.NOW, proof)
+        self.assertEqual(os.stat(path).st_mtime_ns, before)
+        self.assertEqual(sorted(os.listdir(os.path.dirname(path))), ["doc-verify.sqlite"])
+        # the same store read with the real bound finds the judged user the small bound cut off
+        self.assertEqual(vqr.doc_reader_facts(path, self.NOW, proof)["doc_reader_state"], "live")
+
+    def test_the_waiting_read_is_bounded(self):
+        """proof_intake has no index on received_at: only the newest rows are examined, so the
+        30-minute tick never scans the feed."""
+        read = [("doc-%d" % n, "2026-11-13T10:00:00Z", '["req-1"]') for n in range(1, 21)]
+        proof = self.proof_store([("doc-0", "2026-11-13T10:00:00Z", '["req-1"]')] + read)
+        path = self.store("2026-11-09T04:00:00Z",
+                          steps=[("2026-11-13T10:00:00Z", f[0]) for f in read])
+        with mock.patch.object(vqr, "DOC_READER_WAIT_ROWS", 5):
+            self.assertEqual(vqr.doc_reader_facts(path, self.NOW, proof)["doc_reader_state"],
+                             "caught_up")
+        self.assertEqual(vqr.doc_reader_facts(path, self.NOW, proof)["doc_reader_state"],
+                         "stopped")
+
+    def test_the_registry_read_is_the_rule_the_decider_applies(self):
+        full = {"approved": True, "approved_by": "captain", "approval_ref": "ruling-1"}
+        self.assertIs(vqr.doc_writeback_approved(self.registry(full)), True)
+        self.assertIs(vqr.doc_writeback_approved(self.registry({"approved": False})), False)
+        self.assertIs(vqr.doc_writeback_approved(self.registry(dict(full, approved_by=""))), False)
+        self.assertIs(vqr.doc_writeback_approved(self.registry(dict(full, approval_ref=None))), False)
+        self.assertIs(vqr.doc_writeback_approved(self.registry(dict(full, approved="true"))), False)
+        self.assertIsNone(vqr.doc_writeback_approved("/nonexistent/registry.json"))
+        self.assertIsNone(vqr.doc_writeback_approved(self.registry(None)))
+        # the same row and the same answer as the decider's own gate, on every shape above
+        sys.path.insert(0, os.path.join(REPO, "scripts"))
+        self.addCleanup(lambda: sys.path.remove(os.path.join(REPO, "scripts")))
+        from credit_review import decide
+        self.assertEqual(decide.DOC_AUTOMATION, vqr.DOC_APPROVAL_AUTOMATION)
+        for entry in (full, {"approved": False}, dict(full, approved_by=""),
+                      dict(full, approval_ref=None), dict(full, approved="true")):
+            path = self.registry(entry)
+            self.assertEqual(bool(vqr.doc_writeback_approved(path)),
+                             decide.doc_class_approved(path)[0], entry)
+        # and today that row is not approved
+        self.assertIs(vqr.doc_writeback_approved(), False)
+        self.assertIs(decide.doc_class_approved()[0], False)
+
+    # -- the other lanes ---------------------------------------------------------------
+
+    def test_the_other_held_lanes_do_not_read_the_docs_in_facts(self):
+        """The docs_in facts must not move another lane's words, whatever the reader does, and
+        each lane's own words come from the policy file it is given."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "lanes.json")
+        with open(path, "w") as fh:
+            json.dump({"lanes": {
+                "credits_docs_in": {"owner": "docs-owner"},
+                "claims_untouched": {"owner": "claims-owner",
+                                     "unblock_after_status": "the reader goes live (this file)"},
+                "fable_decider": {"owner": "decider-owner"},
+                "intercom_customer_last": {"owner": "intercom-owner",
+                                           "reason": "no new copy (this file)",
+                                           "unblock": "approved copy (this file)"}}}, fh)
+        lanes = vqr.read_held_lanes(path)
+        self.assertEqual(lanes["claims_untouched"]["owner"], "claims-owner")
+        for reader in (self.LIVE, self.STOPPED, self.CAUGHT_UP, self.BYTES_OWED, self.BLIND, {}):
+            facts = dict(self.OTHERS, **reader)
+            claims = vqr.held_lane("claims_untouched", facts, lanes)
+            self.assertEqual(claims["unblock"], "the reader goes live (this file)", reader)
+            self.assertEqual(claims["owner"], "claims-owner")
+            self.assertEqual(vqr.held_lane("fable_decider", facts, lanes)["owner"],
+                             "decider-owner")
+            intercom = vqr.held_lane("intercom_customer_last", facts, lanes)
+            self.assertEqual(intercom["reason"], "no new copy (this file)")
+            self.assertEqual(intercom["unblock"], "approved copy (this file)")
+            # a lane that is not held stays not held
+            self.assertIsNone(vqr.held_lane("credits_untouched", facts, lanes))
+            self.assertIsNone(vqr.held_lane(
+                "fable_decider", dict(facts, decide_switch=False), lanes))
+            self.assertIsNone(vqr.held_lane(
+                "claims_untouched", dict(facts, claim_proof_ask_on=True), lanes))
+        self.assertEqual(set(vqr.CAPTAIN_HELD), {"credits_docs_in", "claims_untouched",
+                                                 "fable_decider", "intercom_customer_last"})
 
 
 class DeliveryLedger(unittest.TestCase):

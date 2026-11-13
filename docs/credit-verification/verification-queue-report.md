@@ -159,7 +159,7 @@ BACKLOG FORMING: credit documents back, we owe a look 3 items, oldest 2d, owner 
 | lane | SLA | owner |
 |---|---|---|
 | credits nobody has touched | 24h | verify-ask-wiring-h2 |
-| credit documents back, we owe a look | 24h | user-decisions-fable-d1 + doc-verify-build-b1 |
+| credit documents back, we owe a look | 24h | verification worker, creds home (firstmate-assigned 2026-11-13) |
 | profile claims nobody has touched | 24h | claim-lane-resume-c2 |
 | claim documents back, we owe a look | 24h | claim-lane-resume-c2 |
 | profile merges waiting on us | 24h | profile-merge-ops-m1 |
@@ -205,14 +205,46 @@ Prod effect: `credits_docs_in` 752 -> 0 and "sitting with a person" 824 -> 1,602
 total unchanged — the work did not disappear, it moved to the lane that actually owns it.
 
 **Held by captain order is not a backlog.** Four lanes are held by the captain's own order
-(2026-10-27 00:52Z): credit documents back (`no paperwork asks until a returned document can be
-accepted`), claims nobody has touched (`claim sends are behind hydra #1377 review`), Intercom
+(2026-10-27 00:52Z): credit documents back (the reader is live, but nothing writes a doc-verify
+verdict back), claims nobody has touched (`claim sends are behind hydra #1377 review`), Intercom
 customer-spoke-last (`no new copy`), decider holds (`approvals paused until the account gate is
 live`). They stay visible in the report — and in the state file's `held` block — with their
 owner, the unblock step and an ETA, and they page **once per change of their item set or
 blocker sentence** — never because the oldest item aged another hour (that produced 120 held
 pages on 10-27) and never as "backlog forming". A lane whose blocker has shipped stops being
 held and pages as an ordinary breach. A new breach in any OTHER lane still pages immediately.
+
+**A held sentence is read from the box where the box can answer.** `held_lane()` derives the
+decider, claim and credit-documents sentences from live state; the file supplies the owner,
+the eta and the unblock. For credit documents the reads are the
+reader's own store (`doc_reader_facts`: a doc-verify step in the last hour or a user judged in
+the last 24 hours means the reader is live; when both windows are quiet it asks the proof feed
+whether a returned credit document from the newest filings still has no doc-verify step —
+readable work it did not read means the reader stopped, nothing left in that window means it is
+caught up (a fact about the newest filings, never a whole-store one), and
+filings no run can read — no bytes on file (blob-backfill owes them) or no usable credit
+request — are their own bytes-owed state (also a fact about the newest filings, never a
+whole-store one), where the reader is not the blocker: never a restart,
+and the unblock this lane prints adds `credit-doc-verify.py blob-backfill` for the filings whose
+bytes are owed), and the
+approval registry
+row `document_small_track` (`doc_writeback_approved`), which every reader state's sentence reads
+(a stopped one included).
+Filings are windowed by rowid, never by `received_at`: that column is when the customer sent
+the document, so a feeder that paused files documents days old, and a window on it would call a
+real backlog caught up. A step is matched on the document's sha256, which is what doc-verify
+records; `intake_id` (`<user_id>:<sha256 prefix>`) matches no step. Which filings are readable
+is the reader's own rule (`intake_read.needs_backfill`, `credit_verify/docverify/blobs.py`): bytes
+on file are work, a support@ filing with no stored bytes and a registration whose blob was
+deleted are owed, and an Intercom filing with no stored blob is still fetched from the
+conversation attachment. A store that cannot be read
+is reported as not measured — never as stopped, never as caught up, and never as the file's
+dated claim about the reader. All reads are bounded (the newest rows of each store), a few milliseconds,
+and none of them touches the network. No timestamp or count that moves while the reader works
+is in a reason, because the reason is part of the page's signature. The report's held block
+prints the sentence, item count and oldest age derived on that tick (`held_words_now`), not the
+copy stored with the last delivered page: the file had said the reader was not live for 17 days
+after it went live (2026-11-13).
 
 **Unmeasured is never zero.** The support@ lane has no per-thread ledger on this host: the
 hourly triage is an agent skill that reads Gmail and persists nothing, and `gog` needs a

@@ -118,7 +118,7 @@ PAID_TEAMS = ("(SELECT DISTINCT s.teamid FROM postgresql_core.public.subscriptio
 SENTINEL_BUCKETS = (
     ("credits_untouched", "credits nobody has touched", "verify-ask-wiring-h2", 24),
     ("credits_docs_in", "credit documents back, we owe a look",
-     "user-decisions-fable-d1 + doc-verify-build-b1", 24),
+     "verification worker, creds home (firstmate-assigned 2026-11-13)", 24),
     ("claims_untouched", "profile claims nobody has touched", "claim-lane-resume-c2", 24),
     ("claims_docs_in", "claim documents back, we owe a look", "claim-lane-resume-c2", 24),
     ("merges_waiting", "profile merges waiting on us", "merge-queue-clear-q1", 24),
@@ -139,8 +139,13 @@ SENTINEL_BUCKETS = (
 HELD_LANES_FILE = os.environ.get("VQR_HELD_LANES", str(Path(__file__).resolve().parents[1]
                                                       / "policies" / "queue-report-held-lanes.json"))
 CAPTAIN_HELD = {
-    "credits_docs_in": ("no paperwork asks until a returned document can be accepted",
-                        "turn on the returned-document acceptance path"),
+    # Measured on node-8 2026-11-13: the reader (doc-verify) IS live, and every user in this
+    # bucket is here on a ledger proof tag that nothing reviews. doc-verify is a judge with no
+    # executor: its verdict is written neither to core nor as a proof review in the ledger.
+    "credits_docs_in": ("the returned-document reader is live, but nothing writes a doc-verify "
+                        "verdict back (no executor: not to core, not as a proof review in the "
+                        "ledger), so a user cannot leave this bucket by being read",
+                        "the captain decides whether to wire a verdict write-back"),
     "claims_untouched": ("claim sends are behind hydra #1377 review", "#1377 review lands"),
     "fable_decider": ("approvals paused until the account gate is live",
                       "ship the account gate"),
@@ -153,6 +158,47 @@ SCORE_APPROVE_PY = os.environ.get("VQR_SCORE_APPROVE", str(Path(__file__).resolv
 DECIDE_SWITCH = os.environ.get("VQR_DECIDE_SWITCH", "/etc/hydra/credit-trust-decide.disabled")
 VERIFY_REQUEST_SH = os.environ.get("VQR_VERIFY_REQUEST", str(Path(__file__).resolve().parent
                                                              / "intercom-verify-request.sh"))
+# What the docs_in held sentence is derived from: the returned-document reader's own store
+# (doc-verify) and the approval registry. Both are local files, so the 5-minute light tick
+# pays a few milliseconds for them and no network round trip.
+DOC_VERIFY_STORE = os.environ.get("CREDIT_DOC_VERIFY_STORE",
+                                  "/var/lib/hydra-credit-verify/doc-verify.sqlite")
+# Where the returned documents are filed. Read only to tell a reader with NOTHING to read from
+# one that stopped reading: dv_steps carries a row only for a document a run processed, so a
+# quiet store on its own is not evidence about the reader at all.
+DOC_PROOF_STORE = os.environ.get("CREDIT_PROOF_STORE",
+                                 "/var/lib/hydra-credit-verify/proof.sqlite")
+# Where the filed bytes are stored, `<root>/<sha[:2]>/<sha>` (credit_verify/docverify/blobs.py).
+# A filing whose bytes are not here cannot be read by any run: blob-backfill owes them.
+DOC_BLOB_ROOT = os.environ.get("CREDIT_DOC_VERIFY_BLOBS",
+                               "/var/lib/hydra-credit-verify/blobs")
+APPROVAL_REGISTRY = str(Path(__file__).resolve().parents[1]
+                        / "policies" / "credit-approval-automation.json")
+# The registry row that would let a read document approve a request: the row
+# credit_review/decide.py doc_class_approved() gates on (a test pins the two readers equal).
+DOC_APPROVAL_AUTOMATION = "document_small_track"
+# "The reader is live" = a doc-verify step inside the last hour OR a user judged inside the
+# last 24 hours. The cron (credit-doc-verify) fires hourly, so a working reader with documents
+# to read steps at least once an hour; the 24-hour half keeps one quiet hour (nothing newly
+# filed, one failed run, a short pause) from flipping the sentence, because the sentence is
+# part of the held page's signature and every flip pages the captain.
+DOC_READER_STEP_FRESH = timedelta(hours=1)
+DOC_READER_JUDGED_WINDOW = timedelta(hours=24)
+# Past both windows the reader's silence is only evidence of a STOPPED reader if there was work
+# it should have read: a returned document filed for a credit request with no doc-verify step.
+# proof_intake has no filed-at column (`received_at` is when the CUSTOMER sent it, arbitrarily
+# older than the filing — a paused feeder files documents sent days before), so the newest
+# DOC_READER_WAIT_ROWS rows by rowid are what "filed recently" means; the rowid walk stops and
+# the step lookup per filing is indexed by proof_id. With nothing waiting the honest sentence is
+# that the reader is caught up, never that it stopped.
+DOC_READER_WAIT_ROWS = 500
+# Neither table has an index on `at` and dv_steps holds 2.46M rows, so both reads walk the
+# AUTOINCREMENT rowid backwards and stop. The bound only has to find ONE recent judged user;
+# 5,000 outcome rows is more than a day of judging (3,826 in 24h, measured 2026-11-13) and
+# reads in ~3 ms. Rows carried forward on a version bump keep their old `at`, so a tail of
+# them reads as "nobody judged" and the step half decides.
+DOC_READER_TAIL_ROWS = 5000
+DOC_READER_BUSY_S = 1.0     # a busy store must not stall the tick: it reads as unknown
 
 
 def read_held_lanes(path: str = None) -> dict:
@@ -168,6 +214,146 @@ def read_held_lanes(path: str = None) -> dict:
     except (OSError, ValueError):
         pass
     return {}
+
+
+def doc_blob_present(sha: str) -> bool:
+    """Whether the filed bytes are on disk, the check the reader's own selection makes
+    (credit_verify/docverify/blobs.py BlobStore.has)."""
+    try:
+        return os.path.isfile(os.path.join(DOC_BLOB_ROOT, sha[:2], sha))
+    except (OSError, TypeError):
+        return False
+
+
+def doc_reader_waiting(db, proof_path: str = None) -> tuple[int, int] | None:
+    """(readable, unread) over the returned credit documents with no doc-verify step: the work
+    a live reader should have read, and the filings no run can read (bytes not on file, or no
+    credit request to point a verdict at), which are never evidence that it stopped. Bounded
+    (DOC_READER_WAIT_ROWS filings, one indexed step lookup, one registration lookup and one
+    isfile per unread filing). None when the proof feed cannot be read: then the reader's quiet
+    is not measurable, which is its own state."""
+    try:
+        proof = sqlite3.connect(f"file:{proof_path or DOC_PROOF_STORE}?mode=ro", uri=True,
+                                timeout=DOC_READER_BUSY_S)
+    except sqlite3.Error:
+        return None
+    try:
+        rows = proof.execute(
+            "select file_sha256, candidate_request_ids_json, conversation_id from proof_intake "
+            "where subject = 'credit' order by rowid desc limit ?",
+            (DOC_READER_WAIT_ROWS,)).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        proof.close()
+    # A claim filing carries no candidate request, and the reader's credit pass is not what it
+    # is waiting for: only a document filed for a credit request is work this lane can name. A
+    # filing whose candidates carry no usable id is one the reader skips, so it is not evidence
+    # about the reader either.
+    unread = 0
+    filed = []
+    for sha, cands, convo in rows:
+        if not sha:
+            continue
+        try:
+            usable = any(json.loads(cands or "[]"))
+        except ValueError:
+            usable = False
+        if usable:
+            filed.append((sha, convo or ""))
+        else:
+            unread += 1
+    # doc-verify records every step against the document's sha256 (its proof id), which is
+    # proof_intake.file_sha256; intake_id is `<user_id>:<sha256 prefix>` and matches no step.
+    seen: set = set()
+    try:
+        for start in range(0, len(filed), 500):
+            chunk = [f[0] for f in filed[start:start + 500]]
+            seen.update(x[0] for x in db.execute(
+                "select distinct proof_id from dv_steps where proof_id in (%s)"
+                % ",".join("?" * len(chunk)), chunk).fetchall())
+    except sqlite3.Error:
+        return None
+    unread_filed = [(sha, convo) for sha, convo in filed if sha not in seen]
+    if not unread_filed:
+        return 0, unread
+    # The reader's own selection rule (intake_read.needs_backfill): a filing whose bytes are not
+    # stored is skipped when it came in by email, or when its stored blob was deleted; an
+    # Intercom filing with no stored blob is still fetched from the conversation attachment.
+    try:
+        registered = {x[0] for x in db.execute(
+            "select sha256 from dv_blobs where sha256 in (%s)"
+            % ",".join("?" * len(unread_filed)), [sha for sha, _ in unread_filed]).fetchall()}
+    except sqlite3.Error:
+        # Whether the bytes were ever stored is what separates readable work from a blob the
+        # reader will skip: an unreadable registry would silently call an owed filing readable
+        # and page a healthy reader as stopped, so it is unmeasured, like every other read here.
+        return None
+    readable = 0
+    for sha, convo in unread_filed:
+        if doc_blob_present(sha):
+            readable += 1
+        elif convo.startswith("gmail:") or sha in registered:
+            unread += 1
+        else:
+            readable += 1
+    return readable, unread
+
+
+def doc_reader_facts(path: str = None, now: datetime = None, proof_path: str = None) -> dict:
+    """What the returned-document reader is doing, asked of its own store in bounded reads
+    (DOC_READER_TAIL_ROWS outcomes, DOC_READER_WAIT_ROWS filings). `doc_reader_state` is
+    "live", "stopped" only when there was readable work it did not read, "bytes_owed" when the
+    only filings left are ones no run can read, "caught_up" when there was no work at all, and
+    "unknown" when a store could not be read (not node-8, missing or busy): an unmeasured
+    reader is never called stopped and never called caught up."""
+    out = {"doc_reader_state": "unknown", "doc_reader_last_step": None}
+    now = now or datetime.now(timezone.utc)
+    try:
+        db = sqlite3.connect(f"file:{path or DOC_VERIFY_STORE}?mode=ro", uri=True,
+                             timeout=DOC_READER_BUSY_S)
+    except sqlite3.Error:
+        return out
+    try:
+        step = db.execute("select at from dv_steps order by id desc limit 1").fetchone()
+        since = (now - DOC_READER_JUDGED_WINDOW).strftime("%Y-%m-%dT%H:%M:%SZ")
+        judged = db.execute(
+            "select count(distinct user_id) from (select user_id, at from dv_outcomes "
+            "order by id desc limit ?) where at >= ?", (DOC_READER_TAIL_ROWS, since)).fetchone()[0]
+        last = step[0] if step else None
+        last_at = parse_ts(last or "")
+        fresh = bool(last_at and now - last_at <= DOC_READER_STEP_FRESH)
+        if fresh or judged > 0:
+            return {"doc_reader_state": "live", "doc_reader_last_step": last}
+        waiting = doc_reader_waiting(db, proof_path)
+    except sqlite3.Error:
+        return out
+    finally:
+        db.close()
+    if waiting is None:
+        state = "unknown"
+    elif waiting[0]:
+        state = "stopped"
+    elif waiting[1]:
+        state = "bytes_owed"
+    else:
+        state = "caught_up"
+    return {"doc_reader_state": state, "doc_reader_last_step": last}
+
+
+def doc_writeback_approved(path: str = None) -> bool | None:
+    """Whether any automation is approved to act on a read document, as the registry records
+    it (approved AND approved_by AND approval_ref, the rule decide.doc_class_approved applies).
+    None when the registry or its row cannot be read: for a sentence that is unknown, where
+    the gate itself fails closed."""
+    try:
+        with open(path or APPROVAL_REGISTRY, encoding="utf-8") as fh:
+            entry = json.load(fh)["automations"][DOC_APPROVAL_AUTOMATION]
+        return (entry.get("approved") is True
+                and bool(str(entry.get("approved_by") or "").strip())
+                and bool(str(entry.get("approval_ref") or "").strip()))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 def held_facts() -> dict:
@@ -195,7 +381,9 @@ def held_facts() -> dict:
     return {"account_gate_live": (gate and wired) if gate is not None and wired is not None else None,
             "decide_switch": has(DECIDE_SWITCH),
             "claim_status_on": lock("CLAIM_STATUS_COPY_APPROVED"),
-            "claim_proof_ask_on": lock("CLAIM_PROOF_ASK_COPY_APPROVED")}
+            "claim_proof_ask_on": lock("CLAIM_PROOF_ASK_COPY_APPROVED"),
+            **doc_reader_facts(),
+            "doc_writeback_approved": doc_writeback_approved()}
 
 
 def held_lane(key: str, facts: dict | None = None, lanes: dict | None = None) -> dict | None:
@@ -223,7 +411,92 @@ def held_lane(key: str, facts: dict | None = None, lanes: dict | None = None) ->
         spec["reason"] = ("claim-status notes are on (hydra #1377 is live); claim proof asks "
                           "stay off until a returned document can be accepted")
         spec["unblock"] = spec.get("unblock_after_status") or "the returned-document reader goes live"
+    if key == "credits_docs_in":
+        # The reader's state is what can be read from the box; the file supplies the owner, the
+        # eta and the unblock. An unmeasured reader is said as unmeasured, never as the file's
+        # dated claim. No timestamp or count that moves while the reader works goes in a reason:
+        # it is part of the page's signature.
+        state, armed = facts.get("doc_reader_state"), facts.get("doc_writeback_approved")
+        reading = {
+            "live": "the returned-document reader is live and reading",
+            "caught_up": ("the returned-document reader has read every returned credit "
+                          "document in the newest filings (nothing among them is waiting to "
+                          "be read)"),
+            "bytes_owed": ("the returned-document reader is not the blocker in the newest "
+                           "filings: every returned credit document it can read there has "
+                           "been read, and the ones still unread cannot be read by any run "
+                           "(their bytes are not on file, or they carry no credit request to "
+                           "point a verdict at)"),
+        }.get(state, "")
+        if state in ("live", "caught_up", "bytes_owed"):
+            if armed is False:
+                spec["reason"] = (reading + ", but nothing writes its verdict back: no automation "
+                                  "is approved to act on a read document (" + DOC_APPROVAL_AUTOMATION
+                                  + " is approved=false in the approval registry), so a user "
+                                  "cannot leave this bucket by being read")
+                spec["eta"] = spec.get("eta") or "when the captain decides"
+            elif armed:
+                spec["reason"] = (reading + ", and document approvals are registered approved ("
+                                  + DOC_APPROVAL_AUTOMATION + "); the documents still here were "
+                                  "not decided by that path")
+                spec["unblock"] = "find why the approved document path leaves these documents"
+            else:
+                spec["reason"] = (reading + "; whether a verdict write-back is approved was not "
+                                  "measured (the approval registry could not be read)")
+            if state == "bytes_owed":
+                spec["unblock"] = ("restore the filed bytes (credit-doc-verify.py blob-backfill "
+                                   "for the filings whose bytes are owed); then: "
+                                   + spec["unblock"])
+        elif state == "stopped":
+            # Stopped means a returned document filed for a request was not read, not that the
+            # store went quiet. The latest step does not move while it is stopped, and the
+            # write-back half is said as the registry measures it, exactly as above.
+            write_back = {
+                False: ", and nothing writes a doc-verify verdict back either",
+                True: ", and document approvals are registered approved ("
+                      + DOC_APPROVAL_AUTOMATION + "), so it was not that path",
+            }.get(armed, "; whether a verdict write-back is approved was not measured"
+                          " (the approval registry could not be read)")
+            spec["reason"] = ("the returned-document reader has stopped reading (a returned "
+                              "document filed for a request is still unread; latest "
+                              "doc-verify step "
+                              f"{facts.get('doc_reader_last_step') or 'none on record'}"
+                              + write_back)
+            spec["unblock"] = ("restart the reader (cron credit-doc-verify); then: "
+                               + spec["unblock"])
+        else:
+            # An unknown is not a fact: say it was not measured, in the same voice as an
+            # unread approval registry, and never the file's dated claim about the reader.
+            spec["reason"] = ("whether the returned-document reader is reading was not measured "
+                              "(the doc-verify store or the proof feed could not be read), so "
+                              "whether these documents have been read is unknown")
     return spec
+
+
+def held_words_now(stored: dict, facts: dict | None, lanes: dict | None,
+                   live: dict | None = None) -> dict:
+    """The report's held block, with each lane's WORDS as they are derived on this tick.
+
+    `stored` is the state file's `held`: a snapshot taken when a page was last DELIVERED. Its
+    count and item hash are the dedupe record and stay as they are. Its sentence is a copy of
+    what was true then, and printing the copy is how a false sentence outlives its fix: a dry
+    run, a rejected page or the sentinel's kill switch all leave the old words in the file,
+    and the 30-minute report would go on saying them (2026-11-13: it still called the
+    document reader "not live yet", 17 days after the reader went live).
+
+    `live` is this tick's `{bucket: (count, oldest_h)}`; the numbers move and are printed, but
+    they are not part of the page's dedupe record (that is `items_sha`, and it stays stored)."""
+    owners = {key: owner for key, _label, owner, _sla in SENTINEL_BUCKETS}
+    out = {}
+    for key, row in stored.items():
+        spec = held_lane(key, facts, lanes)
+        row = dict(row)
+        if live and key in live:
+            row["count"], row["oldest_h"] = live[key]
+        out[key] = row if spec is None else dict(
+            row, reason=spec["reason"], unblock=spec["unblock"],
+            owner=spec.get("owner") or owners.get(key) or row.get("owner"), eta=spec.get("eta"))
+    return out
 
 
 def held_signature(items: list) -> dict:
@@ -2169,6 +2442,7 @@ def main(argv: list[str]) -> int:
     lock_failure: Exception | None = None
     state_write_failure: Exception | None = None
     breaches_msgs, sentinel_state, page_map = [], {"legacy": {}, "breaches": [], "held": {}}, []
+    held_facts_now, held_lanes_now = None, None
     found: dict = {"items": {}, "unmeasured": set()}
     ev: dict = {}
     try:
@@ -2190,8 +2464,9 @@ def main(argv: list[str]) -> int:
                                    light=light, prev_state=sent_prev, now=now,
                                    probe=probe, failed_pop=failed_pop)
             ev = sentinel_evaluate(found, now)
+            held_facts_now, held_lanes_now = held_facts(), read_held_lanes()
             breaches_msgs, sentinel_state, page_map = sentinel_page(
-                ev, sent_prev, now, dry, held_facts(), read_held_lanes())
+                ev, sent_prev, now, dry, held_facts_now, held_lanes_now)
             # Deliver the pages and write the shared ledger INSIDE the lock: this is the
             # transaction two coincident ticks would otherwise race on, and an item is only
             # marked told once Slack has confirmed it.
@@ -2238,7 +2513,11 @@ def main(argv: list[str]) -> int:
     dnc = decided_not_closed()
     m["decided_not_closed"] = dnc
     m["headline"] = headline_build(credits, claim, c_class, k_class, dnc)
-    m["held"] = sentinel_state.get("held") or {}
+    m["held"] = held_words_now(
+        sentinel_state.get("held") or {}, held_facts_now, held_lanes_now,
+        {k: (len(v.get("breaches") or ()), round(max((a for _i, a in v.get("breaches") or ()),
+                                                     default=0)))
+         for k, v in ev.items() if v.get("breaches")})
     m["sentinel_lock_busy"] = lock_failure is not None
     m["sentinel"] = {k: {"legacy": v["legacy"], "breaches": len(v["breaches"]),
                          "unmeasured": v["unmeasured"], "owner": v["owner"]}
