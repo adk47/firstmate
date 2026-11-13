@@ -244,10 +244,16 @@ write_child_meta() {
     "mode=local-only" "yolo=off"
 }
 mkdir -p "$TMP_ROOT/childfake"
-for t in tmux treehouse no-mistakes gh gh-axi tasks-axi; do
+for t in tmux no-mistakes gh gh-axi tasks-axi; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP_ROOT/childfake/$t"
   chmod +x "$TMP_ROOT/childfake/$t"
 done
+# Teardown now verifies the release path before killing the endpoint. This
+# fixture's child worktree is synthetic rather than a real treehouse slot, so the
+# pool must report it held for the treehouse return path to be chosen (and the
+# fake return itself succeeds silently).
+fm_fake_treehouse "$TMP_ROOT/childfake"
+printf '%s\n' "$CHILD_WT" > "$TMP_ROOT/childfake/fm-fake-treehouse-held"
 
 run_child_teardown() { # <extra env assignments...>
   local out rc=0

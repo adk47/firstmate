@@ -66,14 +66,18 @@ When Orca reports a task's terminal gone (`missing`, as after an Orca or host re
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
 A ship still refuses dirty or unlanded work.
-Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
-A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
-After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
-It never raw-deletes a worktree Orca still tracks.
+Before release, cleanup resolves the release path from how the worktree was created rather than from any single record field: a task recorded as `backend=orca`, a recorded Orca worktree id, or a worktree under an Orca workspace tree - so a record that predates the backend field still routes by provenance - releases through Orca.
+When a recorded Orca worktree id exists it must resolve to the recorded worktree path; an unreadable or mismatched id preserves metadata and stops rather than deleting anything.
+An Orca-created worktree with no recorded id proves its release path from the current path instead: the path Orca returns must canonicalize to the directory the safety gates inspected, and only a migrated prior-path record additionally requires a non-empty worktree id, because its Orca removal names that id.
+These checks run before the endpoint kill, so a worktree with no proven release path leaves the agent alive and the branch intact.
+After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command, by recorded id when one exists and otherwise by the worktree's current path; only an explicit `ok:true` envelope counts as a released worktree.
+Only a proven registry miss - Orca answering `selector_not_found` for that path - falls back to a guarded plain `git worktree remove`, which refuses a locked, dirty, or submodule-holding worktree and never forces.
+Every other Orca failure refuses with the concrete Orca error named, including one the CLI reports only on stderr, because a bare git remove would delete a worktree Orca still owns.
+Firstmate never raw-deletes an Orca worktree Orca still names.
 
 A task migrated from the Mac-era Orca backend keeps only `orca_worktree_id_prior=` (a `/Users/<user>/orca/workspaces/...` path) and no `orca_worktree_id=`, so its backend reads as tmux and its worktree is not in Treehouse's pool.
-After the same landed-work gates pass, cleanup resolves the worktree Orca still records at that prior path and requires it to canonicalize to the exact directory the gates inspected before removing it through Orca.
-When Orca no longer tracks it, cleanup removes it as a plain git worktree.
+After the same landed-work gates pass, cleanup resolves the worktree Orca still records at that prior path, requires it to canonicalize to the exact directory the gates inspected, and requires Orca's non-empty worktree id before removing it through Orca.
+Only Orca's proven `selector_not_found` registry miss falls back to the same guarded plain git release; every other failure, including a registry row that resolves elsewhere, refuses with the concrete error and leaves the worktree, branch, and record intact.
 Neither path relaxes the dirty, unlanded, or force gates.
 
 ## Active limits

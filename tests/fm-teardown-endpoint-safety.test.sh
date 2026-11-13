@@ -23,8 +23,11 @@ printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
 exit 0
 SH
+  fm_fake_treehouse_status "$TMP_ROOT/$dir/fakebin"
+  printf '%s\n' "$TMP_ROOT/$dir/worktree" > "$TMP_ROOT/$dir/fakebin/fm-fake-treehouse-held"
   cat > "$TMP_ROOT/$dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = status ]; then exec "$(dirname "$0")/fm-fake-treehouse-status"; fi
 printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"

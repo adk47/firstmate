@@ -57,6 +57,20 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# Also covers return-path verification before the endpoint kill:
+#   (z)  no return tool, or a worktree this host's treehouse pool does not hold
+#        and the recorded project does not register          -> REFUSE before the
+#        kill: agent alive, branch intact, no pending close staged
+#   (aa) the pool holds the slot                              -> treehouse return,
+#        branch detached then dropped
+#   (ab) the pool does not hold a registered linked worktree  -> guarded plain
+#        git release
+#   (ac) the pool does not hold it and plain git cannot remove -> REFUSE before
+#        the kill (locked registration, a dirty tree even under --force, or an
+#        initialized submodule)
+#   (ad) the pool listing names ~ paths this HOME cannot resolve -> REFUSE
+#        before the kill, since membership is unproven
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -88,11 +102,9 @@ make_case() {
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-# `treehouse return --force <wt>`: succeed silently.
-exit 0
-SH
+  # `treehouse status` reports this repo's pool (the pre-kill release probe reads
+  # it) and `treehouse return --force <wt>` succeeds silently.
+  fm_fake_treehouse "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 # tmux kill-window etc.: succeed silently.
@@ -336,6 +348,7 @@ add_lock_aware_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" = status ] && exec "$(dirname "$0")/fm-fake-treehouse-status"
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -370,6 +383,7 @@ add_transient_lock_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" = status ] && exec "$(dirname "$0")/fm-fake-treehouse-status"
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -415,6 +429,7 @@ add_persistent_lock_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" = status ] && exec "$(dirname "$0")/fm-fake-treehouse-status"
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -574,6 +589,23 @@ make_path_without_lsof() {  # <case-dir>
   mkdir -p "$path_dir"
   for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
     mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+  done
+  printf '%s\n' "$path_dir"
+}
+
+# Build an executable search path holding only the ordinary tools fm-teardown.sh
+# needs, deliberately WITHOUT a worktree-return CLI (treehouse or orca). This
+# makes "the return tool is not installed on this host" a hermetic fixture
+# instead of depending on whatever the test runner happens to have installed.
+# Mirrors make_path_without_lsof's whitelist, but keeps lsof so process reaping
+# behaves normally.
+make_path_without_worktree_return_tools() {  # <case-dir>
+  local case_dir=$1 path_dir="$1/path-without-return-tools" cmd resolved
+  mkdir -p "$path_dir"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+    lsof mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
@@ -1404,6 +1436,8 @@ test_non_linked_index_lock_path_is_checked_from_worktree() {
 
   add_lock_aware_treehouse "$case_dir"
   add_lsof_no_holder "$case_dir"
+  # The clone is not a linked worktree, so the pool must report holding it.
+  printf '%s\n' "$case_dir/wt" > "$case_dir/fakebin/fm-fake-treehouse-held"
 
   lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
@@ -1905,6 +1939,7 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes() {
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
@@ -2001,6 +2036,7 @@ assert_herdr_teardown_preflight_refuses_before_changes() {
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
@@ -2115,6 +2151,7 @@ test_forced_secondmate_herdr_child_preflight_refuses_before_changes() {
   : > "$log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
@@ -2169,6 +2206,7 @@ exit 0
 SH
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
 exit 0
 SH
@@ -3039,6 +3077,7 @@ test_parked_own_run_refuses_when_abort_is_unconfirmed() {
 
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
@@ -3209,6 +3248,7 @@ exit 1
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
@@ -3435,6 +3475,7 @@ exec "$REAL_PS_FOR_TEST" "$@"
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf 'returned\n' > "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps" "$case_dir/fakebin/treehouse"
@@ -3471,6 +3512,7 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   # real observed state, not a source-text or line-number correlation.
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
 if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
 exit 0
@@ -3638,12 +3680,126 @@ test_migrated_orca_mismatched_path_not_removed() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "migrated-orca-mismatch: teardown should fall back to git removal"
-  [ ! -e "$wt" ] || fail "migrated-orca-mismatch: the inspected worktree was not removed"
+  expect_code 1 "$rc" "migrated-orca-mismatch: teardown should refuse a mismatched Orca path"
+  [ -d "$wt" ] || fail "migrated-orca-mismatch: the inspected worktree was removed despite the mismatch"
   [ -d "$decoy" ] || fail "migrated-orca-mismatch: Orca removed a directory the safety gates never inspected"
   [ ! -e "$case_dir/orca-rm.log" ] || fail "migrated-orca-mismatch: Orca removal was invoked for a mismatched path"
-  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-mismatch: the task meta was not removed"
-  pass "a mismatched Orca path falls back to removing the inspected worktree"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-mismatch: the task meta was removed despite the refusal"
+  assert_grep 'resolves' "$case_dir/stderr" "migrated-orca-mismatch: refusal did not name the path mismatch"
+  pass "a mismatched Orca path refuses instead of removing the inspected worktree"
+}
+
+# Install an `orca` mock whose `worktree show` fails with a non-selector error.
+# Args: case_dir code message [stderr-only]
+add_fake_orca_show_failure() {
+  local case_dir=$1 code=$2 message=$3 stderr_only=${4:-}
+  cat > "$case_dir/fakebin/orca" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "worktree show")
+    if [ -n "$stderr_only" ]; then
+      printf '%s\n' "$message" >&2
+    else
+      printf '{"ok":false,"error":{"code":"$code","message":"$message"}}\n'
+    fi
+    exit 1 ;;
+  "worktree rm")
+    printf 'removed\n' >> "$case_dir/orca-rm.log"
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+}
+
+# Install an `orca` mock that reports the prior path as a proven registry miss.
+# Args: case_dir
+add_fake_orca_selector_not_found() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/orca" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "worktree show")
+    printf '{"ok":false,"error":{"code":"selector_not_found"}}\n'
+    exit 1 ;;
+  "worktree rm")
+    printf 'removed\n' >> "$case_dir/orca-rm.log"
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+}
+
+test_migrated_orca_show_failure_refuses_with_concrete_error() {
+  local case_dir rc wt
+  case_dir=$(make_migrated_orca_case migrated-orca-show-failure)
+  wt=$(migrated_orca_wt "$case_dir")
+  write_migrated_orca_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  mwt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$wt" rev-parse HEAD)"
+  add_fake_orca_show_failure "$case_dir" runtime_unavailable "Orca runtime is not running"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "migrated-orca-show-failure: teardown should refuse a non-selector show failure"
+  [ -d "$wt" ] || fail "migrated-orca-show-failure: the worktree was removed despite the show failure"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-show-failure: the task meta was removed despite the refusal"
+  assert_grep 'Orca runtime is not running' "$case_dir/stderr" \
+    "migrated-orca-show-failure: refusal did not name the concrete Orca error"
+  pass "a non-selector Orca show failure refuses with the concrete error"
+}
+
+test_migrated_orca_stderr_only_show_failure_refuses_with_concrete_error() {
+  local case_dir rc wt
+  case_dir=$(make_migrated_orca_case migrated-orca-stderr-failure)
+  wt=$(migrated_orca_wt "$case_dir")
+  write_migrated_orca_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  mwt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$wt" rev-parse HEAD)"
+  add_fake_orca_show_failure "$case_dir" '' "orca: Orca is no longer installed at /opt/Orca/resources/bin/orca-ide." stderr-only
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "migrated-orca-stderr-failure: teardown should refuse a stderr-only show failure"
+  [ -d "$wt" ] || fail "migrated-orca-stderr-failure: the worktree was removed despite the show failure"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-stderr-failure: the task meta was removed despite the refusal"
+  assert_grep 'Orca is no longer installed' "$case_dir/stderr" \
+    "migrated-orca-stderr-failure: refusal did not name the concrete stderr error"
+  pass "a stderr-only Orca show failure refuses with the concrete error"
+}
+
+test_migrated_orca_selector_not_found_uses_guarded_git_release() {
+  local case_dir rc wt
+  case_dir=$(make_migrated_orca_case migrated-orca-selector-miss)
+  wt=$(migrated_orca_wt "$case_dir")
+  write_migrated_orca_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  mwt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$wt" rev-parse HEAD)"
+  add_fake_orca_selector_not_found "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "migrated-orca-selector-miss: teardown should release a proven registry miss"
+  [ ! -e "$wt" ] || fail "migrated-orca-selector-miss: the worktree was not released"
+  [ ! -e "$case_dir/orca-rm.log" ] || fail "migrated-orca-selector-miss: Orca removal was invoked for a registry miss"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-selector-miss: the task meta was not removed"
+  pass "a proven Orca registry miss releases through the guarded plain git path"
 }
 
 test_migrated_orca_dirty_worktree_refuses() {
@@ -3857,6 +4013,1263 @@ test_proven_change_watch_allows_teardown() {
   pass "a change watch that ended proven allows teardown"
 }
 
+# The Captain's incident: teardown passed the landed-work gate, killed the agent
+# and closed its window, then aborted at the worktree return because treehouse is
+# not installed on this host. Verification must happen BEFORE the endpoint kill:
+# when no return path resolves at all, the teardown refuses while the agent is
+# still alive and the branch is still intact.
+test_missing_return_tool_refuses_before_killing_the_agent() {
+  local case_dir rc pid path_no_tools
+  case_dir=$(make_case missing-return-tool)
+  # The recorded worktree is a standalone repository, so ordinary git commands
+  # succeed in it while it is provably NOT a registered linked worktree of the
+  # recorded project - the "no viable return path" shape the refusal reports.
+  git init -q "$case_dir/standalone"
+  git -C "$case_dir/standalone" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m standalone
+  git -C "$case_dir/standalone" checkout -q -b fm/task-x1
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/standalone" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=teardown-test-task-x1"
+  path_no_tools=$(make_path_without_worktree_return_tools "$case_dir")
+  rm -f "$case_dir/fakebin/treehouse"
+  # A long-lived process stands in for the crew agent in the worktree.
+  ( cd "$case_dir/standalone" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "missing-return-tool: setup sleeper did not start"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_no_tools" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "missing-return-tool: teardown should refuse when no return tool resolves"$'\n'"$(cat "$case_dir/stderr")"
+  # The refusal must name the concrete missing requirement.
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "missing-return-tool: refusal did not report the missing return path"
+  assert_grep 'treehouse is not installed on this host' "$case_dir/stderr" \
+    "missing-return-tool: refusal did not name the missing treehouse install"
+  assert_grep 'leaving the agent alive and the branch intact' "$case_dir/stderr" \
+    "missing-return-tool: refusal did not report leaving the agent alive and the branch intact"
+  # The agent is still alive: verification failed before any endpoint kill.
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "missing-return-tool: the crew process was killed before the return tool was verified"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  # The worktree and its branch ref survive for inspection and retry.
+  assert_present "$case_dir/standalone" \
+    "missing-return-tool: the worktree was removed despite the refusal"
+  git -C "$case_dir/standalone" rev-parse --verify refs/heads/fm/task-x1 >/dev/null 2>&1 \
+    || fail "missing-return-tool: the task branch ref was dropped despite the refusal"
+  pass "a missing worktree-return tool refuses before the endpoint kill, leaving the agent alive and the branch intact"
+}
+
+# A tmux-era task - a Mac-migrated record whose backend is tmux - has a plain
+# git worktree this host's treehouse never leased. When treehouse is not
+# installed at all there is no pool to corrupt, so the guarded plain git release
+# is its return path instead of a refusal. The worktree must be a registered
+# linked worktree of the recorded project so git can release it safely.
+test_tmux_era_task_without_treehouse_uses_guarded_git_release() {
+  local case_dir rc branch path_no_tools
+  case_dir=$(make_case tmux-era-no-treehouse)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'backend=tmux\n' >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  path_no_tools=$(make_path_without_worktree_return_tools "$case_dir")
+  rm -f "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_no_tools" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "tmux-era-no-treehouse: a registered tmux-era worktree must release through guarded plain git when treehouse is absent"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'plain git worktree remove' "$case_dir/stderr" \
+    "tmux-era-no-treehouse: teardown did not name the plain git release mechanism"
+  assert_absent "$case_dir/wt" \
+    "tmux-era-no-treehouse: the released worktree directory is still present"
+  git -C "$case_dir/project" worktree list --porcelain | grep -F "$case_dir/wt" >/dev/null \
+    && fail "tmux-era-no-treehouse: the released worktree is still registered with the project"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "tmux-era-no-treehouse: the task branch ref survived a successful release"
+  pass "a registered tmux-era worktree releases through guarded plain git when treehouse is absent"
+}
+
+# The same tmux-era task with uncommitted work cannot be released safely: the
+# guarded plain git path refuses a dirty worktree, so verification lands before
+# the endpoint kill and the agent stays alive with its work intact.
+test_tmux_era_task_without_treehouse_refuses_dirty_worktree() {
+  local case_dir rc branch pid path_no_tools
+  case_dir=$(make_case tmux-era-no-treehouse-dirty)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'backend=tmux\n' >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  printf '%s\n' uncommitted > "$case_dir/wt/dirty.txt"
+  path_no_tools=$(make_path_without_worktree_return_tools "$case_dir")
+  rm -f "$case_dir/fakebin/treehouse"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "tmux-era-no-treehouse-dirty: setup sleeper did not start"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_no_tools" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "tmux-era-no-treehouse-dirty: a dirty tmux-era worktree must refuse before the endpoint kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "tmux-era-no-treehouse-dirty: refusal did not report the missing return path"
+  assert_grep 'holds uncommitted or untracked work' "$case_dir/stderr" \
+    "tmux-era-no-treehouse-dirty: refusal did not name the dirty worktree as the blocker"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "tmux-era-no-treehouse-dirty: the crew process was killed before the release was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_present "$case_dir/wt" \
+    "tmux-era-no-treehouse-dirty: the dirty worktree was removed anyway"
+  assert_present "$case_dir/wt/dirty.txt" \
+    "tmux-era-no-treehouse-dirty: the uncommitted file was discarded"
+  git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "tmux-era-no-treehouse-dirty: the task branch ref was dropped despite the refusal"
+  pass "a dirty tmux-era worktree refuses before the agent is killed and keeps its work"
+}
+
+# A treehouse that is installed and answers `status` with a pool listing that
+# does not hold the worktree - a base-branch line only, as a real pool with no
+# slot for this repo prints - and refuses `return` outright, so a wrong release
+# decision cannot pass silently.
+add_unlisted_pool_treehouse() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status) printf 'main\n'; exit 0 ;;
+  return) echo "treehouse: no such worktree in this pool" >&2; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# A plain git worktree that this host's treehouse pool proves it never leased
+# must still be releasable: the guarded plain-git path runs plain `git worktree
+# remove`, which git itself refuses on a dirty worktree.
+test_plain_git_release_removes_clean_registered_worktree() {
+  local case_dir rc branch
+  case_dir=$(make_case plain-git-clean)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  add_unlisted_pool_treehouse "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "plain-git-clean: teardown should succeed through the guarded plain git release"$'\n'"$(cat "$case_dir/stderr")"
+  # The plain-git path actually performed the release and named its mechanism.
+  assert_grep 'released worktree' "$case_dir/stderr" \
+    "plain-git-clean: teardown did not report a plain-git release"
+  assert_grep 'plain git worktree remove' "$case_dir/stderr" \
+    "plain-git-clean: teardown did not name the plain git release mechanism"
+  # The worktree directory is gone and its registration is retired.
+  assert_absent "$case_dir/wt" \
+    "plain-git-clean: the released worktree directory is still present"
+  git -C "$case_dir/project" worktree list --porcelain | grep -F "$case_dir/wt" >/dev/null \
+    && fail "plain-git-clean: the released worktree is still registered with the project"
+  # The branch ref is dropped only after the release succeeds.
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "plain-git-clean: the task branch ref survived a successful release"
+  pass "an unpooled clean registered worktree releases through guarded plain git"
+}
+
+# A pool with no rows answers `status` the way the pinned treehouse v2.0.1 does:
+# an empty-pool diagnostic on stderr, nothing on stdout, exit 0. That is an
+# answered empty pool, not an unreportable one, so a clean registered worktree it
+# never leased must still release through guarded plain git instead of refusing.
+test_empty_pool_listing_releases_through_guarded_plain_git() {
+  local case_dir rc branch
+  case_dir=$(make_case empty-pool-listing)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  : > "$case_dir/fakebin/fm-fake-treehouse-empty"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "empty-pool-listing: a successful empty status listing must not read as an unreportable pool"$'\n'"$(cat "$case_dir/stderr")"
+  assert_no_grep 'cannot report its pool' "$case_dir/stderr" \
+    "empty-pool-listing: an answered empty pool was read as unreportable"
+  assert_grep 'plain git worktree remove' "$case_dir/stderr" \
+    "empty-pool-listing: teardown did not release through guarded plain git"
+  assert_absent "$case_dir/wt" \
+    "empty-pool-listing: the released worktree directory is still present"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "empty-pool-listing: the task branch ref survived a successful release"
+  pass "a successful empty treehouse status listing releases through guarded plain git"
+}
+
+# A successful `treehouse status` may print diagnostics on stderr (real
+# treehouse reports unreadable process tables, damaged slots and orphaned pools
+# there) while the pool table goes to stdout. Those diagnostics are not listing
+# rows: a warning that merely names this worktree must not read as "the pool
+# holds it" - that would route the release through `treehouse return`, which
+# fails after the endpoint kill and leaves the agent dead with the teardown half
+# done. Membership is decided from the stdout listing alone, so this worktree the
+# pool does not hold releases through guarded plain git instead.
+test_pool_stderr_diagnostic_is_not_pool_membership() {
+  local case_dir rc branch
+  case_dir=$(make_case pool-stderr-diagnostic)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status)
+    # Succeeds, keeps its diagnostics on stderr, and its stdout table does NOT
+    # name this worktree.
+    echo "warning: prune skipped $FM_FAKE_POOL_WT (unlanded HEAD)" >&2
+    printf 'main\n'
+    printf '1  available  %s\n' "$FM_FAKE_OTHER_WT"
+    exit 0
+    ;;
+  return)
+    echo "treehouse: no such worktree in this pool" >&2
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_FAKE_POOL_WT="$case_dir/wt" FM_FAKE_OTHER_WT="$case_dir/other-slot" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "pool-stderr-diagnostic: a stderr diagnostic naming the worktree must not read as pool membership"$'\n'"$(cat "$case_dir/stderr")"
+  # The release went through plain git, never through the failing treehouse return.
+  assert_grep 'plain git worktree remove' "$case_dir/stderr" \
+    "pool-stderr-diagnostic: teardown did not release through guarded plain git"
+  assert_no_grep 'treehouse return failed' "$case_dir/stderr" \
+    "pool-stderr-diagnostic: a stderr diagnostic was read as a held pool slot"
+  assert_absent "$case_dir/wt" \
+    "pool-stderr-diagnostic: the released worktree directory is still present"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "pool-stderr-diagnostic: the task branch ref survived a successful release"
+  pass "a stderr diagnostic naming the worktree is not pool membership; the worktree releases through guarded plain git"
+}
+
+# The guarded release never passes --force, and the gate proves the release can
+# succeed BEFORE the agent is killed: an unpooled worktree holding uncommitted
+# work refuses pre-kill, even under --force.
+test_plain_git_release_refuses_dirty_worktree() {
+  local case_dir rc branch pid
+  case_dir=$(make_case plain-git-dirty)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  add_unlisted_pool_treehouse "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  # Uncommitted work in the worktree: git worktree remove must refuse it.
+  printf '%s\n' uncommitted > "$case_dir/wt/dirty.txt"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "plain-git-dirty: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "plain-git-dirty: an unpooled dirty worktree must refuse before the endpoint kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "plain-git-dirty: refusal did not report the missing return path"
+  assert_grep 'holds uncommitted or untracked work' "$case_dir/stderr" \
+    "plain-git-dirty: refusal did not name the dirty worktree as the blocker"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "plain-git-dirty: the crew process was killed before the release was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  # Nothing staged a replayable intent to finish this teardown.
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "plain-git-dirty: a refused release left a replayable backlog-close record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "plain-git-dirty: the backlog row was closed despite the refusal"
+  # The dirty worktree, its uncommitted file, and its branch ref are preserved.
+  assert_present "$case_dir/wt" \
+    "plain-git-dirty: the dirty worktree was removed anyway"
+  assert_present "$case_dir/wt/dirty.txt" \
+    "plain-git-dirty: the uncommitted file was discarded"
+  git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "plain-git-dirty: the task branch ref was dropped despite the refusal"
+  pass "guarded plain git never forces: an unpooled dirty worktree refuses before the agent is killed"
+}
+
+# A locked registration cannot be removed by plain `git worktree remove` without
+# --force either, so the gate refuses before the endpoint kill instead of killing
+# the agent and staging a replayable close first.
+test_plain_git_release_refuses_locked_worktree() {
+  local case_dir rc branch pid
+  case_dir=$(make_case plain-git-locked)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  add_unlisted_pool_treehouse "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  git -C "$case_dir/project" worktree lock "$case_dir/wt"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "plain-git-locked: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "plain-git-locked: a locked unpooled worktree must refuse before the endpoint kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "plain-git-locked: refusal did not report the missing return path"
+  assert_grep 'registered locked' "$case_dir/stderr" \
+    "plain-git-locked: refusal did not name the locked registration as the blocker"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "plain-git-locked: the crew process was killed before the release was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "plain-git-locked: a refused release left a replayable backlog-close record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "plain-git-locked: the backlog row was closed despite the refusal"
+  assert_present "$case_dir/wt" \
+    "plain-git-locked: the locked worktree was removed anyway"
+  git -C "$case_dir/project" worktree list --porcelain | grep -F "$case_dir/wt" >/dev/null \
+    || fail "plain-git-locked: the refused worktree lost its registration"
+  git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "plain-git-locked: the task branch ref was dropped despite the refusal"
+  pass "a locked unpooled worktree refuses before the agent is killed and stays intact"
+}
+
+# A clean, unlocked worktree holding an initialized submodule is still one git
+# refuses to remove ("working trees containing submodules cannot be moved or
+# removed"), so the gate must refuse before the kill rather than prove success
+# and then fail after the agent is dead.
+test_plain_git_release_refuses_initialized_submodule() {
+  local case_dir rc branch pid sub_state
+  case_dir=$(make_case plain-git-submodule)
+  write_meta "$case_dir" no-mistakes ship
+  git init -q "$case_dir/sub"
+  git -C "$case_dir/sub" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m sub
+  git -C "$case_dir/wt" -c protocol.file.allow=always \
+    -c user.email=t@t -c user.name=t \
+    submodule add -q "$case_dir/sub" deps/sub
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+    commit -q -m "add the dependency submodule"
+  land_shippable_commit "$case_dir"
+  git -C "$case_dir/wt" -c protocol.file.allow=always submodule update --init -q
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  add_unlisted_pool_treehouse "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  # Fixture precondition: the submodule is initialized, so git would refuse it.
+  sub_state=$(git -C "$case_dir/wt" submodule status)
+  case "$sub_state" in
+    ' '* | +* | U*) ;;
+    *) fail "plain-git-submodule: fixture submodule is not initialized" ;;
+  esac
+  [ -z "$(git -C "$case_dir/wt" status --porcelain)" ] \
+    || fail "plain-git-submodule: fixture worktree is not clean"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "plain-git-submodule: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "plain-git-submodule: an unpooled worktree holding an initialized submodule must refuse before the endpoint kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "plain-git-submodule: refusal did not report the missing return path"
+  assert_grep 'holds an initialized submodule' "$case_dir/stderr" \
+    "plain-git-submodule: refusal did not name the initialized submodule as the blocker"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "plain-git-submodule: the crew process was killed before the release was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "plain-git-submodule: a refused release left a replayable backlog-close record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "plain-git-submodule: the backlog row was closed despite the refusal"
+  assert_present "$case_dir/wt/deps/sub" \
+    "plain-git-submodule: the initialized submodule checkout was discarded"
+  git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "plain-git-submodule: the task branch ref was dropped despite the refusal"
+  pass "a worktree holding an initialized submodule refuses before the agent is killed"
+}
+
+# A worktree under an Orca workspace tree is creation provenance: even a task
+# record that predates backend= and orca_worktree_id= must release through Orca,
+# never through treehouse ("not managed by treehouse") and never as a discard.
+write_orca_workspace_case() {  # <case-dir>
+  local case_dir=$1 wt commit
+  land_shippable_commit "$case_dir"
+  commit=$(git -C "$case_dir/wt" rev-parse HEAD)
+  wt="$case_dir/orca/workspaces/example-repo/wt"
+  mkdir -p "$(dirname "$wt")"
+  git -C "$case_dir/project" worktree add -q --detach "$wt" "$commit"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=teardown-test-task-x1"
+  printf '%s\n' "$wt"
+}
+
+test_orca_workspace_path_routes_release_to_orca() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-workspace-route)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree show")
+    selector=
+    for arg in "$@"; do
+      case "$arg" in path:*) selector=${arg#path:} ;; esac
+    done
+    printf '{"ok":true,"result":{"worktree":{"id":"live-id-1","path":"%s"}}}\n' "$selector"
+    exit 0 ;;
+  "worktree rm")
+    printf '%s\n' "$*" >> "$FM_FAKE_ORCA_LOG"
+    printf '{"ok":true}\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  FM_FAKE_ORCA_LOG="$case_dir/orca.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "orca-workspace-route: an Orca-created worktree must release through orca"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "worktree rm --worktree path:$wt" "$case_dir/orca.log" \
+    "orca-workspace-route: the release did not route through orca by the worktree path"
+  pass "an Orca workspace path routes the release through orca, not treehouse or a discard"
+}
+
+test_orca_show_failure_refuses_before_killing_the_agent() {
+  local case_dir rc wt pid
+  case_dir=$(make_case orca-pre-kill-show-failure)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree show") printf '{"ok":false,"error":{"code":"app_not_running","message":"Orca app is not running"}}\n'; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  ( cd "$wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "orca-pre-kill-show-failure: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-pre-kill-show-failure: an unproven Orca release must refuse before the kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "orca-pre-kill-show-failure: the refusal did not report the unproven release path"
+  assert_grep 'Orca app is not running' "$case_dir/stderr" \
+    "orca-pre-kill-show-failure: the refusal did not name the concrete Orca error"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "orca-pre-kill-show-failure: the agent was killed before the release path was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_present "$wt" \
+    "orca-pre-kill-show-failure: the worktree was removed despite the refusal"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "orca-pre-kill-show-failure: the task records were removed despite the refusal"
+  pass "an unproven Orca release refuses before the agent is killed"
+}
+
+test_orca_selector_miss_without_git_registration_refuses_before_kill() {
+  local case_dir rc wt pid
+  case_dir=$(make_case orca-pre-kill-unregistered-miss)
+  wt=$(write_orca_workspace_case "$case_dir")
+  sed -i.bak "s|^project=.*|project=$case_dir/origin.git|" "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree show") printf '{"ok":false,"error":{"code":"selector_not_found","message":"No worktree matches selector path"}}\n'; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  ( cd "$wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "orca-pre-kill-unregistered-miss: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-pre-kill-unregistered-miss: an unregistered git fallback must refuse before the kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "orca-pre-kill-unregistered-miss: the refusal did not report the unproven release path"
+  assert_grep 'not a registered worktree' "$case_dir/stderr" \
+    "orca-pre-kill-unregistered-miss: the refusal did not name the missing git registration"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "orca-pre-kill-unregistered-miss: the agent was killed before the git fallback was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_present "$wt" \
+    "orca-pre-kill-unregistered-miss: the worktree was removed despite the refusal"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "orca-pre-kill-unregistered-miss: the task records were removed despite the refusal"
+  pass "an Orca registry miss without git registration refuses before the agent is killed"
+}
+
+test_id_less_orca_show_releases_by_path() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-pre-kill-id-less-ok)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "worktree show")
+    selector=
+    for arg in "\$@"; do
+      case "\$arg" in path:*) selector=\${arg#path:} ;; esac
+    done
+    printf '{"ok":true,"result":{"worktree":{"path":"%s"}}}\n' "\$selector"
+    exit 0 ;;
+  "worktree rm")
+    printf '%s\n' "\$*" >> "$case_dir/orca.log"
+    rm -rf "$wt"
+    git -C "$case_dir/project" worktree prune 2>/dev/null || true
+    printf '{"ok":true}\n'
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "orca-pre-kill-id-less-ok: an id-less Orca worktree should release by path"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "worktree rm --worktree path:$wt" "$case_dir/orca.log" \
+    "orca-pre-kill-id-less-ok: the release did not route through orca by the worktree path"
+  assert_absent "$wt" \
+    "orca-pre-kill-id-less-ok: the worktree was not released"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "orca-pre-kill-id-less-ok: the task records were not removed"
+  pass "an id-less Orca worktree releases by path"
+}
+
+test_migrated_orca_show_without_worktree_id_refuses_before_kill() {
+  local case_dir rc wt pid
+  case_dir=$(make_migrated_orca_case migrated-orca-pre-kill-missing-id)
+  wt=$(migrated_orca_wt "$case_dir")
+  write_migrated_orca_meta "$case_dir" no-mistakes ship
+  cat > "$case_dir/fakebin/orca" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "worktree show")
+    printf '{"ok":true,"result":{"worktree":{"path":"$wt"}}}\n'
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  ( cd "$wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "migrated-orca-pre-kill-missing-id: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "migrated-orca-pre-kill-missing-id: a migrated Orca answer without a worktree id must refuse before the kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "migrated-orca-pre-kill-missing-id: the refusal did not report the unproven release path"
+  assert_grep 'returned no worktree id' "$case_dir/stderr" \
+    "migrated-orca-pre-kill-missing-id: the refusal did not name the missing worktree id"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "migrated-orca-pre-kill-missing-id: the agent was killed before the release path was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_present "$wt" \
+    "migrated-orca-pre-kill-missing-id: the worktree was removed despite the refusal"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "migrated-orca-pre-kill-missing-id: the task records were removed despite the refusal"
+  pass "a migrated Orca answer without a worktree id refuses before the agent is killed"
+}
+
+test_orca_path_miss_falls_back_to_guarded_git_release() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-path-miss)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree show")
+    printf '{"ok":false,"error":{"code":"selector_not_found","message":"No worktree matches selector path"}}\n'
+    exit 1 ;;
+  "worktree rm") printf '{"ok":false,"error":{"code":"selector_not_found","message":"No worktree matches selector path"}}\n'; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "orca-path-miss: Orca's miss must fall back to a guarded git release"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$wt" \
+    "orca-path-miss: the guarded git fallback did not release the worktree"
+  pass "an Orca path miss falls back to a guarded plain git release, never a discard"
+}
+
+# An Orca release by path can fail for reasons other than a registry miss: the
+# app is not running, the registry answers ok:false for another reason, or the
+# call times out. None of those prove the worktree is unowned, so a plain git
+# release would delete a worktree Orca may still own while its registry keeps
+# naming it. Teardown must refuse with the concrete Orca error named.
+test_orca_non_selector_failure_refuses_instead_of_plain_git_fallback() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-non-selector-failure)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree show")
+    selector=
+    for arg in "$@"; do
+      case "$arg" in path:*) selector=${arg#path:} ;; esac
+    done
+    printf '{"ok":true,"result":{"worktree":{"id":"live-id-1","path":"%s"}}}\n' "$selector"
+    exit 0 ;;
+  "worktree rm") printf '{"ok":false,"error":{"code":"app_not_running","message":"Orca app is not running"}}\n'; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-non-selector-failure: a non-registry-miss Orca failure must refuse, not fall back to git"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'refusing to fall back to a plain git release' "$case_dir/stderr" \
+    "orca-non-selector-failure: the refusal did not explain why the git fallback was refused"
+  assert_grep 'Orca app is not running' "$case_dir/stderr" \
+    "orca-non-selector-failure: the refusal did not name the concrete Orca error"
+  assert_present "$wt" \
+    "orca-non-selector-failure: the worktree was released despite the refusal"
+  pass "a non-registry-miss Orca failure refuses instead of falling back to a plain git release"
+}
+
+# A failed Orca call that prints nothing is not proof of removal. Treating empty
+# output as success would drop the branch and the records for a worktree Orca
+# never released, so it must refuse like any other unproven failure.
+test_orca_empty_failure_output_refuses_instead_of_success() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-empty-output)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree show")
+    selector=
+    for arg in "$@"; do
+      case "$arg" in path:*) selector=${arg#path:} ;; esac
+    done
+    printf '{"ok":true,"result":{"worktree":{"id":"live-id-1","path":"%s"}}}\n' "$selector"
+    exit 0 ;;
+  "worktree rm") exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-empty-output: an Orca failure with no output must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'refusing to fall back to a plain git release' "$case_dir/stderr" \
+    "orca-empty-output: the refusal did not explain why the git fallback was refused"
+  assert_grep 'returned no output' "$case_dir/stderr" \
+    "orca-empty-output: the refusal did not name the empty output"
+  assert_present "$wt" \
+    "orca-empty-output: the worktree was released despite the failed Orca call"
+  pass "an Orca failure with empty output refuses instead of counting as a successful removal"
+}
+
+# Whitespace-only output is not an Orca JSON envelope either: the CLI's own JSON
+# guard trims to empty and reports success, so relying on non-empty output alone
+# would let a failed release delete the records and drop the task branch.
+test_orca_whitespace_failure_output_refuses_instead_of_success() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-whitespace-output)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree show")
+    selector=
+    for arg in "$@"; do
+      case "$arg" in path:*) selector=${arg#path:} ;; esac
+    done
+    printf '{"ok":true,"result":{"worktree":{"id":"live-id-1","path":"%s"}}}\n' "$selector"
+    exit 0 ;;
+  "worktree rm") printf ' \n\t\n'; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-whitespace-output: a whitespace-only Orca failure must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'refusing to fall back to a plain git release' "$case_dir/stderr" \
+    "orca-whitespace-output: the refusal did not explain why the git fallback was refused"
+  assert_present "$wt" \
+    "orca-whitespace-output: the worktree was released despite the failed Orca call"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "orca-whitespace-output: the task records were deleted despite the failed Orca call"
+  pass "a whitespace-only Orca failure refuses instead of counting as a successful removal"
+}
+
+# A CLI that fails with nothing on stdout and the concrete reason on stderr still
+# names that reason; only the JSON envelope may decide success, but the refusal
+# must not hide the real error behind a generic "no output" line.
+test_orca_stderr_only_failure_names_the_concrete_error() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-stderr-output)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree show")
+    selector=
+    for arg in "$@"; do
+      case "$arg" in path:*) selector=${arg#path:} ;; esac
+    done
+    printf '{"ok":true,"result":{"worktree":{"id":"live-id-1","path":"%s"}}}\n' "$selector"
+    exit 0 ;;
+  "worktree rm") printf '%s\n' 'orca: Orca is no longer installed at /opt/Orca/resources/bin/orca-ide.' >&2; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-stderr-output: an Orca failure must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'refusing to fall back to a plain git release' "$case_dir/stderr" \
+    "orca-stderr-output: the refusal did not explain why the git fallback was refused"
+  assert_grep 'Orca is no longer installed' "$case_dir/stderr" \
+    "orca-stderr-output: the refusal did not name the concrete Orca error"
+  assert_no_grep 'returned no output' "$case_dir/stderr" \
+    "orca-stderr-output: the refusal replaced the concrete Orca error with a generic line"
+  assert_present "$wt" \
+    "orca-stderr-output: the worktree was released despite the failed Orca call"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "orca-stderr-output: the task records were deleted despite the failed Orca call"
+  pass "an Orca failure reported only on stderr names the concrete error"
+}
+
+# A stdout fragment that is not an Orca envelope is a failure, and the CLI's own
+# stderr reason is more concrete than the parser's complaint about the fragment.
+test_orca_unparseable_stdout_names_the_concrete_stderr_error() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-unparseable-output)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree show")
+    selector=
+    for arg in "$@"; do
+      case "$arg" in path:*) selector=${arg#path:} ;; esac
+    done
+    printf '{"ok":true,"result":{"worktree":{"id":"live-id-1","path":"%s"}}}\n' "$selector"
+    exit 0 ;;
+  "worktree rm")
+    printf 'not-an-envelope-partial-write'
+    printf '%s\n' 'orca: worktree rm crashed: runtime schema mismatch' >&2
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-unparseable-output: an Orca failure must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'refusing to fall back to a plain git release' "$case_dir/stderr" \
+    "orca-unparseable-output: the refusal did not explain why the git fallback was refused"
+  assert_grep 'runtime schema mismatch' "$case_dir/stderr" \
+    "orca-unparseable-output: the refusal did not name the concrete Orca error"
+  assert_no_grep 'invalid Orca JSON' "$case_dir/stderr" \
+    "orca-unparseable-output: the refusal replaced the concrete Orca error with the parse error"
+  assert_present "$wt" \
+    "orca-unparseable-output: the worktree was released despite the failed Orca call"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "orca-unparseable-output: the task records were deleted despite the failed Orca call"
+  pass "an unparseable Orca stdout refuses with the concrete stderr error named"
+}
+
+# Parseable JSON that is not an Orca success envelope is not proof of removal.
+# Treating it as success would drop the branch and delete the records for a
+# worktree Orca never released.
+test_orca_parseable_non_envelope_refuses_instead_of_success() {
+  local case_dir rc wt branch
+  case_dir=$(make_case orca-non-envelope-output)
+  wt=$(write_orca_workspace_case "$case_dir")
+  branch=fm/task-x1
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree show")
+    selector=
+    for arg in "$@"; do
+      case "$arg" in path:*) selector=${arg#path:} ;; esac
+    done
+    printf '{"ok":true,"result":{"worktree":{"id":"live-id-1","path":"%s"}}}\n' "$selector"
+    exit 0 ;;
+  "worktree rm")
+    printf '{"level":"error","msg":"runtime schema mismatch"}\n'
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-non-envelope-output: parseable non-envelope JSON must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'refusing to fall back to a plain git release' "$case_dir/stderr" \
+    "orca-non-envelope-output: the refusal did not explain why the git fallback was refused"
+  assert_grep 'runtime schema mismatch' "$case_dir/stderr" \
+    "orca-non-envelope-output: the refusal did not name the CLI's output"
+  assert_present "$wt" \
+    "orca-non-envelope-output: the worktree was released despite the failed Orca call"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "orca-non-envelope-output: the task records were deleted despite the failed Orca call"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "orca-non-envelope-output: the task branch ref was dropped despite the failed Orca call"
+  pass "parseable non-envelope Orca output refuses instead of counting as a successful removal"
+}
+
+# The pool probe merges an external tool's stdout and stderr, so a whitespace-only
+# row is possible input. It must be classified - not expanded as an unset array,
+# which stock-macOS bash 3.2 under `set -u` treats as unbound - so the held slot
+# below is still found and released through treehouse.
+test_whitespace_only_pool_listing_row_is_classified() {
+  local case_dir rc branch
+  case_dir=$(make_case pool-blank-row)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status)
+    printf '   \n\t\n'
+    printf '1  leased  %s\n' "$FM_FAKE_POOL_WT"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_FAKE_POOL_WT="$case_dir/wt" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "pool-blank-row: a whitespace-only listing row must not abort the probe"$'\n'"$(cat "$case_dir/stderr")"
+  assert_no_grep "unbound variable" "$case_dir/stderr" \
+    "pool-blank-row: the probe aborted on the whitespace-only listing row"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "pool-blank-row: the held slot was not released, so the listing row was misread"
+  pass "a whitespace-only pool listing row is classified and the held slot still releases"
+}
+
+# A pool listing that names home-relative paths this host's HOME cannot resolve
+# speaks for some other home: membership is unproven, so teardown refuses before
+# the kill instead of concluding "not held" and running a plain git release over
+# a slot treehouse may still lease.
+add_foreign_home_pool_treehouse() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status) printf '1  leased  ~/other-home/.treehouse/1/repo\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+test_unresolvable_home_relative_pool_listing_refuses_before_killing_the_agent() {
+  local case_dir rc branch pid
+  case_dir=$(make_case pool-foreign-home)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  add_foreign_home_pool_treehouse "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "pool-foreign-home: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "pool-foreign-home: a listing this HOME cannot resolve must refuse before the kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'home-relative paths' "$case_dir/stderr" \
+    "pool-foreign-home: refusal did not name the unresolvable home-relative listing"
+  assert_grep 'leaving the agent alive and the branch intact' "$case_dir/stderr" \
+    "pool-foreign-home: refusal did not report leaving the agent alive and the branch intact"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "pool-foreign-home: the crew process was killed although pool membership was unproven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "pool-foreign-home: a refused teardown left a replayable backlog-close record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "pool-foreign-home: the backlog row was closed despite the refusal"
+  assert_present "$case_dir/wt" \
+    "pool-foreign-home: the worktree a foreign pool may hold was removed"
+  git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "pool-foreign-home: the task branch ref was dropped despite the refusal"
+  pass "a pool listing this host's HOME cannot resolve refuses before the endpoint kill"
+}
+
+# A pool listing that resolves at least one `~` path speaks for THIS home, so an
+# unresolvable slot beside it is a stale entry whose directory was removed out of
+# band - not a foreign HOME. Teardown still refuses before the kill (never
+# discarding a slot treehouse may lease), but names the stale slot and the exact
+# prune command so the operator can clear the outage.
+add_stale_slot_pool_treehouse() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status)
+    printf '1  leased  ~/.treehouse/example-repo/live-slot/example-repo\n'
+    printf '2  leased  ~/.treehouse/example-repo/stale-slot/example-repo\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+test_stale_pool_entry_is_named_with_its_prune_command() {
+  local case_dir rc branch pid home
+  case_dir=$(make_case pool-stale-slot)
+  home="$case_dir/home"
+  mkdir -p "$home/.treehouse/example-repo/live-slot/example-repo"
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  add_stale_slot_pool_treehouse "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "pool-stale-slot: setup sleeper did not start"
+
+  rc=0
+  HOME="$home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "pool-stale-slot: a stale pool entry must refuse before the kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'stale slot' "$case_dir/stderr" \
+    "pool-stale-slot: refusal did not name the stale slot"
+  assert_grep 'stale-slot' "$case_dir/stderr" \
+    "pool-stale-slot: refusal did not name the concrete stale slot path"
+  assert_grep 'treehouse prune' "$case_dir/stderr" \
+    "pool-stale-slot: refusal did not print the exact prune command"
+  assert_grep "prune it with: ( cd \"$case_dir/project\" && treehouse prune )" "$case_dir/stderr" \
+    "pool-stale-slot: the printed prune command does not quote the project path"
+  assert_no_grep 'home-relative paths this host' "$case_dir/stderr" \
+    "pool-stale-slot: a stale slot beside a resolvable slot was misread as a foreign HOME"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "pool-stale-slot: the crew process was killed before the release was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "pool-stale-slot: a refused teardown left a replayable backlog-close record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "pool-stale-slot: the backlog row was closed despite the refusal"
+  assert_present "$case_dir/wt" \
+    "pool-stale-slot: the worktree was removed despite the refusal"
+  git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "pool-stale-slot: the task branch ref was dropped despite the refusal"
+  pass "a stale pool entry is named with its prune command and refuses before the kill"
+}
+
+# A pool listing whose only entries are longer paths that merely contain this
+# worktree's path: a prefix sibling (`<wt>2`) and a path whose tail ends with it.
+# Neither is this worktree's lease, so membership must not be claimed for them -
+# claiming it would route an unheld worktree through `treehouse return`, which
+# refuses outright here.
+add_longer_sibling_pool_treehouse() {  # <case-dir> <worktree>
+  local case_dir=$1 wt=$2
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -u'
+    printf 'wt=%q\n' "$wt"
+    cat <<'SH'
+case "${1:-}" in
+  status)
+    printf '1  leased  %s2  busy\n' "$wt"
+    printf '2  leased  z%s  busy\n' "$wt"
+    exit 0
+    ;;
+  return)
+    echo "treehouse: no such worktree in this pool" >&2
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  } > "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+test_pool_listing_does_not_claim_a_longer_sibling_path() {
+  local case_dir rc branch
+  case_dir=$(make_case pool-longer-sibling)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  add_longer_sibling_pool_treehouse "$case_dir" "$case_dir/wt"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "pool-longer-sibling: teardown should release through guarded plain git"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'plain git worktree remove' "$case_dir/stderr" \
+    "pool-longer-sibling: a longer pool path was claimed as this worktree's lease"
+  assert_absent "$case_dir/wt" \
+    "pool-longer-sibling: the released worktree directory is still present"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "pool-longer-sibling: the task branch ref survived a successful release"
+  pass "pool membership is matched per listing field, so a longer sibling path is not this worktree's lease"
+}
+
+# A worktree this host's treehouse pool provably does not hold and that is not a
+# registered linked worktree of its project has no verifiable release path. The
+# refusal must land before the agent is killed AND before the pending backlog
+# close is recorded, or a later replay would retire a task whose agent is still
+# alive.
+test_unpooled_unregistered_worktree_refuses_before_killing_the_agent() {
+  local case_dir rc pid
+  case_dir=$(make_case unpooled-unregistered)
+  git init -q "$case_dir/standalone"
+  git -C "$case_dir/standalone" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m standalone
+  git -C "$case_dir/standalone" checkout -q -b fm/task-x1
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/standalone" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=teardown-test-task-x1"
+  add_unlisted_pool_treehouse "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  ( cd "$case_dir/standalone" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "unpooled-unregistered: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "unpooled-unregistered: teardown should refuse without a verifiable release path"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "unpooled-unregistered: refusal did not report the missing return path"
+  assert_grep "does not hold $case_dir/standalone" "$case_dir/stderr" \
+    "unpooled-unregistered: refusal did not name the unheld worktree"
+  assert_grep 'not a registered linked worktree' "$case_dir/stderr" \
+    "unpooled-unregistered: refusal did not name the unregistered linked worktree requirement"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "unpooled-unregistered: the crew process was killed before the return path was verified"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  git -C "$case_dir/standalone" rev-parse --verify refs/heads/fm/task-x1 >/dev/null 2>&1 \
+    || fail "unpooled-unregistered: the task branch ref was dropped despite the refusal"
+  # Nothing staged a replayable intent to finish this teardown.
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "unpooled-unregistered: a refused release left a replayable backlog-close record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "unpooled-unregistered: the backlog row was closed despite the refusal"
+  pass "an unpooled, unregistered worktree refuses before the kill and the backlog close"
+}
+
+# A recorded project directory that cannot be inspected cannot vouch for this
+# host's pool, so the refusal lands before the agent is killed.
+test_uninspectable_project_refuses_before_killing_the_agent() {
+  local case_dir rc pid
+  case_dir=$(make_case uninspectable-project)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/gone-project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=teardown-test-task-x1"
+  land_shippable_commit "$case_dir"
+  add_unlisted_pool_treehouse "$case_dir"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "uninspectable-project: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "uninspectable-project: teardown should refuse an uninspectable project dir"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'is not inspectable' "$case_dir/stderr" \
+    "uninspectable-project: refusal did not name the uninspectable project directory"
+  assert_grep 'leaving the agent alive and the branch intact' "$case_dir/stderr" \
+    "uninspectable-project: refusal did not report leaving the agent alive and the branch intact"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "uninspectable-project: the crew process was killed before the return path was verified"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  pass "an uninspectable project directory refuses before the endpoint kill"
+}
+
+# A host whose treehouse cannot report its pool at all - an installed treehouse
+# older than the `status` subcommand, or a repo whose pool config fails to load -
+# has no proof that the worktree is returnable. Teardown must refuse before the
+# endpoint kill instead of killing first and failing at `treehouse return`.
+test_unreportable_pool_listing_refuses_before_killing_the_agent() {
+  local case_dir rc pid
+  case_dir=$(make_case unreportable-pool)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ]; then
+  echo "treehouse: failed to load pool config" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "unreportable-pool: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "unreportable-pool: teardown should refuse when the pool cannot be reported"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'cannot report its pool' "$case_dir/stderr" \
+    "unreportable-pool: refusal did not name the unreportable pool"
+  assert_grep 'leaving the agent alive and the branch intact' "$case_dir/stderr" \
+    "unreportable-pool: refusal did not report leaving the agent alive and the branch intact"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "unreportable-pool: the crew process was killed although the pool listing was unavailable"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_present "$case_dir/wt" \
+    "unreportable-pool: the worktree was removed despite the refusal"
+  git -C "$case_dir/wt" rev-parse --verify refs/heads/fm/task-x1 >/dev/null 2>&1 \
+    || fail "unreportable-pool: the task branch ref was dropped despite the refusal"
+  pass "an unreportable treehouse pool listing refuses before the endpoint kill"
+}
+
+
+# A treehouse-held worktree releases through treehouse; because the release may
+# reset or detach the slot itself, the task branch is detached first so the
+# post-release ref deletion actually happens rather than silently no-op'ing on a
+# branch that is still the worktree's HEAD.
+test_treehouse_return_drops_the_task_branch() {
+  local case_dir rc branch
+  case_dir=$(make_case treehouse-branch-drop)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  # The default fake treehouse reports its pool as holding the worktree and its
+  # `return` leaves the worktree untouched - exactly the slot a release must not
+  # leave holding the task branch.
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "treehouse-branch-drop: teardown should succeed"$'\n'"$(cat "$case_dir/stderr")"
+  [ "$branch" != HEAD ] || fail "treehouse-branch-drop: fixture captured no task branch"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "treehouse-branch-drop: the task branch ref survived a successful release"
+  pass "a treehouse-held worktree detaches before the release so its task branch is dropped"
+}
+
+# A release that fails after the pre-release detach must put the worktree back on
+# its task branch: a retry learns which ref to drop from the worktree's HEAD, so a
+# worktree left detached could never retire its branch even when the retry's
+# release succeeds. The first attempt fails at `treehouse return`, the second one
+# over the same state succeeds and drops the ref.
+test_failed_release_restores_the_task_branch_for_retry() {
+  local case_dir rc branch marker
+  case_dir=$(make_case release-failure-retry)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  [ "$branch" != HEAD ] || fail "release-failure-retry: fixture captured no task branch"
+  marker="$case_dir/fakebin/fm-fake-treehouse-return-fails"
+  # The default fake treehouse reports this repo's pool (so the pre-kill probe
+  # proves the slot returnable) and this variant additionally refuses `return`
+  # with a non-lock error while the marker exists.
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+here="$(dirname "$0")"
+if [ "${1:-}" = status ]; then exec "$here/fm-fake-treehouse-status"; fi
+if [ -f "$here/fm-fake-treehouse-return-fails" ]; then
+  echo "treehouse: pool slot is held by another process" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  : > "$marker"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "release-failure-retry: a failing worktree return must abort the teardown"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'treehouse return failed' "$case_dir/stderr" \
+    "release-failure-retry: teardown did not report the failed worktree return"
+  assert_present "$case_dir/wt" \
+    "release-failure-retry: the worktree was removed despite the failed return"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "release-failure-retry: the task branch ref was dropped despite the failed return"
+  # The observable pre-release state: the worktree is checked out on its branch
+  # again, not left detached from it.
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$branch" ] \
+    || fail "release-failure-retry: the failed release left the worktree detached from $branch"
+
+  rm -f "$marker"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout.retry" 2> "$case_dir/stderr.retry" || rc=$?
+  expect_code 0 "$rc" "release-failure-retry: the retry's release should succeed"$'\n'"$(cat "$case_dir/stderr.retry")"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "release-failure-retry: the task branch ref survived a retried successful release"
+  pass "a failed release re-attaches the task branch so a retry still drops it"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
@@ -3940,6 +5353,9 @@ test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_migrated_orca_clean_worktree_removed
 test_migrated_orca_mismatched_path_not_removed
+test_migrated_orca_show_failure_refuses_with_concrete_error
+test_migrated_orca_stderr_only_show_failure_refuses_with_concrete_error
+test_migrated_orca_selector_not_found_uses_guarded_git_release
 test_migrated_orca_dirty_worktree_refuses
 test_migrated_orca_unpushed_worktree_refuses
 test_change_watch_terminal_gap_refuses_teardown
@@ -3947,3 +5363,33 @@ test_change_watch_interrupted_refuses_until_reregistered
 test_change_watch_gap_survives_verdict_deletion
 test_running_change_watch_does_not_block_teardown
 test_proven_change_watch_allows_teardown
+test_missing_return_tool_refuses_before_killing_the_agent
+test_tmux_era_task_without_treehouse_uses_guarded_git_release
+test_tmux_era_task_without_treehouse_refuses_dirty_worktree
+test_plain_git_release_removes_clean_registered_worktree
+test_empty_pool_listing_releases_through_guarded_plain_git
+test_pool_stderr_diagnostic_is_not_pool_membership
+test_plain_git_release_refuses_dirty_worktree
+test_plain_git_release_refuses_locked_worktree
+test_plain_git_release_refuses_initialized_submodule
+test_orca_workspace_path_routes_release_to_orca
+test_orca_show_failure_refuses_before_killing_the_agent
+test_orca_selector_miss_without_git_registration_refuses_before_kill
+test_id_less_orca_show_releases_by_path
+test_migrated_orca_show_without_worktree_id_refuses_before_kill
+test_orca_path_miss_falls_back_to_guarded_git_release
+test_orca_non_selector_failure_refuses_instead_of_plain_git_fallback
+test_orca_empty_failure_output_refuses_instead_of_success
+test_orca_whitespace_failure_output_refuses_instead_of_success
+test_orca_stderr_only_failure_names_the_concrete_error
+test_orca_unparseable_stdout_names_the_concrete_stderr_error
+test_orca_parseable_non_envelope_refuses_instead_of_success
+test_whitespace_only_pool_listing_row_is_classified
+test_pool_listing_does_not_claim_a_longer_sibling_path
+test_unresolvable_home_relative_pool_listing_refuses_before_killing_the_agent
+test_stale_pool_entry_is_named_with_its_prune_command
+test_unpooled_unregistered_worktree_refuses_before_killing_the_agent
+test_uninspectable_project_refuses_before_killing_the_agent
+test_unreportable_pool_listing_refuses_before_killing_the_agent
+test_treehouse_return_drops_the_task_branch
+test_failed_release_restores_the_task_branch_for_retry

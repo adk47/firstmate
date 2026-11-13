@@ -39,6 +39,32 @@ export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
 
+# Build a system PATH that carries the utilities bootstrap itself needs but not
+# one named tool, so a case that means "<tool> is absent" stays true even on a
+# host that installs it in a base path. Symlinks every base-path executable except
+# <tool> into <case-dir>/path-without-<tool> and echoes that directory.
+# Args: <case-dir> <tool>
+make_path_without_tool() {  # <case-dir> <tool>
+  local case_dir=$1 skip=$2 path_dir src f base
+  path_dir="$1/path-without-$2"
+  mkdir -p "$path_dir"
+  for base in ${BASE_PATH//:/ }; do
+    [ -d "$base" ] || continue
+    for src in "$base"/*; do
+      [ -x "$src" ] && [ ! -d "$src" ] || continue
+      f=${src##*/}
+      [ "$f" = "$skip" ] && continue
+      [ -e "$path_dir/$f" ] && continue
+      ln -s "$src" "$path_dir/$f" 2>/dev/null || true
+    done
+  done
+  printf '%s\n' "$path_dir"
+}
+
+make_path_without_node() {  # <case-dir>
+  make_path_without_tool "$1" node
+}
+
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
 make_fake_toolchain() {
@@ -714,6 +740,146 @@ test_treehouse_lease_check_follows_resolved_backend() {
   pass "bootstrap: the treehouse lease check follows the resolved backend's worktree provider"
 }
 
+test_recorded_treehouse_backend_requires_treehouse_under_orca() {
+  local case_dir home fakebin out
+  case_dir="$TMP_ROOT/orca-recorded-tmux-task"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  # A recorded task spawned under tmux still leases its worktree through
+  # treehouse, so a config-only orca home must still require treehouse.
+  printf '%s\n' 'window=firstmate:fm-legacy-task' 'backend=tmux' 'kind=ship' \
+    > "$home/state/legacy-task.meta"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" orca
+  # FM_FAKE_TREEHOUSE_LEASE_HELP unset: the fake treehouse advertises NO --lease.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: treehouse" \
+    "a recorded non-orca task must require treehouse even when config/backend is orca"
+  pass "bootstrap: a recorded non-orca task requires treehouse under an orca home"
+}
+
+# The recorded-task treehouse requirement is about the binary being ON PATH, not
+# only about lease support: a config/backend=orca home holding one default tmux
+# task record (no backend= line, the shape every default-path spawn writes) must
+# still report a missing treehouse even when no treehouse is installed at all.
+test_recorded_default_backend_task_requires_absent_treehouse() {
+  local case_dir home fakebin base_path out
+  case_dir="$TMP_ROOT/orca-recorded-default-task-no-treehouse"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  printf '%s\n' 'window=firstmate:fm-legacy-task' 'kind=ship' \
+    > "$home/state/legacy-task.meta"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux" "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" orca
+  base_path=$(make_path_without_tool "$case_dir" treehouse)
+  out=$(PATH="$fakebin:$base_path" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: treehouse" \
+    "a recorded default-backend task must require treehouse even when treehouse is not installed"
+  pass "bootstrap: a recorded default-backend task reports an absent treehouse under an orca home"
+}
+
+# A remote secondmate record carries kind=secondmate and remote_backend=herdr
+# but no backend= line, so it must not be mistaken for a local tmux task that
+# needs this host's treehouse. Its worktree lease lives on the remote host.
+test_remote_secondmate_record_does_not_require_local_treehouse() {
+  local case_dir home fakebin base_path out
+  case_dir="$TMP_ROOT/orca-remote-secondmate-no-treehouse"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  printf '%s\n' 'window=remote:fm-sm' 'kind=secondmate' 'remote_host=remote.example' \
+    'remote_backend=herdr' > "$home/state/sm.meta"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux" "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" orca
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+exit 255
+SH
+  chmod +x "$fakebin/ssh"
+  base_path=$(make_path_without_tool "$case_dir" treehouse)
+  out=$(PATH="$fakebin:$base_path" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: treehouse" \
+    "a remote secondmate record must not require local treehouse under an orca home"
+  pass "bootstrap: a remote secondmate record does not require local treehouse"
+}
+
+# A migrated Mac-era Orca task keeps only orca_worktree_id_prior and no
+# backend= line, so its backend reads as tmux. Its worktree is Orca-managed and
+# outside Treehouse's pool, so this host must not report a missing treehouse for it.
+test_migrated_orca_record_does_not_require_local_treehouse() {
+  local case_dir home fakebin base_path out
+  case_dir="$TMP_ROOT/orca-migrated-task-no-treehouse"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  printf '%s\n' 'window=firstmate:fm-migrated-task' 'kind=ship' \
+    'orca_worktree_id_prior=11111111-2222-3333-4444-555555555555::/Users/aaron/orca/workspaces/proj/fm-migrated-task' \
+    > "$home/state/migrated-task.meta"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux" "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" orca
+  base_path=$(make_path_without_tool "$case_dir" treehouse)
+  out=$(PATH="$fakebin:$base_path" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: treehouse" \
+    "a migrated Orca task record must not require local treehouse under an orca home"
+  pass "bootstrap: a migrated Orca task record does not require local treehouse"
+}
+
+test_orca_recorded_id_does_not_require_local_treehouse() {
+  local case_dir home fakebin base_path out
+  case_dir="$TMP_ROOT/orca-recorded-id-no-treehouse"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  printf '%s\n' 'window=firstmate:fm-orca-id-task' 'kind=ship' \
+    'orca_worktree_id=11111111-2222-3333-4444-555555555555' \
+    > "$home/state/orca-id-task.meta"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux" "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" orca
+  base_path=$(make_path_without_tool "$case_dir" treehouse)
+  out=$(PATH="$fakebin:$base_path" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: treehouse" \
+    "a recorded Orca worktree id must not require local treehouse under an orca home"
+  pass "bootstrap: a recorded Orca worktree id does not require local treehouse"
+}
+
+test_orca_workspace_path_record_does_not_require_local_treehouse() {
+  local case_dir home fakebin base_path out
+  case_dir="$TMP_ROOT/orca-workspace-path-no-treehouse"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  printf '%s\n' 'window=firstmate:fm-workspace-task' 'kind=ship' \
+    "worktree=$case_dir/orca/workspaces/proj/fm-workspace-task" \
+    > "$home/state/workspace-task.meta"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux" "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" orca
+  base_path=$(make_path_without_tool "$case_dir" treehouse)
+  out=$(PATH="$fakebin:$base_path" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: treehouse" \
+    "a recorded worktree under an Orca workspace tree must not require local treehouse"
+  pass "bootstrap: a recorded Orca workspace path does not require local treehouse"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -887,7 +1053,7 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
 # split is a PARTITION: `skip` plus `only` together do exactly what `all` does,
 # with no step dropped and no step run twice.
 test_network_phase_partitions_the_run() {
-  local case_dir fakebin all_out skip_out only_out combined
+  local case_dir fakebin base_path all_out skip_out only_out combined
   case_dir="$TMP_ROOT/network-phase"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
@@ -900,18 +1066,21 @@ test_network_phase_partitions_the_run() {
 exit 1
 SH
   chmod +x "$fakebin/gh"
+  # Hide node from the base PATH too: a host that installs node at /usr/bin would
+  # otherwise satisfy the local floor and never emit the diagnostic this case pins.
+  base_path=$(make_path_without_node "$case_dir")
 
-  all_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  all_out=$(PATH="$fakebin:$base_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$all_out" "MISSING: node (install:" "the unsplit run lost its local diagnostic"
   assert_contains "$all_out" "NEEDS_GH_AUTH" "the unsplit run lost its network diagnostic"
 
-  skip_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  skip_out=$(PATH="$fakebin:$base_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$skip_out" "MISSING: node (install:" "the local half lost its own diagnostic"
   assert_not_contains "$skip_out" "NEEDS_GH_AUTH" "the local half still made a network call"
 
-  only_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  only_out=$(PATH="$fakebin:$base_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$only_out" "NEEDS_GH_AUTH" "the network half lost its own diagnostic"
   assert_not_contains "$only_out" "MISSING: node" "the network half repeated the local half's work"
@@ -922,7 +1091,7 @@ SH
 
   # A typo must never silently drop a safety sweep, so anything unrecognized
   # resolves to the complete run.
-  [ "$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  [ "$(PATH="$fakebin:$base_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=sikp "$ROOT/bin/fm-bootstrap.sh")" = "$all_out" ] \
     || fail "an unrecognized FM_BOOTSTRAP_NETWORK value did not fall back to the complete run"
   pass "bootstrap: FM_BOOTSTRAP_NETWORK partitions one run into local and network halves"
@@ -1163,6 +1332,12 @@ test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
+test_recorded_treehouse_backend_requires_treehouse_under_orca
+test_recorded_default_backend_task_requires_absent_treehouse
+test_remote_secondmate_record_does_not_require_local_treehouse
+test_migrated_orca_record_does_not_require_local_treehouse
+test_orca_recorded_id_does_not_require_local_treehouse
+test_orca_workspace_path_record_does_not_require_local_treehouse
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
