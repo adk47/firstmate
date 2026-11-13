@@ -1467,6 +1467,35 @@
       }
     },
     {
+      "id": "edd40ffe-7c13-5963-9118-9cd1b7f3e264",
+      "agentId": "operations",
+      "createdAtMs": 1794571200000,
+      "updatedAtMs": 1794571200000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": true,
+      "name": "credit-proof-marker",
+      "description": "The proof marker (captain 2026-11-13: 'process all proof'): hourly at :45, every SENT verify note whose account filed a document dated after the note is tagged proof_tagged_at with the document's own received_at, so 'did they answer' is one column. A credit note needs the document filed against one of its requests; a claim note any document after it. Reads proof_intake read-only and writes only verify_messages.proof_tagged_at plus one proof_marks audit row per tag: no judgement, no approval, no send, no Intercom or admin API call. Replaces the Intercom tag sweep inside verify-notify, which never recorded a look (proof_checked_at set on 0 rows). Kill file /etc/hydra/proof-marker.disabled. Undo a run: proof_marker.py revert --run-id RUN. Doc: docs/credit-verification/proof-path.md.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "45 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit_review/proof_marker.py",
+          "apply"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 300
+      }
+    },
+    {
       "id": "b08cbb96-e5b4-59d6-95b1-a4cbddac9022",
       "agentId": "operations",
       "createdAtMs": 1792112400000,

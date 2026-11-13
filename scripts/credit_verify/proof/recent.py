@@ -8,8 +8,19 @@ the last successful run:
     `--max-fetches` per run; a conversation over the budget is CARRIED to the next run, never lost);
   * support@ Gmail: messages with an attachment since then (read-only `gog gmail messages search`),
     through gmail_intake.run (authenticated sender only, confirmed account only).
-Dry run unless `--apply`. The window start advances only after an --apply run that finished, so a
-failed or deferred run is retried. One run at a time (an exclusive lock on the state file).
+Dry run unless `--apply`. One run at a time (an exclusive lock on the state file).
+
+A run is BOUNDED and its progress is SAVED AS IT GOES (2026-11-13: the window was saved only at the very
+end, so once a 24 h kill-file pause left more conversations than one run could read inside the cron's
+3000 s kill, every run was killed with nothing saved and the next one started over on a longer window:
+36 of the next 37 runs failed in 41 h, 31 of them at that kill, the cursor frozen at 2026-11-10T17:15Z). Now:
+  * both searches run first, and their whole result is written to the state (`carry`, `carry_messages`)
+    before any conversation is read, so the window moves as soon as the searches were complete;
+  * conversations are filed CHUNK at a time and the state is saved after each chunk: a killed run redoes at
+    most one chunk (re-filing is idempotent);
+  * past `max_seconds` the run stops filing conversations and carries the rest, never dropped (support@
+    messages are still filed: they are capped by count);
+  * a chunk with a transient Intercom error is carried whole, and the window is held as before.
 """
 
 from __future__ import annotations
@@ -26,6 +37,8 @@ STATE = os.environ.get("CREDIT_PROOF_FILE_STATE", "/var/lib/hydra-credit-verify/
 API = "https://api.intercom.io"
 OVERLAP_S = 600            # each window starts 10 min before the last run's start (clock skew, slow indexing)
 MAX_PAGES = 40             # 40 x 150 conversations per run at most; more is carried, never dropped
+CHUNK = 25                 # conversations filed between two saves of the state: what a killed run redoes at most
+MAX_SECONDS = 2400.0       # a run stops filing here and carries the rest; the cron's own kill is at 3000 s
 
 Search = Callable[[dict[str, Any]], dict[str, Any]]
 GmailSearch = Callable[[str, str], dict[str, Any]]
@@ -117,6 +130,26 @@ class Busy(RuntimeError):
     """Another file-recent run holds the lock."""
 
 
+def _merge(total: dict[str, Any], part: dict[str, Any]) -> dict[str, Any]:
+    """Add one chunk's intake stats to the run's: lists are joined, counts are summed, count maps are merged."""
+    for k, v in part.items():
+        if isinstance(v, list):
+            total[k] = list(total.get(k) or []) + v
+        elif isinstance(v, dict):
+            total[k] = _merge(dict(total.get(k) or {}), v)
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            total[k] = (total.get(k) or 0) + v
+        else:
+            total[k] = v
+    return total
+
+
+def _transient(errors: Any) -> list[str]:
+    """Intercom failures worth a retry (a conversation GET or an attachment download). A ValueError is permanent
+    (over 25 MB, a host that is not Intercom's) and would be retried forever, so it never is (QA #1447)."""
+    return [e for e in errors or [] if "ValueError" not in e]
+
+
 def locked(path: str):
     os.makedirs(os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
     fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
@@ -155,10 +188,14 @@ def run(*, state_path: str, hours: float, apply: bool, now: float | None = None,
         file_messages: Callable[[list[str]], dict[str, Any]],
         order: Callable[[list[str]], list[str]] = lambda c: c,
         max_messages: int | None = None,
+        max_seconds: float | None = None, chunk: int = CHUNK,
+        clock: Callable[[], float] = time.monotonic,
         log: Callable[[str], None] = lambda m: None) -> dict[str, Any]:
     """One intake pass. `file_conversations(ids)` / `file_messages(ids)` are intake.run / gmail_intake.run
     already bound to the store, apply flag and fetch budget; they return their stats. At most `max_messages`
-    support@ messages are fetched per run; the rest ride in `carry_messages` to the next run, never dropped."""
+    support@ messages are fetched per run; the rest ride in `carry_messages` to the next run, never dropped.
+    `file_conversations` is called once per `chunk` conversations and the state is saved after each call;
+    past `max_seconds` (None = no limit) no more conversations are filed and the rest is carried."""
     now = time.time() if now is None else now
     fd = locked(state_path)
     try:
@@ -167,25 +204,55 @@ def run(*, state_path: str, hours: float, apply: bool, now: float | None = None,
         since = start - OVERLAP_S
         since = max(since, now - 7 * 86400)               # never look back more than a week in one run
         out: dict[str, Any] = {"since": since, "apply": apply}
+        deadline = None if max_seconds is None else clock() + max(0.0, float(max_seconds))
         carried = [str(c) for c in st.get("carry") or []]
         convs, c_ok = recent_conversations(conv_search, since) if conv_search else ([], True)
         todo = list(dict.fromkeys(carried + order(convs)))
-        cstats = file_conversations(todo) if todo else {"deferred_conversations": []}
-        carry = list(cstats.get("deferred_conversations") or [])
         carried_msgs = [str(m) for m in st.get("carry_messages") or []]
         found, m_ok = recent_messages(gmail_search, since) if gmail_search else ([], True)
         pending = list(dict.fromkeys(carried_msgs + found))
+
+        def checkpoint(unfiled: list[str]) -> None:
+            # What a KILLED run leaves behind: every conversation and message not filed yet, by id. The window
+            # may move here because nothing it found can be lost: it is all in `carry` / `carry_messages`.
+            if apply:
+                save_state(state_path, {"since": now if (c_ok and m_ok) else start, "carry": unfiled,
+                                        "carry_messages": pending, "last_run": st.get("last_run"),
+                                        "checkpoint": now})
+
+        if todo:
+            checkpoint(todo)
+        cstats: dict[str, Any] = {"deferred_conversations": []}
+        carry: list[str] = []
+        left = list(todo)
+        size = max(1, int(chunk))
+        while left and (deadline is None or clock() < deadline):
+            part, left = left[:size], left[size:]
+            got = file_conversations(part)
+            _merge(cstats, got)
+            carry += [str(c) for c in got.get("deferred_conversations") or []]
+            if _transient(got.get("errors")):
+                carry += part                             # the error names no conversation: the chunk is retried whole
+            carry = list(dict.fromkeys(carry))
+            checkpoint(list(dict.fromkeys(carry + left)))
+        out_of_time = len(left)
+        carry = list(dict.fromkeys(carry + left))
         # support@ disabled (--no-gmail = Intercom only, QA #1488): nothing is fetched or filed, and the queued
-        # ids are kept untouched for a later run with support@ enabled
-        cap = 0 if gmail_search is None else len(pending) if max_messages is None else max(0, int(max_messages))
+        # ids are kept untouched for a later run with support@ enabled. A run that ran out of time on Intercom
+        # still files its support@ messages: they are capped by count, and a backlog of conversations that takes
+        # many runs to read must not hold every emailed document behind it (2026-11-13: 2,888 conversations
+        # carried, 118 messages waiting). The time for them is the gap between `max_seconds` and the cron's kill.
+        cap = 0 if gmail_search is None else (
+            len(pending) if max_messages is None else max(0, int(max_messages)))
         msgs, carry_msgs = pending[:cap], pending[cap:]
         mstats = file_messages(msgs) if msgs else {}
         retry_msgs = [e.split(":", 1)[0] for e in mstats.get("fetch_errors") or []]
         # Transient Intercom failures (a conversation GET or an attachment download) hold the window, so the
         # next run searches the same range again (QA #1447). A ValueError is permanent (over 25 MB, a host
         # that is not Intercom's) and would hold the window forever, so it never does.
-        transient = [e for e in cstats.get("errors") or [] if "ValueError" not in e]
+        transient = _transient(cstats.get("errors"))
         out.update(conversations=len(todo), carried_in=len(carried), carried_out=len(carry),
+                   out_of_time=out_of_time,
                    messages=len(msgs), messages_carried_in=len(carried_msgs), messages_carried_out=len(carry_msgs),
                    retry_messages=retry_msgs, intercom_transient_errors=transient[:5],
                    complete=c_ok and m_ok,
@@ -195,7 +262,7 @@ def run(*, state_path: str, hours: float, apply: bool, now: float | None = None,
                    gmail={k: (len(v) if isinstance(v, list) else v) for k, v in mstats.items()})
         if apply:
             # The window moves only when this run saw everything (no page cap hit) and no message
-            # failed to fetch; deferred conversations ride along in `carry` either way.
+            # failed to fetch; deferred, retried and out-of-time conversations ride along in `carry` either way.
             # A held window keeps the lower bound this run ATTEMPTED - on a first run too - so a later run
             # never jumps to a fresh `now - hours` and skips what this one could not finish (QA #1447).
             nxt = {"since": now if (c_ok and m_ok and not retry_msgs and not transient) else start,
@@ -206,7 +273,9 @@ def run(*, state_path: str, hours: float, apply: bool, now: float | None = None,
                        [m for m in retry_msgs if m in set(msgs)] + carry_msgs)), "last_run": now}
             save_state(state_path, nxt)
             out["window_advanced"] = nxt["since"] == now
-        log("file-recent " + json.dumps(out, default=str)[:2000])
+        # the log line carries COUNTS: the unresolved conversations are in the tray file, and listing them here
+        # pushed the support@ stats past the line's cut (2026-11-13: a 60-message run's result could not be read)
+        log("file-recent " + json.dumps({**out, "unresolved": len(out["unresolved"])}, default=str)[:2000])
         return out
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)

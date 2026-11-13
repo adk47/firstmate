@@ -2728,6 +2728,9 @@ jobs:
           # Document intake (credit-proof.py file): files a conversation's documents into
           # proof_intake with the account + candidate requests; never judges. Intercom/Trino faked.
           python3 scripts/tests/test_proof_intake.py
+          # The proof marker (credit_review/proof_marker.py): a sent note is tagged proof_tagged_at from the
+          # documents on file (after the note, for its request); never judges, sends or approves; revertible.
+          python3 scripts/tests/test_proof_marker.py
           # Link replies (r5 r1-link): proof_link_intake only, never proof_intake; host class from
           # policies/proof-link-hosts.json; SSRF-safe fetch of allowlisted hosts only. Fakes only, no network.
           python3 scripts/tests/test_proof_links.py

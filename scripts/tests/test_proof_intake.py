@@ -820,7 +820,9 @@ class RecentIntakeTest(unittest.TestCase):
             self.r.run(state_path=self.state, hours=2, apply=True, now=10_000.0, conv_search=self._search,
                        gmail_search=None, file_conversations=self.r.with_unresolved_tray(fc, bad, True),
                        file_messages=lambda ids: {})
-        self.assertFalse(os.path.exists(self.state))                        # cursor never saved
+        # the pass did not finish, and nothing it found is lost: every conversation is still carried by id
+        self.assertEqual(json.loads(Path(self.state).read_text())["carry"], ["c1", "c2", "c3"])
+        self.assertNotIn("last_run", {k for k, v in json.loads(Path(self.state).read_text()).items() if v})
         good = os.path.join(os.path.dirname(self.state), "tray.jsonl")
         self.searches.clear()                                                   # the same window again
         out = self.r.run(state_path=self.state, hours=2, apply=True, now=10_000.0, conv_search=self._search,
@@ -837,6 +839,128 @@ class RecentIntakeTest(unittest.TestCase):
         body = src[src.index("def cmd_file_recent("):src.index("def cmd_email(")]
         self.assertIn("recent.with_unresolved_tray(", body)
         self.assertNotIn('open(UNRESOLVED, "a"', body)                           # no append after the pass
+
+    def _many(self, n: int) -> list[str]:
+        ids = [f"k{i:03d}" for i in range(n)]
+        self.pages = [{"conversations": [{"id": i} for i in ids], "pages": {}}]
+        return ids
+
+    def test_a_run_out_of_time_carries_the_rest_and_the_window_moves(self) -> None:
+        # 2026-11-13: one run could not read a 24 h window inside the cron's kill, saved nothing, and the next
+        # run started over on a longer one - 36 failed runs in 41 h. A run now stops at its own limit.
+        ids = self._many(60)
+        ticks = iter([0.0, 1.0, 2.0, 99.0, 99.0, 99.0])                 # the limit is passed after two chunks
+        out = self.r.run(state_path=self.state, hours=2, apply=True, now=10_000.0, conv_search=self._search,
+                         gmail_search=None, max_seconds=50.0, chunk=20, clock=lambda: next(ticks),
+                         file_conversations=lambda c: self.filed.append(c) or {"deferred_conversations": []},
+                         file_messages=lambda m: {})
+        self.assertEqual(self.filed, [ids[:20], ids[20:40]])
+        self.assertEqual((out["out_of_time"], out["carried_out"], out["window_advanced"]), (20, 20, True))
+        st = json.loads(Path(self.state).read_text())
+        self.assertEqual((st["carry"], st["since"]), (ids[40:], 10_000.0))
+        self.searches.clear()
+        self.pages = [{"conversations": [{"id": "new1"}], "pages": {}}]
+        self._run(apply=True, now=13_600.0)                                # the next run: the carried ones first
+        self.assertEqual(self.filed[-1], ids[40:] + ["new1"])
+        self.assertEqual(json.loads(Path(self.state).read_text())["carry"], [])
+
+    def test_a_run_out_of_time_on_intercom_still_files_its_support_messages(self) -> None:
+        # 2026-11-13: 2,888 conversations carried and 118 emailed documents waiting behind them. Messages are
+        # capped by count, so a conversation backlog never holds them.
+        ids = self._many(60)
+        ticks = iter([0.0, 1.0, 99.0, 99.0])                               # the limit is passed after one chunk
+        got: list[list[str]] = []
+        out = self.r.run(state_path=self.state, hours=2, apply=True, now=10_000.0, conv_search=self._search,
+                         gmail_search=lambda q, page: {"messages": [{"id": f"m{i}"} for i in range(5)]},
+                         max_messages=3, max_seconds=50.0, chunk=20, clock=lambda: next(ticks),
+                         file_conversations=lambda c: {"deferred_conversations": []},
+                         file_messages=lambda m: got.append(list(m)) or {})
+        self.assertEqual((out["out_of_time"], got), (40, [["m0", "m1", "m2"]]))
+        st = json.loads(Path(self.state).read_text())
+        self.assertEqual((st["carry"], st["carry_messages"]), (ids[20:], ["m3", "m4"]))
+
+    def test_a_killed_run_loses_nothing_and_redoes_at_most_one_chunk(self) -> None:
+        ids = self._many(60)
+
+        class Killed(BaseException):                                       # the cron's kill: no handler runs
+            pass
+
+        def fc(part):
+            if part[0] == ids[40]:
+                raise Killed()
+            self.filed.append(part)
+            return {"deferred_conversations": [ids[3]] if ids[3] in part else []}
+        with self.assertRaises(Killed):
+            self.r.run(state_path=self.state, hours=2, apply=True, now=10_000.0, conv_search=self._search,
+                       gmail_search=None, chunk=20, file_conversations=fc, file_messages=lambda m: {})
+        st = json.loads(Path(self.state).read_text())
+        # the two chunks that finished are not redone; the one the kill interrupted and the deferred one are
+        self.assertEqual(st["carry"], [ids[3]] + ids[40:])
+        self.assertEqual(st["since"], 10_000.0)                             # the search itself is not repeated
+        self.assertIsNone(st["last_run"])                                   # and the run is not called finished
+        self.searches.clear()
+        self.pages = [{"conversations": [], "pages": {}}]
+        self.filed.clear()
+        self._run(apply=True, now=13_600.0)
+        self.assertEqual(self.filed, [[ids[3]] + ids[40:]])
+        self.assertEqual(self.searches[0]["query"]["value"], int(10_000 - 600))
+
+    def test_a_killed_run_whose_search_was_cut_short_keeps_its_window(self) -> None:
+        self._many(3)
+        self.r.MAX_PAGES, old = 0, self.r.MAX_PAGES                         # the search is never complete
+        Path(self.state).write_text(json.dumps({"since": 9_000.0, "carry": ["old1"], "carry_messages": []}))
+        try:
+            with self.assertRaises(RuntimeError):
+                self.r.run(state_path=self.state, hours=2, apply=True, now=10_000.0, conv_search=self._search,
+                           gmail_search=None, file_messages=lambda m: {},
+                           file_conversations=lambda c: (_ for _ in ()).throw(RuntimeError("killed")))
+        finally:
+            self.r.MAX_PAGES = old
+        st = json.loads(Path(self.state).read_text())
+        self.assertEqual((st["since"], st["carry"]), (9_000.0, ["old1"]))
+
+    def test_a_chunk_with_a_transient_error_is_carried_whole(self) -> None:
+        ids = self._many(4)
+
+        def fc(part):
+            self.filed.append(part)
+            return {"deferred_conversations": [], "errors": ["…00002: HTTPError"] if ids[2] in part else [],
+                    "files_filed": 1, "links_by_class": {"dsp": 1}}
+        out = self.r.run(state_path=self.state, hours=2, apply=True, now=10_000.0, conv_search=self._search,
+                         gmail_search=None, chunk=2, file_conversations=fc, file_messages=lambda m: {})
+        self.assertEqual(json.loads(Path(self.state).read_text())["carry"], ids[2:])
+        self.assertFalse(out["window_advanced"])
+        # the chunks' counts are one run's counts
+        self.assertEqual((out["intercom"]["files_filed"], out["intercom"]["links_by_class"]), (2, {"dsp": 2}))
+
+    def test_the_log_line_counts_the_unresolved_and_keeps_the_support_stats(self) -> None:
+        # the unresolved list is long (a conversation id and every file hash each) and the line is cut at 2000
+        # characters: listed in full it cut off the support@ stats, so a run's email result could not be read
+        lines: list[str] = []
+        many = [{"conversation_id": str(10**14 + i), "why": "unresolved: the external_id is not a Muso account",
+                 "files": ["a" * 64], "received_at": ["2026-11-06T00:42:19Z"]} for i in range(60)]
+        self._many(1)
+        out = self.r.run(state_path=self.state, hours=2, apply=True, now=10_000.0, conv_search=self._search,
+                         gmail_search=lambda q, page: {"messages": [{"id": "m1"}]},
+                         file_conversations=lambda ids: {"deferred_conversations": [], "unresolved": many},
+                         file_messages=lambda ids: {"filed": 1, "fetch_errors": []}, log=lines.append)
+        self.assertEqual(len(out["unresolved"]), 60)                   # the caller still gets the list
+        line = [x for x in lines if x.startswith("file-recent ")][-1]
+        got = json.loads(line[len("file-recent "):])                   # whole, not cut
+        self.assertEqual((got["unresolved"], got["gmail"]), (60, {"filed": 1, "fetch_errors": 0}))
+
+    def test_a_dry_run_saves_no_checkpoint(self) -> None:
+        self._many(60)
+        self.r.run(state_path=self.state, hours=2, apply=False, now=10_000.0, conv_search=self._search,
+                   gmail_search=None, chunk=20, file_conversations=lambda c: {"deferred_conversations": []},
+                   file_messages=lambda m: {})
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_the_cron_stops_itself_before_the_gateway_kills_it(self) -> None:
+        jobs = json.loads((Path(__file__).resolve().parents[2] / "cron-jobs.json").read_text())["jobs"]
+        job = next(j for j in jobs if j["name"] == "credit-verify-proof-file")
+        self.assertGreaterEqual(job["payload"]["timeoutSeconds"] - self.r.MAX_SECONDS, 600)
+        self.assertEqual(self.r.MAX_SECONDS, 2400.0)
 
     def test_first_run_files_the_last_hours_paged_and_advances_only_on_apply(self) -> None:
         out = self._run(apply=False)

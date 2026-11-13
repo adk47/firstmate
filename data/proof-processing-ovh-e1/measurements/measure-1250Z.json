@@ -1,0 +1,105 @@
+{
+ "accounts_answered": 536,
+ "accounts_with_documents": 2611,
+ "at": "2026-11-13T12:50:22Z",
+ "core": {
+  "approved": {
+   "created_today": 1020,
+   "older_request_written_today": 5,
+   "total": 5377982
+  },
+  "processing": {
+   "created_today": 6,
+   "older_request_written_today": 0,
+   "total": 7
+  },
+  "rejected": {
+   "created_today": 0,
+   "older_request_written_today": 0,
+   "total": 180602
+  },
+  "unverified": {
+   "created_today": 504,
+   "older_request_written_today": 8,
+   "total": 20803
+  },
+  "user_verification_needed": {
+   "created_today": 538,
+   "older_request_written_today": 1,
+   "total": 79100
+  }
+ },
+ "core_decided_today_older_requests": 5,
+ "core_pending_total": 99903,
+ "core_requests_of_accounts_with_documents": {
+  "approved": {
+   "accounts": 2380,
+   "requests": 1004573
+  },
+  "rejected": {
+   "accounts": 842,
+   "requests": 15932
+  },
+  "unverified": {
+   "accounts": 634,
+   "requests": 8536
+  },
+  "user_verification_needed": {
+   "accounts": 1630,
+   "requests": 17881
+  }
+ },
+ "core_status_of_requests_named_by_a_document": {
+  "approved": 3620,
+  "not_in_core_or_deleted": 2398,
+  "rejected": 6,
+  "unverified": 6735,
+  "user_verification_needed": 16486
+ },
+ "core_status_of_requests_on_answered_notes": {
+  "approved": 1085,
+  "not_in_core_or_deleted": 746,
+  "rejected": 1,
+  "unverified": 613,
+  "user_verification_needed": 4223
+ },
+ "credit_requests_on_answered_notes": 6668,
+ "day": "2026-11-13",
+ "decider_rows_today": {
+  "judge:defer": 1807,
+  "judge:hold": 1190,
+  "judge:support": 3092
+ },
+ "doc_approvals": 0,
+ "doc_verify_documents_read_ever": 8608,
+ "doc_verify_today": {
+  "unknown": 1,
+  "unverifiable": 236
+ },
+ "documents_by_source": {
+  "email": 1219,
+  "intercom": 8391
+ },
+ "documents_on_file": 9610,
+ "documents_received_today": 30,
+ "marker_runs": {
+  "pm-20261113T123401Z": 534
+ },
+ "newest_document": "2026-11-13T11:56:34Z",
+ "notes_answered": 637,
+ "notes_answered_by_campaign": {
+  "claim-proof-ask": 19,
+  "claim-status": 15,
+  "gap-ask": 89,
+  "proof-need-ask": 2,
+  "status-doc-received": 131,
+  "status-team-review": 135,
+  "uvn-status": 245,
+  "verify-live": 1
+ },
+ "notes_sent": 9657,
+ "notes_unmeasured_no_account": 1517,
+ "requests_named_by_a_document": 29245,
+ "stage2_requests_today": 103,
+ "stage2_rows_today": 119
+}

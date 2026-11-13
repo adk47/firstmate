@@ -223,22 +223,35 @@ def cmd_file_recent(args: argparse.Namespace) -> int:
     g_search = gmail_quota.guarded("file-recent", recent.gog_search(), lock=False)
     # gog_raw takes the same lock itself (#1558); flock twice in one process would wait on us
     g_fetch = gmail_quota.guarded("file-recent", gmail_intake.gog_raw, lock=False)
+    # recent.run files a chunk of conversations per call, so the per-RUN download caps are kept here and each
+    # call gets what is left of them (intake.run would otherwise grant every chunk a full --max-fetches).
+    fetches_left = [max(0, int(args.max_fetches))]
+    links_left = [max(0, int(args.max_link_fetches))]
+    fetch = make_fetch(tok)
+    contact_fetch = Pacer("intercom", 1.0).paced(make_contact_fetch(tok))      # one pace for the whole run
+
+    def file_chunk(ids: list[str]) -> dict:
+        stats = intake.run(
+            store, conversations=ids, fetch=fetch, lookup=intake.professional_lookup, held=held,
+            apply=args.apply, max_fetches=fetches_left[0], open_rows_fn=intake.open_rows_trino,
+            filed_by="intake-cron", log=log,
+            link_policy=link_policy, link_fetch=link_fetch, max_link_fetches=links_left[0],
+            # fail-closed identity: one user contact, external_id + email hash against core, > 24 h old
+            identity=intake.strict_identity(contact_fetch=contact_fetch, lookup=intake.professional_lookup))
+        fetches_left[0] = max(0, fetches_left[0] - int(stats.get("fetches_used") or 0))
+        links_left[0] = max(0, links_left[0] - int(stats.get("link_fetches") or 0))
+        return stats
     try:
         res = recent.run(
             state_path=args.state or recent.STATE, hours=args.hours, apply=args.apply,
             conv_search=recent.intercom_search(tok),
             gmail_search=None if no_gmail else g_search,
-            max_messages=args.max_fetches,          # the same per-run cap for support@ (the rest is carried)
+            # support@ has its own per-run cap (the rest is carried); it defaults to --max-fetches
+            max_messages=args.max_fetches if args.max_messages is None else args.max_messages,
             order=lambda convs: recent.paid_first(convs, export, paying),
+            max_seconds=args.max_seconds,           # stop filing and carry the rest before the cron's own kill
             # unresolved conversations go to the tray inside the pass, before the window is saved (QA #1481)
-            file_conversations=recent.with_unresolved_tray(lambda ids: intake.run(
-                store, conversations=ids, fetch=make_fetch(tok), lookup=intake.professional_lookup, held=held,
-                apply=args.apply, max_fetches=args.max_fetches, open_rows_fn=intake.open_rows_trino,
-                filed_by="intake-cron", log=log,
-                link_policy=link_policy, link_fetch=link_fetch, max_link_fetches=args.max_link_fetches,
-                # fail-closed identity: one user contact, external_id + email hash against core, > 24 h old
-                identity=intake.strict_identity(contact_fetch=Pacer("intercom", 1.0).paced(make_contact_fetch(tok)),
-                                                lookup=intake.professional_lookup)), UNRESOLVED, args.apply),
+            file_conversations=recent.with_unresolved_tray(file_chunk, UNRESOLVED, args.apply),
             file_messages=lambda ids: gmail_intake.run(
                 store, message_ids=ids, fetch=g_fetch, lookup=admin_lookup,
                 open_rows=intake.open_rows_trino, apply=args.apply, log=log, blobs=_blob_put()),
@@ -248,8 +261,10 @@ def cmd_file_recent(args: argparse.Namespace) -> int:
         print("NO_REPLY")
         return 0
     except OSError as exc:
-        # the unresolved tray could not be written: the window was NOT saved, the next run repeats it
-        log(f"intake ERROR: unresolved tray {UNRESOLVED} not written ({type(exc).__name__}: {exc}); window held")
+        # the unresolved tray could not be written: the conversations it was for stay in the state's carry and
+        # the next run files them again
+        log(f"intake ERROR: unresolved tray {UNRESOLVED} not written ({type(exc).__name__}: {exc}); "
+            "its conversations stay carried")
         print("NO_REPLY")
         return 1
     if args.out:
@@ -352,6 +367,11 @@ def parser() -> argparse.ArgumentParser:
     pr2.add_argument("--apply", action="store_true", help="write the filings and advance the window")
     pr2.add_argument("--hours", type=float, default=2.0, help="first-run window (later runs start at the last run)")
     pr2.add_argument("--max-fetches", type=int, default=60)
+    pr2.add_argument("--max-messages", type=int, default=None,
+                     help="support@ messages fetched per run (default: --max-fetches). A backlog drain raises "
+                          "--max-fetches without raising the Gmail read rate")
+    pr2.add_argument("--max-seconds", type=float, default=2400.0,
+                     help="stop filing after this long and carry the rest to the next run (the cron kills at 3000 s)")
     pr2.add_argument("--no-gmail", action="store_true", help="Intercom only")
     pr2.add_argument("--links", action="store_true",
                      help="also file customer LINK replies into proof_link_intake (r5 r1-link; never proof_intake). "

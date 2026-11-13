@@ -1,0 +1,163 @@
+{
+ "accounts_answered": 557,
+ "accounts_with_documents": 2660,
+ "at": "2026-11-13T13:50:16Z",
+ "core": {
+  "approved": {
+   "created_today": 1104,
+   "older_request_written_today": 5,
+   "total": 5378066
+  },
+  "processing": {
+   "created_today": 5,
+   "older_request_written_today": 0,
+   "total": 6
+  },
+  "rejected": {
+   "created_today": 0,
+   "older_request_written_today": 0,
+   "total": 180602
+  },
+  "unverified": {
+   "created_today": 520,
+   "older_request_written_today": 8,
+   "total": 20819
+  },
+  "user_verification_needed": {
+   "created_today": 588,
+   "older_request_written_today": 1,
+   "total": 79150
+  }
+ },
+ "core_credit_document_verdicts_rows": 0,
+ "core_decided_today_older_requests": 5,
+ "core_pending_total": 99969,
+ "core_requests_of_accounts_with_documents": {
+  "approved": {
+   "accounts": 2421,
+   "requests": 1022422
+  },
+  "rejected": {
+   "accounts": 856,
+   "requests": 16042
+  },
+  "unverified": {
+   "accounts": 648,
+   "requests": 8592
+  },
+  "user_verification_needed": {
+   "accounts": 1675,
+   "requests": 19253
+  }
+ },
+ "core_status_of_doc_verify_verified_requests": {
+  "approved": 3,
+  "not_in_core_or_deleted": 1,
+  "unverified": 3,
+  "user_verification_needed": 8
+ },
+ "core_status_of_requests_named_by_a_document": {
+  "approved": 3629,
+  "not_in_core_or_deleted": 2398,
+  "rejected": 7,
+  "unverified": 6888,
+  "user_verification_needed": 17988
+ },
+ "core_status_of_requests_on_answered_notes": {
+  "approved": 1284,
+  "not_in_core_or_deleted": 754,
+  "rejected": 1,
+  "unverified": 634,
+  "user_verification_needed": 5252
+ },
+ "core_status_of_requests_on_notes_answered_before_the_marker": {
+  "approved": 174,
+  "not_in_core_or_deleted": 238,
+  "rejected": 1,
+  "unverified": 80,
+  "user_verification_needed": 1258
+ },
+ "credit_requests_on_answered_notes": 7925,
+ "credit_requests_on_notes_answered_before_the_marker": 1751,
+ "day": "2026-11-13",
+ "decider_rows_today": {
+  "judge:defer": 1809,
+  "judge:hold": 1191,
+  "judge:support": 3103
+ },
+ "doc_approvals": 0,
+ "doc_verify_documents_read_ever": 8613,
+ "doc_verify_latest_per_claim": {
+  "unknown": {
+   "claims": 3428,
+   "requests": 1355
+  },
+  "unverifiable": {
+   "claims": 49126,
+   "requests": 22431
+  },
+  "verified": {
+   "claims": 29,
+   "requests": 15
+  }
+ },
+ "doc_verify_today": {
+  "unknown": 1,
+  "unverifiable": 272
+ },
+ "doc_verify_verified_requests": 15,
+ "documents_by_source": {
+  "email": 1219,
+  "intercom": 8740
+ },
+ "documents_doc_verify_has_keyed": 7244,
+ "documents_doc_verify_has_not_keyed": 2715,
+ "documents_filed_by": {
+  "credit-proof.py file": 5550,
+  "credit-proof.py file --source gmail": 1219,
+  "intake-cron": 3190
+ },
+ "documents_on_file": 9959,
+ "documents_received_today": 65,
+ "documents_with_a_doc_verify_outcome": 7030,
+ "documents_with_no_local_bytes": 3917,
+ "feeder": {
+  "conversations_carried": 2514,
+  "cursor": "2026-11-13T13:01:38Z",
+  "messages_carried": 61
+ },
+ "marker_runs": {
+  "pm-20261113T123401Z": 534,
+  "pm-20261113T131320Z": 18,
+  "pm-20261113T134321Z": 7
+ },
+ "newest_document": "2026-11-13T12:00:31Z",
+ "notes_answered": 662,
+ "notes_answered_by_campaign": {
+  "claim-proof-ask": 19,
+  "claim-status": 16,
+  "gap-ask": 90,
+  "proof-need-ask": 2,
+  "status-doc-received": 134,
+  "status-team-review": 143,
+  "uvn-status": 257,
+  "verify-live": 1
+ },
+ "notes_sent": 9662,
+ "notes_unmeasured_no_account": 1517,
+ "proof_checked_at_rows": 0,
+ "requests_named_by_a_document": 30910,
+ "stage2_requests_today": 103,
+ "stage2_rows_today": 119,
+ "unresolved_tray": {
+  "conversations": 434,
+  "rows": 793,
+  "rows_today": 72,
+  "why_today": {
+   "unresolved: the contact is younger than 24 h": 2,
+   "unresolved: the external_id is not a Muso account": 62,
+   "unresolved: the thread has 0 user contacts (exactly one requ": 6,
+   "unresolved: the thread has 2 user contacts (exactly one requ": 2
+  }
+ }
+}

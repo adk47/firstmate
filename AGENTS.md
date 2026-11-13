@@ -1100,6 +1100,30 @@ triggers). Authoritative doc: `data/sentinel/README.md`; registry `policies/sent
 - **Ticks serialize on a host `flock`** across load → evaluate → save → mirror PR; a tick that cannot
   acquire within `SENTINEL_LOCK_TIMEOUT` exits 0 silently (the other tick is doing the same join).
 
+## The proof path: one feeder, one reader, one marker, and no armed decision
+
+A customer's document goes file -> read -> decide -> mark -> tell, one owner per stage:
+`docs/credit-verification/proof-path.md` (what each named processor is, what retires and its replacement).
+Counts: `data/proof-processing-ovh-e1/tools/measure.py` on node-8.
+
+- **The feeder is `credit-proof.py file-recent` and it saves as it goes.** The search result goes into the state
+  before any conversation is read, conversations are filed 25 at a time with a save after each, and a run stops
+  itself at `--max-seconds` (2400), under the cron's 3000 s kill. Saved only at the end, one 24 h kill-file pause
+  froze the cursor for 67 hours: 36 of 37 runs failed with nothing saved. **A job whose progress is saved only on
+  success has a backlog size past which it never succeeds again.** Read a cron's health from the gateway's
+  `cron_run_receipts`, not from its exit-0 "another run is in flight" lines.
+- **"Did they answer" is `verify_messages.proof_tagged_at`, set by `credit_review/proof_marker.py` from
+  `proof_intake`** (a document dated after the note, filed against one of the note's requests; any document for
+  a claim note). It never judges, sends or approves, every tag is a `proof_marks` row, and
+  `revert --run-id` undoes a run. The Intercom tag sweep (`verify_notify.sweep_proofs`) never recorded a look in
+  production; do not wire a second writer.
+- **A tag is not a decision.** No job turns a read document into a decision: the document class is
+  `approved: false` in `policies/credit-approval-automation.json`, `doc_approvals` is empty and core's
+  `credit_document_verdicts` has 0 rows. Report the stages separately (filed, read, answered, decided, told);
+  never report "proof processed" from the first three.
+- A ledger table that only one tool reads is created by that tool, never added to `verify_ledger.SCHEMA`: every
+  read-only reader refuses a ledger that lacks a table `connect()` would add.
+
 ## The verification scale drain: one deterministic ladder, one reviewed ask path
 
 The 92,861-request verification backlog is a **one-time drain**, not a throughput problem:
