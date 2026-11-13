@@ -166,7 +166,9 @@ claim-doc-ladder.py plan --snapshot /dev/shm/snap.json --policy my-policy.json
   all 51 `not_extracted` claims is among them; 12 more are owed by `blob-backfill`) and hands each to
   `runner.verify_document` with no keys, which records locate, text and extract and stops: no claim
   key, no H3, no outcome row. They are read behind the credit filings and ahead of the re-reads,
-  inside the same `--max-docs`, at one model call per document under doc-verify's daily cap. The
+  at one model call per document under doc-verify's daily cap: the room the credit filings leave in
+  `--max-docs`, and never fewer than 5 per worker on top of it (`runner.claim_only_room`; with the room
+  alone the first deployed run read none of them, `data/verif-claim-doc-extract-r1/report.md`). The
   open-claim accounts are one replica read an hour (`runner.claim_accounts`, kept in `dv_state`);
   when that read fails or answers nothing, or `proof_intake` cannot be read, none of these filings
   is selected and the run reports it as an error. A filing whose bytes were never stored is still

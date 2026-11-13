@@ -777,8 +777,9 @@ revert per field: `docs/credit-verification/claim-doc-ladder.md`; first real-row
 - **The predicates decide; the model's part ends at the extraction**, which is the one doc-verify already recorded.
   The ladder does not extract. doc-verify reads a filing with no candidate credit request when its account has an
   open claim (`runner.claim_only_docs`: the extraction only, no key, no H3, no outcome row; before it, 10 of the
-  12 real replies to the claim ask were `unreadable: not_extracted`). A failed open-claims read selects none and
-  is a run error, never "nobody claims".
+  12 real replies to the claim ask were `unreadable: not_extracted`). They get the room the credit filings leave
+  and a floor of 5 per worker on top of `--max-docs` (`runner.claim_only_room`; the room alone read 0 of 116).
+  A failed open-claims read selects none and is a run error, never "nobody claims".
 - **No document, no decision; parsed-but-empty is `unreadable`; unmeasured is its own reason, never a pass.**
 - **A credits page is not accepted and a document must name a release on the profile**
   (`policies/claim-doc-ladder.json`): without those two the first real run approved 15 claims, 11 on a public page.

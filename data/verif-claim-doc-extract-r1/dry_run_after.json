@@ -1,0 +1,55 @@
+{
+ "at": "2026-11-13T14:20:31Z",
+ "version": "dv-4",
+ "rule_from": "PR source sent with this script",
+ "open_claim_accounts": 2022,
+ "shards": [
+  {
+   "shard": 0,
+   "budget": 10,
+   "credit_selected": 10,
+   "claim_only_owing_a_read": 35,
+   "claim_only_selected_before": 0,
+   "claim_only_selected_after": 5,
+   "claim_only_waiting_after": 30,
+   "accounts_selected_after": 4
+  },
+  {
+   "shard": 1,
+   "budget": 10,
+   "credit_selected": 10,
+   "claim_only_owing_a_read": 25,
+   "claim_only_selected_before": 0,
+   "claim_only_selected_after": 5,
+   "claim_only_waiting_after": 20,
+   "accounts_selected_after": 5
+  },
+  {
+   "shard": 2,
+   "budget": 10,
+   "credit_selected": 10,
+   "claim_only_owing_a_read": 36,
+   "claim_only_selected_before": 0,
+   "claim_only_selected_after": 5,
+   "claim_only_waiting_after": 31,
+   "accounts_selected_after": 3
+  },
+  {
+   "shard": 3,
+   "budget": 10,
+   "credit_selected": 10,
+   "claim_only_owing_a_read": 20,
+   "claim_only_selected_before": 0,
+   "claim_only_selected_after": 5,
+   "claim_only_waiting_after": 15,
+   "accounts_selected_after": 5
+  }
+ ],
+ "totals": {
+  "credit_selected": 40,
+  "claim_only_owing_a_read": 116,
+  "claim_only_selected_before": 0,
+  "claim_only_selected_after": 20,
+  "claim_only_waiting_after": 96
+ }
+}

@@ -2130,6 +2130,120 @@ class IntakeD2Tests(unittest.TestCase):
         self.assertEqual((stats.claim_only, stats.documents, rows, len(stats.errors)), (0, 0, [], 1))
         self.assertIn("claim-only filings not selected: OperationalError", stats.errors[0])
 
+    def _claim_only_filings(self):
+        """Beside setUp's credit filing (account 42), account 77 has an open claim, no credit request and two
+        filings: one whose bytes are on file, one support@ email whose bytes were never stored."""
+        os.makedirs(self.cache, exist_ok=True)
+        data = b"%PDF-1.4 a label's letter sent for the claim; this account has no credit request"
+        sha = hashlib.sha256(data).hexdigest()
+        path = os.path.join(self.cache, "77.pdf")
+        Path(path).write_bytes(data)
+        ps = ProofStore(self.proof_path)
+        on_file = ps.file_document(file_sha256=sha, user_id=77, conversation_id="77", file_path=path,
+                                   candidate_request_ids=[], received_at="2026-11-12T10:00:00Z",
+                                   matched_by="professional_id")
+        no_bytes = ps.file_document(file_sha256=hashlib.sha256(b"never stored").hexdigest(), user_id=77,
+                                    conversation_id="gmail:18f0a", candidate_request_ids=[], source="gmail",
+                                    received_at="2026-11-12T09:00:00Z", matched_by="email")
+        ps.close()
+        self.assertEqual(sqlite3.connect(self.proof_path).execute(
+            "SELECT candidate_request_ids_json, file_path FROM proof_intake WHERE intake_id=?",
+            (on_file,)).fetchone(), ("[]", path))
+        self.deps.claimants = lambda: frozenset({77})
+        return sha, on_file, no_bytes
+
+    def _second_reader(self):
+        """A fresh doc-verify store and its reader over the SAME filings: one fixture read under two rules."""
+        store = DocVerifyStore(os.path.join(self.td.name, "dv-second.sqlite"))
+        return store, dataclasses.replace(self.deps, extractor=Extractor(
+            store, key="k", post=lambda *a: or_response(self.answer)))
+
+    def test_a_full_credit_queue_no_longer_starves_a_claimants_filing(self):
+        # node-8, 2026-11-13T13:56Z: 110-135 credit filings owed a read in each worker's 10 slots, a claim-only
+        # filing was given the slots they left (none), and 0 of 116 was selected in the first hour the selection
+        # was deployed. Here the credit filing fills a run of 1.
+        sha, on_file, no_bytes = self._claim_only_filings()
+        proof = sqlite3.connect(self.proof_path)
+        ids = lambda docs: [d.intake_id for d in docs]  # noqa: E731
+        self.assertEqual(ids(runner._intake_docs(proof, self.store, self.deps, 10)), [self.intake_id])  # never there
+        self.assertEqual(ids(runner.claim_only_docs(proof, self.store, self.deps, 10)), [on_file])
+        self.assertNotIn(no_bytes, ids(runner.claim_only_docs(proof, self.store, self.deps, 10)))   # bytes owed
+        self.assertEqual(runner.claim_only_docs(proof, self.store, self.deps, 1 - 1), [])    # the room alone: none
+
+        def read(store, deps, **kw):
+            stats, rows = runner.run(store, deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z",
+                                     max_docs=1, **kw)
+            extracted = sorted(r[0] for r in store.db.execute("SELECT proof_id FROM dv_steps WHERE step='extract'"))
+            credit = store.db.execute("SELECT intake_id, proof_id, request_id, role, user_id, outcome, reason, "
+                                      "h3_verdict, source_ref FROM dv_outcomes ORDER BY id").fetchall()
+            return stats, extracted, credit, [(r["request_id"], r["role"], r["outcome"]) for r in rows]
+        old_store, old_deps = self._second_reader()
+        old, old_extracted, old_credit, old_rows = read(old_store, old_deps, claim_only_floor=0)
+        self.assertEqual((old.intake, old.claim_only, old.claim_only_waiting, old.documents), (1, 0, 1, 1))
+        self.assertEqual(old_extracted, [self.sha])                 # the room alone: selected by nothing, and counted
+        new, extracted, credit, rows = read(self.store, self.deps)
+        self.assertEqual((new.intake, new.claim_only, new.claim_only_waiting, new.documents), (1, 1, 0, 2))
+        self.assertEqual(extracted, sorted([self.sha, sha]))        # read in the same run, on top of the 1
+        self.assertEqual(new.errors, [])
+        # the credit filing: the same slot, the same verdict, the same row
+        self.assertEqual((credit, rows, new.outcomes), (old_credit, old_rows, old.outcomes))
+        self.assertEqual([c[:3] for c in credit], [(self.intake_id, self.sha, RID)])   # no row for the claim filing
+        self.assertEqual(len(self.h3_calls), 2)                     # H3: once per reader, for the credit filing only
+        self.assertEqual(json.loads(json.dumps(new.as_dict()))["claim_only_waiting"], 0)
+
+    def test_the_credit_selection_is_the_same_bytes_with_claim_only_filings_on_file(self):
+        from credit_verify.docverify import intake_read
+        ps = ProofStore(self.proof_path)
+        for uid, at, cands in ((43, "2026-10-26T08:00:00Z", [RID]), (44, "2026-11-01T08:00:00Z", [RID, "r-2"])):
+            ps.file_document(file_sha256=hashlib.sha256(f"credit {uid}".encode()).hexdigest(), user_id=uid,
+                             conversation_id=str(uid), candidate_request_ids=cands, received_at=at,
+                             matched_by="professional_id")
+        ps.close()
+
+        def selections():
+            proof = sqlite3.connect(self.proof_path)
+            unsettled = lambda i, ids: False  # noqa: E731
+            return repr([intake_read.intake_docs(proof, unsettled, 100),
+                         intake_read.intake_docs(proof, unsettled, 2),
+                         intake_read.intake_docs(proof, unsettled, 100, paying={44, 77}),
+                         intake_read.intake_docs(proof, unsettled, 100, keep=lambda s: s != self.sha),
+                         intake_read.intake_docs(proof, self.store.intake_settled, 100),
+                         runner._intake_docs(proof, self.store, self.deps, 100),
+                         runner._intake_docs(proof, self.store, self.deps, 100, require_bytes=False,
+                                             settled=self.store.intake_keyed)]).encode()
+        only_credit = selections()
+        self.assertEqual(only_credit.count(b"IntakeDoc("), 3 + 2 + 3 + 2 + 3 + 3 + 3)
+        _, on_file, no_bytes = self._claim_only_filings()
+        both_kinds = selections()
+        self.assertEqual(both_kinds, only_credit)                   # byte for byte
+        self.assertNotIn(on_file.encode(), both_kinds)
+        self.assertNotIn(no_bytes.encode(), both_kinds)
+        # the rule itself, as it stood before the claim-only selection existed
+        import inspect
+        self.assertIn("WHERE subject = 'credit' AND candidate_request_ids_json != '[]' ORDER BY received_at, "
+                      "intake_id", inspect.getsource(intake_read.intake_docs))
+
+    def test_the_claim_only_floor_is_on_top_of_the_budget_and_never_above_it(self):
+        room = runner.claim_only_room
+        self.assertEqual(runner.CLAIM_ONLY_FLOOR, 5)
+        for max_docs, credit, floor, want in (
+                (10, 10, 5, 5),      # the credit filings fill the run: the floor
+                (10, 8, 5, 5),       # they leave less than the floor: the floor
+                (10, 2, 5, 8),       # they leave more: the room, as before
+                (10, 0, 5, 10),
+                (10, 10, 0, 0),      # no floor = the room alone (the rule that starved them)
+                (10, 10, -3, 0),
+                (3, 3, 5, 3),        # never more than the run was asked for
+                (1, 1, 5, 1),
+                (0, 0, 5, 0),        # a run asked for no document reads none
+                (-1, 0, 5, 0)):
+            self.assertEqual(room(max_docs, credit, floor), want, (max_docs, credit, floor))
+        self.assertEqual(room(10, 10), 5)
+        self._claim_only_filings()
+        stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z",
+                                 max_docs=0)
+        self.assertEqual((stats.documents, stats.claim_only, stats.claim_only_waiting, rows), (0, 0, 0, []))
+
     def test_the_intake_path_never_writes_a_hold(self):
         self.answer = {**GOOD_ANSWER, "sender": {"email": "dana@bluefern-records.co", "confidence": 0.9}}
         stats, rows = self._run()

@@ -94,11 +94,17 @@ is read when its account has an open claim (`runner.claim_only_docs`), because t
 
 - It is read for the extraction only: `locate`, `text`, `extract`, `artifact`. No claim key, no H3, no outcome row, no hold.
 - It is read once per `VERSION`. A transient failure is retried up to `MAX_EXTRACT_ATTEMPTS`; a provider outage is no answer.
-- Order: behind the credit filings, ahead of the re-reads, inside the same `--max-docs`; paid accounts first.
+- Order: behind the credit filings, ahead of the re-reads; paid accounts first. They take the room the credit
+  filings leave in `--max-docs`, and never fewer than `runner.CLAIM_ONLY_FLOOR` (5) per worker, on top of it
+  (`runner.claim_only_room`). The room alone selected none: on 2026-11-13 each worker had 110-135 credit filings
+  owing a read for its 10 slots and 0 of 116 of these were read
+  (`data/verif-claim-doc-extract-r1/report.md`). The credit filings lose no slot; a worker reads at most
+  `--max-docs` + 5 documents.
 - The open-claim accounts are one replica read an hour (`runner.claim_accounts`, kept in `dv_state` for every worker).
   A read that fails or answers nothing selects none of these filings and is a run error (`claim-only filings not selected`);
   so is a `proof_intake` this selection cannot read, which is never "no such filing".
-- The run line counts them as `claim_only`.
+- The run line counts them as `claim_only`, and the ones owing a read that it had no slot for as
+  `claim_only_waiting`. `claim_only: 0` with a waiting count above 0 is a starved queue, not an empty one.
 - The same blob rules as below apply: a filing whose bytes are owed by `blob-backfill` is not selected.
 
 ## Filed bytes: stored once, never re-downloaded (Fable 10-31)

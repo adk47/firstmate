@@ -199,6 +199,26 @@ def extract_settled(store: DocVerifyStore, proof_id: str) -> bool:
     return not err.startswith(TRANSIENT) or sum(1 for s, _ in got if s == "error") >= MAX_EXTRACT_ATTEMPTS
 
 
+CLAIM_ONLY_FLOOR = 5      # reads per run a claimant's filing is owed whatever the credit queue holds (per worker)
+CLAIM_ONLY_SCAN = 10 ** 6  # "all of them": the run counts the ones it had no slot for
+
+
+def claim_only_room(max_docs: int, credit_filings: int, floor: int = CLAIM_ONLY_FLOOR) -> int:
+    """How many claim-only filings this run may read: the room the credit filings left in `max_docs`, and never
+    fewer than `floor` (itself never above `max_docs`; a run asked for no document reads none).
+
+    The room alone was the whole rule, and it starved them: a credit filing is selected first and the queue of
+    those is longer than a run. Measured on node-8 2026-11-13T13:56Z, the first hour the claim-only selection
+    was deployed: each of the 4 workers had 110-135 credit filings owing a read for its 10 slots, so the room was
+    0 in every one and none of the 116 claim-only filings owing a read was selected
+    (`data/verif-claim-doc-extract-r1/report.md`). The floor is ON TOP of `max_docs`: the credit filings are
+    selected exactly as before and lose no slot, so a run reads at most `max_docs + floor` documents. Each
+    extra read is one extraction under the same daily model cap."""
+    if max_docs <= 0:
+        return 0
+    return max(max_docs - credit_filings, min(max(0, floor), max_docs))
+
+
 def claim_only_docs(proof_db: sqlite3.Connection, store: DocVerifyStore, deps: Deps, limit: int, *,
                     keep: Callable[[str], bool] | None = None,
                     paying: set[int] | frozenset[int] | None = None) -> list[intake_read.IntakeDoc]:
@@ -341,12 +361,14 @@ class Stats:
     blob_owed: int = 0                        # filings whose bytes only blob-backfill restores (never read here)
     keyed: int = 0                            # filings whose candidate requests were keyed this run (no read)
     claim_only: int = 0                       # filings with no credit request, read for a claim's extraction only
+    claim_only_waiting: int = 0               # such filings owing a read that this run had no slot for
 
     def as_dict(self) -> dict[str, Any]:
         return {"run_id": self.run_id, "documents": self.documents, "pairs": self.pairs, "retry": self.retry,
                 "superseded": self.superseded, "intake": self.intake,
                 "outcomes": dict(self.outcomes), "errors": self.errors[:10], "blob_owed": self.blob_owed,
                 "keyed": self.keyed, "claim_only": self.claim_only,
+                "claim_only_waiting": self.claim_only_waiting,
                 **({"provider_down": self.provider_down} if self.provider_down else {})}
 
 
@@ -575,7 +597,7 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
 def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, since: str | None = None,
         max_docs: int = 30, pairs: dict[str, list[str]] | None = None, intake: bool | None = None,
         shard: tuple[int, int] | None = None, paying: set[int] | frozenset[int] | None = None,
-        reread_carried: bool = False,
+        reread_carried: bool = False, claim_only_floor: int = CLAIM_ONLY_FLOOR,
         log: Callable[[str], None] = lambda m: None) -> tuple[Stats, list[dict[str, Any]]]:
     """One run. `pairs` (eval): verify exactly these documents and claims,
     ignoring `since` and what is already done. The cron (no `pairs`) then fills the rest of
@@ -585,7 +607,9 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
     `reread_carried` (Fable 134/136): NEW filings first (the ordinary intake selection), then the idle room goes to
     filings with claims whose standing row was carried forward into this VERSION without a read; those claims are
     re-read under the current rule. The new rows are ordinary rows of this VERSION, with their steps; nothing is
-    hand-written. A re-read never starves a new document."""
+    hand-written. A re-read never starves a new document.
+    `claim_only_floor`: the reads a claimant's filing with no credit request is owed on top of `max_docs` when the
+    credit filings fill it (`claim_only_room`); 0 = only the room they leave."""
     intake_from_store = (pairs is None) if intake is None else intake
     keep = None if shard is None else (lambda pid: pace.shard_of(pid, shard[1]) == shard[0])
     run_id = f"dv-{utcnow()}-{uuid.uuid4().hex[:8]}"
@@ -608,16 +632,21 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
             if intake_from_store:
                 pre_docs = _intake_docs(proof_db, store, deps, max_docs, keep=keep, paying=paying)
                 # A claimant's filing with no credit request is a filed document too: behind the credit filings,
-                # ahead of the re-reads, inside the same `max_docs`.
+                # ahead of the re-reads. It takes the room they leave in `max_docs`, and a floor of its own when
+                # they leave none: `pre_docs` is the same list with or without it.
                 try:
-                    claim_docs = claim_only_docs(proof_db, store, deps, max_docs - len(pre_docs), keep=keep,
-                                                 paying=paying)
+                    # every one that owes a read, so the run line says how many are still waiting: a starved
+                    # queue and an empty one both read `claim_only: 0`
+                    owed = claim_only_docs(proof_db, store, deps, CLAIM_ONLY_SCAN if max_docs > 0 else 0,
+                                           keep=keep, paying=paying)
+                    claim_docs = owed[:claim_only_room(max_docs, len(pre_docs), claim_only_floor)]
+                    stats.claim_only_waiting = len(owed) - len(claim_docs)
                 except Exception as exc:  # noqa: BLE001 - unmeasured: none is read this run, and the run says so
                     stats.errors.append(f"claim-only filings not selected: {type(exc).__name__}: {str(exc)[:160]}")
                     log(f"claim-only filings NOT selected ({type(exc).__name__}: {str(exc)[:160]})")
             pairs = candidates(proof_db, store, cutoff, max(0, max_docs - len(pre_docs) - len(claim_docs)), keep=keep)
-            log(f"since {cutoff}: {len(pre_docs)} filings + {len(claim_docs)} claim-only filings + {len(pairs)} "
-                "documents to verify")
+            log(f"since {cutoff}: {len(pre_docs)} filings + {len(claim_docs)} claim-only filings "
+                f"({stats.claim_only_waiting} more waiting) + {len(pairs)} documents to verify")
         restored = store.restore_over_provider_down()    # idempotent: a no-op once the 10-29 rows are restored
         if restored:
             log(f"restored {restored} claim verdicts masked by a provider-refusal unknown")
