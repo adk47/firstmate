@@ -28,6 +28,10 @@ setup() {
 
   export MUSOAI_INTERCOM_TOKEN="test-token"
   export INTERCOM_OPS_TEST_LOG_DIR="$TEST_TMPDIR/api-logs"
+  # The per-conversation write lock lives in the test's own dir, and a held lock is given up on after 1 s
+  # (the deployed copy waits 20 s under /run/lock and refuses both overrides).
+  export INTERCOM_OPS_TEST_LOCK_DIR="$TEST_TMPDIR/locks"
+  export INTERCOM_OPS_TEST_LOCK_WAIT_S=1
   mkdir -p "$INTERCOM_OPS_TEST_LOG_DIR"
 
   # curl stub: records the URL and the JSON payload, answers like Intercom really does: the
@@ -43,6 +47,14 @@ setup() {
 #!/usr/bin/env bash
 payload=""
 url=""
+# The body last POSTed, the way Intercom stores text: & < > escaped, each line a <p>, and a line that starts
+# "N. " a list item with its number dropped.
+stored_as_intercom() {
+  jq -r '.body | split("\n") | map(select(length > 0)
+      | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;")
+      | if test("^[0-9]+\\. ") then "<li>" + sub("^[0-9]+\\. "; "") + "</li>" else "<p>" + . + "</p>" end)
+      | join("")' "$CURL_STUB_PAYLOAD"
+}
 while [ $# -gt 0 ]; do
   case "$1" in
     --data|-d) if [ "$2" = "@-" ]; then payload="$(cat)"; else payload="$2"; fi; shift 2 ;;
@@ -50,8 +62,56 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+if [ -z "$payload" ]; then
+  # A GET. Reads are recorded apart from the POSTs, so a test counting writes never counts a read.
+  #   1st GET = the PRE-READ the wrapper makes before it logs, claims or posts: the parts already on file.
+  #             Default: the customer's own older part and nothing of ours. INTERCOM_STUB_PREREAD overrides it
+  #             (a JSON body), and INTERCOM_STUB_PREREAD_RC makes the read itself fail.
+  #   later   = the re-read after a POST whose response carried no qualifying part (INTERCOM_STUB_REFETCH, a
+  #             JSON body; or INTERCOM_STUB_REFETCH_STORED=1, the conversation as it reads once the POST landed).
+  # "1st" is per wrapper invocation, not per test: a test may run the wrapper twice, or two at once. So the count
+  # is keyed by the wrapper's pid: the topmost of the stub's ancestors that is still the copy under test (a `$( ... || true)`
+  # runs in a forked copy of it, so the direct grandparent is not always the wrapper itself).
+  echo "$url" >> "$CURL_STUB_LOG.get"
+  wrapper_pid=""; up="$PPID"
+  while [ -n "$up" ] && [ "$up" -gt 1 ]; do
+    case "$(ps -o args= -p "$up" 2>/dev/null)" in
+      *under-test.sh*) wrapper_pid="$up" ;;
+      *) [ -z "$wrapper_pid" ] || break ;;
+    esac
+    up="$(ps -o ppid= -p "$up" 2>/dev/null | tr -d ' ')"
+  done
+  wrapper_pid="${wrapper_pid:-$PPID}"
+  echo "$url" >> "$CURL_STUB_LOG.get.$wrapper_pid"
+  conv="${url##*/conversations/}"; conv="${conv%%[/?]*}"
+  if [ "$(wc -l < "$CURL_STUB_LOG.get.$wrapper_pid")" -eq 1 ]; then
+    [ -z "${INTERCOM_STUB_PREREAD_RC:-}" ] || exit "$INTERCOM_STUB_PREREAD_RC"
+    if [ -n "${INTERCOM_STUB_PREREAD:-}" ]; then printf '%s' "$INTERCOM_STUB_PREREAD"; exit 0; fi
+    printf '{"type":"conversation","id":"%s","conversation_parts":{"type":"conversation_part.list","conversation_parts":[{"type":"conversation_part","id":"52987726001","part_type":"comment","body":"<p>hello</p>","created_at":%s,"author":{"type":"user","id":"6001"}}],"total_count":1}}' "$conv" "$(( $(date +%s) - 3600 ))"
+    exit 0
+  fi
+  if [ -n "${INTERCOM_STUB_REFETCH_STORED:-}" ]; then
+    # The conversation now holds what this call POSTed, stored the way Intercom stores text: & < > escaped,
+    # each line a <p>, and a line that starts "N. " a list item with its number dropped. The part is ours
+    # (id 777), created now. INTERCOM_STUB_REFETCH_EXTRA adds more parts (raw JSON, comma-led).
+    now="$(date +%s)"
+    stored="$(stored_as_intercom)"
+    mt="$(jq -r '.message_type' "$CURL_STUB_PAYLOAD")"
+    if [ "$mt" = "note" ]; then pt="note"; else pt="${INTERCOM_STUB_REFETCH_STORED_TYPE:-comment}"; fi
+    jq -cn --arg conv "$conv" --arg pt "$pt" --arg body "$stored" --argjson now "$now" \
+      --argjson extra "[${INTERCOM_STUB_REFETCH_EXTRA#,}]" \
+      '{type: "conversation", id: $conv, conversation_parts: {type: "conversation_part.list", conversation_parts:
+         ([{type: "conversation_part", id: "777", part_type: $pt, body: $body, created_at: $now,
+            author: {type: "admin", id: "5763097"}}] + $extra)}}'
+    exit 0
+  fi
+  if [ -n "${INTERCOM_STUB_REFETCH:-}" ]; then printf '%s' "$INTERCOM_STUB_REFETCH"; else printf '{}'; fi
+  exit 0
+fi
 echo "$url" >> "$CURL_STUB_LOG"
 printf '%s' "$payload" > "$CURL_STUB_PAYLOAD"
+# INTERCOM_STUB_POST_SLEEP holds the POST open (seconds), so a test can start a second call while this one is in flight.
+[ -z "${INTERCOM_STUB_POST_SLEEP:-}" ] || sleep "$INTERCOM_STUB_POST_SLEEP"
 if [ -n "${INTERCOM_STUB_RESPONSE:-}" ]; then
   printf '%s' "$INTERCOM_STUB_RESPONSE"
   exit 0
@@ -59,7 +119,17 @@ fi
 mt="$(printf '%s' "$payload" | jq -r '.message_type')"
 if [ "$mt" = "note" ]; then pt="note"; else pt="comment"; fi
 conv="${url##*/conversations/}"; conv="${conv%%/*}"
-printf '{"type":"conversation","id":"%s","conversation_parts":{"type":"conversation_part.list","conversation_parts":[{"type":"conversation_part","id":"52987726001","part_type":"comment"},{"type":"conversation_part","id":"52987726093","part_type":"%s"}],"total_count":2}}' "$conv" "$pt"
+# The part just created is OURS (author = the pinned bot admin), created now, with a body: the delivery read-back
+# accepts nothing less. The part before it is the customer's own, older, so it can never stand in for the send.
+now="$(date +%s)"
+# The body is what this call POSTed, stored the way Intercom stores text (stored_as_intercom): the read-back holds
+# the POST's own response to the text too, so a fixed placeholder body would verify nothing.
+stored_as_intercom | jq -Rsc --arg conv "$conv" --arg pt "$pt" --argjson now "$now" \
+  '{type: "conversation", id: $conv, conversation_parts: {type: "conversation_part.list", total_count: 2, conversation_parts: [
+     {type: "conversation_part", id: "52987726001", part_type: "comment", body: "<p>hello</p>", created_at: ($now - 3600),
+      author: {type: "user", id: "6001"}},
+     {type: "conversation_part", id: "52987726093", part_type: $pt, body: (. | rtrimstr("\n")), created_at: $now,
+      author: {type: "admin", id: "5763097"}}]}}'
 STUB
   chmod +x "$STUB_DIR/curl"
   # The wrapper replaces PATH on line 1, so the stub is handed over through the explicit
@@ -92,6 +162,7 @@ claim_letter() {  # $1 conversation, $2 body, $3 request id (default 1), $4 stat
 teardown() { rm -rf "$TEST_TMPDIR"; }
 
 payload() { cat "$CURL_STUB_PAYLOAD"; }
+get_calls() { if [ -f "$CURL_STUB_LOG.get" ]; then wc -l < "$CURL_STUB_LOG.get" | tr -d ' '; else echo 0; fi; }
 log_count() { find "$INTERCOM_OPS_TEST_LOG_DIR" -type f -name '*.json' | wc -l | tr -d ' '; }
 curl_calls() { if [ -f "$CURL_STUB_LOG" ]; then wc -l < "$CURL_STUB_LOG" | tr -d ' '; else echo 0; fi; }
 
@@ -530,6 +601,425 @@ curl_calls() { if [ -f "$CURL_STUB_LOG" ]; then wc -l < "$CURL_STUB_LOG" | tr -d
   [ "$status" -eq 0 ]
   [[ "$output" == *"part=52987726093" ]]
   [[ "$output" != *"part=215475719661301"* ]]
+}
+
+# --- the delivery read-back: what counts as "this POST landed" -------------------------
+# node-8 ran this predicate by hand from 2026-11-09 (a reply to a CLOSED conversation comes back as a part of
+# type "open" carrying our body, and the old last-part check recorded that delivered letter as rc 4).
+
+# <part_type> <author id> <created_at offset in s> <body> [more parts as raw JSON, comma-led]
+# A note with --body "x" asked for by Jan (U038BM16T7W), the way Intercom stores it: the wrapper's own header line,
+# then the body, a <p> each. The read-back holds every part to the text this call sent, so a test about the part's
+# type, author, age or id must hand it THIS text - with a placeholder body it would pass on the text alone.
+NOTE_X='<p>Note to team (internal Ops note, not visible to the customer). Requested in Slack by Jan.</p><p>x</p>'
+
+_conv_with_part() {
+  local now; now="$(date +%s)"
+  printf '{"type":"conversation","id":"1","conversation_parts":{"conversation_parts":[{"type":"conversation_part","id":"777","part_type":"%s","body":"%s","created_at":%s,"author":{"type":"admin","id":"%s"}}%s]}}' \
+    "$1" "$4" "$((now + $3))" "$2" "${5:-}"
+}
+
+@test "a reply to a CLOSED conversation is verified by our reopen part that carries the body" {
+  INTERCOM_STUB_RESPONSE="$(_conv_with_part open 5763097 0 '<p>your letter</p>')"; export INTERCOM_STUB_RESPONSE
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "your letter"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"POSTED comment conversation=1 part=777" ]]
+}
+
+@test "a reopen part never verifies a NOTE" {
+  INTERCOM_STUB_RESPONSE="$(_conv_with_part open 5763097 0 "$NOTE_X")"; export INTERCOM_STUB_RESPONSE
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 4 ]
+  [[ "$output" != *"POSTED"* ]]
+}
+
+@test "a bare reopen with an empty body is not a delivery" {
+  INTERCOM_STUB_RESPONSE="$(_conv_with_part open 5763097 0 '<p> </p>')"; export INTERCOM_STUB_RESPONSE
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "your letter"
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"0 qualifying part(s)"* ]]
+  [[ "$output" != *"POSTED"* ]]
+}
+
+@test "a part written by anyone but the pinned bot admin never verifies a send" {
+  INTERCOM_STUB_RESPONSE="$(_conv_with_part note 10206197 0 "$NOTE_X")"; export INTERCOM_STUB_RESPONSE
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 4 ]
+  [[ "$output" != *"POSTED"* ]]
+}
+
+@test "a part created before the POST is an earlier attempt's, not evidence of this one" {
+  INTERCOM_STUB_RESPONSE="$(_conv_with_part note 5763097 -600 "$NOTE_X")"; export INTERCOM_STUB_RESPONSE
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 4 ]
+  [[ "$output" != *"POSTED"* ]]
+}
+
+@test "two qualifying parts is a duplicate a person must see, never a pick of one" {
+  local now; now="$(date +%s)"
+  INTERCOM_STUB_RESPONSE="$(_conv_with_part note 5763097 0 "$NOTE_X" ",{\"type\":\"conversation_part\",\"id\":\"778\",\"part_type\":\"note\",\"body\":\"$NOTE_X\",\"created_at\":$now,\"author\":{\"type\":\"admin\",\"id\":\"5763097\"}}")"
+  export INTERCOM_STUB_RESPONSE
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"2 qualifying part(s)"* ]]
+  [[ "$output" != *"POSTED"* ]]
+}
+
+@test "a 2xx whose body shows no qualifying part is settled by ONE re-read under the same rule" {
+  export INTERCOM_STUB_RESPONSE='{"type":"conversation","id":"1","conversation_parts":{"conversation_parts":[]}}'
+  export INTERCOM_STUB_REFETCH_STORED=1
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"part=777" ]]
+  # two reads: the pre-read before the write, and exactly one re-read after it
+  [ "$(get_calls)" -eq 2 ]
+  [ "$(curl_calls)" -eq 1 ]
+}
+
+@test "a verified write makes one pre-read and no re-read" {
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 0 ]
+  [ "$(get_calls)" -eq 1 ]
+  [ "$(curl_calls)" -eq 1 ]
+}
+
+# --- the pre-read: a part already on file can never verify this write (QA review of #1929) ---------------
+# The read-back's window opens 10 s before the POST (clock difference with Intercom). Caroline answers live
+# under the same admin id, so a part of hers written seconds earlier sat inside that window with a body, and
+# the re-read after a POST that created nothing picked it up and printed POSTED.
+# In each case below the earlier part carries the SAME words this call sends (a canned letter sent twice is the
+# same bytes), so its text matches and only the pre-read keeps it from verifying the write.
+
+@test "a bot part written 2 s earlier does not verify a POST that returned an error (QA #1929 finding 1)" {
+  INTERCOM_STUB_PREREAD="$(_conv_with_part comment 5763097 -2 '<p>your letter</p>')"; export INTERCOM_STUB_PREREAD
+  export INTERCOM_STUB_RESPONSE='{"type":"error.list","errors":[{"code":"server_error","message":"Server Error"}]}'
+  export INTERCOM_STUB_REFETCH="$INTERCOM_STUB_PREREAD"
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "your letter"
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"0 qualifying part(s)"* ]]
+  [[ "$output" != *"POSTED"* ]]
+  [ "$(curl_calls)" -eq 1 ]
+}
+
+@test "a bot part written 2 s earlier does not verify a part-less 2xx either" {
+  INTERCOM_STUB_PREREAD="$(_conv_with_part note 5763097 -2 "$NOTE_X")"; export INTERCOM_STUB_PREREAD
+  export INTERCOM_STUB_RESPONSE='{"type":"conversation","id":"1","conversation_parts":{"conversation_parts":[]}}'
+  export INTERCOM_STUB_REFETCH="$INTERCOM_STUB_PREREAD"
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 4 ]
+  [[ "$output" != *"POSTED"* ]]
+}
+
+@test "a part on file before the write is excluded even when the POST response repeats it" {
+  INTERCOM_STUB_PREREAD="$(_conv_with_part note 5763097 -2 "$NOTE_X")"; export INTERCOM_STUB_PREREAD
+  export INTERCOM_STUB_RESPONSE="$INTERCOM_STUB_PREREAD"
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 4 ]
+  [[ "$output" != *"POSTED"* ]]
+}
+
+@test "with an earlier bot part on file, the part this write created is the one reported" {
+  local now; now="$(date +%s)"
+  INTERCOM_STUB_PREREAD="$(_conv_with_part note 5763097 -2 "$NOTE_X")"; export INTERCOM_STUB_PREREAD
+  INTERCOM_STUB_RESPONSE="$(_conv_with_part note 5763097 -2 "$NOTE_X" ",{\"type\":\"conversation_part\",\"id\":\"778\",\"part_type\":\"note\",\"body\":\"$NOTE_X\",\"created_at\":$now,\"author\":{\"type\":\"admin\",\"id\":\"5763097\"}}")"
+  export INTERCOM_STUB_RESPONSE
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"part=778" ]]
+}
+
+@test "a conversation that cannot be read before the write stops BEFORE the log, the claim and the POST" {
+  claim_letter 215476650395415 "We have removed your profile from Muso."
+  export INTERCOM_STUB_PREREAD_RC=28
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso."
+  # exit 2 + ERROR: is what send.WRITER_PREFLIGHT_RC reads as provably pre-send (retryable), never `unknown`
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"ERROR: conversation 215476650395415 could not be read before the write"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+  [ -z "$(sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" "SELECT consumed_at FROM erasure_sends WHERE target='215476650395415'")" ]
+}
+
+@test "a pre-read that answers anything but a conversation (an error body) stops the write the same way" {
+  export INTERCOM_STUB_PREREAD='{"type":"error.list","errors":[{"code":"not_found","message":"Resource Not Found"}]}'
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"could not be read before the write"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+}
+
+@test "the pre-read is ordered BEFORE the audit record, so a failed read logs and spends nothing" {
+  pre_line="$(grep -n '^PRE_READ=' "$SCRIPT" | head -1 | cut -d: -f1)"
+  log_dir_line="$(grep -n 'mkdir -p "$LOG_DIR"' "$SCRIPT" | head -1 | cut -d: -f1)"
+  consume_line="$(grep -n 'purpose_consume_claim "$PURPOSE" "$CONVERSATION"' "$SCRIPT" | head -1 | cut -d: -f1)"
+  [ -n "$pre_line" ] && [ -n "$log_dir_line" ] && [ -n "$consume_line" ]
+  [ "$pre_line" -lt "$log_dir_line" ]
+  [ "$pre_line" -lt "$consume_line" ]
+}
+
+@test "the re-read is held to the same lower bound: an older part of ours does not verify" {
+  export INTERCOM_STUB_RESPONSE='{"type":"conversation","id":"1","conversation_parts":{"conversation_parts":[]}}'
+  INTERCOM_STUB_REFETCH="$(_conv_with_part comment 5763097 -600 '<p>x</p>')"; export INTERCOM_STUB_REFETCH
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "x"
+  [ "$status" -eq 4 ]
+  [[ "$output" != *"POSTED"* ]]
+  # the same part, created now, does verify: the time was the only thing wrong with it
+  INTERCOM_STUB_REFETCH="$(_conv_with_part comment 5763097 0 '<p>x</p>')"; export INTERCOM_STUB_REFETCH
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "x"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"part=777" ]]
+}
+
+# --- the re-read is tied to the text this call sent (QA review of #1929, second round) -------------------
+# The re-read shows whatever the conversation holds. Caroline and every other caller of this script write under
+# the same admin id, so a part one of them adds AFTER the pre-read is new, ours by author and inside the window.
+# Without a tie to this request it verified a POST that created nothing.
+
+@test "another writer's part added after the pre-read does not verify a POST that returned an error (QA #1929 round 2)" {
+  export INTERCOM_STUB_RESPONSE='{"type":"error.list","errors":[{"code":"server_error","message":"Server Error"}]}'
+  INTERCOM_STUB_REFETCH="$(_conv_with_part comment 5763097 0 '<p>Caroline, answering the customer live</p>')"; export INTERCOM_STUB_REFETCH
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "your letter"
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"0 qualifying part(s)"* ]]
+  [[ "$output" != *"POSTED"* ]]
+  [ "$(curl_calls)" -eq 1 ]
+}
+
+@test "another writer's part added after the pre-read does not verify a part-less 2xx either" {
+  export INTERCOM_STUB_RESPONSE='{"type":"conversation","id":"1","conversation_parts":{"conversation_parts":[]}}'
+  INTERCOM_STUB_REFETCH="$(_conv_with_part note 5763097 0 '<p>a different note, by another caller</p>')"; export INTERCOM_STUB_REFETCH
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"0 qualifying part(s)"* ]]
+  [[ "$output" != *"POSTED"* ]]
+}
+
+@test "a re-read that holds another writer's part AND ours reports ours" {
+  export INTERCOM_STUB_RESPONSE='{"type":"conversation","id":"1","conversation_parts":{"conversation_parts":[]}}'
+  export INTERCOM_STUB_REFETCH_STORED=1
+  export INTERCOM_STUB_REFETCH_EXTRA=",{\"type\":\"conversation_part\",\"id\":\"778\",\"part_type\":\"comment\",\"body\":\"<p>Caroline, answering live</p>\",\"created_at\":$(date +%s),\"author\":{\"type\":\"admin\",\"id\":\"5763097\"}}"
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "your letter"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"part=777" ]]
+}
+
+@test "a re-read part whose text is not the text sent does not verify, however close" {
+  export INTERCOM_STUB_RESPONSE='{"type":"conversation","id":"1","conversation_parts":{"conversation_parts":[]}}'
+  INTERCOM_STUB_REFETCH="$(_conv_with_part comment 5763097 0 '<p>your letter, with one more line</p>')"; export INTERCOM_STUB_REFETCH
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "your letter"
+  [ "$status" -eq 4 ]
+  [[ "$output" != *"POSTED"* ]]
+}
+
+# --- word boundaries are part of the text (QA review of #1929, third round) -------------------------------
+# With ALL white space removed, "now here" and another writer's "no where" were one text ("nowhere"), so that
+# other part verified a POST that created nothing. A run of white space is one space; it is never nothing.
+
+@test "another writer's part that differs only in where the words break does not verify an error POST (QA #1929 round 3)" {
+  export INTERCOM_STUB_RESPONSE='{"type":"error.list","errors":[{"code":"server_error","message":"Server Error"}]}'
+  INTERCOM_STUB_REFETCH="$(_conv_with_part comment 5763097 0 '<p>no where</p>')"; export INTERCOM_STUB_REFETCH
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "now here"
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"0 qualifying part(s)"* ]]
+  [[ "$output" != *"POSTED"* ]]
+  [ "$(curl_calls)" -eq 1 ]
+}
+
+@test "another writer's part that differs only in where the words break does not verify a part-less 2xx" {
+  export INTERCOM_STUB_RESPONSE='{"type":"conversation","id":"1","conversation_parts":{"conversation_parts":[]}}'
+  INTERCOM_STUB_REFETCH="$(_conv_with_part comment 5763097 0 '<p>no where</p>')"; export INTERCOM_STUB_REFETCH
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "now here"
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"0 qualifying part(s)"* ]]
+  [[ "$output" != *"POSTED"* ]]
+  # the same re-read with the words where this call put them does verify: the break was the only difference
+  INTERCOM_STUB_REFETCH="$(_conv_with_part comment 5763097 0 '<p>now here</p>')"; export INTERCOM_STUB_REFETCH
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "now here"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"part=777" ]]
+}
+
+@test "two lines are not one run of letters: a part that joins them does not verify" {
+  export INTERCOM_STUB_RESPONSE='{"type":"conversation","id":"1","conversation_parts":{"conversation_parts":[]}}'
+  INTERCOM_STUB_REFETCH="$(_conv_with_part comment 5763097 0 '<p>thank youall done</p>')"; export INTERCOM_STUB_REFETCH
+  body="$(printf 'thank you\nall done')"
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "$body"
+  [ "$status" -eq 4 ]
+  [[ "$output" != *"POSTED"* ]]
+  # stored the way Intercom stores two lines (a block per line), it is this call's text
+  INTERCOM_STUB_REFETCH="$(_conv_with_part comment 5763097 0 '<p>thank you</p><p>all   done</p>')"; export INTERCOM_STUB_REFETCH
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "$body"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"part=777" ]]
+}
+
+@test "a tag inside a line (a link Intercom makes of an address) adds no space; a tag that ends a block does" {
+  export INTERCOM_STUB_RESPONSE='{"type":"conversation","id":"1","conversation_parts":{"conversation_parts":[]}}'
+  INTERCOM_STUB_REFETCH="$(_conv_with_part comment 5763097 0 '<p>Open <a href=\"https://muso.ai/x\" target=\"_blank\">https://muso.ai/x</a>.<br>Then <b>reply</b>.</p>')"; export INTERCOM_STUB_REFETCH
+  body="$(printf 'Open https://muso.ai/x.\nThen reply.')"
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "$body"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"part=777" ]]
+}
+
+@test "the re-read matches a letter the way Intercom stores it: tags, escaped & < >, a numbered list" {
+  export INTERCOM_STUB_RESPONSE='{"type":"conversation","id":"1","conversation_parts":{"conversation_parts":[]}}'
+  export INTERCOM_STUB_REFETCH_STORED=1
+  body="$(printf 'Hi,\n\nTwo ways to finish:\n1. Sign in & open your page\n2. Reply here with <the title>\n\nMuso Support')"
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "$body"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"part=777" ]]
+}
+
+@test "a reply to a CLOSED conversation is verified on the re-read by the reopen part that carries the text" {
+  export INTERCOM_STUB_RESPONSE='{"type":"conversation","id":"1","conversation_parts":{"conversation_parts":[]}}'
+  export INTERCOM_STUB_REFETCH_STORED=1 INTERCOM_STUB_REFETCH_STORED_TYPE=open
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "your letter"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"part=777" ]]
+}
+
+# --- one write per conversation at a time (QA review of #1929, fourth round) ------------------------------
+# Text ties a part to a call, and text cannot tell two calls apart when both send the same words (a canned
+# letter is the same bytes every time). Every caller of this script takes a per-conversation lock before it
+# reads, logs, claims or posts, so a second call cannot start until the first has finished its read-back - and
+# by then the first call's part is on file at the second's pre-read (the cases above).
+
+_wait_locked() {  # $1 lock file: returns once somebody holds it (5 s at most)
+  local _
+  for _ in $(seq 1 100); do
+    if [ -e "$1" ] && ! flock -n "$1" true 2>/dev/null; then return 0; fi
+    sleep 0.05
+  done
+  return 1
+}
+
+@test "two calls with the same words in flight: the second reads, logs, claims and posts nothing (exit 2)" {
+  local lock="$INTERCOM_OPS_TEST_LOCK_DIR/conversation-1.lock"
+  # the first call's POST stays open for 8 s; it holds the lock from before its pre-read to its exit
+  INTERCOM_STUB_POST_SLEEP=8 "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing \
+    --approved-by U0AL36NADEY --body "your letter" > "$TEST_TMPDIR/first.out" 2>&1 3>&- &
+  local first=$!
+  _wait_locked "$lock"
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "your letter"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"ERROR: another write to conversation 1 is in flight"* ]]
+  [[ "$output" != *"POSTED"* ]]
+  wait "$first"
+  grep -q '^POSTED comment conversation=1 part=52987726093$' "$TEST_TMPDIR/first.out"
+  # one POST, one audit record, one read (the first call's pre-read): the second call did none of the three
+  [ "$(curl_calls)" -eq 1 ]
+  [ "$(log_count)" -eq 1 ]
+  [ "$(get_calls)" -eq 1 ]
+  # the lock went with the first call: the same write now runs
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "your letter"
+  [ "$status" -eq 0 ]
+}
+
+@test "a held lock stops a purpose write BEFORE its claim is spent, and only for that conversation" {
+  local lock="$INTERCOM_OPS_TEST_LOCK_DIR/conversation-215476650395415.lock"
+  mkdir -p "$INTERCOM_OPS_TEST_LOCK_DIR"
+  flock "$lock" sleep 6 3>&- &
+  local holder=$!
+  _wait_locked "$lock"
+  claim_letter 215476650395415 "We have removed your profile from Muso."
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso."
+  # exit 2 + ERROR: is what send.WRITER_PREFLIGHT_RC reads as provably pre-send (retryable), never `unknown`
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"ERROR: another write to conversation 215476650395415 is in flight"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(get_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+  [ -z "$(sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" "SELECT consumed_at FROM erasure_sends WHERE target='215476650395415'")" ]
+  # another conversation is not held up by it
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 0 ]
+  kill "$holder" 2>/dev/null || true
+}
+
+@test "a lock directory that cannot be used stops the write before anything is read or posted" {
+  export INTERCOM_OPS_TEST_LOCK_DIR="$TEST_TMPDIR/not-a-dir"
+  : > "$INTERCOM_OPS_TEST_LOCK_DIR"   # a FILE where the dir should be
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"ERROR: the write lock"* ]]
+  [ "$(get_calls)" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+  # a symlink is refused too: the lock must be the directory every other caller uses, not where a link points
+  rm -f "$INTERCOM_OPS_TEST_LOCK_DIR"
+  mkdir -p "$TEST_TMPDIR/elsewhere"
+  ln -s "$TEST_TMPDIR/elsewhere" "$INTERCOM_OPS_TEST_LOCK_DIR"
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"ERROR: the write lock directory"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "the lock is taken BEFORE the pre-read, and a deployed copy takes it under /run/lock for 20 s, no override" {
+  lock_line="$(grep -n '"\$FLOCK_BIN" -w "\$LOCK_WAIT_S" 9' "$SCRIPT" | head -1 | cut -d: -f1)"
+  pre_line="$(grep -n '^PRE_READ=' "$SCRIPT" | head -1 | cut -d: -f1)"
+  [ -n "$lock_line" ] && [ -n "$pre_line" ]
+  [ "$lock_line" -lt "$pre_line" ]
+  grep -q '^readonly PROD_LOCK_DIR="/run/lock/hydra-intercom-ops-write"$' "$REAL_SCRIPT"
+  grep -q '^readonly PROD_LOCK_WAIT_S=20$' "$REAL_SCRIPT"
+  unset INTERCOM_OPS_TEST_LOG_DIR INTERCOM_OPS_TEST_CURL_BIN INTERCOM_OPS_TEST_TIMEOUT_BIN INTERCOM_OPS_TEST_LOCK_WAIT_S
+  run "$REAL_SCRIPT" note --conversation 215475719661301 --requested-by U038BM16T7W --audience team --body "x" --validate
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"INTERCOM_OPS_TEST_LOCK_DIR is not settable"* ]]
+  unset INTERCOM_OPS_TEST_LOCK_DIR
+  export INTERCOM_OPS_TEST_LOCK_WAIT_S=0
+  run "$REAL_SCRIPT" note --conversation 215475719661301 --requested-by U038BM16T7W --audience team --body "x" --validate
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"INTERCOM_OPS_TEST_LOCK_WAIT_S is not settable"* ]]
+}
+
+# --- the POST's own response is held to the text too (QA review of #1929, fourth round) -------------------
+# Intercom answers a reply with the FULL conversation, not with the part it made. A 2xx that created nothing
+# for this call, while another writer added a part under the same admin id after the pre-read, shows that
+# part alone - and a response read without the text verified it.
+
+@test "a 2xx response that holds only another writer's part does not verify this call (QA #1929 round 4)" {
+  INTERCOM_STUB_RESPONSE="$(_conv_with_part comment 5763097 0 '<p>Caroline, answering the customer live</p>')"; export INTERCOM_STUB_RESPONSE
+  export INTERCOM_STUB_REFETCH="$INTERCOM_STUB_RESPONSE"
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "your letter"
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"0 qualifying part(s)"* ]]
+  [[ "$output" != *"POSTED"* ]]
+  [ "$(curl_calls)" -eq 1 ]
+  # the same response with this call's words in that part does verify: the text was the only difference
+  INTERCOM_STUB_RESPONSE="$(_conv_with_part comment 5763097 0 '<p>your letter</p>')"; export INTERCOM_STUB_RESPONSE
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "your letter"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"part=777" ]]
+}
+
+@test "a 2xx response that holds another writer's NOTE alone does not verify a note" {
+  INTERCOM_STUB_RESPONSE="$(_conv_with_part note 5763097 0 '<p>a different note, by another caller</p>')"; export INTERCOM_STUB_RESPONSE
+  export INTERCOM_STUB_REFETCH="$INTERCOM_STUB_RESPONSE"
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 4 ]
+  [[ "$output" != *"POSTED"* ]]
+}
+
+@test "a response that holds this call's part AND another writer's reports this call's, not a duplicate" {
+  local now; now="$(date +%s)"
+  INTERCOM_STUB_RESPONSE="$(_conv_with_part comment 5763097 0 '<p>Caroline, answering live</p>' ",{\"type\":\"conversation_part\",\"id\":\"778\",\"part_type\":\"comment\",\"body\":\"<p>your letter</p>\",\"created_at\":$now,\"author\":{\"type\":\"admin\",\"id\":\"5763097\"}}")"
+  export INTERCOM_STUB_RESPONSE
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "your letter"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"part=778" ]]
+  [ "$(get_calls)" -eq 1 ]
+}
+
+@test "a note part of ours, created now, that carries the note as stored verifies (control for the cases above)" {
+  INTERCOM_STUB_RESPONSE="$(_conv_with_part note 5763097 0 "$NOTE_X")"; export INTERCOM_STUB_RESPONSE
+  run "$SCRIPT" note --conversation 1 --requested-by U038BM16T7W --audience team --body "x"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"part=777" ]]
 }
 
 @test "an Intercom error response exits 4 and never prints POSTED" {

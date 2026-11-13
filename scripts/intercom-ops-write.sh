@@ -58,6 +58,9 @@ readonly INTERCOM_ADMIN_ID="5763097"
 readonly API_BASE="https://api.intercom.io"
 readonly API_VERSION="2.11"
 readonly PROD_LOG_DIR="/opt/hydra/workspaces/operations/api-logs"
+# One write per conversation at a time, across every caller of this script on this host (see CONVERSATION LOCK).
+readonly PROD_LOCK_DIR="/run/lock/hydra-intercom-ops-write"
+readonly PROD_LOCK_WAIT_S=20
 # Caroline's outbound sanitizer word list: every `\b...\b` pattern in
 # plugins/intercom/src/sanitize-tool-leak.ts PATTERNS (tool tokens, the bare word "ticket",
 # the fixed phrases, and the architecture words), copied verbatim. ONE line, because
@@ -227,10 +230,15 @@ if [ "$TESTABLE" != "1" ]; then
   [ -z "${INTERCOM_OPS_TEST_LOG_DIR:-}" ] || die "INTERCOM_OPS_TEST_LOG_DIR is not settable on a deployed copy of this script. The write log is $PROD_LOG_DIR; a caller-selectable log dir is a write nobody can audit."
   [ -z "${INTERCOM_OPS_TEST_CURL_BIN:-}" ] || die "INTERCOM_OPS_TEST_CURL_BIN is not settable on a deployed copy of this script. A caller-selectable client can print POSTED without posting."
   [ -z "${INTERCOM_OPS_TEST_TIMEOUT_BIN:-}" ] || die "INTERCOM_OPS_TEST_TIMEOUT_BIN is not settable on a deployed copy of this script."
+  [ -z "${INTERCOM_OPS_TEST_LOCK_DIR:-}" ] || die "INTERCOM_OPS_TEST_LOCK_DIR is not settable on a deployed copy of this script. A caller-selectable lock dir is a lock nobody else holds."
+  [ -z "${INTERCOM_OPS_TEST_LOCK_WAIT_S:-}" ] || die "INTERCOM_OPS_TEST_LOCK_WAIT_S is not settable on a deployed copy of this script."
   LOG_DIR="$PROD_LOG_DIR"
   CURL_BIN="/usr/bin/curl"
   JQ_BIN="/usr/bin/jq"
   TIMEOUT_BIN="/usr/bin/timeout"
+  FLOCK_BIN="/usr/bin/flock"
+  LOCK_DIR="$PROD_LOCK_DIR"
+  LOCK_WAIT_S="$PROD_LOCK_WAIT_S"
   SQLITE_BIN="/usr/bin/sqlite3"
   SHA256_BIN="/usr/bin/sha256sum"
   GDPR_REGISTER="$GDPR_REGISTER_PROD"
@@ -243,11 +251,14 @@ else
   JQ_BIN="$(command -v jq || echo /usr/bin/jq)"
   # timeout lives outside the replaced PATH on a Homebrew dev box, so the suite hands it in.
   TIMEOUT_BIN="${INTERCOM_OPS_TEST_TIMEOUT_BIN:-$(command -v timeout || command -v gtimeout || echo /usr/bin/timeout)}"
+  FLOCK_BIN="$(command -v flock || echo /usr/bin/flock)"
+  LOCK_DIR="${INTERCOM_OPS_TEST_LOCK_DIR:-$PROD_LOCK_DIR}"
+  LOCK_WAIT_S="${INTERCOM_OPS_TEST_LOCK_WAIT_S:-$PROD_LOCK_WAIT_S}"
   SQLITE_BIN="${INTERCOM_OPS_TEST_SQLITE_BIN:-$(command -v sqlite3 || echo /usr/bin/sqlite3)}"
   SHA256_BIN="${INTERCOM_OPS_TEST_SHA256_BIN:-$(command -v sha256sum || echo /usr/bin/sha256sum)}"
   GDPR_REGISTER="${INTERCOM_OPS_TEST_GDPR_REGISTER:-$GDPR_REGISTER_PROD}"
 fi
-readonly LOG_DIR CURL_BIN JQ_BIN TIMEOUT_BIN SQLITE_BIN SHA256_BIN GDPR_REGISTER
+readonly LOG_DIR CURL_BIN JQ_BIN TIMEOUT_BIN SQLITE_BIN SHA256_BIN GDPR_REGISTER FLOCK_BIN LOCK_DIR LOCK_WAIT_S
 
 # ---------------------------------------------------------------------------------------
 # Arguments
@@ -431,6 +442,53 @@ case "$ACTION" in
 esac
 
 # ---------------------------------------------------------------------------------------
+# CONVERSATION LOCK: one write per conversation at a time, for every caller of this script on this host
+# (QA review of #1929, fourth round). The read-back below ties a part to this call by its text, and text cannot
+# tell two callers apart when both send the same words: the GDPR pipeline, the backlog sender and an agent's
+# reply all go through this file under one admin id, and a canned letter is the same bytes every time. Without
+# the lock, call A's part could verify call B's POST that created nothing. With it, B does not read, log, claim
+# or post until A has finished its read-back, so A's part is on file at B's pre-read and can never verify B.
+# What the lock does NOT cover: a writer that does not go through this script. Caroline's plugin posts under
+# the same admin id from the gateway process; if it posts the SAME words inside this call's window and this
+# call's POST creates nothing, the read-back still accepts that part. The conversation then holds those words
+# once, written in the window; the part id printed is the other writer's.
+# It is taken BEFORE the pre-read. A lock that cannot be taken is a provably pre-send stop (exit 2): nothing
+# was read, logged, claimed or posted, and the caller retries.
+LOCK_FILE="$LOCK_DIR/conversation-$CONVERSATION.lock"
+if [ -L "$LOCK_DIR" ] || ! { mkdir -p "$LOCK_DIR" && chmod 700 "$LOCK_DIR"; } 2>/dev/null; then
+  die "the write lock directory $LOCK_DIR cannot be used, so two writes to conversation $CONVERSATION could not be kept apart. Nothing was logged, claimed or posted."
+fi
+if ! { exec 9>>"$LOCK_FILE"; } 2>/dev/null; then
+  die "the write lock $LOCK_FILE cannot be opened, so two writes to conversation $CONVERSATION could not be kept apart. Nothing was logged, claimed or posted."
+fi
+if ! "$FLOCK_BIN" -w "$LOCK_WAIT_S" 9 2>/dev/null; then
+  die "another write to conversation $CONVERSATION is in flight through this script (waited ${LOCK_WAIT_S}s for $LOCK_FILE). Nothing was logged, claimed or posted by this call; run it again."
+fi
+
+# ---------------------------------------------------------------------------------------
+# PRE-READ: which parts the conversation ALREADY holds (QA review of the read-back, 2026-11-13). The read-back
+# below accepts a part of ours created up to 10 s before the POST, to allow for clock difference with Intercom.
+# On its own that let a part this bot wrote seconds earlier (Caroline answers live under the same admin id)
+# stand in for a POST that created nothing: an error body or a part-less 2xx arrives with curl rc 0, the re-read
+# finds the earlier part, and `POSTED` is printed for a letter nobody received. So the ids on file BEFORE the
+# write are recorded here and can never verify it, whatever their time or body.
+# It runs before the audit record and before the claim is consumed: a conversation that cannot be read is a
+# provably pre-send stop (exit 2, nothing logged, nothing spent, nothing posted), and the caller retries.
+set +e
+PRE_READ="$("$TIMEOUT_BIN" 30 "$CURL_BIN" -sS -H "Authorization: Bearer $MUSOAI_INTERCOM_TOKEN" \
+  -H "Accept: application/json" -H "Intercom-Version: $API_VERSION" \
+  "$API_BASE/conversations/$CONVERSATION" 2>/dev/null)"
+pre_rc=$?
+PRE_IDS="$(printf '%s' "$PRE_READ" | "$JQ_BIN" -c \
+  'if .type == "conversation" then [(.conversation_parts.conversation_parts // [])[] | (.id // "" | tostring)]
+   else error("not a conversation") end' 2>/dev/null)"
+pre_jq=$?
+set -e
+if [ "$pre_rc" -ne 0 ] || [ "$pre_jq" -ne 0 ] || [ -z "$PRE_IDS" ]; then
+  die "conversation $CONVERSATION could not be read before the write (curl rc=$pre_rc), so a delivery could not be told from a part already on file. Nothing was logged, claimed or posted."
+fi
+
+# ---------------------------------------------------------------------------------------
 # Log BEFORE the write (operations/SOUL.md, Write Activity Logging), then consume, then POST, then
 # verify.
 #
@@ -492,6 +550,8 @@ if [ -n "$PURPOSE" ]; then
 fi
 
 set +e
+# Anchor for the delivery read-back: a part created BEFORE this cannot evidence this POST.
+PRE_TS="$(date +%s)"
 RESPONSE="$(printf '%s' "$PAYLOAD" | "$TIMEOUT_BIN" 45 "$CURL_BIN" -sS -X POST \
   -H "Authorization: Bearer $MUSOAI_INTERCOM_TOKEN" \
   -H "Accept: application/json" \
@@ -510,12 +570,100 @@ fi
 # created is the LAST entry of conversation_parts.conversation_parts (the same shape
 # plugins/intercom/src/outbound.ts replyToConversationOnce reads). Anything else (error.list,
 # no parts, a last part of the other type) means the success line must not be printed.
-PART_TYPE="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '(.conversation_parts.conversation_parts // [])[-1].part_type // empty' 2>/dev/null || true)"
-PART_ID="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '(.conversation_parts.conversation_parts // [])[-1].id // empty' 2>/dev/null || true)"
-if [ "$PART_TYPE" != "$EXPECT_PART" ]; then
-  printf 'POST NOT VERIFIED: expected part_type "%s", Intercom answered part_type "%s". Logged at %s. Response:\n%s\n' \
-    "$EXPECT_PART" "${PART_TYPE:-<none>}" "$LOG_FILE" "$RESPONSE" >&2
+#   Reviewed baseline: deploy overwrites - 2026-11-13 (verif-scale-driver-f1, firstmate 007): node-8 has run this
+#   read-back by hand since 2026-11-09T14:22Z (sha256 11d6f879f69b9406..., backup beside it as
+#   intercom-ops-write.sh.pre-parttype-20261109T142229Z). This blob is those bytes plus this note, minus one
+#   assignment nothing read (PART_TYPE, shellcheck SC2034), plus the pre-read above and its one predicate line
+#   (QA review: a part on file before the write must not verify it). The deploy may replace the hand edit with it.
+# Delivery read-back. The old check read [-1].part_type and demanded exactly "$EXPECT_PART", which failed a
+# delivered letter whenever the conversation was CLOSED: Intercom answers a reply to a closed conversation with a
+# part of type "open" (the reopen), carrying our body, so the letter landed and was recorded `unknown` with rc 4.
+# Measured 2026-11-08: 31 of 31 such rows resolve to exactly one admin part of type "open", non-empty body,
+# inside the attempt window. The predicate below is the discriminator, not the part type alone:
+#   - author is OUR admin id (a customer's own part can never verify a send)
+#   - part_type is the expected one, or "open" (= a reopen; only meaningful for a comment)
+#   - its id was NOT on file at the pre-read (a part that existed before the write is never evidence of it)
+#   - created_at in [PRE_TS-10, PRE_TS+120] (the 10 s is clock difference with Intercom, not licence for an
+#     earlier part: the pre-read is what excludes those)
+#   - the body is non-empty after tags are stripped (the bare reopen Intercom emits has an empty body)
+#   - EXACTLY ONE such part. Two candidates means a duplicate delivery or a double reopen: a human must see it,
+#     because picking one would hide the duplicate.
+#   - the part's text is the text THIS call sent (below), in the POST's own response and in the re-read alike.
+#
+# Neither read is a receipt for this request. The re-read shows whatever the conversation holds, and so does
+# the POST's own response: Intercom answers a reply with the FULL conversation, not with the part it made.
+# Caroline and every other caller of this script write under the same admin id, so a part another writer added
+# after the pre-read is new, ours by author and inside the window; without a tie to this request it would
+# verify a POST that created nothing (QA review of #1929: second round for the re-read, fourth round for a 2xx
+# response that holds only the other writer's part). So a part counts, wherever it was read, only when its
+# stored text equals the text this call sent. That also settles the case that used to end "2 qualifying
+# part(s)": this call's part and another writer's in one response are now told apart by their text.
+# Intercom stores HTML: it wraps the text in tags,
+# escapes & < > and turns a line that starts "1. " into a list item, dropping the number. Both sides are
+# therefore compared with entities decoded and every run of white space made ONE space (ends trimmed), and
+# the sent text is tried in two forms: as written, and with a leading "N. " removed from each line. In the
+# stored HTML a tag that ends a block (p, br, li, ...) counts as white space and any other tag (a link, bold)
+# as nothing. Word boundaries are KEPT: with all white space removed, "now here" and another writer's
+# "no where" were the same text, and that other part verified a POST that created nothing (QA review of
+# #1929, third round).
+# Measured 2026-11-13 09:19Z, read-only, with these same jq definitions: the 92 GDPR letters whose sent
+# text is on file (41 delivered as "comment", 51 as "open") against the part Intercom stores for each -
+# 92 of 92 equal (83 as written, 9 in the list form). Internal notes and staff replies are NOT measured
+# for equality: no copy of their sent text is kept. What was measured for them, 2026-11-13 09:59Z, is the
+# shape Intercom stores: 150 notes and 148 replies this script wrote (matched to its audit log by time) carry
+# only the tags p, a, br, ol and li, all of which the definitions below read; and, 10:18Z, the line this
+# script puts at the head of a note came back as sent in 150 of 150 notes. A delivered write whose stored
+# text differs in some way not seen here ends "POST NOT VERIFIED" (exit 4) - fail closed, as any unverified
+# write does: the caller records it as unknown, never as sent, and a person reads the conversation.
+readonly NORM_JQ='
+def unent:
+  gsub("&#(?<n>[0-9]+);"; [(.n | tonumber)] | implode)
+  | gsub("&#[xX](?<h>[0-9a-fA-F]+);";
+      [(.h | ascii_downcase | explode
+        | reduce .[] as $c (0; . * 16 + (if $c >= 97 then $c - 87 else $c - 48 end)))] | implode)
+  | gsub("&nbsp;"; " ") | gsub("&quot;"; "\"") | gsub("&apos;"; [39] | implode)
+  | gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("&amp;"; "&");
+def squeeze: gsub("[[:space:]]+"; " ") | sub("^ "; "") | sub(" $"; "");
+def stored_text:
+  (. // "")
+  | gsub("</?(?i:p|div|br|li|ul|ol|h[1-6]|blockquote|pre|table|tr|td|th)(?:[[:space:]/][^>]*)?>"; " ")
+  | gsub("<[^>]*>"; "") | unent | squeeze;
+def sent_forms: [squeeze, (gsub("(^|\n)[ \t]*[0-9]+\\.[ \t]+"; "\n") | squeeze)] | unique;
+'
+SENT_FORMS="$(printf '%s' "$FULL_BODY" | "$JQ_BIN" -Rsc "$NORM_JQ"' sent_forms' 2>/dev/null || printf '[]')"
+# $1 = a conversation (JSON text): the POST's own response, or the re-read.
+_part_filter() {
+  printf '%s' "$1" | "$JQ_BIN" -c --arg admin "$INTERCOM_ADMIN_ID" --arg exp "$EXPECT_PART" \
+    --argjson lo "$((PRE_TS - 10))" --argjson hi "$((PRE_TS + 120))" --argjson pre "$PRE_IDS" \
+    --slurpfile sent <(printf '%s' "$SENT_FORMS") \
+    "$NORM_JQ"'
+     [(.conversation_parts.conversation_parts // [])[]
+      | select(((.id // "") | tostring) as $i | ($pre | index($i)) == null)
+      | select((.author.id // "" | tostring) == $admin)
+      | select(.part_type == $exp or ($exp == "comment" and .part_type == "open"))
+      | select((.created_at // 0) >= $lo and (.created_at // 0) <= $hi)
+      | (.body | stored_text) as $text
+      | select(($text | length) > 0)
+      | select((($sent[0] // []) | index($text)) != null)
+      | {id: .id, part_type: .part_type}]' 2>/dev/null || printf '[]'
+}
+MATCHES="$(_part_filter "$RESPONSE")"
+MATCH_N="$(printf '%s' "$MATCHES" | "$JQ_BIN" -r 'length' 2>/dev/null || printf 0)"
+if [ "$MATCH_N" = "0" ]; then
+  # No qualifying part in the response body: ask Intercom what the conversation now holds, and apply
+  # the SAME predicate (same pre-read ids, same lower bound, same text - the fallback must not pick up a prior
+  # part or somebody else's write either).
+  REFETCH="$("$TIMEOUT_BIN" 30 "$CURL_BIN" -sS -H "Authorization: Bearer $MUSOAI_INTERCOM_TOKEN" \
+    -H "Accept: application/json" -H "Intercom-Version: $API_VERSION" \
+    "https://api.intercom.io/conversations/$CONVERSATION" 2>/dev/null || true)"
+  MATCHES="$(_part_filter "$REFETCH")"
+  MATCH_N="$(printf '%s' "$MATCHES" | "$JQ_BIN" -r 'length' 2>/dev/null || printf 0)"
+fi
+if [ "$MATCH_N" != "1" ]; then
+  printf 'POST NOT VERIFIED: %s qualifying part(s) for admin %s in [%s-10,%s+120] (expected 1). Logged at %s. Response:\n%s\n' \
+    "$MATCH_N" "$INTERCOM_ADMIN_ID" "$PRE_TS" "$PRE_TS" "$LOG_FILE" "$RESPONSE" >&2
   exit 4
 fi
+PART_ID="$(printf '%s' "$MATCHES" | "$JQ_BIN" -r '.[0].id')"
 
 printf 'POSTED %s conversation=%s part=%s\n' "$MESSAGE_TYPE" "$CONVERSATION" "$PART_ID"
