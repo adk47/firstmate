@@ -305,6 +305,9 @@ test_apply_appends_one_closing_line_per_record_and_nothing_else() {
     || fail "a swept finished task no longer reads its done line"
 
   # A second sweep finds nothing left to close.
+  for id in t-done t-resolved t-merged t-closed t-open t-noproc t-norecord; do
+    touch -d "@$OLD" "$home/state/$id.status"
+  done
   out=$(sweep "$home" --apply 2>&1); status=$?
   expect_code 0 "$status" "a repeat --apply must succeed: $out"
   assert_contains "$out" $'summary\tapply\tclose=0\theld=0\tprotected=0\tkept=1\tfailed=0' "a repeat --apply closes nothing"
@@ -325,6 +328,7 @@ test_repeat_sweep_reports_the_tasks_own_reason() {
   has_row "$out" closed t-done other last-line-done "the first pass closes the record the task's done line covers"
   [ -n "$(status_open_decisions "$home/state/t-done.status")" ] || fail "the held record was closed anyway"
 
+  touch -d "@$OLD" "$home/state/t-done.status"
   out=$(sweep "$home" --apply 2>&1); status=$?
   expect_code 0 "$status" "a repeat --apply must succeed: $out"
   has_row "$out" closed t-done kept last-line-done "a repeat sweep reports the task's own done line, not the sweep's close line"
@@ -348,6 +352,7 @@ test_repeat_sweep_never_closes_a_live_tasks_record_as_resolved() {
   has_row "$out" closed t-live other pr-merged "the first pass closes the other record"
 
   printf '%s\n' 'https://github.com/acme/app/pull/41 OPEN' > "$home/gh-states"
+  touch -d "@$OLD" "$home/state/t-live.status"
   out=$(sweep "$home" --task t-live 2>&1); status=$?
   expect_code 0 "$status" "the repeat sweep must succeed: $out"
   has_row "$out" kept t-live kept agent-alive "a repeat sweep leaves a live agent's record alone"
@@ -369,6 +374,7 @@ test_repeat_sweep_closes_a_dead_tasks_record_as_no_process() {
   has_row "$out" held t-dead kept captain-call "the held record survives the first pass"
   has_row "$out" closed t-dead other no-process-48h "the first pass closes the other record"
 
+  touch -d "@$OLD" "$home/state/t-dead.status"
   out=$(sweep "$home" --apply 2>&1); status=$?
   expect_code 0 "$status" "a repeat --apply must succeed: $out"
   has_row "$out" closed t-dead kept no-process-48h "a repeat sweep closes the record for the liveness reason, not its own line"
@@ -432,6 +438,7 @@ test_filters_and_refusals() {
   has_row "$out" closed t-done default last-line-done "--apply --task closes that task's record"
   cmp -s <(printf '%s\n' "$before" | grep -v ' ./t-done.status$') <(state_fingerprint "$home" | grep -v ' ./t-done.status$' | grep -v '/\.') \
     || fail "--apply --task wrote outside its task"
+  touch -d "@$OLD" "$home/state/t-done.status"
 
   out=$(sweep "$home" --reason nonsense 2>&1); status=$?
   expect_code 2 "$status" "an unknown reason is a usage error"
