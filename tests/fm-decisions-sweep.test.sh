@@ -311,6 +311,27 @@ test_apply_appends_one_closing_line_per_record_and_nothing_else() {
   pass "--apply appends one closing line per stale record, leaves everything else byte-identical, and is idempotent"
 }
 
+test_repeat_sweep_reports_the_tasks_own_reason() {
+  local home out status
+  home=$(make_home repeat)
+  task "$home" t-done
+  log "$home" t-done "$OLD" 'needs-decision [key=kept]: captain call' \
+    'needs-decision [key=other]: also open' 'done: shipped'
+  printf '%s\n' kept > "$home/hold-ids"
+
+  out=$(FM_FAKE_HOLD_IDS="$home/hold-ids" sweep "$home" --apply 2>&1); status=$?
+  expect_code 0 "$status" "the first --apply must succeed: $out"
+  has_row "$out" held t-done kept captain-call "the held record survives the first pass"
+  has_row "$out" closed t-done other last-line-done "the first pass closes the record the task's done line covers"
+  [ -n "$(status_open_decisions "$home/state/t-done.status")" ] || fail "the held record was closed anyway"
+
+  out=$(sweep "$home" --apply 2>&1); status=$?
+  expect_code 0 "$status" "a repeat --apply must succeed: $out"
+  has_row "$out" closed t-done kept last-line-done "a repeat sweep reports the task's own done line, not the sweep's close line"
+  [ -z "$(status_open_decisions "$home/state/t-done.status")" ] || fail "the repeat sweep left the record open"
+  pass "a repeat sweep reads through its own close line to the reason the task itself earned"
+}
+
 test_pr_state_comes_from_the_recorded_merge_or_the_forge_and_unknown_never_closes() {
   local home out
   home=$(make_home pr)
@@ -393,6 +414,7 @@ test_dry_run_is_default_names_each_reason_and_writes_nothing
 test_recent_or_live_task_is_never_touched
 test_owned_records_are_held
 test_apply_appends_one_closing_line_per_record_and_nothing_else
+test_repeat_sweep_reports_the_tasks_own_reason
 test_pr_state_comes_from_the_recorded_merge_or_the_forge_and_unknown_never_closes
 test_filters_and_refusals
 

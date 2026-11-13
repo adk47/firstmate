@@ -329,7 +329,7 @@ sweep_task() {  # <status-file>
   [ -n "$open" ] || return 0
 
   meta="$STATE/$task.meta"
-  last=$(last_status_line "$file")
+  last=$(last_status_line_behind_sweep "$file")
   verb=$(status_line_verb "$last")
   mtime=$(_fm_status_file_mtime "$file")
   case "$mtime" in ''|*[!0-9]*) mtime=$NOW ;; esac
