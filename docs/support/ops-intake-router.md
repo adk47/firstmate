@@ -102,7 +102,11 @@ and **3 writes / target profile / day**; over a cap the ask is `held` and paged.
 ## What is (and is not) switched on
 
 * **On:** intake, classification, coded answers, the conflict-of-interest check,
-  quarantine, pages, the digest, the daily red-team replay.
+  quarantine, pages, the digest, the daily red-team replay — on `main`. This is not
+  a claim that the router intercepts on node-8: measured on 2026-11-12 it claimed
+  nothing (`ops_asks` 0 rows, against Jan's 7 asks of 2026-11-11) and `ops-intake`
+  was absent from the gateway's plugin list. The measurement, its limits and the
+  unmerged fix branch are in `data/jan-intercom-5-answers-j1/report.md` §3.
 * **Off by config:** W1 execution. Without `OPS_INTAKE_WRITES=1` a W1 write is
   recorded as a ledger plan (with its inverse) and marked `no writer wired for
   <action>`; the reply says so and names the ledger row. Turning it on is a
