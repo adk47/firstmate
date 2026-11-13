@@ -719,6 +719,54 @@ status_open_decisions() {  # <status-file>
   printf '%s' "$open"
 }
 
+# Count the status lines whose verb is needs-decision, using the same opener
+# rule the repeat fold applies. This is the cheap pre-filter for
+# status_repeat_escalations, and sharing status_line_verb_core keeps it in
+# agreement with that fold for timestamp-first and indented lines.
+status_count_needs_decision() {  # <status-file> -> count
+  local f=$1 line n=0
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { printf '0'; return 0; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    status_line_verb_core "$line"
+    [ "$_FM_STATUS_VERB" != needs-decision ] || n=$((n + 1))
+  done < "$f"
+  printf '%s' "$n"
+}
+
+# Count how often each still-open decision was raised again without an answer.
+# Prints one TAB-separated "<key>\t<count>" line for every key that is open at
+# the end of the stream and was opened by a `needs-decision` line two or more
+# times since it was last closed; prints nothing otherwise. A close (an explicit
+# `resolved`, or the verified captain-held transfer) resets that key's count, so
+# an answered or held decision never reads as a repeat.
+# The per-line rule is not restated here: every line goes through
+# _fm_fold_line_state, and only the transitions it reports are counted.
+# bin/fm-board-audit.sh is the consumer; it pre-filters to logs that hold at
+# least two needs-decision lines before paying for this fold.
+status_repeat_escalations() {  # <status-file>
+  local f=$1 line resolve held open='' events=''
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    _fm_fold_line_state "$open" "$line" "$resolve" "$held"
+    open=$_FM_FOLD_OPEN
+    case "$_FM_FOLD_OP" in
+      open)
+        status_line_verb_core "$line"
+        [ "$_FM_STATUS_VERB" != needs-decision ] || events="${events}raise ${_FM_FOLD_KEY}"$'\n'
+        ;;
+      close) events="${events}close ${_FM_FOLD_KEY}"$'\n' ;;
+    esac
+  done < "$f"
+  [ -n "$events" ] || return 0
+  printf '%s' "$events" | awk '
+    $1 == "raise" { if (!($2 in count)) order[++keys] = $2; count[$2]++ }
+    $1 == "close" { if ($2 in count) count[$2] = 0 }
+    END { for (i = 1; i <= keys; i++) if (count[order[i]] >= 2) printf "%s\t%d\n", order[i], count[order[i]] }
+  '
+}
+
 # 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.
 _fm_open_set_has() {  # <open-set> <key>
   case "$1" in

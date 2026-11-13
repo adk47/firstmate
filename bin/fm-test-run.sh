@@ -588,6 +588,8 @@ tests/fm-backlog-handoff.test.sh 56117
 tests/fm-bearings-board-render.test.sh 1587
 tests/fm-bearings-board.test.sh 5163
 tests/fm-bearings-snapshot.test.sh 135774
+tests/fm-board-audit.test.sh 1400
+tests/fm-board.test.sh 1100
 tests/fm-bootstrap-network-parallel.test.sh 9307
 tests/fm-bootstrap.test.sh 36015
 tests/fm-branch-supervision.test.sh 10009

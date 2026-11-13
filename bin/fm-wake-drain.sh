@@ -4,7 +4,8 @@
 # informational status lines, latest captain-facing statuses not covered by a
 # newer branch outcome, OPEN DECISIONS, captain-call record divergence, and a
 # SENTRY WATCH DARK line for an armed Sentry watch that lost its check, trust
-# binding, or beat, then assert liveness.
+# binding, or beat, then assert liveness. A main drain on a home that keeps a
+# board also prints its one agenda line (bin/fm-board.sh wake-line) first.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -602,9 +603,24 @@ print_status_sections() {
   rm -f -- "$prepared"
 }
 
-print_status_presentation() {  # [<deduped-raw-rows>]
-  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
+# The board's one agenda line; bin/fm-board.sh wake-line owns its text and is
+# silent on a home that keeps no data/board.md. Only main reads it, because the
+# supervision branch handles routed wakes and never drives the agenda. The data
+# directory is taken beside the resolved state directory so a state override
+# can never read another home's board.
+print_board_line() {
+  [ "$ACTOR" = main ] || return 0
+  FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-$(dirname "$STATE")/data}" \
+    "$SCRIPT_DIR/fm-board.sh" wake-line 2>/dev/null
+}
+
+print_status_presentation() {  # [<deduped-raw-rows>] [<board-line-printed>]
+  local rows=${1:-} board_line_printed=${2:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   local lock_rc holder_pid
+  # Ahead of the presentation lock and independent of the status logs: the
+  # agenda is read on every main drain, including one that carries no wake. A
+  # drain that prints it before its wake rows passes 1 so it appears exactly once.
+  [ "$board_line_printed" = 1 ] || print_board_line || true
   if fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
     :
   else
@@ -875,6 +891,7 @@ case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   *) sleep "$FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT" ;;
 esac
 if [ -n "$RAW_ROWS" ]; then
+  print_board_line || true
   printf '%s\n' "$RAW_ROWS" || exit "$?"
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
@@ -888,6 +905,6 @@ DRAIN_LOCK_HELD=false
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
-(print_status_presentation "$RAW_ROWS") || true
+(print_status_presentation "$RAW_ROWS" 1) || true
 assert_watcher_liveness
 exit 0
