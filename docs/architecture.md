@@ -176,6 +176,7 @@ Endpoint death is the only process-level override and yields dead; child process
 A secondmate spawn arms the same busy-state contract but deliberately omits its harness turn-end notification, because a mate's meta lives in the parent's state directory and each touch there would wake the parent firstmate; the wake-stall rung reads the busy record instead.
 
 Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.
+A worker that exits without a teardown leaves the only writer of its record gone, so `bin/fm-watch.sh` retires that record on the same poll whose recovery-grade verdict reports the endpoint missing or dead, passing the generation it captured before the liveness read; an unreadable backend retires nothing, and an already-orphaned record is removed only while its sidecar is still absent under the writer lock, so neither a transient outage nor a relaunch armed in between can clear a live task's state.
 Three rendered-text checks deliberately remain outside this contract because they answer delivery questions: submit acknowledgement and the away-mode supervisor-pane busy guard consume the shared delivery-footer matcher owned by `bin/fm-composer-lib.sh`, while `bin/fm-pending-reply-lib.sh` owns the secondmate delivery-confirmation observation.
 All are harness-scoped rather than a global pattern union, and none is a recorded worker state source.
 
