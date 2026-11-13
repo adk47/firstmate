@@ -2963,8 +2963,13 @@ class OpsKillDryRunTest(unittest.TestCase):
             ks.write_text("")
         gate = gate or FakeGate()
         real = uvn_status.run
-        cli.uvn_status.run = lambda **kw: real(**{**kw, "query": self.q, "runner": gate, "wrapper": self.gate_file(),
-                                                  "now": NOW, "pace_seconds": 0})
+        self.last_read_only = None
+
+        def run(**kw):
+            self.last_read_only = verify_ledger.READ_ONLY_PROCESS       # what the run itself is under
+            return real(**{**kw, "query": self.q, "runner": gate, "wrapper": self.gate_file(),
+                           "now": NOW, "pace_seconds": 0})
+        cli.uvn_status.run = run
         out = io.StringIO()
         try:
             with mock.patch.object(cli, "CREDIT_OPS_NOTES_KILL_SWITCH", ks), \
@@ -2974,9 +2979,8 @@ class OpsKillDryRunTest(unittest.TestCase):
                                "--proof-on-file", str(self.proof), "--max-users", "10", *extra])
         finally:
             cli.uvn_status.run = real
-            ro = verify_ledger.READ_ONLY_PROCESS
-            verify_ledger.READ_ONLY_PROCESS = False      # one CLI run per process in prod; reset between tests
-        self.last_read_only = ro
+        # 2026-11-13: the flag is scoped to the run. Nothing resets it here - a run that leaves it set fails this.
+        self.assertFalse(verify_ledger.READ_ONLY_PROCESS, "the read-only flag outlived the run that set it")
         return rc, out.getvalue(), gate
 
     def test_apply_refuses_under_the_kill(self):

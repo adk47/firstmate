@@ -2541,6 +2541,10 @@ jobs:
           # Caroline's send ledger: writer (verify_ledger) and take-back reader agree on
           # verify_messages, and `verify_ledger.py migrate` (run by deploy.sh) creates it. Stdlib only.
           python3 scripts/tests/test_verify_ledger_contract.py
+          # The ledger's two openers (credit_review/ledger_open.py): a write on the read-only connection raises a
+          # named error and changes no byte; a writer SQLite handed its read-only WAL fallback is reopened or
+          # names the file that refused it; READ_ONLY_PROCESS never outlives the run that set it. Stdlib only.
+          python3 scripts/tests/test_ledger_open.py
           # The outbound copy gate (scripts/outbound_copy/gate.py): a body with no SIGNED reviewer verdict on
           # its exact bytes is never approved; a stand-in reviewer can refuse and never approve; the sender
           # calls the gate between the claim and its one customer POST; a copy hold is a log, not a lock.

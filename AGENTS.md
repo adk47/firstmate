@@ -1271,6 +1271,32 @@ timeout, and the timeouts tripped the unmeasured bar (`UNMEASURED STOP`). Doc an
   is read live (one more round trip per person). `scripts/tests/test_gate_facts.py` fails on the gap.
 - A measurement run on node-8 is load on the same replica path the tick uses: run it between ticks.
 
+## A writer told "readonly database" was handed SQLite's read-only WAL fallback, not a read-only opener
+
+`attempt to write a readonly database` ended six credit-review ticks on 2026-11-12/13, all as root on a plain
+`sqlite3.connect`. The ledger directory is `root:1000 1770` and node-8 has `fs.protected_regular=2`: when the last
+writer closes, SQLite deletes the `-wal`/`-shm`, the uid-1000 exporter's read re-creates them as its own, and the
+kernel then refuses root's `O_CREAT` open of them in a sticky directory. SQLite falls back to a read-only handle
+without an error, reads work, and the first write dies. Root's failed open re-owns the files, so the next run
+is fine and nothing is left to see. Repro (two uids, container only):
+`data/verif-readonly-write-crash-r1/repro_sticky_shm.py`.
+
+- **`verify_ledger.connect` and `credit_review.ledger.Ledger` open `ledger.sqlite3` through
+  `scripts/credit_review/ledger_open.py`** (`open_rw`): it probes the write lock, makes at most 3 opens where a
+  reopen can differ, and reports each reopen to `EVENT_SINK` (`credit-review.py` points it at run.log; a caller
+  that sets no sink records nothing). A write it cannot make raises `LedgerNotWritableError` with a reason code
+  and the owner and mode of each file. This is NOT yet the single write boundary: `open_ledger()` in
+  `scripts/credit_verify/dspverify/link_proposal.py` (the enabled hourly `credit-profile-link-proposals` cron),
+  `scripts/credit_verify/dspverify/merge_candidates.py` and
+  `scripts/credit-stale-velocity-revalidate.py` still write the same `ledger.sqlite3` through a bare
+  `sqlite3.connect`, so they can still die with the bare `attempt to write a readonly database` — no reopen, no
+  reason code, no run.log line. Routing them through `ledger_open` is separate follow-up work. **A new writer
+  must use `ledger_open.open_rw`, never a bare `sqlite3.connect`.**
+- **A write on `open_ro` / `connect_ro` raises `ReadOnlyConnectionWriteError`** and changes no byte.
+- **`READ_ONLY_PROCESS` is set only inside `verify_ledger.read_only_process()`**; never assign it.
+- The reopen is a workaround. The cause is the sticky bit plus a reader that creates the WAL files, and changing
+  either is a node-8 / H-DevOps decision, not something this code does.
+
 ## The bulk send queue: a verdict per person, a durable queue, and it ships unarmed
 
 `scripts/credit_review/bulk_queue.py` (doc `docs/credit-verification/bulk-send-queue.md`, policy

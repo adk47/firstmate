@@ -138,6 +138,9 @@ from credit_review.ledger import Ledger  # noqa: E402
 from credit_review.runner import (  # noqa: E402
     LOG_PATH, Config, log, profile_burst_alerts, render_digest, render_metrics, run_audit, run_review)
 
+# The read opener, the write opener and LedgerNotWritableError: the ONE copy verify_ledger and Ledger use.
+_LEDGER_OPEN = verify_ledger.ledger_open()
+
 KILL_SWITCH = Path(os.environ.get("CREDIT_REVIEW_KILL_SWITCH", "/etc/hydra/credit-review.disabled"))
 # spec-deploy-lock-deferral-m1: the exit code for a TRANSIENT upstream failure (Trino said "retry in a few minutes").
 # Distinct from 1 (a real failure) so the tick can retry bounded and then DEFER the family instead of stopping the run.
@@ -843,10 +846,13 @@ def cmd_uvn_status(args: argparse.Namespace) -> int:
         except verify_ledger.ReadOnlyLedgerError as exc:
             print(f"KILL SWITCH PRESENT ({CREDIT_OPS_NOTES_KILL_SWITCH}): dry run refused - {exc}")
             return 2
-        verify_ledger.READ_ONLY_PROCESS = True     # every later open in this run is mode=ro (QA #1564 round 3)
         log(f"credit-ops-notes kill switch present at {CREDIT_OPS_NOTES_KILL_SWITCH}: dry run only (read-only)")
         print(f"KILL SWITCH PRESENT ({CREDIT_OPS_NOTES_KILL_SWITCH}): dry run only - no messages are sent and no "
               "verify-ledger entries are recorded")
+        # Every open in THIS run is mode=ro (QA #1564 round 3) - and only in this run: the flag is restored on the way
+        # out, so nothing that runs later in the process inherits a read-only ledger (2026-11-13).
+        with verify_ledger.read_only_process():
+            return _uvn_status(args)
     return _uvn_status(args)
 
 
@@ -1627,6 +1633,8 @@ def main(argv: list[str] | None = None) -> int:
     # Python warnings go to the run log, never to stderr: openclaw posts a command
     # cron's stderr to Slack next to its stdout.
     warnings.showwarning = _warning_to_log
+    # A writer that was handed a read-only ledger and reopened it says so in the run log, never silently.
+    _LEDGER_OPEN.EVENT_SINK = log
     args = parser().parse_args(argv)
     # [key=note-step-budget] (Fable 753): ONE place hands the tick's remaining share to every family's send loop, so a
     # slow user can overrun it by at most one retry budget instead of making the family defer every tick.
@@ -1685,6 +1693,15 @@ def main(argv: list[str] | None = None) -> int:
         kept = log(f"admin API unavailable: {exc}")
         print(f"Credit review could not run: the admin API is unavailable. No credits were changed. "
               f"{_details(kept)}")
+        return 1
+    except _LEDGER_OPEN.LedgerNotWritableError as exc:
+        # 2026-11-13: six runs in two days ended on a bare "attempt to write a readonly database" that named neither
+        # the file nor the reason. The reason is the line; the traceback still goes to the log. Same exit code as any
+        # other crash: what the tick does with a failed step is not changed here.
+        import traceback
+        kept = log("crash: " + "".join(traceback.format_exception(exc)))
+        print(f"Credit review {args.cmd} stopped: it could not write its ledger ({exc.reason}) - {exc.why}. "
+              f"Nothing after that write ran. {_details(kept)}")
         return 1
     except Exception as exc:  # noqa: BLE001 - a crash is one plain line in Slack, the traceback goes to the log
         import traceback

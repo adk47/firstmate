@@ -89,7 +89,9 @@ The wrapper calls this as a CLI (one op per call, JSON on stdout). The driver
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -376,15 +378,55 @@ def stamp(now: datetime | None = None) -> str:
 # QA #1564 (round 3): a process under the credit-ops-notes kill sets this ONCE; from then on EVERY connect() in the
 # process - the runner's, verify_notify's, any later one - is connect_ro(must_exist=True): never created, never migrated,
 # and a write fails loud (sqlite: readonly database). Not a per-call promise that a later open could forget.
+#
+# 2026-11-13: it is SCOPED, never assigned. credit-review.py used to set it to True and leave it, so a process that ran
+# a kill-switch dry run and then anything that writes got a mode=ro ledger for the write too, with nothing saying why.
+# Enter it with `with read_only_process():`; it is restored on the way out, an exception included.
 READ_ONLY_PROCESS = False
 
 
+@contextlib.contextmanager
+def read_only_process():
+    """Every connect() inside the block is connect_ro(must_exist=True). Restores what it found, so blocks nest."""
+    global READ_ONLY_PROCESS
+    before = READ_ONLY_PROCESS
+    READ_ONLY_PROCESS = True
+    try:
+        yield
+    finally:
+        READ_ONLY_PROCESS = before
+
+
+def ledger_open() -> Any:
+    """ledger_open.py, loaded from THIS file's directory: the read opener, the write opener, and the error that names
+    why a write was refused. Not `from . import ledger_open`: this file is also run as a script
+    (`python3 -I verify_ledger.py migrate`, deploy.sh) and imported top-level, where there is no parent package."""
+    name = "credit_review_ledger_open"
+    cached = sys.modules.get(name)
+    if cached is not None:
+        return cached
+    path = Path(__file__).resolve().with_name("ledger_open.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"{path} cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module          # before exec: dataclasses resolves a class's module through sys.modules
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return sys.modules[name]
+
+
 def connect(path: str) -> sqlite3.Connection:
+    """The WRITE opener (creates, migrates). A read-only run uses connect_ro(), or read_only_process() around its
+    whole body. A write this connection is refused raises ledger_open().LedgerNotWritableError naming the reason."""
     if READ_ONLY_PROCESS and path != ":memory:":
         return connect_ro(path, must_exist=True)
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path, timeout=30, isolation_level=None)
+    db = ledger_open().open_rw(path, opener="verify_ledger.connect", timeout=30, isolation_level=None)
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
     _migrate(db)
@@ -449,8 +491,9 @@ def connect_ro(path: str, *, must_exist: bool = False) -> sqlite3.Connection:
             # QA #1564: the path is PERCENT-ENCODED into the URI - a raw '?' (or '#') in it would end the path early and
             # open a different, writable file without mode=ro. Re-opened per attempt: a schema change made by the
             # migrating writer is only guaranteed visible to a fresh read.
-            db = sqlite3.connect(f"file:{urllib.parse.quote(str(Path(path).resolve()))}?mode=ro", uri=True,
-                                 timeout=30, isolation_level=None)
+            # (ledger_open.open_ro does the encoding.) A write on this connection raises
+            # ReadOnlyConnectionWriteError, which says the caller holds a reader - never a bare OperationalError.
+            db = ledger_open().open_ro(path, opener="verify_ledger.connect_ro", timeout=30, isolation_level=None)
             db.row_factory = sqlite3.Row
             try:
                 gap = _schema_gap(db, ref)

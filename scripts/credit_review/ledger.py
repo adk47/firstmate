@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import verify_ledger
+
 DEFAULT_PATH = os.environ.get("CREDIT_REVIEW_LEDGER", "/var/lib/hydra/credit-review/ledger.sqlite3")
 
 SCHEMA = """
@@ -82,7 +84,9 @@ class Ledger:
         self.path = path or DEFAULT_PATH
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path, timeout=30)
+        # The write opener (2026-11-13): a root writer handed SQLite's silent read-only fallback is reopened, and a
+        # write that still cannot happen raises LedgerNotWritableError naming why. See ledger_open.py.
+        self.db = verify_ledger.ledger_open().open_rw(self.path, opener="credit_review.ledger.Ledger", timeout=30)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self.db.commit()
