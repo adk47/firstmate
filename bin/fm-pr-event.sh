@@ -70,10 +70,6 @@ while [ "$#" -gt 0 ]; do
       HEAD_OVERRIDE=$2
       shift 2
       ;;
-    --head=*)
-      HEAD_OVERRIDE=${1#--head=}
-      shift
-      ;;
     --)
       shift
       break

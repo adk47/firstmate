@@ -242,7 +242,7 @@ test_explicit_head_overrides_live_resolution() {
   [ "$head_a" != "$head_b" ] || fail "the fixture needs two distinct commits"
   run_event "$dir" "$err" -- --head "$head_a" "$URL" finding 'no test covers the retry'; rc=$?
   expect_code 0 "$rc" "an explicit head should deliver"
-  run_event "$dir" "$err" -- --head="$head_b" "$URL" finding 'no test covers the retry'; rc=$?
+  run_event "$dir" "$err" -- --head "$head_b" "$URL" finding 'no test covers the retry'; rc=$?
   expect_code 0 "$rc" "a different explicit head should deliver"
   [ "$(count_records "$inbox")" = 2 ] \
     || fail "two explicit heads collapsed onto one record:"$'\n'"$(ls "$inbox")"
