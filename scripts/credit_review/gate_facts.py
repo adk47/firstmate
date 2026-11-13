@@ -13,8 +13,8 @@ and the timeout are right; six round trips for one person was the defect.
         any failure (replica down, a statement that errors, output that cannot be split): NOTHING on stdout, exit 2.
 
 The gate then runs the two helpers UNCHANGED with scripts/replica-serve.sh as their replica command: it answers a
-statement whose exact text is in the bundle and runs the real trino-query.sh for any other. So this file can only
-make the gate faster:
+statement whose exact text is in the bundle and runs the real trino-query.sh for any other. So this file cannot
+change an answer (a read that fails or never answers costs time: replica_batch.BATCH_TIMEOUT_S at most):
 
   * no bundle, a failed read here, a stale one (replica_batch.MAX_AGE_S) -> every statement is read live, as before;
   * a statement this file did not predict (or predicted with one byte different) -> that statement is read live;

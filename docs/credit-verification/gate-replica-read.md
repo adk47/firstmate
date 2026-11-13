@@ -66,7 +66,7 @@ calls approach the timeout again; it is not addressed here.
    asks, `replica-serve.sh` answers from the read when it holds that EXACT statement text and the read is at most
    `replica_batch.MAX_AGE_S` (30 s) old; otherwise it becomes the real `trino-query.sh` (exec) with that statement.
 
-So the read can only make a gate call faster:
+So the read cannot change an answer:
 
 - no read, a failed read, a stale read, a malformed read: every statement is read live, as before;
 - a statement the read does not hold (a helper changed, a rare branch): that statement is read live;
@@ -74,6 +74,27 @@ So the read can only make a gate call faster:
 - nothing is evaluated in `gate_facts.py`: the rules stay in `core_notice.reasons_by_user` and `comm_state.check`.
 
 Our own stores (ledger, proof, doc-verify, account holds) and Intercom are never in the read.
+
+## What a failed read costs
+
+Time, inside the gate call's own 20 s read timeout, before the first helper runs:
+
+- a read that fails at once (replica refuses, a statement errors): its own round trip, about 2 s;
+- a read that never answers: `replica_batch.BATCH_TIMEOUT_S`, 8 s, then every statement is read live.
+
+The read asks `comm_state.py`'s statements before `core_notice.py` has run. Before this change a person
+`core_notice.py` holds never had those statements asked at all, so a stall in one of them could not touch that
+person. The bound is sized for that person: 8 s + two live round trips (4.4 s) + the rest of a gate call (2.5 s) =
+14.9 s. It first shipped at 15 s, where the same person took 19.7 s before any of the rest and would have been
+left unmeasured (QA on PR 1926; `test_gate_facts.py` reproduces it and pins the sum against
+`verify_notify.READ_TIMEOUT_S`).
+
+What the bound does not save: a person who needs all of the live reads (12 to 13 s measured) after a read that
+stalled for the full 8 s is over 20 s and unmeasured. Before this change that person made 5 to 6 separate replica
+calls, any one of which stalling had the same result.
+
+Of the 114 reads measured on node-8, the slowest took 6.12 s (4 workers, load 7-9) and the median 3 s; none came
+within 1.8 s of the bound. A read slower than 8 s that would have answered by 15 s is now abandoned.
 
 ## What is deliberately not in the read
 

@@ -22,8 +22,10 @@ Three parts, all read-only:
                                    bundle named by $REPLICA_BATCH_FACTS when it holds that exact text, otherwise by
                                    BECOMING the real wrapper (exec) with the statement on stdin.
 
-The bundle only ever makes a read FASTER. A missing, stale (> MAX_AGE_S), malformed or foreign bundle is ignored
-and every statement is read live, exactly as before this file existed: no rule reads "the bundle says so".
+The bundle never changes an ANSWER. A missing, stale (> MAX_AGE_S), malformed or foreign bundle is ignored and
+every statement is read live, exactly as before this file existed: no rule reads "the bundle says so". It can cost
+TIME: a batch that fails costs its own round trip (~2 s), and one that never answers costs BATCH_TIMEOUT_S, before
+the live reads start.
 """
 from __future__ import annotations
 
@@ -37,9 +39,13 @@ from typing import Any
 
 # A bundle is the SAME gate call's read, seconds old. One older than this is not "right now" and is read again live.
 MAX_AGE_S = 30
-# A batch that has not answered by now is abandoned and every statement is read live: the read must never cost a
-# gate call more than the round trips it replaces.
-BATCH_TIMEOUT_S = 15
+# A batch that has not answered by now is abandoned and every statement is read live. The wait is spent INSIDE the
+# gate call's own read timeout (verify_notify.READ_TIMEOUT_S, 20 s), before the first helper runs, so it has to leave
+# room for the live reads that follow it: a person core_notice holds in two live round trips (~4.4 s) must still be
+# held, not timed out into "unmeasured". 8 + 4.4 + 2.5 (the rest of a gate call) = 14.9 s. At 15 the same person
+# took 19.7 s before any of the rest (QA on #1926, reproduced in test_gate_facts.py). The slowest of the 114 reads
+# measured on node-8 took 6.12 s (4 workers, load 7-9), the median 3 s. test_gate_facts.py pins this sum.
+BATCH_TIMEOUT_S = 8
 VERSION = 1
 # where the gate tells replica-serve.sh its read is (a file in a root-only tmpfs directory, removed with the gate call)
 FACTS_ENV = "REPLICA_BATCH_FACTS"

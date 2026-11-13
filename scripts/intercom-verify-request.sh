@@ -414,8 +414,10 @@ readonly PROD_COMM_STATE_HELPER="/opt/hydra/scripts/credit_review/comm_state.py"
 # gate-replica-read.md): what the two helpers above ask the replica about this user, asked in ONE round trip. The
 # helpers then run UNCHANGED with replica-serve.sh as their replica command: it answers a statement whose exact text
 # the read holds and runs the real trino-query.sh for any other - and for all of them when the read failed, is
-# stale or is absent. It only makes the gate faster. Measured on node-8: 5-6 round trips of ~2 s per person were
-# 10.25 s of a 13.47 s gate call, and the calls that crossed the 20 s read timeout tripped the unmeasured bar.
+# stale or is absent. It changes no answer; a read that never answers costs replica_batch.BATCH_TIMEOUT_S (8 s) of
+# this call before the live reads start, which is why that bound is small. Measured on node-8: 5-6 round trips of
+# ~2 s per person were 10.25 s of a 13.47 s gate call, and the calls that crossed the 20 s read timeout tripped the
+# unmeasured bar.
 readonly PROD_GATE_FACTS_HELPER="/opt/hydra/scripts/credit_review/gate_facts.py"
 readonly PROD_REPLICA_SERVE="/opt/hydra/scripts/replica-serve.sh"
 # tmpfs, root-only: the read is never on disk and never outlives a reboot

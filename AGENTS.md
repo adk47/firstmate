@@ -1242,7 +1242,8 @@ timeout, and the timeouts tripped the unmeasured bar (`UNMEASURED STOP`). Doc an
 - **The gate takes one read per person** (`credit_review/gate_facts.py` -> `replica_batch.read_many`, one invocation,
   no partial answer) and runs `core_notice.py` / `comm_state.py` unchanged behind `scripts/replica-serve.sh`, which
   answers a statement only on its EXACT text from a read at most 30 s old and runs the real wrapper otherwise. It
-  can only make a call faster; it is never a fact source.
+  is never a fact source. A read that never answers is abandoned at `replica_batch.BATCH_TIMEOUT_S` (8 s) and that
+  wait is spent inside the gate call's 20 s: raising it takes the room a live hold needs (pinned by a test).
 - **A new or changed replica statement in `core_notice.py` or `comm_state.py` goes in `gate_facts.py` too**, or it
   is read live (one more round trip per person). `scripts/tests/test_gate_facts.py` fails on the gap.
 - A measurement run on node-8 is load on the same replica path the tick uses: run it between ticks.

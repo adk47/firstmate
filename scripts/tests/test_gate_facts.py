@@ -2,7 +2,7 @@
 
 What these pin, in order of what would hurt:
 
-  * the read can only make a check FASTER: with it, without it, with a stale one or with garbage in its place, the
+  * the read never changes an ANSWER: with it, without it, with a stale one or with garbage in its place, the
     helpers return the same answer - and a failed batch returns no partial answer at all;
   * a read never answers a different question: statements are matched by exact text, and a statement the read does
     not hold is run live, through the real wrapper, byte for byte;
@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from credit_review import comm_state as cs  # noqa: E402
-from credit_review import fraud_lens, gate_facts, replica_batch as rb, uvn_status  # noqa: E402
+from credit_review import fraud_lens, gate_facts, replica_batch as rb, uvn_status, verify_notify  # noqa: E402
 from credit_review import verify_ledger as vl  # noqa: E402
 
 CR = ROOT / "scripts" / "credit_review"
@@ -52,9 +52,12 @@ REQ = "0a000000-0000-4000-8000-000000000001"
 # Statements are split on the batch separator; a `SELECT '<literal>'` echoes its literal (the sentinel), anything
 # else answers from $STUB_ROWS = {substring: [[cell, ...], ...]} (first matching key; no match = no rows).
 # STUB_MODE: fail = exit 1 before any output; cut = stop after the first statement (exit 0, output truncated);
-#            die-mid = print the first statement's rows then exit 1; extra = one more row after the last sentinel.
+#            die-mid = print the first statement's rows then exit 1; extra = one more row after the last sentinel;
+#            stall-batch = a BATCH (more than one statement) never answers, with a grandchild holding its pipes open,
+#            as a hung `kubectl` under the real wrapper does; a single statement still answers.
+# STUB_LIVE_S: seconds every answered invocation takes (the real wrapper's fixed cost is ~2 s whatever it asks).
 STUB = r'''#!/usr/bin/env python3
-import json, os, re, sys
+import json, os, re, subprocess, sys, time
 sql = sys.stdin.read()
 with open(os.environ["STUB_CALLS"], "a") as fh:
     fh.write(json.dumps(sql) + "\n")
@@ -62,6 +65,10 @@ mode = os.environ.get("STUB_MODE", "")
 if mode == "fail":
     sys.stdout.write("WARNING: half a line\n")
     sys.stderr.write("Query 2026_x failed: replica is under too much load\n"); sys.exit(1)
+if mode == "stall-batch" and "\n;\n" in sql:
+    subprocess.Popen(["sleep", "60"])            # inherits stdout and stderr, and outlives a kill of this process
+    time.sleep(60)
+time.sleep(float(os.environ.get("STUB_LIVE_S", "0")))
 rows = json.loads(os.environ.get("STUB_ROWS", "{}"))
 def out(r): print(",".join('"' + c.replace('"', '""') + '"' for c in r))
 for i, st in enumerate(sql.split("\n;\n")):
@@ -177,6 +184,13 @@ class ReadManyTests(unittest.TestCase):
     def test_a_missing_wrapper_is_a_batch_error(self):
         with self.assertRaises(rb.BatchError):
             rb.read_many(["SELECT 1"], cmd=os.path.join(self.tmp, "nope.sh"))
+
+    def test_a_batch_that_never_answers_is_abandoned_at_its_timeout(self):
+        os.environ.update(self.rep.env({}, "stall-batch"))
+        t0 = time.monotonic()
+        with self.assertRaises(rb.BatchError):
+            rb.read_many(["SELECT a", "SELECT b"], cmd=self.rep.cmd, timeout=1)
+        self.assertLess(time.monotonic() - t0, 3)       # not the 60 s the wrapper (and its child) would have taken
 
     def test_nothing_to_ask_asks_nothing(self):
         self.assertEqual(rb.read_many([], cmd=self.rep.cmd), [])
@@ -539,6 +553,30 @@ class CliTests(unittest.TestCase):
                 self.assertEqual((p.returncode, p.stdout), (2, ""))
         p = self.run_("gate_facts.py", "read", "--campaign", "uvn-status", "--user-id", "jane@example.com")
         self.assertEqual((p.returncode, p.stdout), (2, ""))
+
+    def test_a_stalled_read_still_leaves_room_for_the_live_hold(self):
+        """QA on #1926: the read asks comm_state's statements BEFORE core_notice runs. When that batch stalls, a
+        person core_notice holds in two live round trips must still be HELD inside the gate call's read timeout,
+        not left unmeasured: five unmeasured people end the tick. Measured on node-8 2026-11-12/13: a live round
+        trip 2.2 s; bash, jq, Python start-up and our own stores 2.5 s per gate call at most."""
+        live_s, gate_other_s, spare_s = 2.2, 2.5, 3.0
+        t0 = time.monotonic()
+        p = self.read(mode="stall-batch")
+        read_s = time.monotonic() - t0
+        self.assertEqual((p.returncode, p.stdout), (2, ""))            # no read on file: the gate runs the helpers live
+        self.assertLess(read_s, rb.BATCH_TIMEOUT_S + 1.5)
+        self.rep.reset()
+        held = self.run_("core_notice.py", "check", "--user-id", str(UID), mode="stall-batch",
+                         env={"STUB_LIVE_S": str(live_s)})
+        total = time.monotonic() - t0
+        self.assertEqual(held.returncode, 3, held.stderr)              # the hold is found, live
+        self.assertEqual(len(self.rep.calls()), 2)
+        self.assertLess(total + gate_other_s + spare_s, verify_notify.READ_TIMEOUT_S,
+                        f"a stalled read ({read_s:.1f} s) plus the live hold took {total:.1f} s of the gate call")
+
+    def test_the_read_timeout_is_budgeted_against_the_gate_calls_own(self):
+        # the same sum without the wait, so a raised batch timeout or a lowered read timeout fails here by name
+        self.assertLessEqual(rb.BATCH_TIMEOUT_S + 2 * 2.2 + 2.5 + 3.0, verify_notify.READ_TIMEOUT_S)
 
     def test_an_unreadable_replica_is_still_unknown_never_clear(self):
         # the batch fails -> nothing on file -> the helper's statements run live -> they fail -> exit 2, as before
