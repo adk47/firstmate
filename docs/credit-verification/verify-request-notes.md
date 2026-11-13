@@ -718,40 +718,76 @@ midnight, not the mechanism.)
 
 ## A page too big to fit is CUT to what fits, never dropped (`[key=tick-budget-page-fit]`, 2026-11-11)
 
-A paged family's worst-case estimate before it starts is `2 x max(cap, CHECK_ENTRIES) x CHECK_S_PER_USER +
-RESERVE_PAD_S` (the check and the bodies each walk the page). `CHECK_ENTRIES` is a page-SIZE knob, so it decided
-whether the family ran AT ALL: on 2026-11-11 a live `CHECK_ENTRIES=600` on node-8 made that estimate 5,100 s, the tick
+A paged family's worst-case estimate before it starts is `2 x max(cap, its page) x CHECK_S_PER_USER +
+RESERVE_PAD_S` (the check and the bodies each walk the page). The page is a SIZE knob, so it decided
+whether the family ran AT ALL: on 2026-11-11 a live `CHECK_ENTRIES=600` on node-8 (one knob for every family then)
+made that estimate 5,100 s, the tick
 reached uvn-status ~3,963 s in (the builders and reply-due run first), and `3,963 + 5,100 > 6,900` skipped **every
 family on every tick** for hours - the tick never reached a send, and raising the page size made it strictly worse.
 
 A page that does not fit is now cut to what fits and the family runs. The walk still starts at the same cursor and the
 cursor still advances from the check's own page record, so a smaller page is a SLOWER page, never a skipped one.
 `PAGE_FLOOR` (`CVO_PAGE_FLOOR`, default 20) is the smallest page worth the setup cost; below it the family still waits
-for the next tick. This is live at the shipped page, not only a guard: at `CHECK_ENTRIES=600` the estimate is 5,100 s,
-so any paged family that starts more than 1,800 s into the tick walks `(6,900 - elapsed - 300) / 8` entries instead of
-600 (329 at the 3,963 s above).
+for the next tick. This is live at the shipped pages, not only a guard: the sending family's estimate is 5,100 s at
+its 600-entry page, so whenever it starts more than 1,800 s into the tick it walks `(6,900 - elapsed - 300) / 8`
+entries instead of 600 (329 at the 3,963 s above). A 200-entry family's estimate is 1,900 s (2,300 s at the full 250
+cap), so it is cut only when it starts past 5,000 s (4,600 s).
 
-## The page is 600 entries a tick (`[key=walk-size]`, 2026-11-13)
+## Two pages: 200 entries for every paged family, 600 for the one that sends (`[key=walk-size]`, `[key=send-page-per-family]`, 2026-11-13)
 
-`CHECK_ENTRIES` in `scripts/credit-verify-outbound.sh` is the page every paged family (uvn-status, reply-due, r1,
-proof-need-ask) walks per tick, counted in list entries that still need a live-gate check. It went 200 -> 600 because
-the page, not a cap, was what limited sends: the 2026-11-13 01:10:23Z run walked 200, found 15 sendable (about 7.5%),
-sent 15 notes and left 2,319 entries unwalked, while `CVO_CAP` is 250 and was never reached.
+A paged family (wait-apology, reply-due, uvn-status, r1, proof-need-ask) walks one page per tick, counted in list
+entries that still need a live-gate check. `scripts/credit-verify-outbound.sh` has two page sizes:
 
-- **The deadline arithmetic.** The tick's own guard computes `SEND_WORST_S = 2 x max(CHECK_ENTRIES, CAP) x
-  CHECK_S_PER_USER + RESERVE_PAD_S` = `2 x 600 x 4 + 300` = 5,100 s against `TICK_HARD_S` 6,900 s: 1,800 s to spare.
-  The largest page that fits at those numbers is 825. `scripts/tests/credit-verify-outbound.bats` (`[key=walk-size]`)
-  pins 600, the fit, and what happens one entry past it, so a raise that does not fit fails in CI.
-- **600 is the most a family walks, not what it is promised.** Per the section above, a family that starts later than
-  1,800 s into the tick gets a cut page, and a family ahead of it that now walks more starts it later. How many notes a
-  tick sends is therefore measured from `run.log` after the change, not derived from the ratio.
+| knob | default | who walks it |
+|---|---|---|
+| `CHECK_ENTRIES` | 200 | every paged family |
+| `CHECK_ENTRIES_SEND` | 600 | **uvn-status free only** - the family that sends the notes |
+
+Both are code constants in production (`cfg()`), and `page_entries()` picks one from the family's own name, segment
+and subcommand - the same arguments that key its cursor and its policy `tick_cap` - never from where the call sits in
+`credit_families()`. `uvn-status paid` stays on 200, and so does `reply-due free`, which runs the same subcommand on
+the same segment.
+
+- **Why the sending family has a larger page.** The page, not a cap, was what limited sends: the 2026-11-13
+  01:10:23Z run walked 200, found 15 sendable (about 7.5%), sent 15 notes and left 2,319 entries unwalked, while
+  `CVO_CAP` is 250 and was never reached.
+- **Why only that family.** #1928 raised the one global knob 200 -> 600. Four paged families run ahead of uvn-status
+  free (reply-due paid and free, uvn-status paid, r1 paid). Each of them then walked up to 600 entries a pass
+  (~2,400 s at 4 s an entry) where it had walked 200 (~800 s), and every second they spent started the sending
+  family later, where the section above cuts its page. The raise slowed four families and shrank the page of the one
+  it was for. This change corrects that: the larger page is the sending family's alone.
+- **The deadline arithmetic, one family at a time.** The tick's own guard computes `SEND_WORST_S = 2 x
+  max(CHECK_ENTRIES_SEND, CAP) x CHECK_S_PER_USER + RESERVE_PAD_S` = `2 x 600 x 4 + 300` = 5,100 s against
+  `TICK_HARD_S` 6,900 s: 1,800 s to spare. The largest send page that fits a tick alone is 825. A 200-entry family's
+  worst case is `2 x 200 x 4 + 300` = 1,900 s, or 2,300 s where its cap is the full 250 (the walk is
+  `max(page, cap)`).
+- **The deadline arithmetic, the mixed case. It does not fit.** The four families that always run ahead
+  (reply-due paid and free, uvn-status paid, r1 paid) at their worst cost `4 x (2 x 200 x 4)` = 6,400 s, and the
+  sending family's own check and bodies cost `2 x 600 x 4` = 4,800 s: 11,200 s against 6,900 s. wait-apology paid
+  and free run ahead too whenever a paid-status plan exists for the day, so it is up to six: `6 x 1,600` = 9,600 s
+  ahead and 14,400 s mixed - worse, never better. It did not fit with every family on 200 either (`5 x 1,600` =
+  8,000 s). After the four always-present worst-case families the send page that still fits is
+  `(6,900 - 6,400 - 300) / 8` = 25 entries; after six it is negative, so the cut floors at `PAGE_FLOOR` and the
+  family waits. The worst case is
+  an estimate of 4 s for every entry, twice, in every family; the tick does not rely on it holding, it measures
+  `elapsed` when each family starts and cuts the page then. `TICK_HARD_S` is not raised for this.
+- **600 is the most the sending family walks, not what it is promised.** It gets the whole page only when it starts
+  within 1,800 s of the tick's start. What this change removes is the extra delay the families ahead of it added on
+  600-entry pages; it does not make them faster than they were at 200. How many notes a tick sends is measured from
+  `run.log` after deploy, not derived from a ratio.
 - **Nothing else moved.** `CVO_CAP`, the tick budget and deadline, the per-user estimates and every stop rule are as
   they were. Accepts are still bounded by the cap and by the policy `tick_cap` (uvn-status free: 60 a tick).
-- **What it costs.** The check and the bodies each walk the page, so a paged family's read-only gate calls go from at
-  most 400 to at most 1,200 a tick. The runner's unmeasured stop is a share of the page (`max(5, 10%)`), so the same
-  rule stops a full page at 60 unmeasured users where it stopped at 20.
-- **Revert.** Set the default back to 200 in the script and in the three bats cases that name 600 as the shipped
-  page (the `--print-config` expectation and the two `[key=walk-size]` cases).
+- **What it costs, on the sending family.** The check and the bodies each walk the page, so its read-only gate calls
+  go from at most 400 to at most 1,200 a tick. And the runner's unmeasured stop is a share of the page
+  (`max(5, 10%)`): on a full 600-entry page it stops at **60** unmeasured users where a 200-entry page stops at 20.
+  A slow gate is therefore noticed three times later on the sending family - up to 60 users timed out before the run
+  fails loudly instead of 20. Every other paged family keeps the 20-user bar.
+- **Tests.** `scripts/tests/credit-verify-outbound.bats`: the `[key=send-page-per-family]` cases pin 200 / 600, that
+  only uvn-status free is handed the larger page, and the mixed-case numbers above; the `[key=walk-size]` cases pin
+  the fit and what happens one entry past 825. A global raise, or a send page that does not fit, fails in CI.
+- **Revert.** Set `CHECK_ENTRIES_SEND` to 200 in the script and in the bats cases that name 600 as the shipped send
+  page (the `--print-config` expectation, the `[key=walk-size]` shipped-page case and the two
+  `[key=send-page-per-family]` cases).
 
 ## The apply loop is a bounded pool of 6, keyed per user (`[key=apply-pool]`, captain 2026-11-11)
 

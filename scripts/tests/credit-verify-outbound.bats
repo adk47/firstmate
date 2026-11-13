@@ -19,9 +19,11 @@ SH
   export CALLS="$TEST_TMPDIR/calls.log"; : > "$CALLS"
   export CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0   # the deadline rails have their own tests
   # The HARNESS's page, not the shipped one: the paging fixtures list 450 entries and assert a cursor that rotates
-  # 200 -> 400 -> 0, which needs a page smaller than the list. The shipped page (600, [key=walk-size]) is pinned by
-  # the --print-config cases and the [key=walk-size] cases below, which unset this.
-  export CVO_CHECK_ENTRIES=200
+  # 200 -> 400 -> 0, which needs a page smaller than the list - for the sending family too, so BOTH knobs are 200
+  # here. The shipped pages (200 for every paged family, 600 for uvn-status free alone: [key=send-page-per-family])
+  # are pinned by the --print-config cases and the [key=walk-size] / [key=send-page-per-family] cases below, which
+  # unset these.
+  export CVO_CHECK_ENTRIES=200 CVO_CHECK_ENTRIES_SEND=200
   # spec-deploy-lock-deferral-m1: the retry schedules are constants in production; the arms shrink them to 0 s
   export CVO_APPLY_RETRY_SLEEPS="0 0 0 0 0" CVO_TRANSIENT_RETRY_SLEEPS="0 0 0"
   export CVO_TIMEOUT_BIN="$(command -v timeout)"
@@ -284,6 +286,15 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 
 applies() { grep -c -- "--mode apply" "$CALLS" || true; }
 
+# [key=send-page-per-family]: the runner calls of the ONE family that sends the notes (uvn-status free: the owing
+# list, the free segment), and the paged calls of every OTHER family. reply-due free shares the subcommand, the
+# segment and the campaign with it and r1 free the subcommand and the segment, so the LIST is what tells them apart.
+SEND_FAMILY_RE='^uvn-status --list [^ ]*/owing-uvn\.json --segment free '
+send_family_calls() { grep -E -- "$SEND_FAMILY_RE" "$CALLS" || true; }
+other_paged_calls() { grep -- "--max-entries " "$CALLS" | grep -vE -- "$SEND_FAMILY_RE" || true; }
+# the distinct --max-entries values on stdin's runner calls, one per line
+pages_of() { grep -oE -- "--max-entries [0-9]+" | awk '{print $2}' | sort -un; }
+
 # OUT_ROOT is keyed by STAMP="$(date -u +%Y%m%dT%H%MZ)" - MINUTE resolution (credit-verify-outbound.sh:149) - and a
 # case may invoke the script more than once, so a minute boundary leaves TWO out dirs. Every read of "the run I just
 # made" goes through these helpers: a bare "$CVO_OUT_ROOT"/*/tick.log grep matches ANY run's log, so on a minute
@@ -296,7 +307,7 @@ newest_tick() { printf '%s' "$(newest_out)tick.log"; }
   evil=(HYDRA_ROOT="$E" CVO_ETC="$E/etc" CVO_STATE="$E/state" PY_BIN="$E/py" CVO_RUNNER="$E/r" CVO_OWING="$E/o" CVO_RECEIPTS="$E/rc"
         CVO_HEALTH="$E/h" CVO_ZERO_READ="$E/z" CVO_FRAUD="$E/f" CVO_MAIN_ENV="$E/env" CVO_LEDGER="$E/l.sqlite3" CVO_SCRIPTS="$E/s"
         CVO_RD_SCAN="$E/rd" CVO_RD_CAP=99999 CVO_POLICY="$E/p.json" CVO_CLAIM_LIST="$E/c.json" CVO_CAP=99999 CVO_R1_CAP=99999
-        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_CLAIM_GROUP_BUDGET_S=1 CVO_STARVED_PAGE_AT=99 CVO_STARVED_REPAGE_EVERY=1 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_CHECK_ENTRIES=99999 CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_PER_SEGMENT_FROM_TEST=status-doc-received=2000-01-01T00:00Z CVO_PAID_FROM_TEST=proof-need-ask=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t"
+        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_CLAIM_GROUP_BUDGET_S=1 CVO_STARVED_PAGE_AT=99 CVO_STARVED_REPAGE_EVERY=1 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_CHECK_ENTRIES=99999 CVO_CHECK_ENTRIES_SEND=99999 CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_PER_SEGMENT_FROM_TEST=status-doc-received=2000-01-01T00:00Z CVO_PAID_FROM_TEST=proof-need-ask=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t"
         CVO_CLAIM_PROOF_STATE="$E/cpc" CVO_CLAIM_PROOF_LIMIT_H=999 CVO_CLAIM_PROOF_UNREAD_H=999 CVO_CLAIM_PROOF_REPEAT_MIN=999)
   run -0 env -u BATS_TEST_TMPDIR "${evil[@]}" "$SCRIPT" --print-config
   [[ "$output" != *"$E"* ]]; [[ "$output" != *99999* ]]
@@ -335,7 +346,8 @@ FIRST_CAP=100
 UNSIGNED_ALL=0
 JUDGE=/opt/hydra/scripts/credit-batch-judge.py
 DEPLOYED_SHA_FILE=/opt/hydra/.deployed-sha
-CHECK_ENTRIES=600
+CHECK_ENTRIES=200
+CHECK_ENTRIES_SEND=600
 PAGE_FLOOR=20
 TICK_BUDGET_S=6000
 TICK_HARD_S=6900
@@ -658,7 +670,8 @@ PY
   # worst case 2*600*4+300 = 5,100 s, and the tick reaches uvn-status ~3,963 s in (the builders and reply-due run
   # first), so 3,963+5,100 > 6,900 and the family was SKIPPED - the tick never reached a send, and raising the page
   # size made it worse. The page is now cut to what fits instead of the family being dropped.
-  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES=600 CVO_CHECK_S_PER_USER=4 CVO_RESERVE_PAD_S=300 \
+  # (One knob paged every family that day; both are set here so every paged family is the 600-entry one it was.)
+  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES=600 CVO_CHECK_ENTRIES_SEND=600 CVO_CHECK_S_PER_USER=4 CVO_RESERVE_PAD_S=300 \
     CVO_TICK_HARD_S=6900 CVO_TICK_ELAPSED0=3963 run -0 "$SCRIPT"
   # the family RAN - this is the whole point: before the fix there was no uvn-status call at all
   grep -q "^uvn-status .*--check-recipients" "$CALLS"
@@ -679,13 +692,13 @@ PY
   if grep -qE -- "^uvn-status .*--max-entries 600 " "$CALLS"; then false; fi
   # and the cut page's worst case really does fit before the deadline
   [ $(( 2 * $(printf '%s\n' "$pages" | sort -n | tail -1) * 4 + 300 )) -le $(( 6900 - 3963 )) ]
-  # NEGATIVE CONTROL: a 200-entry page (the shipped size until 2026-11-13) already fits at the same point in the tick,
-  # so it is NOT cut.
+  # NEGATIVE CONTROL: a 200-entry page (what every family but the sending one ships with) already fits at the same
+  # point in the tick, so it is NOT cut.
   # Two runs inside one second share an out dir, so the log is APPENDED to: compare the cut-line count on the same
   # file rather than asserting the file has none (a fresh dir must have none).
   t0="$(newest_tick)"; n0="$(grep -c "page cut from" "$t0" || true)"
   : > "$CALLS"
-  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES=200 CVO_CHECK_S_PER_USER=4 CVO_RESERVE_PAD_S=300 \
+  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES=200 CVO_CHECK_ENTRIES_SEND=200 CVO_CHECK_S_PER_USER=4 CVO_RESERVE_PAD_S=300 \
     CVO_TICK_HARD_S=6900 CVO_TICK_ELAPSED0=3963 run -0 "$SCRIPT"
   t1="$(newest_tick)"
   if [ "$t1" = "$t0" ]; then
@@ -699,8 +712,8 @@ PY
 @test "outbound tick (2026-11-11): the SHIPPED deadline fits the send family's worst case - a shorter one starves every send" {
   # The gate is right (QA #1587): a family whose worst case does not fit before TICK_HARD_S must not start. The defect
   # this pins is the NUMBER. On 2026-11-11 00:04Z the live tree cut TICK_BUDGET_S/TICK_HARD_S 6000/6900 -> 1500/1700
-  # to fit a 30-minute cron. 1700 < 1900 (the worst case at the 200-entry page) and < 5100 at the 600-entry page, so
-  # uvn-status could never start: every tick from 00:49Z ended "credit families: FAILED at the unmeasured bar, the
+  # to fit a 30-minute cron. 1700 < 1900 (the worst case at a 200-entry page) and < 5100 at the sending family's
+  # 600-entry page, so uvn-status could never start: every tick from 00:49Z ended "credit families: FAILED at the unmeasured bar, the
   # deadline or a failed apply" and NOTHING was sent for a day (last real acknowledgement 2026-11-10T03:06:37Z).
   # The invariant is arithmetic on the SHIPPED constants - no clock, no fixture - so it cannot drift with a shard.
   # `env -u BATS_TEST_TMPDIR` is what makes --print-config report the shipped values instead of the harness seam.
@@ -708,7 +721,8 @@ PY
   local hard budget entries per pad worst
   hard="$(printf '%s\n' "$output" | sed -n 's/^TICK_HARD_S=//p')"
   budget="$(printf '%s\n' "$output" | sed -n 's/^TICK_BUDGET_S=//p')"
-  entries="$(printf '%s\n' "$output" | sed -n 's/^CHECK_ENTRIES=//p')"
+  # the SENDING family's page: the larger of the two, so the deadline that fits it fits every 200-entry family
+  entries="$(printf '%s\n' "$output" | sed -n 's/^CHECK_ENTRIES_SEND=//p')"
   per="$(printf '%s\n' "$output" | sed -n 's/^CHECK_S_PER_USER=//p')"
   pad="$(printf '%s\n' "$output" | sed -n 's/^RESERVE_PAD_S=//p')"
   [ -n "$hard" ] && [ -n "$budget" ] && [ -n "$entries" ] && [ -n "$per" ] && [ -n "$pad" ]
@@ -724,7 +738,7 @@ PY
 @test "outbound tick (2026-11-11): a deadline too short for the send family PAGES instead of starving the send quietly" {
   # The live 1500/1700 was wrong QUIETLY: the tick ran, logged a deferral per family and exited 0, so nothing paged
   # and the ledger simply stopped moving. A number that makes the send impossible must be loud on the first tick.
-  run -0 env CVO_TICK_HARD_S=1700 CVO_TICK_BUDGET_S=1500 CVO_CHECK_ENTRIES=600 \
+  run -0 env CVO_TICK_HARD_S=1700 CVO_TICK_BUDGET_S=1500 CVO_CHECK_ENTRIES_SEND=600 \
     CVO_CHECK_S_PER_USER=4 CVO_RESERVE_PAD_S=300 "$SCRIPT"
   grep -q "TICK DEADLINE TOO SHORT: TICK_HARD_S=1700s cannot fit the send family's worst case 5100s" "$(newest_tick)"
   # page_confirmed, not page: a warning that cannot be delivered is the same silent failure this guard ends
@@ -736,7 +750,7 @@ PY
 @test "outbound tick (2026-11-11): a deadline page Slack REJECTS is logged as undelivered, not swallowed" {
   # `page` delegates to notify(), whose slack_notify ends `|| true`, so it reports success on a rejected post. A
   # warning nobody receives is the same silent failure the guard exists to end (QA #1882 Important 2).
-  run -0 env CVO_TICK_HARD_S=1700 CVO_TICK_BUDGET_S=1500 CVO_CHECK_ENTRIES=600 \
+  run -0 env CVO_TICK_HARD_S=1700 CVO_TICK_BUDGET_S=1500 CVO_CHECK_ENTRIES_SEND=600 \
     CVO_CHECK_S_PER_USER=4 CVO_RESERVE_PAD_S=300 STUB_SLACK_CONFIRM_RC=1 "$SCRIPT"
   grep -q "TICK DEADLINE TOO SHORT: TICK_HARD_S=1700s cannot fit the send family's worst case 5100s" "$(newest_tick)"
   grep -q "page not delivered: TICK DEADLINE TOO SHORT" "$(newest_tick)"
@@ -752,15 +766,16 @@ PY
   [ ! -e "$CALLS.page" ] || ! grep -q "TICK DEADLINE TOO SHORT" "$CALLS.page"
 }
 
-@test "outbound tick ([key=walk-size]): the SHIPPED page is 600 entries, and the send family's worst case at it fits the SHIPPED deadline" {
+@test "outbound tick ([key=walk-size]): the SHIPPED send page is 600 entries, and the send family's worst case at it fits the SHIPPED deadline" {
   # 2026-11-13: the page is what sets how many notes a tick sends (200 walked -> 15 sendable; CVO_CAP=250 was never
-  # reached), so it went 200 -> 600. This pins the new number AND the arithmetic that lets it run: the guard's own
-  # SEND_WORST_S = 2 x max(CHECK_ENTRIES, CAP) x CHECK_S_PER_USER + RESERVE_PAD_S must not pass TICK_HARD_S, or
-  # uvn-status is paged about on every tick and never gets its page. A later raise that breaks this fails HERE.
+  # reached), so the SENDING family's page went 200 -> 600. This pins that number AND the arithmetic that lets it run:
+  # the guard's own SEND_WORST_S = 2 x max(CHECK_ENTRIES_SEND, CAP) x CHECK_S_PER_USER + RESERVE_PAD_S must not pass
+  # TICK_HARD_S, or uvn-status is paged about on every tick and never gets its page. A later raise that breaks this
+  # fails HERE. (Which families get which page is the [key=send-page-per-family] case below.)
   # `env -u BATS_TEST_TMPDIR` makes --print-config report the shipped constants, not the harness seam.
   run -0 env -u BATS_TEST_TMPDIR "$SCRIPT" --print-config
   local entries cap per pad hard walk worst
-  entries="$(printf '%s\n' "$output" | sed -n 's/^CHECK_ENTRIES=//p')"
+  entries="$(printf '%s\n' "$output" | sed -n 's/^CHECK_ENTRIES_SEND=//p')"
   cap="$(printf '%s\n' "$output" | sed -n 's/^CAP=//p')"
   per="$(printf '%s\n' "$output" | sed -n 's/^CHECK_S_PER_USER=//p')"
   pad="$(printf '%s\n' "$output" | sed -n 's/^RESERVE_PAD_S=//p')"
@@ -770,20 +785,124 @@ PY
   walk=$(( entries > cap ? entries : cap ))
   worst=$(( 2 * walk * per + pad ))
   [ "$worst" -le "$hard" ] || {
-    echo "CHECK_ENTRIES=${entries}: the send family's worst case ${worst}s (2 x ${walk} entries x ${per}s + ${pad}s pad) is past TICK_HARD_S=${hard}s"
+    echo "CHECK_ENTRIES_SEND=${entries}: the send family's worst case ${worst}s (2 x ${walk} entries x ${per}s + ${pad}s pad) is past TICK_HARD_S=${hard}s"
     false
   }
   # ...and the same thing asked of the script itself rather than of this file's copy of the formula: with every
   # deadline override the setup exports removed, the tick runs its real guard and its real family() on its own numbers.
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
-  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 run -0 env -u CVO_CHECK_ENTRIES -u CVO_TICK_HARD_S -u CVO_CHECK_S_PER_USER \
-    -u CVO_RESERVE_PAD_S "$SCRIPT"
+  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 run -0 env -u CVO_CHECK_ENTRIES -u CVO_CHECK_ENTRIES_SEND -u CVO_TICK_HARD_S \
+    -u CVO_CHECK_S_PER_USER -u CVO_RESERVE_PAD_S "$SCRIPT"
   if grep -q "TICK DEADLINE TOO SHORT" "$(newest_tick)"; then false; fi
   [ ! -e "$CALLS.page-confirmed" ] || ! grep -q "TICK DEADLINE TOO SHORT" "$CALLS.page-confirmed"
-  # the page the runner is handed is the shipped 600, whole: a few seconds into the tick nothing has to be cut
-  [ "$(grep -c "^uvn-status " "$CALLS")" -gt 0 ]
-  [ "$(grep -c -- "^uvn-status .*--max-entries 600 " "$CALLS")" -eq "$(grep -c "^uvn-status " "$CALLS")" ]
+  # the page the runner is handed for the sending family is the shipped 600, whole: a few seconds into the tick
+  # nothing has to be cut
+  [ -n "$(send_family_calls)" ]
+  [ "$(send_family_calls | pages_of)" = 600 ]
   if grep -q "page cut from" "$(newest_tick)"; then false; fi
+}
+
+@test "outbound tick ([key=send-page-per-family]): ONLY uvn-status free walks the 600-entry send page - every other paged family, reply-due free included, still walks 200" {
+  # #1928 raised the ONE page knob 200 -> 600 for every paged family. Four of them run ahead of uvn-status free
+  # (reply-due paid and free, uvn-status paid, r1 paid), so each walked three times as far and started the sending
+  # family later, where its page is cut. The larger page is the sending family's alone. A later GLOBAL raise - 600
+  # back in CHECK_ENTRIES, or page_entries() widened - fails here.
+  run -0 env -u BATS_TEST_TMPDIR "$SCRIPT" --print-config
+  [ "$(printf '%s\n' "$output" | sed -n 's/^CHECK_ENTRIES=//p')" = 200 ]
+  [ "$(printf '%s\n' "$output" | sed -n 's/^CHECK_ENTRIES_SEND=//p')" = 600 ]
+  # ...and the tick itself, on its own page numbers (both harness overrides removed), with EVERY paged credit family
+  # given work: reply-due paid + free, uvn-status paid, r1 paid, uvn-status free, r1 free, then the need-ask pair.
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  cat > "$TEST_TMPDIR/rd_scan.py" <<'PY'
+import json, sys
+json.dump({"generated_at": "x", "users": [{"user_id": "41", "paid": True, "reply_due": {"part": "9", "conversation": "7"}},
+                                         {"user_id": "42", "paid": False, "reply_due": {"part": "8", "conversation": "6"}}]},
+          open(sys.argv[sys.argv.index("--out") + 1], "w"))
+print('{"rows": 2}')
+PY
+  CVO_RD_SCAN="$TEST_TMPDIR/rd_scan.py" STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 \
+    run -0 env -u CVO_CHECK_ENTRIES -u CVO_CHECK_ENTRIES_SEND "$SCRIPT"
+  # the sending family: every call it made, check and bodies and apply alike, on the 600-entry page
+  [ -n "$(send_family_calls)" ]
+  [ "$(send_family_calls | grep -c -- "--max-entries 600 ")" -eq "$(send_family_calls | grep -c .)" ]
+  # each family the larger page must NOT reach really ran (so "no 600 there" is not an empty set agreeing with itself)
+  grep -qE -- "^uvn-status --list [^ ]*/reply-due\.json --segment paid .*--max-entries 200 " "$CALLS"
+  grep -qE -- "^uvn-status --list [^ ]*/reply-due\.json --segment free .*--max-entries 200 " "$CALLS"
+  grep -qE -- "^uvn-status --list [^ ]*/owing-uvn\.json --segment paid .*--max-entries 200 " "$CALLS"
+  grep -qE -- "^uvn-status --list [^ ]*/receipts-received\.json --segment paid .*--max-entries 200 " "$CALLS"
+  grep -qE -- "^send --list [^ ]*/need-asks\.json --segment free .*--max-entries 200 " "$CALLS"
+  # ...and every paged call that is not the sending family's is a 200-entry one: nothing else got the larger page
+  [ "$(other_paged_calls | pages_of)" = 200 ]
+  # The knobs are independent. Raise ONLY the general page and the sending family does not move; raise ONLY the send
+  # page and nothing else moves. (The harness's 200 stays in whichever knob the line does not name.)
+  rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
+  CVO_RD_SCAN="$TEST_TMPDIR/rd_scan.py" STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES=300 run -0 "$SCRIPT"
+  [ "$(send_family_calls | pages_of)" = 200 ]
+  [ "$(other_paged_calls | pages_of)" = 300 ]
+  rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
+  CVO_RD_SCAN="$TEST_TMPDIR/rd_scan.py" STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES_SEND=300 run -0 "$SCRIPT"
+  [ "$(send_family_calls | pages_of)" = 300 ]
+  [ "$(other_paged_calls | pages_of)" = 200 ]
+}
+
+@test "outbound tick ([key=send-page-per-family]): the mixed-case deadline arithmetic at the SHIPPED numbers - the send page fits alone, every 200-entry family fits, and a late start CUTS the send page while the 200-entry families walk theirs whole" {
+  # Arithmetic on the shipped constants (no clock, no fixture), then the same thing asked of the tick itself.
+  run -0 env -u BATS_TEST_TMPDIR "$SCRIPT" --print-config
+  local page send cap per pad hard walk send_worst other_worst ahead own mixed left ahead6 mixed6 left6
+  page="$(printf '%s\n' "$output" | sed -n 's/^CHECK_ENTRIES=//p')"
+  send="$(printf '%s\n' "$output" | sed -n 's/^CHECK_ENTRIES_SEND=//p')"
+  cap="$(printf '%s\n' "$output" | sed -n 's/^CAP=//p')"
+  per="$(printf '%s\n' "$output" | sed -n 's/^CHECK_S_PER_USER=//p')"
+  pad="$(printf '%s\n' "$output" | sed -n 's/^RESERVE_PAD_S=//p')"
+  hard="$(printf '%s\n' "$output" | sed -n 's/^TICK_HARD_S=//p')"
+  # one assertion a line: in `A && B` a failing A is not an error under `set -e`, so the line would pass
+  [ -n "$page" ]; [ -n "$send" ]; [ -n "$cap" ]; [ -n "$per" ]; [ -n "$pad" ]; [ -n "$hard" ]
+  # 1. SEND_WORST_S, the guard's own formula on the SEND page: it must fit the deadline, or the sending family is
+  #    paged about on every tick. 2 x 600 x 4 + 300 = 5,100 against 6,900.
+  walk=$(( send > cap ? send : cap )); send_worst=$(( 2 * walk * per + pad ))
+  [ "$send_worst" = 5100 ]
+  [ "$send_worst" -le "$hard" ] || {
+    echo "CHECK_ENTRIES_SEND=${send}: SEND_WORST_S ${send_worst}s is past TICK_HARD_S=${hard}s"; false; }
+  # 2. a 200-entry family at the full cap (its walk is max(page, cap)) fits too, with room
+  walk=$(( page > cap ? page : cap )); other_worst=$(( 2 * walk * per + pad ))
+  [ "$other_worst" -le "$hard" ]
+  # 3. the mixed case, as the script comment and the doc state it: the four families that ALWAYS run ahead at their
+  #    worst (4 x 2 x 200 x 4 = 6,400 s) plus the sending family's own 2 x 600 x 4 = 4,800 s is 11,200 s. That does
+  #    NOT fit 6,900 s, and after those four the send page that still fits is (6,900 - 6,400 - 300) / 8 = 25 entries.
+  #    wait-apology paid and free run ahead too when a paid-status plan exists, so the real worst case is UP TO SIX:
+  #    6 x 1,600 = 9,600 s ahead, 14,400 s mixed, and the page that still fits is negative - the cut floors at
+  #    PAGE_FLOOR and the family waits. These are pinned as the numbers they are, computed from what --print-config
+  #    reports: a change to a page, to the per-user estimate or to the deadline moves them, and the script comment and
+  #    docs/credit-verification/verify-request-notes.md, which quote them, then have to be read again.
+  ahead=$(( 4 * 2 * page * per )); own=$(( 2 * send * per )); mixed=$(( ahead + own ))
+  left=$(( (hard - ahead - pad) / (2 * per) ))
+  ahead6=$(( 6 * 2 * page * per )); mixed6=$(( ahead6 + own )); left6=$(( (hard - ahead6 - pad) / (2 * per) ))
+  [ "$ahead" = 6400 ]
+  [ "$own" = 4800 ]
+  [ "$mixed" = 11200 ]
+  [ "$left" = 25 ]
+  [ "$mixed" -gt "$hard" ]
+  [ "$ahead6" = 9600 ]
+  [ "$mixed6" = 14400 ]
+  [ "$left6" = -375 ]
+  [ "$left6" -lt 20 ]
+  # 4. So the worst case is handled by the CUT, and the cut lands on the sending family only. 3,963 s into the tick
+  #    (the documented start point) on the shipped pages and the shipped deadline numbers: a 200-entry family's worst
+  #    case (1,900 s at the 100 first-run cap) still fits, so it walks its page whole; the sending family's 5,100 s
+  #    does not, so its page is cut to (6,900 - 3,963 - 300) / 8 = 329, less whatever the shard has already spent.
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  CVO_UNSIGNED_ALL=0 CVO_TICK_ELAPSED0=3963 run -0 env -u CVO_CHECK_ENTRIES -u CVO_CHECK_ENTRIES_SEND \
+    -u CVO_TICK_HARD_S -u CVO_CHECK_S_PER_USER -u CVO_RESERVE_PAD_S "$SCRIPT"
+  grep -qE "uvn-status-free: page cut from 600 to [0-9]+ entries \(what fits before the 6900s deadline\)" "$(newest_tick)"
+  [ "$(grep -c "page cut from" "$(newest_tick)")" = 1 ]
+  local n; n="$(send_family_calls | pages_of)"
+  [ -n "$n" ]
+  [ "$(printf '%s\n' "$n" | wc -l)" = 1 ]
+  [ "$n" -ge 300 ]
+  [ "$n" -le 329 ]
+  [ $(( 2 * n * per + pad )) -le $(( hard - 3963 )) ]
+  grep -qE -- "^uvn-status --list [^ ]*/owing-uvn\.json --segment paid .*--max-entries 200 " "$CALLS"
+  [ "$(other_paged_calls | pages_of)" = 200 ]
 }
 
 @test "outbound tick ([key=walk-size]): a page raised past what the SHIPPED deadline fits is paged about and never walked - it is cut to what fits, or the family does not start" {
@@ -791,12 +910,14 @@ PY
   # The script's own deadline numbers (4 s a user, 300 s pad, 6,900 s), by removing the setup's overrides. At them the
   # largest page whose worst case fits is 825: 2 x 825 x 4 + 300 = 6,900. One more entry is 6,908.
   local ship=(env -u CVO_TICK_HARD_S -u CVO_CHECK_S_PER_USER -u CVO_RESERVE_PAD_S) pages n
+  # The page raised here is the SENDING family's: it is the larger one and the one the guard measures. Every other
+  # paged family stays on the harness's 200 throughout.
   # 825: the guard has nothing to say
-  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES=825 run -0 "${ship[@]}" "$SCRIPT"
+  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES_SEND=825 run -0 "${ship[@]}" "$SCRIPT"
   if grep -q "TICK DEADLINE TOO SHORT" "$(newest_tick)"; then false; fi
   # 826: the guard pages, with the numbers, on a channel that reports whether it was delivered
   rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"; rm -f "$CALLS.page-confirmed"
-  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES=826 run -0 "${ship[@]}" "$SCRIPT"
+  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES_SEND=826 run -0 "${ship[@]}" "$SCRIPT"
   grep -q "TICK DEADLINE TOO SHORT: TICK_HARD_S=6900s cannot fit the send family's worst case 6908s (2 x 826 entries x 4s + 300s pad)" "$(newest_tick)"
   grep -q "Raise CVO_TICK_HARD_S to >= 6908" "$CALLS.page-confirmed"
   # ...and family() does not walk that page. Since [key=tick-budget-page-fit] it CUTS a page that cannot fit instead
@@ -810,18 +931,20 @@ PY
   for n in $pages; do
     [ "$n" -le 825 ] && [ $(( 2 * n * 4 + 300 )) -le 6900 ] || false
   done
-  # Where the cut is not available (the page that fits is under PAGE_FLOOR) the family does not START: no paged
-  # runner call at all, and the reason in tick.log is the worst case against the deadline.
+  # Where the cut is not available (the page that fits is under PAGE_FLOOR) the family does not START: no runner
+  # call for it at all, and the reason in tick.log is the worst case against the deadline. The 200-entry families
+  # fit whole and are not this guard's subject, so they still run.
   rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
-  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES=826 CVO_PAGE_FLOOR=826 run -0 "${ship[@]}" "$SCRIPT"
-  if grep -q -- "--max-entries" "$CALLS"; then false; fi
-  grep -qE "uvn-status-(paid|free): [0-9]+s into the tick and its worst case is 6908s .*it does not fit before the 6900s deadline; this family waits for the next tick" "$(newest_tick)"
+  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES_SEND=826 CVO_PAGE_FLOOR=826 run -0 "${ship[@]}" "$SCRIPT"
+  [ -z "$(send_family_calls)" ]
+  [ "$(other_paged_calls | pages_of)" = 200 ]
+  grep -qE "uvn-status-free: [0-9]+s into the tick and its worst case is 6908s .*it does not fit before the 6900s deadline; this family waits for the next tick" "$(newest_tick)"
   # NEGATIVE CONTROL: the same floor with the shipped 600 - the family starts, on the whole page. So what stopped it
   # above was the page not fitting, not the floor.
   rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
-  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES=600 CVO_PAGE_FLOOR=826 run -0 "${ship[@]}" "$SCRIPT"
-  [ "$(grep -c "^uvn-status " "$CALLS")" -gt 0 ]
-  [ "$(grep -c -- "^uvn-status .*--max-entries 600 " "$CALLS")" -eq "$(grep -c "^uvn-status " "$CALLS")" ]
+  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES_SEND=600 CVO_PAGE_FLOOR=826 run -0 "${ship[@]}" "$SCRIPT"
+  [ -n "$(send_family_calls)" ]
+  [ "$(send_family_calls | pages_of)" = 600 ]
 }
 
 @test "outbound tick (2026-11-11): a FAILED family does not starve the send - uvn-status still runs after reply-due fails" {
