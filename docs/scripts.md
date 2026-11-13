@@ -99,7 +99,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-afk-return.sh`       | Own deterministic return shutdown, catch-up evidence, and the firstmate-actionable blocker gate |
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target and backend for the daemon and launcher       |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, guard injection by the detected primary harness, escalate batched digests, alert on failed delivery |
-| `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
+| `fm-crew-state.sh`       | Print one deterministic current-state line for a crew, falling back to whether an agent process is alive in its worktree, and report a status log with no task record as unowned |
+| `fm-agent-proc-lib.sh`   | Single owner of agent liveness read from the OS process table: the agent processes in a task's worktree, the alive/dead/unknown rule, and the processes holding a file open for writing |
+| `fm-decisions-sweep.sh`  | List the open decision records whose task finished, shipped, or died and then went quiet (dry run by default), and close them with `--apply` |
 | `fm-nm-run-lib.sh`       | Single owner of shared no-mistakes run-attribution primitives and rules             |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-timeout-lib.sh`      | Single owner of hard-bounded command execution and its fallback watchdog |
@@ -125,7 +127,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-lease-lib.sh`        | One owner of the supervision lease contract and the main-only role-partition guards  |
 | `fm-control.sh`          | Agent lifecycle control plane: allowlisted `interrupt`, `exit`, and transactional `relaunch` verbs for an exact task id ([agent-control.md](agent-control.md)) |
 | `fm-control-lib.sh`      | One executable owner of the control-plane verb allowlist, per-harness interrupt/exit mechanics, and per-backend capability |
-| `fm-leave-stopped.sh`    | Record or clear the captain's order to leave a task stopped (`state/<id>.stopped`), which silences its endpoint in the watcher |
+| `fm-leave-stopped.sh`    | Record or clear the captain's order to leave a task stopped (`state/<id>.stopped`), which silences its endpoint in the watcher; refuses while an agent still runs in the task's worktree unless `--exit` stops it first or `--force-silence` accepts it |
 | `fm-busy-lib.sh`         | Single owner of the semantic busy-state contract: verdicts, source attribution, and per-harness sources |
 | `fm-busy-event.sh`       | The only writer of a task's semantic busy-state record; arms an incarnation, applies lifecycle events, and retires an exact generation or an orphan record |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for composer capture, verified submit, and the submit-time busy check |

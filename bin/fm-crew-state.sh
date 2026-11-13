@@ -15,7 +15,25 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|idle|alive|dead|unowned|unknown> · source: <run-step|pane|status-log|process|remote-endpoint|none> · <detail>
+#
+# `idle`, `alive`, and `dead` are liveness answers for a task with no run and no
+# status-log state to report: the agent is running and its harness is idle; the
+# agent is running but its harness busy state could not be read; no agent is
+# running. Every consumer that acts on a state matches the specific word it
+# wants (working, paused, done, failed, ...), so these three read to them exactly
+# as `unknown` always did - nothing is absorbed or silenced on their strength.
+# A `dead` answer names the verb of the task's newest status line as
+# `last event: <verb>`, never its note, so a reader can tell an agent that
+# finished and exited from one that died mid-work without the log's stale prose
+# being read as current.
+#
+# `unowned` is the answer for a status log with no task record at all
+# (state/<id>.status without state/<id>.meta): something wrote it, the watcher
+# wakes on its lines, and nothing can be supervised because no worktree,
+# endpoint, or harness is recorded. The detail carries how recently the log was
+# written and any process holding it open for writing. An id with neither file
+# still reads `unknown` (no metadata).
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -71,6 +89,20 @@
 #      unreachable, and an alive endpoint whose scrollback read failed is still
 #      classified by step 4. Backends with no classifier keep reading a failed
 #      capture as gone. The fallback's own comment owns the per-verdict rules.
+#   6. Before the fallback settles for `unknown`, it asks the operating system
+#      whether an agent process is running in the task's worktree
+#      (bin/fm-agent-proc-lib.sh). An endpoint handle can be stale, unreadable,
+#      or of a shape the reader does not expect - an Orca task owns no tmux
+#      window at all - while the agent is running fine, and the process table
+#      has no such blind spot. A live agent is never reported `unknown`: it
+#      reads `idle` or `alive`. No agent process, with the backend's own
+#      classifier not vouching for one either, reads `dead`, and a status log
+#      still saying `working` does not outvote that. Where the endpoint or the
+#      harness busy state could not be read either, `dead` is reported ahead
+#      of the status log whatever its last line says, exactly where `unknown`
+#      was reported before. When the process table
+#      itself cannot be read the historical `unknown` answers stand, because an
+#      unreadable table is not evidence of death.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -91,6 +123,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-agent-proc-lib.sh
+. "$SCRIPT_DIR/fm-agent-proc-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -119,7 +153,44 @@ emit() {  # <state> <source> [detail]
 
 # --- meta resolution --------------------------------------------------------
 
-[ -f "$META" ] || emit unknown none "no metadata for $ID"
+# A status log with no task record is UNOWNED: something appended to it, the
+# watcher wakes on those lines, and nothing here can supervise who wrote them
+# because no worktree, endpoint, or harness is recorded. Say so, with how
+# recently it was written and whoever holds it open for writing, instead of
+# the bare "no metadata" a mistyped id gets.
+emit_unowned() {
+  local now mtime age writers rc=0 who detail
+  now=${FM_CREW_STATE_NOW:-$(date +%s)}
+  mtime=$(_fm_status_file_mtime "$LOG")
+  detail="no task record for $ID (nothing supervises this log)"
+  case "$mtime:$now" in
+    *[!0-9:]*|:*|*:) ;;
+    *)
+      age=$((now - mtime))
+      [ "$age" -ge 0 ] || age=0
+      if [ "$age" -lt 3600 ]; then age="$((age / 60))m"
+      elif [ "$age" -lt 172800 ]; then age="$((age / 3600))h"
+      else age="$((age / 86400))d"
+      fi
+      detail="$detail${SEP}last written $age ago"
+      ;;
+  esac
+  writers=$(fm_agent_proc_file_writers "$LOG" 2>/dev/null) || rc=$?
+  case "$rc" in
+    0)
+      who=$(printf '%s\n' "$writers" | awk -F '\t' 'NF >= 2 { printf "%s%s pid %s", sep, $2, $1; sep = ", " }')
+      detail="$detail${SEP}writer: $who"
+      ;;
+    1) detail="$detail${SEP}writer not seen (no process holds the log open for writing)" ;;
+    *) detail="$detail${SEP}writer unknown (open files could not be read)" ;;
+  esac
+  emit unowned status-log "$detail"
+}
+
+if [ ! -f "$META" ]; then
+  [ -f "$LOG" ] && [ ! -L "$LOG" ] && emit_unowned
+  emit unknown none "no metadata for $ID"
+fi
 
 meta_value() {  # <key>
   grep "^$1=" "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true
@@ -143,9 +214,11 @@ fi
 # Last non-empty status line; fm-classify-lib.sh owns leading-verb normalization
 # and the bounded tail read (only the final 64 KiB are inspected,
 # so a multi-megabyte append-only log never forces a whole-file scan per task).
+# A decision record the sweep closed is looked through to the `done` or `failed`
+# claim behind it (last_status_line_behind_sweep owns that rule).
 log_last_line() {
   [ -f "$LOG" ] || return 1
-  last_status_line "$LOG"
+  last_status_line_behind_sweep "$LOG"
 }
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is
 # the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
@@ -642,8 +715,62 @@ fi
 # both classifier-backed backends (tmux and herdr) - and every death-class
 # verdict reports unknown rather than trusting a possibly-stale status log as
 # the current state.
-[ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
-if ! pane_readable "$BACKEND_TARGET"; then
+#
+# Liveness comes from two independent reads, each made at most once and only
+# when an answer depends on it:
+#   the backend's recovery-grade classifier (fm_backend_agent_state), for the
+#     backends that own one - tmux, herdr, and orca;
+#   the operating system's process table (bin/fm-agent-proc-lib.sh): is an
+#     agent process running in this task's worktree.
+# fm_agent_liveness (bin/fm-agent-proc-lib.sh) owns how the two combine into
+# alive, dead, or unknown, and what counts as proof of death.
+#
+# Both reads report under `source: process`, never `pane`: a `pane` source is
+# what consumers take as a live ACTIVITY read (a busy harness), and "an agent
+# exists" is not activity.
+AGENT_STATE=''   # backend classifier verdict; '' = not read yet, none = no classifier
+NO_AGENT='no agent process in worktree'
+read_backend_agent_state() {
+  [ -z "$AGENT_STATE" ] || return 0
+  fm_agent_classifier_state "$TASK_BACKEND" "$BACKEND_TARGET"
+  AGENT_STATE=$FM_AGENT_CLASSIFIER
+}
+# LIVE: alive|dead|unknown, with LIVE_SOURCE and LIVE_DESC naming the evidence.
+# fm_agent_liveness owns the rule; this only words its verdict.
+LIVE=''
+resolve_liveness() {
+  [ -z "$LIVE" ] || return 0
+  fm_agent_liveness "$WT" "$HARNESS" "$TASK_BACKEND" "$BACKEND_TARGET" "$AGENT_STATE"
+  LIVE=$FM_AGENT_LIVE
+  AGENT_STATE=$FM_AGENT_CLASSIFIER
+  case "$LIVE" in
+    alive) LIVE_SOURCE=process LIVE_DESC="agent alive ($FM_AGENT_LIVE_DESC)" ;;
+    dead) LIVE_SOURCE=process LIVE_DESC=$NO_AGENT ;;
+    *) LIVE_SOURCE=none LIVE_DESC='' ;;
+  esac
+}
+
+# What the task last said, as a detail for a liveness answer. A dead agent's
+# last word matters most: `dead` after `done` is a finished task whose agent
+# exited, `dead` after `working` or `needs-decision` is work that stopped. It
+# stays a detail and never becomes the state, because the log cannot vouch for
+# a claim the agent may have moved on from before it died.
+case "$LOG_VERB" in
+  ''|*[!a-z-]*) LAST_EVENT='' ;;
+  *) LAST_EVENT="${SEP}last event: $LOG_VERB" ;;
+esac
+
+HAVE_TARGET=1
+if [ -z "$BACKEND_TARGET" ]; then
+  HAVE_TARGET=0
+  resolve_liveness
+  case "$LIVE" in
+    alive) ;;
+    dead) emit dead process "$NO_AGENT (no backend target recorded)$LAST_EVENT" ;;
+    *) emit unknown none "no backend target recorded" ;;
+  esac
+fi
+if [ "$HAVE_TARGET" = 1 ] && ! pane_readable "$BACKEND_TARGET"; then
   # A failed probe is not itself evidence the pane is gone: the herdr CLI can
   # error or stall under load, and tmux can fail to be executed at all (a
   # trimmed PATH) or answer non-definitively, while the pane is alive - a busy
@@ -666,41 +793,57 @@ if ! pane_readable "$BACKEND_TARGET"; then
   #             normal flow below instead of being discarded.
   #   anything else - the cheap probes themselves failed to answer or
   #             contradicted themselves, which is unknown, never death.
-  # Backends with no classifier (orca, zellij, and cmux all report unverified)
-  # keep their historical capture-failure-means-gone reading.
-  case "$TASK_BACKEND" in
-    tmux|herdr) AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
-    *) AGENT_STATE=none ;;
-  esac
+  # Orca's classifier (its terminal's process tree) is consulted too, but only
+  # its alive and dead verdicts change anything: a live agent whose scrollback
+  # read failed carries on to the normal flow, and a terminal holding only a
+  # shell says so. Any other Orca answer, and every backend with no classifier
+  # (zellij and cmux report unverified), keeps the historical
+  # capture-failure-means-gone reading.
+  #
+  # None of those non-alive verdicts is the last word, though: an agent process
+  # running in the worktree outlives a stale handle, so the process table is
+  # asked before anything is called gone. A live agent carries on to the normal
+  # flow below; a readable table with no agent turns the verdict into `dead`;
+  # an unreadable table leaves the historical `unknown` answer standing.
+  read_backend_agent_state
   case "$TASK_BACKEND:$AGENT_STATE" in
-    tmux:alive|herdr:alive)
-      ;;
-    tmux:missing|herdr:missing)
-      emit unknown none "backend target gone: $BACKEND_TARGET"
-      ;;
-    tmux:dead|herdr:dead)
-      emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
-      ;;
-    tmux:*|herdr:*)
-      emit unknown none "backend unreachable ($TASK_BACKEND endpoint state: $AGENT_STATE)"
-      ;;
-    *)
-      emit unknown none "backend target gone: $BACKEND_TARGET"
-      ;;
+    *:alive) GONE_DETAIL='' ;;
+    *:dead) GONE_DETAIL="backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)" ;;
+    tmux:missing|herdr:missing) GONE_DETAIL="backend target gone: $BACKEND_TARGET" ;;
+    tmux:*|herdr:*) GONE_DETAIL="backend unreachable ($TASK_BACKEND endpoint state: $AGENT_STATE)" ;;
+    *) GONE_DETAIL="backend target gone: $BACKEND_TARGET" ;;
   esac
+  if [ -n "$GONE_DETAIL" ]; then
+    resolve_liveness
+    case "$LIVE" in
+      alive) ;;
+      dead) emit dead process "$NO_AGENT${SEP}$GONE_DETAIL$LAST_EVENT" ;;
+      *) emit unknown none "$GONE_DETAIL" ;;
+    esac
+  fi
 fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # state is not meaningful for them; read their state from the status log only.
 # Only an exact busy verdict reports working here, and only an exact idle
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
-# unverified semantic state remains unknown.
-if [ "$KIND" != secondmate ]; then
+# unverified semantic state remains unknown - unless the agent is provably
+# running or provably gone, which is then what gets reported: the busy contract
+# not answering is no reason to hide that the agent is alive, or that it died.
+BUSY_VERDICT=''
+if [ "$KIND" != secondmate ] && [ "$HAVE_TARGET" = 1 ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+    *)
+      resolve_liveness
+      case "$LIVE" in
+        alive) emit alive "$LIVE_SOURCE" "$LIVE_DESC${SEP}harness state unavailable ($BUSY_VERDICT)" ;;
+        dead) emit dead process "$NO_AGENT$LAST_EVENT" ;;
+        *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+      esac
+      ;;
   esac
 fi
 
@@ -714,11 +857,35 @@ fi
 # `unknown` with the resolution note as `doing`. map_log_state is the single owner of
 # the verb->state mapping (including the configurable paused verb), so reusing its
 # `unknown` verdict as the "not a state" test needs no second verb list here.
+#
+# A trailing `working:` is the one state the log cannot vouch for on its own: it
+# was written by an agent that may since have died, and nothing appends a line
+# when that happens. So it is reported only while the agent is not provably gone.
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
+  if [ "$LOG_STATE" = working ]; then
+    resolve_liveness
+    [ "$LIVE" != dead ] || emit dead process "$NO_AGENT${SEP}last event: working: $(status_line_note "$LOG_LINE")"
+  fi
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi
 fi
+
+# Nothing claims a state. That is not the same as knowing nothing: say whether
+# the agent is running. An exact idle verdict from the busy contract plus a live
+# agent is `idle`; a live agent whose busy state was never read (a secondmate,
+# which idles on its own watcher, or a task with no recorded endpoint) is
+# `alive`.
+resolve_liveness
+case "$LIVE" in
+  alive)
+    if [ "${BUSY_VERDICT%% *}" = idle ]; then
+      emit idle "$LIVE_SOURCE" "$LIVE_DESC${SEP}harness idle (${BUSY_VERDICT#* })$LAST_EVENT"
+    fi
+    emit alive "$LIVE_SOURCE" "$LIVE_DESC$LAST_EVENT"
+    ;;
+  dead) emit dead process "$NO_AGENT$LAST_EVENT" ;;
+esac
 
 emit unknown none "no current-state source available"

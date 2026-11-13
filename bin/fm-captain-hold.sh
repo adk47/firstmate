@@ -30,6 +30,7 @@
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id>
+#   fm-captain-hold.sh open-ids
 #   fm-captain-hold.sh diverged
 #
 # `hold` places an existing task under an active captain hold, or creates the
@@ -140,6 +141,12 @@
 # recorded instead (bin/fm-backlog-transition-lib.sh owns that transition), so
 # holding the very work item a question gates is safe; `answer` remains the
 # only act that closes a captain call.
+#
+# `open-ids` is the same predicate for a caller with many candidates: it prints
+# the id of every open captain call in this home, one per line, from a single
+# backlog listing, and exits 2 printing nothing when that listing cannot be read
+# or does not have the shape it parses. bin/fm-decisions-sweep.sh reads it once
+# so it never closes a decision record a live captain call still stands behind.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -1478,6 +1485,35 @@ command_open() {  # <task-id>
   exit 2
 }
 
+# Every open captain call in one listing (see the header). The hold kind is the
+# listing's LAST field and a bare slug, so a quoted title holding commas cannot
+# shift it; the header line must name it last and the stated count must equal
+# the rows read, or the listing is not the shape this parses and the answer is
+# "cannot tell", never a shorter list.
+command_open_ids() {
+  local data out
+  [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+  fm_tasks_axi_compatible || { printf 'fm-captain-hold: compatible tasks-axi is required\n' >&2; exit 2; }
+  data=$(fm_backlog_data_absolute "$DATA") \
+    || { printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2; exit 2; }
+  out=$(fm_backlog_row_list "$data" --fields hold_kind) \
+    || { printf 'fm-captain-hold: the backlog listing could not be read\n' >&2; exit 2; }
+  printf '%s\n' "$out" | LC_ALL=C awk -F, '
+    /^count: [0-9]+$/ { split($0, c, " "); count = c[2]; have_count = 1; next }
+    /^tasks\[[0-9]+\]\{.*\}:$/ { if ($0 ~ /,hold_kind\}:$/) shaped = 1; next }
+    /^  [A-Za-z0-9._-]+,/ {
+      rows++
+      id = $1
+      sub(/^ +/, "", id)
+      if ($2 != "done" && $NF == "captain") ids[++n] = id
+    }
+    END {
+      if (!have_count || rows != count || (count > 0 && !shaped)) exit 2
+      for (i = 1; i <= n; i++) print ids[i]
+    }
+  ' || { printf 'fm-captain-hold: the backlog listing is not in the expected shape\n' >&2; exit 2; }
+}
+
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   answer) shift; command_answer "$@" ;;
@@ -1488,6 +1524,7 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
+  open-ids) shift; command_open_ids "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
