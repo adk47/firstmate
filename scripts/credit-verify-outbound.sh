@@ -147,11 +147,28 @@ read -r -a APPLY_RETRY_SLEEPS <<<"$(cfg CVO_APPLY_RETRY_SLEEPS '15 30 60 60 120'
 APPLY_RETRY_CAP_S="$(cfg CVO_APPLY_RETRY_CAP_S 600)"   # hard cap from the first transient rc, whatever the budget
 read -r -a TRANSIENT_RETRY_SLEEPS <<<"$(cfg CVO_TRANSIENT_RETRY_SLEEPS '30 60 120')"  # 4 read-only attempts
 DEFERRED=0                             # 1 once any family deferred: the tick then exits 2, never 0
-CHECK_ENTRIES="$(cfg CVO_CHECK_ENTRIES 200)"
+# [key=walk-size] (2026-11-13): the page a PAGED family (uvn-status, reply-due, r1, proof-need-ask) walks per tick, in
+# LIST ENTRIES that still need a live-gate check (p1 599 / r5 598). It is the knob that sets how many notes a tick sends, and CVO_CAP is not: the cap
+# bounds ACCEPTS (250, and the policy tick_cap holds uvn-status free at 60), but a tick can only accept from the
+# entries it walked. Reported from run.log 2026-11-13 01:10:23Z: 200 walked, 15 sendable, 15 notes sent, 2,319 not
+# walked - about 7.5% of a page is sendable, so "15-17 a run" was the page size, never a ceiling. Raised 200 -> 600.
+#   Deadline: SEND_WORST_S = 2 x max(CHECK_ENTRIES, CAP) x CHECK_S_PER_USER + RESERVE_PAD_S = 2 x 600 x 4 + 300 =
+#   5,100 s against TICK_HARD_S 6,900 s: 1,800 s to spare. The largest page that fits at these numbers is 825
+#   (2 x 825 x 4 + 300 = 6,900); the bats suite pins both, so a raise past it fails in CI, not on node-8.
+#   What 600 does NOT promise: family() estimates the same 5,100 s before each paged family starts, so one that starts
+#   more than 1,800 s into the tick has its page CUT to (TICK_HARD_S - elapsed - RESERVE_PAD_S) / (2 x
+#   CHECK_S_PER_USER) entries ([key=tick-budget-page-fit]). Started at the same second that is never a smaller page
+#   than 200 gave, but it is not 600 either, and a family ahead of it that now walks more starts it later. No
+#   deadline, budget, cap or stop RULE moves with this number.
+#   Cost: the check and the bodies each walk the page, so the read-only gate calls per paged family per tick go from
+#   at most 400 to at most 1,200; and the runner's unmeasured stop is a SHARE of the page (max(5, 10%)), so a full
+#   page's bar is 60 users where it was 20.
+#   Revert: put 200 back here, and in the three bats cases that name 600 as the shipped page.
+CHECK_ENTRIES="$(cfg CVO_CHECK_ENTRIES 600)"
 # [key=tick-budget-page-fit] (2026-11-11): the smallest page a paged family will still run with. A page that does not
 # fit before TICK_HARD_S is CUT to what fits (see family()); below this floor the setup cost is not worth the walk, so
 # the family waits for the next tick instead. This is a floor, never a target - it does not raise a page.
-PAGE_FLOOR="$(cfg CVO_PAGE_FLOOR 20)"   # p1 599 / r5 598: a uvn family walks at most this many LIST ENTRIES a tick
+PAGE_FLOOR="$(cfg CVO_PAGE_FLOOR 20)"
 CHECK_S_PER_USER="$(cfg CVO_CHECK_S_PER_USER 4)"   # ~10-15 s a live-gate check on 4 read-only workers (#1596)
 RESERVE_PAD_S="$(cfg CVO_RESERVE_PAD_S 300)"      # + the replica read (~86 s) and the health / zero-read rails
 # [key=note-step-timeout] / [key=note-step-budget] (d2 r5 750, amended by Fable 753): TWO numbers, not one.
@@ -514,7 +531,7 @@ install -d -m 700 "$STATE" "$OUT_ROOT" "$OUT" || exit 2
 # slow the tick down, it stops it sending - permanently and silently. `family()` refuses to start a family whose worst
 # case (2 x walk x CHECK_S_PER_USER + RESERVE_PAD_S) does not fit before TICK_HARD_S, and uvn-status is the family that
 # actually sends. On 2026-11-11 00:04Z TICK_BUDGET_S/TICK_HARD_S were cut 6000/6900 -> 1500/1700 on the server to fit a
-# 30-minute cron: 1700 < 1900 (the worst case even at the old 200-entry page, and 5100 at the 600-entry page), so
+# 30-minute cron: 1700 < 1900 (the worst case even at the old 200-entry page, and 5100 at today's 600-entry page), so
 # uvn-status could never start. Every tick from 00:49Z ended "credit families: FAILED at the unmeasured bar, the
 # deadline or a failed apply" with the ledger untouched; the last real acknowledgement was 2026-11-10T03:06:37Z.
 # The gate itself is right (QA #1587) - a family that cannot finish must not start - so the defect is the NUMBER, and
