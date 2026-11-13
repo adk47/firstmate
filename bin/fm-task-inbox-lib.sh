@@ -39,6 +39,10 @@
 #   at=<utc timestamp>
 #   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
 #   coalesce=<key>             present only on a coalescing record (below)
+#   dedup=<key>                present only on a record whose caller supplied a
+#                              canonical delivery identity; the idempotent
+#                              dedup then matches that key, not the body
+#                              (fm_task_inbox_write_idempotent)
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
@@ -309,8 +313,8 @@ fm_task_inbox_verify() {  # <record-path> <text>
 # taken between the scan and the link costs one re-scan and the next sequence.
 # Caller normally holds .seq.lock, which keeps a collision rare; the guarantee
 # holds with or without it, because the link is the arbiter.
-_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [coalesce-key]
-  local dir=$1 text=$2 delivery_mode=${3:-} coalesce=${4:-}
+_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [coalesce-key] [dedup-key]
+  local dir=$1 text=$2 delivery_mode=${3:-} coalesce=${4:-} dedup=${5:-}
   local seq tmp rec attempt=0
   local attempts=$_FM_TASK_INBOX_PUBLISH_ATTEMPTS
   tmp=$(mktemp "$dir/.staging.XXXXXX") || return 1
@@ -319,6 +323,7 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [co
     printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
     [ -z "$coalesce" ] || printf 'coalesce=%s\n' "$coalesce"
+    [ -z "$dedup" ] || printf 'dedup=%s\n' "$dedup"
     printf -- '--\n'
     printf '%s' "$text"
   } > "$tmp"; then
@@ -392,14 +397,54 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode]
 # secondmate request embeds a per-request correlation token in its body. The
 # local plane keeps plain fm_task_inbox_write: its outcome is synchronous, so
 # a repeated identical local steer is a deliberate new instruction.
-fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mode]
-  local state=$1 task=$2 text=$3 delivery_mode=${4:-} dir shadow lock want have f base rec='' status=0
+# A caller whose body renders more than its identity passes that identity as
+# <dedup-key>: the record then carries it as dedup=<key> and the scan matches on
+# the key instead of the body, so a rendering difference cannot split one event
+# into two records.
+fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mode] [dedup-key]
+  local state=$1 task=$2 text=$3 delivery_mode=${4:-} dedup_key=${5:-} dir shadow lock want have f base rec='' status=0
   dir=$(fm_task_inbox_dir "$state" "$task")
   fm_task_inbox_prepare_dirs "$dir" || return 1
   shadow=$(fm_task_inbox_shadow_dir "$dir")
   lock="$dir/.seq.lock"
   fm_task_inbox_lock_acquire "$lock" || return 1
-  if want=$(mktemp "$dir/.dedup.XXXXXX") && have=$(mktemp "$dir/.dedup.XXXXXX"); then
+  if [ -n "$dedup_key" ]; then
+    case "$dedup_key" in
+      *[!A-Za-z0-9._-]*)
+        fm_lock_release "$lock"
+        return 1
+        ;;
+    esac
+  fi
+  if [ -n "$dedup_key" ]; then
+    for f in "$dir"/*.msg "$dir/handled"/*.msg "$shadow"/*; do
+      [ -e "$f" ] || [ -L "$f" ] || continue
+      if [ "$delivery_mode" = fire-and-forget ]; then
+        fm_task_inbox_is_fire_and_forget "$f" || continue
+      elif fm_task_inbox_is_fire_and_forget "$f"; then
+        continue
+      fi
+      [ "$(fm_task_inbox_dedup_key "$f" 2>/dev/null)" = "$dedup_key" ] || continue
+      base=${f##*/}
+      base=${base%.msg}
+      rec="$dir/$base.msg"
+      if [ -e "$rec" ] || [ -L "$rec" ]; then
+        :
+      elif [ -e "$dir/handled/$base.msg" ]; then
+        rec="$dir/handled/$base.msg"
+      elif [ -e "$shadow/$base" ]; then
+        ln "$shadow/$base" "$rec" 2>/dev/null || true
+        if [ ! -e "$rec" ]; then
+          rec=''
+          continue
+        fi
+      else
+        rec=''
+        continue
+      fi
+      break
+    done
+  elif want=$(mktemp "$dir/.dedup.XXXXXX") && have=$(mktemp "$dir/.dedup.XXXXXX"); then
     if printf '%s' "$text" > "$want"; then
       for f in "$dir"/*.msg "$dir/handled"/*.msg "$shadow"/*; do
         [ -e "$f" ] || [ -L "$f" ] || continue
@@ -446,12 +491,31 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
     status=1
   fi
   if [ "$status" -eq 0 ] && [ -z "$rec" ]; then
-    rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode") || status=1
+    rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode" "" "$dedup_key") || status=1
   fi
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1
-  fm_task_inbox_verify "$rec" "$text" || return 1
+  if [ -n "$dedup_key" ]; then
+    fm_task_inbox_verify_dedup "$rec" "$dedup_key" || return 1
+  else
+    fm_task_inbox_verify "$rec" "$text" || return 1
+  fi
   printf '%s' "$rec"
+}
+
+# Verify a published record by the dedup key it carries: the record in the inbox
+# root, or the acknowledged copy the worker already moved under handled/.
+# Identity is the key, so a record rendered from the same identity but with a
+# different body still verifies.
+fm_task_inbox_verify_dedup() {  # <record-path> <dedup-key>
+  local rec=$1 key=$2 acked
+  if [ -f "$rec" ] && [ ! -L "$rec" ] \
+    && [ "$(fm_task_inbox_dedup_key "$rec" 2>/dev/null)" = "$key" ]; then
+    return 0
+  fi
+  acked="${rec%/*}/handled/${rec##*/}"
+  [ -f "$acked" ] && [ ! -L "$acked" ] \
+    && [ "$(fm_task_inbox_dedup_key "$acked" 2>/dev/null)" = "$key" ]
 }
 
 # The coalesce key a record carries, or fail when it carries none.
@@ -460,6 +524,16 @@ fm_task_inbox_coalesce_key() {  # <record-path>
   awk '
     $0 == "--" { exit }
     index($0, "coalesce=") == 1 { key = substr($0, 10) }
+    END { if (key == "") exit 1; print key }
+  ' "$1"
+}
+
+# The dedup key a record carries, or fail when it carries none.
+fm_task_inbox_dedup_key() {  # <record-path>
+  [ -f "$1" ] || return 1
+  awk '
+    $0 == "--" { exit }
+    index($0, "dedup=") == 1 { key = substr($0, 7) }
     END { if (key == "") exit 1; print key }
   ' "$1"
 }

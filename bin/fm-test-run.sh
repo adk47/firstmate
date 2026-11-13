@@ -330,7 +330,7 @@ family_for_basename() {
       printf '%s\n' backend-dispatch
       ;;
     fm-check-unregister.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
-    fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
+    fm-pr-event.test.sh|fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
@@ -652,6 +652,7 @@ tests/fm-pi-branch-responsiveness-live-e2e.test.sh 21
 tests/fm-pi-primary-live-e2e.test.sh 20
 tests/fm-pi-watch-extension.test.sh 78360
 tests/fm-pr-check-security.test.sh 185914
+tests/fm-pr-event.test.sh 9587
 tests/fm-procevent-quota.test.sh 1949
 tests/fm-procevent-when.test.sh 20460
 tests/fm-procevent.test.sh 75501
