@@ -46,8 +46,12 @@ test_fixture_root_gone_after_sigterm() {
     while :; do sleep 0.1; done
   ' &
   pid=$!
+  # The child sources tests/lib.sh before it can publish anything, and that
+  # bootstrap does real work (Git-config isolation, an orphan sweep). This case
+  # is about the TERM cleanup, not the bootstrap's latency, so the wait is a
+  # generous real bound rather than a tight one.
   tries=0
-  while [ "$tries" -lt 100 ]; do
+  while [ "$tries" -lt 600 ]; do
     [ -s "$dirfile" ] && break
     sleep 0.05
     tries=$((tries + 1))

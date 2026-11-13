@@ -1272,7 +1272,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         else
           RUN_STATE=failed; RUN_DETAIL="run failed"
         fi ;;
-      cancelled) RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
+      cancelled) RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
   else
@@ -1298,7 +1298,7 @@ if [ "$HAVE_RUN" = 1 ]; then
           fi ;;
         cancelled)
           if nm_reclassify_failed_run_as_held_green; then :; else
-            RUN_STATE=failed; RUN_DETAIL="run cancelled"
+            RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict"
           fi ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
@@ -1331,7 +1331,7 @@ if [ "$HAVE_RUN" = 1 ]; then
           fi ;;
         cancelled)
           if nm_reclassify_failed_run_as_held_green; then :; else
-            RUN_STATE=failed; RUN_DETAIL="run cancelled"
+            RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict"
           fi ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
