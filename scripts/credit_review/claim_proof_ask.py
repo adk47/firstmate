@@ -56,7 +56,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from . import proof_parts, verify_ledger, verify_notify
+from . import apply_queue, proof_parts, verify_ledger, verify_notify
 from .uvn_status import Query, accounts_of, gmail_held, trino
 
 CAMPAIGN = verify_ledger.CLAIM_CAMPAIGN
@@ -417,9 +417,13 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
         seen.add(uid)
         payloads.append(_payload(c, acct))
     report.users = len(payloads)
+    # TEMPORARY (apply_queue.py names the removal condition): a first note's apply goes through the durable queue
+    # when policies/apply-queue.json switches this campaign on and /etc/hydra/apply-queue.disabled is absent.
+    # None is the direct path. Reminders returned above: a second note on the same claim is never queued.
+    queue = apply_queue.session_for(CAMPAIGN, ledger_path or verify_ledger.DEFAULT_PATH) if mode == "apply" else None
     verify_notify.send_all(payloads, report, mode=mode, wrapper=wrapper, runner=runner,
                            extra=["--campaign", CAMPAIGN], preview_dir=preview_dir,
-                           check_recipients=check_recipients and mode != "apply")
+                           check_recipients=check_recipients and mode != "apply", queue=queue)
     if mode == "apply":
         export_asked(db, export_path)
     return report

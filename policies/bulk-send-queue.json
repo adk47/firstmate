@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "_about": "The bulk send queue (scripts/credit_review/bulk_queue.py; docs/credit-verification/bulk-send-queue.md). `enabled` and a route's `enabled` are both false: this ships UNARMED and turning either on is a captain decision made in a PR, never a merge side effect. `routes` is the captain's order of 2026-11-12 (our own chat, then email, then Intercom only where a thread already lives there). `batch_capable` says whether the queue may send on a route at all, and `idempotent` says whether the provider de-duplicates on our key, which decides what happens to a job a dead worker left `attempted`: re-presented under the same key, or `uncertain` and never sent again. `stages` maps a person's stage to the ONE message class that stage may ever get; only stages where the work is on us are listed, because an ask is scripts/credit_review/need_asks.py's and is never sent from here. An email template is sent only when the sha256 of its reviewed source is pinned in `template_sha256` (computed by scripts/request_comms/channels.py template_source_sha256); with no pin every job on that key is held.",
+  "enabled": false,
+  "routes": {
+    "chat": {
+      "batch_capable": false,
+      "idempotent": false,
+      "enabled": false,
+      "why": "our chat has no Muso-to-user send: core-backend ChatBackend mints a room only for an accepted connection between two users, every room is born Megolm-encrypted (TuwunelMatrixService.ts), and the homeserver is one replica by design. It is 1:1 between customers today, so email carries the batch."
+    },
+    "email": {
+      "batch_capable": true,
+      "idempotent": true,
+      "enabled": false,
+      "pod_concurrency": 8,
+      "template_keys": {
+        "status-doc-received": "credit_status_doc_received",
+        "status-team-review": "credit_status_team_review"
+      },
+      "template_sha256": {},
+      "why": "send-gateway /v1/send is at-most-once per idempotency_key (a repeat answers the first send's row), so a job with no recorded outcome is safe to present again."
+    },
+    "intercom": {
+      "batch_capable": false,
+      "idempotent": false,
+      "enabled": false,
+      "why": "Intercom keeps no key of ours, so a send with no recorded outcome can never be retried safely. A person reachable only on an Intercom thread stays on scripts/intercom-verify-request.sh, which owns that send."
+    }
+  },
+  "stages": {
+    "doc_received": "status-doc-received",
+    "team_review": "status-team-review"
+  }
+}

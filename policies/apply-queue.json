@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "_doc": "TEMPORARY. Which campaigns' apply goes through the durable send queue in scripts/credit_review/apply_queue.py instead of calling the gate directly. Only an explicit true switches a campaign on; an unreadable file, a missing row, or the kill file /etc/hydra/apply-queue.disabled is the direct path, which is the one that ran before the queue existed. The queue changes no cap, no copy, no audience and no tick: it records each attempt before the gate is called and each outcome when the gate answers. Remove this file and the module when bulk_queue.py's email route carries the family (send-gateway needs a reviewed claim-proof-ask template first). Add a campaign here only after the one before it has passed `apply_queue.py verify` on its first 100 sends.",
+  "campaigns": {
+    "claim-proof-ask": {
+      "enabled": true,
+      "since": "2026-11-12",
+      "why": "Aaron 2026-11-12: do something temporary to get verifications through now; one family first, the starved claim queue",
+      "accept": "first 100 sends with requests_with_two_notes = 0, orphans = 0 and sent_without_ledger_row = 0 in `apply_queue.py verify --ledger /var/lib/hydra/credit-review/ledger.sqlite3`"
+    }
+  }
+}

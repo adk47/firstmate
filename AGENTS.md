@@ -1221,6 +1221,31 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   token resolve, per-item failure isolation, writes serialised after reads, gates still
   run).
 
+## The bulk send queue: a verdict per person, a durable queue, and it ships unarmed
+
+`scripts/credit_review/bulk_queue.py` (doc `docs/credit-verification/bulk-send-queue.md`, policy
+`policies/bulk-send-queue.json`) is the replacement for the per-message apply subprocess that loses its outcomes
+past ~80 sends. It is **not wired to production**: the policy is `enabled: false`, no template is pinned, no timer
+runs it, and the builder that fills its `people` table does not exist yet.
+
+- **It is a transport, not a second sender or decider.** It writes no copy (every body passes `lib/copy_gate`),
+  approves nothing and sends no ask (`need_asks.py` owns asks).
+- **The guardrails are triggers, not caller discipline**: no job without a `send` verdict, one job per
+  (user, stage) ever, no `sent` without a recorded `attempted`, settled rows and the event log never rewritten.
+- **A dead worker's `attempted` row is re-presented only where the provider de-duplicates on our key** (email:
+  send-gateway is at-most-once per `idempotency_key`). Anywhere else it becomes `uncertain`, which only a named
+  person's `resolve` settles. Never add a route as `idempotent: true` without reading the provider's own code.
+- **The send rate is the gateway's warm-up ceiling, not our code**: 2,500 credit emails per UTC day on `notify`
+  (H-DevOps `78-send-gateway.yaml` `WARMUP_CEILINGS`), against 6,327 sends/min measured for the queue itself.
+  Our chat has no Muso-to-user send, so it carries no batch.
+- `bench` and `chaos` take no `--db`, for the reason `scale_drain.py chaos` takes no `--ledger`.
+- **Until that queue has an email template for a family, `scripts/credit_review/apply_queue.py` is the TEMPORARY
+  queue around the gate call itself**, switched on per campaign in `policies/apply-queue.json` (only
+  `claim-proof-ask`; kill file `/etc/hydra/apply-queue.disabled` returns to the direct path). It commits
+  `attempted` before `intercom-verify-request.sh` runs and reads each outcome from the **verify ledger**, never
+  from the gate's stdout. It changes no cap, audience, copy or tick, and `verify_notify`'s report is identical
+  with it on. Add a campaign only after the one before passed `apply_queue.py verify` on its first 100 sends.
+
 ## The standing review reads; it never steers
 
 `scripts/standing_review/review.py` (tick `scripts/standing-review-tick.sh`, every 2 h on ak47, the only box that

@@ -1268,10 +1268,14 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
              pace_seconds: float = 0.0, preview_dir: str | None = None, reminder: bool = False,
              check_recipients: bool = False, workers: int | None = None,
              walked: int | None = None, ledger_path: str | None = None,
-             campaign: str = "") -> None:
+             campaign: str = "", queue: Any = None) -> None:
     """``ledger_path`` + ``campaign`` turn on the read-failure hold for this lane (Fable r5 2026-11-06 00:53Z): a user
     whose own send-time read failed on an earlier tick is SKIPPED until the hold expires, and a read that works clears
-    the streak. Both are apply-only; a dry run neither honours nor writes a hold."""
+    the streak. Both are apply-only; a dry run neither honours nor writes a hold.
+
+    ``queue`` (TEMPORARY, an ``apply_queue.Session``; apply only) puts a durable intent around each gate call: the
+    attempt is committed before the gate runs and its outcome when the gate answers. The gate's answer comes back
+    unchanged, so every counter and the outcomes file are exactly what they are without it."""
     if PREVIEW_ONLY is not None and preview_dir and mode != "apply" and not check_recipients:
         payloads = [p for p in payloads if _uid(p) in PREVIEW_ONLY]          # never a gate call for the rest
     if APPLY_ONLY is not None and mode == "apply":
@@ -1333,7 +1337,8 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
             report.halted = str(exc)[:300]
             return
     try:
-        _send_loop(payloads, report, mode=mode, pace_seconds=pace_seconds, pre=pre, gate=gate, extra=extra,
+        send_gate = queue.open(payloads, gate) if (queue is not None and mode == "apply") else gate
+        _send_loop(payloads, report, mode=mode, pace_seconds=pace_seconds, pre=pre, gate=send_gate, extra=extra,
                    preview_dir=preview_dir, reminder=reminder, walked=walked, ledger_path=ledger_path,
                    campaign=campaign)
     finally:
