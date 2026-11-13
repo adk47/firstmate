@@ -79,13 +79,13 @@
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail. A busy verdict whose
-#      only evidence is a stored state/<id>.busy-state record is corroborated
-#      against a live agent process in the recorded worktree
-#      (bin/fm-lane-liveness-lib.sh) before it may read working: the record
-#      survives a hard kill, so on its own it reports a corpse as working. No
-#      such process reads unknown/stale, and an unreadable process table reads
-#      unknown rather than dead.
+#      `resolved` never become current state or detail. Any busy verdict, from a
+#      stored state/<id>.busy-state record or from a pull of the harness's own
+#      artifact, is corroborated against a live agent process in the recorded
+#      worktree (bin/fm-lane-liveness-lib.sh) before it may read working: both
+#      are last-written evidence that survives a hard kill, so on its own such a
+#      verdict reports a corpse as working. No such process reads unknown/stale,
+#      and an unreadable process table reads unknown rather than dead.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -844,18 +844,12 @@ if [ "$KIND" != secondmate ] && [ "$HAVE_TARGET" = 1 ]; then
   BUSY_SOURCE=${BUSY_VERDICT#* }
   case "${BUSY_VERDICT%% *}" in
     busy)
-      if fm_busy_source_is_record "$BUSY_SOURCE"; then
-        fm_lane_agent_live_in_worktree "$WT"
-        case $? in
-          0) emit working pane "harness busy ($BUSY_SOURCE)" ;;
-          1) emit unknown pane "busy record with no live agent process in the worktree (stale: $BUSY_SOURCE)" ;;
-          *) emit unknown pane "busy record unconfirmed: cannot read process working directories ($BUSY_SOURCE)" ;;
-        esac
-      else
-        # A live PULL source is re-read from the harness's own artifact on every
-        # call, so it is its own corroboration and needs no process check.
-        emit working pane "harness busy ($BUSY_SOURCE)"
-      fi
+      fm_lane_agent_live_in_worktree "$WT"
+      case $? in
+        0) emit working pane "harness busy ($BUSY_SOURCE)" ;;
+        1) emit unknown pane "busy verdict with no live agent process in the worktree (stale: $BUSY_SOURCE)" ;;
+        *) emit unknown pane "busy verdict unconfirmed: cannot read process working directories ($BUSY_SOURCE)" ;;
+      esac
       ;;
     idle) ;;
     *)

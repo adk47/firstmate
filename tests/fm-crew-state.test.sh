@@ -989,11 +989,12 @@ test_no_run_busy_record_without_live_agent_is_stale() {
   pass "a busy record with no live agent process reads unknown/stale, never working"
 }
 
-# The corroboration must not fire for a live PULL source: grok's rendered tail
-# is re-read from the pane on every call, so it cannot go stale the way a
-# record does, and a grok lane with no process in the worktree still reads
-# working from its own verified signature.
-test_no_run_grok_pull_source_needs_no_corroboration() {
+# A PULL source is last-written evidence too: grok's rendered tail is only
+# re-read, and a hard-killed grok leaves the busy marker in the pane forever. So
+# a pull-sourced busy verdict is corroborated exactly like a record: with no live
+# agent process in the worktree it reads unknown/stale, and with one it reads
+# working.
+test_no_run_grok_pull_source_is_corroborated() {
   reset_fakes
   local d; d=$(new_case busy-grok-pull)
   make_repo_on_branch "$d/wt" fm/feat-h-pull
@@ -1004,10 +1005,17 @@ test_no_run_grok_pull_source_needs_no_corroboration() {
   FM_FAKE_BUSY=1
   FM_FAKE_BUSY_TEXT='Ctrl+c:cancel'
   export FM_FAKE_BUSY_TEXT
+  # The agent was hard-killed: only the pane's last busy marker survives.
   local out; out=$(run_crew_state "$d" feat-h-pull)
-  assert_contains "$out" "state: working" "a live pull source needs no process corroboration"
+  assert_not_contains "$out" "state: working" "a pull-sourced busy verdict with no live agent must not read working"
+  assert_contains "$out" "state: unknown" "a stale pull-sourced busy verdict reads unknown"
+  assert_contains "$out" "grok-regex" "the verdict still names the pull source"
+  # The same artifact with a live agent in the worktree is real work.
+  spawn_live_agent "$d" "$d/wt" >/dev/null || fail "could not spawn the live agent fixture"
+  out=$(run_crew_state "$d" feat-h-pull)
+  assert_contains "$out" "state: working" "a pull-sourced busy verdict with a live agent reads working"
   assert_contains "$out" "grok-regex" "the verdict names the pull source"
-  pass "a live pull source reads working without a process corroboration"
+  pass "a pull-sourced busy verdict is corroborated against a live agent"
 }
 
 # A converted adapter must NOT read working from rendered footer text: the
@@ -1044,6 +1052,9 @@ test_no_run_grok_uses_isolated_fallback() {
   FM_FAKE_BUSY=1
   FM_FAKE_BUSY_TEXT='Ctrl+c:cancel'
   export FM_FAKE_BUSY_TEXT
+  # A busy verdict is corroborated against a live agent process in the worktree,
+  # so the fixture must actually have one.
+  spawn_live_agent "$d" "$d/wt" >/dev/null || fail "could not spawn the live agent fixture"
   local out; out=$(run_crew_state "$d" feat-h3)
   assert_contains "$out" "state: working" "grok busy tail -> working"
   assert_contains "$out" "grok-regex" "the grok verdict names its isolated fallback source"
@@ -1063,6 +1074,9 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   FM_FAKE_TMUX_MISSING=1
   FM_FAKE_HERDR_BUSY=1
   FM_FAKE_HERDR_AGENT_STATUS=working
+  # A busy verdict is corroborated against a live agent process in the worktree,
+  # so the fixture must actually have one.
+  spawn_live_agent "$d" "$d/wt" >/dev/null || fail "could not spawn the live agent fixture"
   local out; out=$(run_crew_state "$d" feat-herdr)
   assert_contains "$out" "state: working" "herdr native busy -> working"
   assert_contains "$out" "source: pane" "herdr native busy -> pane source"
@@ -1125,6 +1139,9 @@ test_no_run_herdr_alive_with_failed_read_stays_live() {
   # pair answers: the pane is present and its agent is working.
   FM_FAKE_HERDR_READ_FAIL=1
   FM_FAKE_HERDR_AGENT_STATUS=working
+  # A busy verdict is corroborated against a live agent process in the worktree,
+  # so the fixture must actually have one.
+  spawn_live_agent "$d" "$d/wt" >/dev/null || fail "could not spawn the live agent fixture"
   local out; out=$(run_crew_state "$d" feat-herdr-alive)
   assert_contains "$out" "state: working" "an alive endpoint with a failed scrollback read stays live"
   assert_not_contains "$out" "backend unreachable" "an authoritative alive answer is never unreachable"
@@ -2307,7 +2324,7 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_busy_record_without_live_agent_is_stale
-test_no_run_grok_pull_source_needs_no_corroboration
+test_no_run_grok_pull_source_is_corroborated
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture

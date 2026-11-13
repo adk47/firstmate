@@ -27,7 +27,8 @@ TMP_ROOT=$(fm_test_tmproot fm-fleet-integrity)
 # `sleep` under the wanted name is what makes `ps -o comm=` report that name, so
 # the shared process vocabulary classifies it as an agent.
 spawn_named_process() {  # <dir> <name> <cwd>
-  local dir=$1 name=$2 cwd=$3 bin="$1/$2"
+  local dir=$1 name=$2 cwd=$3 bin
+  bin="$dir/$name"
   mkdir -p "$dir"
   cp "$(command -v sleep)" "$bin" || return 1
   chmod +x "$bin" || return 1
@@ -68,6 +69,14 @@ make_idle_lane() {  # <case-dir> <id> <worktree>
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" "$id")
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" "$id" idle --gen "$gen" \
     --source claude-hook --event stop
+}
+
+# A worktree holding one commit and no remote: `git rev-list --count HEAD --not
+# --remotes` counts it as unlanded work.
+git_worktree_with_unlanded_commit() {  # <dir>
+  mkdir -p "$1" || return 1
+  git -C "$1" init -q || return 1
+  git -C "$1" -c user.name=fm -c user.email=fm@example.invalid commit -q --allow-empty -m unlanded || return 1
 }
 
 run_check() {  # <case-dir>
@@ -144,6 +153,58 @@ test_done_claim_with_uncommitted_work_is_reported() {
   assert_contains "$out" "claims done" "the report names the lane's claim"
   assert_contains "$out" "uncommitted" "the report names the worktree's uncommitted work"
   pass "a non-working claim that disagrees with the worktree is reported"
+}
+
+# --- only a terminal claim is compared with the worktree -------------------
+
+# A freshly spawned lane writes no status line until its crew reports one, so it
+# has no claim at all. That is not a disagreeing claim, and a dirty worktree at
+# that moment is expected.
+test_lane_without_a_claim_is_silent() {
+  local d out
+  d="$TMP_ROOT/no-claim"
+  mkdir -p "$d/fresh-a"
+  make_home "$d" "lane-fresh:$d/fresh-a"
+  git -C "$d/fresh-a" init -q || fail "could not init the lane worktree"
+  printf 'uncommitted\n' > "$d/fresh-a/wip.txt"
+  spawn_named_process "$d/bin" pi "$d/fresh-a" >/dev/null || fail "could not spawn lane-fresh's agent"
+  sleep 0.2
+  out=$(run_check "$d")
+  [ -z "$out" ] || fail "a lane with no status line is not a disagreeing claim, got: $out"
+  pass "a freshly spawned lane with a dirty worktree and no claim is silent"
+}
+
+# `resolved:` is a decision-closing event that bin/fm-classify-lib.sh
+# deliberately keeps out of run-state, so a lane whose last line is `resolved:`
+# has no claim either.
+test_lane_whose_last_line_is_resolved_is_silent() {
+  local d out
+  d="$TMP_ROOT/resolved-claim"
+  mkdir -p "$d/resolved-a"
+  make_home "$d" "lane-resolved:$d/resolved-a"
+  git -C "$d/resolved-a" init -q || fail "could not init the lane worktree"
+  printf 'uncommitted\n' > "$d/resolved-a/wip.txt"
+  printf 'resolved: the decision was closed\n' > "$d/state/lane-resolved.status"
+  spawn_named_process "$d/bin" pi "$d/resolved-a" >/dev/null || fail "could not spawn lane-resolved's agent"
+  sleep 0.2
+  out=$(run_check "$d")
+  [ -z "$out" ] || fail "a trailing resolved: is not a claim, got: $out"
+  pass "a lane whose last status line is resolved: is silent"
+}
+
+# A waiting lane (parked, paused, blocked) is not finished with its worktree, so
+# unlanded commits there are expected rather than a disagreement.
+test_parked_lane_with_unlanded_commits_is_silent() {
+  local d out
+  d="$TMP_ROOT/parked-claim"
+  make_home "$d" "lane-parked:$d/parked-a"
+  git_worktree_with_unlanded_commit "$d/parked-a" || fail "could not prepare the lane worktree"
+  printf 'needs-decision: which option?\n' > "$d/state/lane-parked.status"
+  spawn_named_process "$d/bin" pi "$d/parked-a" >/dev/null || fail "could not spawn lane-parked's agent"
+  sleep 0.2
+  out=$(run_check "$d")
+  [ -z "$out" ] || fail "a parked lane is not a finished claim, got: $out"
+  pass "a parked lane with unlanded commits is silent"
 }
 
 # --- a cleared condition clears the recorded verdict -----------------------
@@ -234,6 +295,9 @@ test_silent_when_every_lane_is_live
 test_names_exactly_the_dead_lanes
 test_idle_lane_is_walked
 test_done_claim_with_uncommitted_work_is_reported
+test_lane_without_a_claim_is_silent
+test_lane_whose_last_line_is_resolved_is_silent
+test_parked_lane_with_unlanded_commits_is_silent
 test_cleared_condition_clears_the_record
 test_remote_secondmate_is_skipped
 test_torn_down_worktree_is_skipped

@@ -32,18 +32,23 @@
 # nothing here signals a process or writes anything but its own stamp and
 # record; the claim comparison adds only local `git status` and `git rev-list`
 # reads inside each recorded worktree.
-# The lane's last status-log line is its CLAIM. When that claim is not working
-# and the worktree still holds uncommitted files or unlanded commits, the claim
-# and the worktree disagree and the lane is reported. A working claim is not
-# compared: work in progress is expected to hold work.
+# The lane's last status-log line is its CLAIM, and only a TERMINAL claim is
+# compared: done or failed. A done or failed lane that still holds uncommitted
+# files or unlanded commits is reported, because the claim and the worktree
+# disagree. A working claim is not compared (work in progress is expected to
+# hold work), and neither is a waiting claim (parked, paused, blocked) nor a
+# lane with no claim at all - no status line yet, or a trailing
+# decision-closing `resolved:` that bin/fm-classify-lib.sh deliberately excludes
+# from run-state - because none of those says the lane is finished with its
+# worktree.
 #
 # WHAT IT SAYS. One line naming every dead lane, only when the dead set is
-# non-empty, plus one line per lane whose non-working claim disagrees with the
-# work its worktree still holds. Silence is the healthy answer and the common
-# one. A lane is reported dead only on positive evidence - its worktree holds
-# nothing but shells, or nothing at all - so a worktree holding a process the
-# shared vocabulary cannot classify is left alone rather than reported, because
-# a false dead verdict is what launches a duplicate agent onto a live worktree.
+# non-empty, plus one line per lane whose terminal claim disagrees with the work
+# its worktree still holds. Silence is the healthy answer and the common one. A
+# lane is reported dead only on positive evidence - its worktree holds nothing
+# but shells, or nothing at all - so a worktree holding a process the shared
+# vocabulary cannot classify is left alone rather than reported, because a false
+# dead verdict is what launches a duplicate agent onto a live worktree.
 # A scan that cannot be trusted (no lsof, or lsof failed) is silent for the same
 # reason: a broken probe is not evidence that the fleet is dead.
 #
@@ -194,7 +199,10 @@ EOF
     if [ -n "$dead" ] && printf '%s\n' "$dead" | grep -Fqx -- "$wt"; then
       ids="${ids:+$ids,}$id"
     fi
-    [ "$claim" = working ] && continue
+    case "$claim" in
+      done|failed) ;;
+      *) continue ;;
+    esac
     IFS=$'\t' read -r dirty unlanded <<EOF
 $(lane_worktree_work "$wt")
 EOF
