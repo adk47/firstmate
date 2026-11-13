@@ -186,10 +186,11 @@ class ReplyDueScanTest(unittest.TestCase):
         self.assertEqual(json.loads(Path(cfp).read_text())["user"]["id"], "1")
 
     def test_a_stale_part_is_a_handoff_without_the_full_check(self):
-        # the deployed trigger_class decides a > 30 d part from the thread alone; the slow check is never called for it
-        self.ic.convs["101"]["conversation_parts"]["conversation_parts"][0]["created_at"] = NOW - 40 * DAY
-        self.ic.search[0]["statistics"]["last_contact_reply_at"] = NOW - 40 * DAY
-        self.ic.convs["101"]["source"]["created_at"] = NOW - 41 * DAY
+        # the deployed trigger_class decides a part past comm_state.STATUS_PART_DAYS (365 since 2026-11-10, was 30) from
+        # the thread alone; the slow check is never called for it
+        self.ic.convs["101"]["conversation_parts"]["conversation_parts"][0]["created_at"] = NOW - 400 * DAY
+        self.ic.search[0]["statistics"]["last_contact_reply_at"] = NOW - 400 * DAY
+        self.ic.convs["101"]["source"]["created_at"] = NOW - 401 * DAY
         calls = []
         def check(campaign, copy, uid, keys, cid, **kw):
             calls.append(uid)

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Reviewed baseline: deploy overwrites - 2026-11-13 (hydra-deploy-drift-unblock-u1). node-8 held a hand-edited copy
+# (sha256 b45150eb5e1b, written 2026-11-10 02:54Z) with three hunks the repo did not have: STATUS_PART_DAYS 30 -> 365
+# with the CREDIT_STATUS_PART_DAYS override, 'immersive' out of PRODUCT_RE, and linked_request_ids' fallback to the
+# account's own sent asks. All three are in this file now, merged with #1682's wait-line release, so the overwrite
+# drops no live behaviour. While this line stands, a later hand edit of this file on node-8 is overwritten without a halt.
 """Where is this user in the conversation, right now? The send-time communication-state check (captain 2026-10-28
 18:2xZ, hard precondition before any go-live batch: "make sure we dont communicate again if someone sent in proof
 already - think about each com status"). READ-ONLY. The gate calls it immediately before every real send of a
@@ -832,7 +837,11 @@ REPLY_DUE_AFTER_S = 24 * 3600
 # Fable [key=reply-due-classes] (r5 249, p1 250): the coded answer classes; comm_state picks EXACTLY one per answer
 REPLY_DUE_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", "reply-ref")
 REPLY_REF = "reply-ref"   # [key=product-dispute-refs]: r5's approved reply set - only where the picker hands the part off
-STATUS_PART_DAYS = 30                           # a customer part older than this is never auto-answered (handoff)
+# captain 2026-11-10: "AI in replacement of humans". 30 days sent every older thread to the
+# handoff bucket, which no one works - 1,771 threads where the customer wrote and got silence.
+# A late answer is not a wrong answer: the copy carries no date and promises nothing, so the
+# age of the part is not a reason to refuse. Override with CREDIT_STATUS_PART_DAYS.
+STATUS_PART_DAYS = float(os.environ.get("CREDIT_STATUS_PART_DAYS", "365"))  # days a customer part stays answerable
 # b1 / QA #1517 (19:05Z, 6th veto round): the classifier is an ALLOWLIST, not a synonym chase. A part is a STATUS
 # question only when it asks one of these explicit status questions (where is / any update / status of / has it been
 # approved ...) AND hits no veto below; everything else - a bare title, a reply to our note, 'thanks', a how-to - is
@@ -871,7 +880,7 @@ ACTION_RE = re.compile(
     # b1 (QA #1517): a correction to what they SENT ("I uploaded the wrong document; can you replace it?") is an action
     r"wrong|replac\w*|instead|mistake\w*|resend\w*|re-?upload\w*|swap\w*)\b", re.I)
 PRODUCT_RE = re.compile(
-    r"\b(support(s|ed|ing)?|feature|features|dolby|atmos|spatial|immersive|integrat\w*|roadmap|plans? to|"
+    r"\b(support(s|ed|ing)?|feature|features|dolby|atmos|spatial|integrat\w*|roadmap|plans? to|"
     r"add(ing)? (a |an |the )?(new )?(field|option|role|category|feature)|available in|availability|pricing|price|"
     r"subscription|upgrade|premium|bug|crash\w*|error|log ?in|password|api|app store|android|ios|iphone)\b", re.I)
 # R9: the SAME pattern as the gate's thread_on_topic (intercom-verify-request.sh). Bare 'verification' / 'under review'
@@ -1129,6 +1138,24 @@ def linked_request_ids(uid: int, conversation: str) -> set[str]:
                 continue
     except sqlite3.Error as exc:
         raise Unknown(f"ledger unreadable: {exc}") from exc
+    # 2026-11-09: an ask we sent as an Intercom MESSAGE never creates a conversation, so its
+    # ledger row has no conversation_id and the reply opens a NEW conversation that can never
+    # link back. 8,237 such rows exist. The ledger still knows which user and which requests:
+    # account_id is the Muso user id and every system campaign writes request_ids_json. When the
+    # conversation-named join found nothing, fall back to the account's own sent asks. It only
+    # ever ADDS the requests of the account that replied, never another account's.
+    if not linked:
+        try:
+            for (rj,) in _ro(LEDGER).execute(
+                    "SELECT request_ids_json FROM verify_messages WHERE status='sent' "
+                    "AND account_id=? AND coalesce(request_ids_json,'') NOT IN ('','[]') "
+                    "ORDER BY sent_at DESC LIMIT 200", (str(uid),)):
+                try:
+                    linked |= {str(x).lower() for x in json.loads(rj or "[]")}
+                except ValueError:
+                    continue
+        except sqlite3.Error as exc:
+            raise Unknown(f"ledger unreadable: {exc}") from exc
     try:
         db = _ro(PROOF_STORE)
         cols = {r[1] for r in db.execute("PRAGMA table_info(proof_intake)")}

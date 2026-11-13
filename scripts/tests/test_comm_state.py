@@ -675,8 +675,18 @@ class ReplyDueTest(unittest.TestCase):
             return {"source": {"author": {"type": "user"}, "body": "hi", "created_at": now - 300 * 86400},
                     "conversation_parts": {"conversation_parts": ps}}
         dolby = "Hello- just checking, is there a way to register Dolby Atmos credits into the system database? I haven't heard"
+        # captain 2026-11-10: a customer part stays answerable for STATUS_PART_DAYS (365, was 30), so the 190-day-old
+        # question is refused by its product cue and only a part past the window is refused as stale
+        self.assertEqual(cs.STATUS_PART_DAYS, 365)
         self.assertEqual(tc(conv(dolby, 190), "9")["class"], "non_status")
-        self.assertIn("stale", tc(conv(dolby, 190), "9")["why"])
+        self.assertIn("product cue", tc(conv(dolby, 190), "9")["why"])
+        self.assertIn("stale", tc(conv(dolby, 400), "9")["why"])
+        self.assertEqual(tc(conv("where is my request?", 190), "9")["class"], "status")      # late, still answered
+        self.assertIn("stale", tc(conv("where is my request?", 400), "9")["why"])
+        # 'immersive' alone is no product cue (it names a credit role); dolby / atmos / spatial still are
+        self.assertIsNone(cs.PRODUCT_RE.search("where is my immersive mix engineer request?"))
+        for cue in ("dolby", "atmos", "spatial"):
+            self.assertIsNotNone(cs.PRODUCT_RE.search(f"where is my {cue} request?"), cue)
         self.assertEqual(tc(conv("is there a way to register Dolby Atmos credits?", 2), "9")["class"], "non_status")
         self.assertEqual(tc(conv("my credits", 2), "9")["class"], "non_status")       # 'credits' alone
         # QA #1517: a product question that merely uses 'request' is not a status part
@@ -726,10 +736,18 @@ class ReplyDueTest(unittest.TestCase):
         self.assertTrue(any(r.startswith("reply_due:non_status_part") and "product cue" in r for r in res["reasons"]), res)
         self.thread("215473681300331")
         self.ic.convs["215473681300331"]["conversation_parts"]["conversation_parts"][1]["body"] = "Is my request approved yet?"
+        unlinked = "no open request of theirs is linked to this thread"
+        # r2 is open, and no sent note of ours to this account names it: the thread has no linked request, so it holds
+        self.core = [["r2", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
+        res = cs.check("uvn-status", "uvnstatus", UID, ["r2"], "c1", conversation="215473681300331",
+                       reply_due_part="57000000001", query=self.q, ic=self.ic, fraud=lambda uid, q: [])
+        self.assertTrue(any(unlinked in r for r in res["reasons"]), res)
+        # 2026-11-09: r1 was named by a note we sent this account in ANOTHER conversation; a reply that opens a new
+        # thread still links to the account's own sent asks, so that reason no longer holds it
         self.core = [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
         res = cs.check("uvn-status", "uvnstatus", UID, ["r1"], "c1", conversation="215473681300331",
                        reply_due_part="57000000001", query=self.q, ic=self.ic, fraud=lambda uid, q: [])
-        self.assertTrue(any("no open request of theirs is linked to this thread" in r for r in res["reasons"]), res)
+        self.assertFalse(any(unlinked in r for r in res["reasons"]), res)
 
     def test_status_team_review_reply_due_takes_the_full_path(self):
         # QA #1517 (critical): the nothing-is-needed fast path never short-circuits a reply_due answer - a closed thread,
@@ -1488,11 +1506,31 @@ class FiledRequestEvidenceTest(unittest.TestCase):
 
     def test_open_and_linked_only(self):
         self.assertEqual(cs.filed_requests(UID, ["r1"], "777", self.q(["r1"])), ["r1"])
-        self.assertEqual(cs.filed_requests(UID, ["r1"], "888", self.q(["r1"])), [])      # another thread
+        # 2026-11-09: no sent note names thread 888, so the account's own sent asks stand in (an ask sent as an
+        # Intercom message has no conversation id, and the reply to it opens a new conversation)
+        self.assertEqual(cs.filed_requests(UID, ["r1"], "888", self.q(["r1"])), ["r1"])
         self.assertEqual(cs.filed_requests(UID, ["r1"], "777", self.q([])), [])          # decided / deleted / not theirs
         self.assertEqual(cs.filed_requests(UID, ["r2"], "777", self.q(["r2"])), [])      # open but never named in 777
         self.assertEqual(cs.filed_requests(UID, ["x'; drop"], "777", self.q(["r1"])), [])  # never reaches the SQL
         self.assertEqual(cs.filed_requests(UID, ["r1"], "", self.q(["r1"])), [])
+
+    def test_the_account_fallback_adds_only_this_accounts_asks_and_only_when_the_thread_names_none(self):
+        db = sqlite3.connect(cs.LEDGER)
+        for account, conversation, ids, status in ((str(UID + 1), "901", ["r9"], "sent"),     # another account's ask
+                                                   (str(UID), "902", ["r5"], "sent"),         # a thread with its own note
+                                                   (str(UID), None, ["r6"], "sent"),          # an ask sent as a message
+                                                   (str(UID), None, ["r7"], "planned")):      # never sent
+            db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, "
+                       "conversation_id, request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, "
+                       "sent_at) VALUES ('uvn-status','initial',?,?,?,?,'comment',?,?,1,'U','ref',"
+                       "'2026-09-02T00:00:00Z','2026-09-02T00:00:00Z','2026-09-02T00:00:00Z')",
+                       (f"k-{ids[0]}", account, f"2026-09-{ids[0][1:].zfill(2)}", status, conversation, json.dumps(ids)))
+        db.commit(); db.close()
+        self.assertEqual(cs.linked_request_ids(UID, "888"), {"r1", "r5", "r6"})     # this account's sent asks, no other's
+        self.assertEqual(cs.filed_requests(UID, ["r9"], "888", self.q(["r9"])), [])
+        self.assertEqual(cs.filed_requests(UID, ["r7"], "888", self.q(["r7"])), [])
+        self.assertEqual(cs.linked_request_ids(UID, "902"), {"r5"})                 # the thread's own note decides
+        self.assertEqual(cs.filed_requests(UID, ["r1"], "902", self.q(["r1"])), [])
 
     def test_a_filing_in_the_thread_links_the_request(self):
         db = sqlite3.connect(cs.PROOF_STORE)
