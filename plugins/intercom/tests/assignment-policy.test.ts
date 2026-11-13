@@ -11,7 +11,11 @@ import {
   EscalationReasonRequired,
   applyHandOff,
   humanHold,
-  lastHumanActionAt,
+  lastHumanReplyAt,
+  oldestCustomerPartAfter,
+  escalationGoesToQueue,
+  QUEUE_ESCALATION_REASONS,
+  DEFAULT_REPLY_GRACE_HOURS,
   resolveHandOffTarget,
   type HandOffKind,
   botPlacedInTeam,
@@ -388,7 +392,13 @@ describe("applyHandOff", () => {
 
 describe("humanHold", () => {
   const base = { botAdminId: "bot", escalationTeamId: "7111842", nowMs: NOW, teamAssigneeId: null as string | null };
-  const part = (hoursAgo: number, id: string, type = "admin") => ({ created_at: Math.floor((NOW - hoursAgo * H) / 1000), author: { type, id } });
+  // A part with words the customer can read. `bare` is the same author doing something that answers nobody.
+  const part = (hoursAgo: number, id: string, type = "admin") => ({
+    created_at: Math.floor((NOW - hoursAgo * H) / 1000), part_type: "comment", body: "<p>words</p>", author: { type, id },
+  });
+  const bare = (hoursAgo: number, id: string, part_type: string, body: string | null = null) => ({
+    created_at: Math.floor((NOW - hoursAgo * H) / 1000), part_type, body, author: { type: "admin", id },
+  });
 
   it("default window is 72 h", () => expect(DEFAULT_HUMAN_HOLD_HOURS).toBe(72));
   it("assigned to the bot: not held, nothing to reclaim", () => {
@@ -427,7 +437,50 @@ describe("humanHold", () => {
   it("human assignee who never acted: RECLAIM", () => {
     const d = humanHold({ ...base, adminAssigneeId: "5465657", parts: [part(1, "bot"), part(2, "c1", "user")] });
     expect(d).toMatchObject({ held: false, reclaim: true });
-    expect(d.reason).toBe("stale human assignee 5465657: no human action in 72h");
+    expect(d.reason).toBe("stale human assignee 5465657: no human reply in 72h");
+  });
+  it.each(["close", "open", "assignment", "snoozed", "note"])(
+    "a human's bare %s answers nobody: RECLAIM (the 2026-11-11 bulk close silenced Caroline for 72 h)",
+    (kind) => {
+      // conv 215476524541332: closed by a person 11-11 16:07Z with no reply, customer wrote 11-13 13:38Z
+      const parts = [bare(45.5, "5465657", kind, kind === "note" ? "<p>looking</p>" : null), part(0, "c1", "user")];
+      expect(humanHold({ ...base, adminAssigneeId: "5465657", parts })).toMatchObject({ held: false, reclaim: true });
+    },
+  );
+  it("a close that carries words IS a reply (send and close)", () => {
+    expect(humanHold({ ...base, adminAssigneeId: "5465657", parts: [bare(2, "5465657", "close", "<p>All sorted.</p>")] }).held).toBe(true);
+  });
+  it("a human who replied holds the customer's next message, and a quick second one", () => {
+    const parts = [part(3, "5465657"), part(1, "c1", "user"), part(0, "c1", "user")];
+    expect(humanHold({ ...base, adminAssigneeId: "5465657", parts })).toEqual({ held: true, reclaim: false, reason: "human assignee 5465657" });
+  });
+  it("a human who replied and then left a customer message unanswered past the grace: RECLAIM", () => {
+    expect(DEFAULT_REPLY_GRACE_HOURS).toBe(4);
+    const parts = [part(30, "5465657"), part(5, "c1", "user"), part(0, "c1", "user")];
+    const d = humanHold({ ...base, adminAssigneeId: "5465657", parts });
+    expect(d).toEqual({ held: false, reclaim: true, reason: "human assignee 5465657 has not replied to the customer in 4h" });
+    // the same thread one hour inside the grace is still the human's
+    expect(humanHold({ ...base, adminAssigneeId: "5465657", parts: [part(30, "5465657"), part(3, "c1", "user"), part(0, "c1", "user")] }).held).toBe(true);
+    // and the grace is configurable
+    expect(humanHold({ ...base, adminAssigneeId: "5465657", replyGraceHours: 6, parts }).held).toBe(true);
+  });
+  it("an escalated thread on a person is held past the reply grace: a legal/fraud case is not Caroline's", () => {
+    const fired = new Date(NOW - 10 * H).toISOString();
+    const parts = [part(9, "c1", "user"), part(0, "c1", "user")];
+    expect(humanHold({ ...base, adminAssigneeId: "5465657", escalationFiredAt: fired, parts })).toEqual({
+      held: true, reclaim: false, reason: "human assignee 5465657 (escalated)",
+    });
+    // A person replying after the escalation (moving it out of the queue, or answering it once)
+    // does not turn the follow-up into Caroline's either.
+    const answered = [part(6, "5465657"), part(5, "c1", "user"), part(0, "c1", "user")];
+    expect(humanHold({ ...base, adminAssigneeId: "5465657", escalationFiredAt: fired, parts: answered }).held).toBe(true);
+  });
+  it("oldestCustomerPartAfter reads customer parts only, newer than the mark", () => {
+    const at = (h: number) => Math.floor((NOW - h * H) / 1000);
+    const parts = [part(9, "c1", "user"), part(5, "c1", "lead"), part(4, "5465657"), part(2, "c1", "contact")];
+    expect(oldestCustomerPartAfter(parts, at(6))).toBe(at(5));
+    expect(oldestCustomerPartAfter(parts, at(1))).toBeNull();
+    expect(oldestCustomerPartAfter(undefined, 0)).toBeNull();
   });
   it("human acted inside the window: held (and the journal line keeps its old shape)", () => {
     expect(humanHold({ ...base, adminAssigneeId: "5465657", parts: [part(71, "5465657")] })).toEqual({
@@ -441,13 +494,17 @@ describe("humanHold", () => {
     expect(humanHold({ ...base, adminAssigneeId: "5465657", parts: [part(2, "10206197")] }).held).toBe(true);
   });
   it("the bot's own parts and Operator (author type bot) are not human actions", () => {
-    expect(lastHumanActionAt([part(1, "bot"), part(1, "4359478", "bot"), part(1, "u", "user")], "bot")).toBeNull();
-    expect(lastHumanActionAt([part(5, "5465657"), part(3, "5465657")], "bot")).toBe(Math.floor((NOW - 3 * H) / 1000));
+    expect(lastHumanReplyAt([part(1, "bot"), part(1, "4359478", "bot"), part(1, "u", "user")], "bot")).toBeNull();
+    expect(lastHumanReplyAt([part(5, "5465657"), part(3, "5465657")], "bot")).toBe(Math.floor((NOW - 3 * H) / 1000));
+    // a part with no words (or an unmarked one) is not a reply
+    expect(lastHumanReplyAt([{ created_at: 5, author: { type: "admin", id: "5465657" } }, bare(1, "5465657", "comment", "<p> </p>")], "bot")).toBeNull();
   });
   it("a reasoned escalation inside the window holds it before any human acts", () => {
     const fired = new Date(NOW - 10 * H).toISOString();
     expect(humanHold({ ...base, adminAssigneeId: "5465657", escalationFiredAt: fired })).toMatchObject({ held: true, reason: "human assignee 5465657 (escalated)" });
     expect(humanHold({ ...base, adminAssigneeId: "5465657", escalationFiredAt: new Date(NOW - 80 * H).toISOString() }).reclaim).toBe(true);
+    // ...and past the window a human reply still re-holds it under the ordinary rule
+    expect(humanHold({ ...base, adminAssigneeId: "5465657", escalationFiredAt: new Date(NOW - 80 * H).toISOString(), parts: [part(2, "5465657")] })).toMatchObject({ held: true, reason: "human assignee 5465657" });
   });
   it("hours <= 0 is the legacy rule: a human assignee always holds", () => {
     expect(humanHold({ ...base, adminAssigneeId: "5465657", holdHours: 0 })).toMatchObject({ held: true, reclaim: false });
@@ -455,6 +512,30 @@ describe("humanHold", () => {
   });
   it("a custom window is honoured", () => {
     expect(humanHold({ ...base, adminAssigneeId: "5465657", holdHours: 24, parts: [part(30, "5465657")] }).reclaim).toBe(true);
+  });
+});
+
+describe("escalationGoesToQueue", () => {
+  it.each([...QUEUE_ESCALATION_REASONS])("rule/%s is outside Caroline's authority: escalation queue", (reason) => {
+    expect(escalationGoesToQueue({ source: "rule", reason })).toBe(true);
+  });
+  it("the list is the content rules and nothing else", () => {
+    expect([...QUEUE_ESCALATION_REASONS].sort()).toEqual([
+      "abuse_report", "cancel_intent", "fraud_complaint", "legal_threat", "public_shaming_intent", "refund_intent", "security_incident",
+    ]);
+  });
+  it.each([
+    { source: "user_request", reason: "user_requested_human" },
+    { source: "rule", reason: "turn_count_cap" },
+    { source: "rule", reason: "" },
+    { source: "rule" },
+    { source: "user_request", reason: "legal_threat" },
+    {},
+  ])("%j stays with Caroline", (assessment) => {
+    expect(escalationGoesToQueue(assessment)).toBe(false);
+  });
+  it("a judge verdict is left to its own switch (jev actions.escalate)", () => {
+    expect(escalationGoesToQueue({ source: "judge", reason: "jev:human_required" })).toBe(true);
   });
 });
 

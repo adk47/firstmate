@@ -132,7 +132,8 @@ explicit escalation that carries a reason leaves her, and it goes to the escalat
 TEAM queue (`escalationTeamId`, sent with `type: "team"`), never to an individual's
 admin id. `defaultInboxId` is retired: `scripts/check-intercom-no-personal-assignee.sh`
 fails CI if a config sets it. Assigning an escalated conversation back to Caroline is
-the hand-back: she answers the customer's next message. The only exception to any of this is a human
+the hand-back: when the customer spoke last she answers at that moment, not on their
+next message (`plugins/intercom/src/handler.ts`, the `assigned` branch). The only exception to any of this is a human
 posting as themselves from the Intercom UI.
 
 ## Authentication

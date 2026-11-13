@@ -253,8 +253,10 @@ export interface IntercomAccountConfig {
    */
   escalationTeamId?: string;
   /**
-   * How long a human admin assignee silences Caroline after their last action in a conversation.
-   * Default 72. Zero or negative = a human assignee always holds (the pre-k1 behaviour).
+   * How long a human admin assignee silences Caroline after their last REPLY to the customer
+   * (assignment-policy.ts humanHold: a note, a close or an assignment answers nobody, and a
+   * customer message left unanswered past the reply grace reclaims the thread). Default 72.
+   * Zero or negative = a human assignee always holds (the pre-k1 behaviour).
    */
   humanHoldHours?: number;
   fallbackSlackSupervisionChannel: string;

@@ -201,8 +201,18 @@ read (a partial read counts as unreadable); the escalation team or Unassigned on
 that and no admin. Every
 client also refuses an admin assignee other than "0" or the acting bot before the request
 (`assertAssignmentTarget`), so the rule does not depend on how a call site is written. A human assignee silences Caroline only while a
-human is working the thread (`humanHoldHours`, default 72): a stale assignment is reclaimed on the customer's next
-message. `ledger.jsonl` rows written before this change carry `assignment` values `team_inbox`,
+human is answering the customer (`humanHold`): a reply the customer can read inside `humanHoldHours` (default 72),
+and no customer message left without one for longer than `DEFAULT_REPLY_GRACE_HOURS` (4). A close, a note, a
+re-open or an assignment with no words is not a reply. Anything else is reclaimed on the customer's next message.
+An escalated thread on a person is the exception: `escalationFiredAt` is set on every escalation this plugin
+fires (the seven reasons below, a judge verdict, and the legacy regex path), so it holds such a thread for the
+whole `humanHoldHours` window and the 4 h reply grace never applies to it.
+A risk escalation leaves Caroline only for a reason in `QUEUE_ESCALATION_REASONS` (legal threat, payment dispute,
+cancellation with deletion, fraud, security, abuse, public shaming); a request for a person and the turn cap are
+logged as `no hand-off conv=<id> reason=<source>/<reason>` and answered by her (captain 2026-11-13). An
+assignment that takes a conversation OUT of `human_takeover` while the customer spoke last is answered at that
+moment: the handler re-runs the ordinary customer-message path on it, so the reply does not wait for the
+customer to write again. `ledger.jsonl` rows written before this change carry `assignment` values `team_inbox`,
 `already_assigned`, `FAILED`. The digest's
 `classifier_unavailable` count is per-call durable rows while `classifier_calls` comes from 15-minute windows that
 can count fewer, so the summary prints a ratio only when the window total covers the rows and otherwise says

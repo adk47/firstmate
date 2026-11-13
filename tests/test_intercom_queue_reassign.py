@@ -307,6 +307,191 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(api.writes, [])
 
 
+class UnansweredScopeTests(unittest.TestCase):
+    """--unanswered-within-days (captain 2026-11-13: "assign everything back to Caroline that Jan hasn't
+    responded if 30 days or newer"). The scope is the person's silence since the customer's last message,
+    not which rule parked the thread there, so a class the default scope leaves moves and is named
+    (left_explicit_escalation) — except the three classes Caroline cannot answer herself and any
+    escalation for a reason outside her authority."""
+
+    NOTE = "reassigned to Caroline; the person had not replied"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ledger = Path(self.tmp.name) / "run.jsonl"
+
+    def scoped(self, api, days=30):
+        return qr.build_plan(api, PERSON, frozenset(), workers=1, now_s=NOW, unanswered_days=days)
+
+    def row(self, c, days=30, api_tickets=None):
+        api = FakeApi([c], tickets={"86abc123": '{"escalation_reason": "legal_threat"}'} if api_tickets is None else api_tickets)
+        return self.scoped(api, days)[0]
+
+    def test_a_thread_the_person_never_answered_moves(self):
+        r = self.row(guard_blocked("1"))
+        self.assertEqual((r["action"], r["reason"], r["default_class"]), ("reassign", "unanswered_by_source", "to_ai_queue"))
+
+    def test_a_reply_after_the_customers_last_message_is_left(self):
+        c = guard_blocked("1")
+        c["conversation_parts"]["conversation_parts"].append(part("comment", "admin", PERSON, NOW - 100, "done"))
+        r = self.row(c)
+        self.assertEqual((r["action"], r["reason"]), ("leave", "left_answered_by_source"))
+
+    def test_a_reply_before_the_customers_last_message_does_not_answer_it(self):
+        c = guard_blocked("1")
+        c["conversation_parts"]["conversation_parts"] += [
+            part("comment", "admin", PERSON, NOW - 3000, "looking"),
+            part("comment", "user", "u1", NOW - 2000, "any news?"),
+        ]
+        self.assertEqual(self.row(c)["action"], "reassign")
+
+    def test_a_close_a_note_or_an_assignment_by_the_person_is_not_a_reply(self):
+        for ptype in ("close", "note", "assignment"):
+            c = guard_blocked("1")
+            c["conversation_parts"]["conversation_parts"].append(part(ptype, "admin", PERSON, NOW - 100, "x"))
+            self.assertEqual(self.row(c)["action"], "reassign", ptype)
+
+    def test_a_customer_message_that_reopened_the_thread_counts_as_their_last(self):
+        c = guard_blocked("1")
+        c["conversation_parts"]["conversation_parts"] += [
+            part("comment", "admin", PERSON, NOW - 3000, "fixed"),
+            part("close", "admin", PERSON, NOW - 2900),
+            part("open", "user", "u1", NOW - 50, "still wrong"),
+        ]
+        self.assertEqual(self.row(c)["action"], "reassign")
+
+    def test_no_activity_inside_the_window_is_left(self):
+        c = guard_blocked("1")
+        for p in c["conversation_parts"]["conversation_parts"]:
+            p["created_at"] -= 40 * 86400
+        c["updated_at"] = NOW - 40 * 86400
+        r = self.row(c)
+        self.assertEqual((r["action"], r["reason"]), ("leave", "left_inactive"))
+        self.assertEqual(self.row(c, days=60)["action"], "reassign")
+
+    def test_the_opening_is_the_customers_message_when_they_never_wrote_again(self):
+        c = conv("1", [part("assignment", "admin", BOT, NOW - 3999, to=PERSON)])
+        c["created_at"] = NOW - 5000
+        self.assertEqual(self.row(c)["action"], "reassign")
+
+    def test_no_customer_message_at_all_is_left(self):
+        c = conv(
+            "1",
+            [part("assignment", "admin", PERSON, NOW - 3999, to=PERSON)],
+            source={"author": {"type": "admin", "id": BOT}},
+        )
+        c["created_at"] = NOW - 5000
+        r = self.row(c)
+        self.assertEqual((r["action"], r["reason"]), ("leave", "left_no_customer_message"))
+
+    def test_snoozed_is_still_left(self):
+        c = guard_blocked("1")
+        c["state"] = "snoozed"
+        self.assertEqual(self.row(c)["reason"], "left_snoozed")
+
+    def test_an_escalation_outside_her_authority_never_moves(self):
+        for reason in (
+            "legal_threat",
+            "refund_intent",
+            "cancel_intent",
+            "fraud_complaint",
+            "security_incident",
+            "abuse_report",
+            "public_shaming_intent",
+        ):
+            r = self.row(escalated("3"), api_tickets={"86abc123": '{"escalation_reason": "%s"}' % reason})
+            self.assertEqual((r["action"], r["reason"]), ("leave", "left_explicit_escalation"), reason)
+
+    def test_an_escalation_a_person_claimed_themselves_never_moves(self):
+        c = conv(
+            "1",
+            [
+                part("comment", "user", "u1", NOW - 5000, "I will sue"),
+                part("comment", "admin", BOT, NOW - 4000, FAREWELL),
+                part("assignment", "admin", PERSON, NOW - 3999, to=PERSON),
+            ],
+        )
+        r = self.row(c)
+        self.assertEqual((r["mechanism"], r["action"], r["reason"]), ("self_assigned", "leave", "left_explicit_escalation"))
+        self.assertEqual(r["escalation_reason"], "legal_threat")
+        self.assertEqual(r["default_class"], "to_ai_queue")
+
+    def test_an_escalation_an_operator_rule_moved_never_moves(self):
+        c = conv(
+            "1",
+            [
+                part("comment", "user", "u1", NOW - 5000, "I will sue"),
+                part("comment", "admin", BOT, NOW - 4000, FAREWELL),
+                *[part("note", "admin", BOT, NOW - 3998 - i, "escalated") for i in range(4)],
+                part("assignment", "admin", BOT, NOW - 3990, to=PERSON),
+            ],
+        )
+        r = self.row(c)
+        self.assertEqual((r["mechanism"], r["action"], r["reason"]), ("plugin_other", "leave", "left_explicit_escalation"))
+
+    def test_a_reason_inside_her_authority_still_moves_whatever_moved_it(self):
+        c = conv(
+            "1",
+            [
+                part("comment", "user", "u1", NOW - 5000, "I will sue"),
+                part("comment", "admin", BOT, NOW - 4000, FAREWELL),
+                part("assignment", "admin", PERSON, NOW - 3999, to=PERSON),
+            ],
+        )
+        r = self.row(c, api_tickets={"86abc123": '{"escalation_reason": "turn_count_cap"}'})
+        self.assertEqual((r["mechanism"], r["action"]), ("self_assigned", "reassign"))
+
+    def test_the_default_scope_still_reassigns_a_cancel_or_refund_escalation(self):
+        for reason in ("cancel_intent", "refund_intent"):
+            api = FakeApi([escalated("3")], tickets={"86abc123": '{"escalation_reason": "%s"}' % reason})
+            self.assertEqual((plan(api)[0]["action"], plan(api)[0]["reason"]), ("reassign", "to_ai_queue"), reason)
+
+    def test_a_restricted_account_never_moves(self):
+        c = guard_blocked("1")
+        restricted = frozenset({c["contacts"]["contacts"][0]["id"]})
+        rows = qr.build_plan(FakeApi([c]), PERSON, restricted, workers=1, now_s=NOW, unanswered_days=30)
+        self.assertEqual((rows[0]["action"], rows[0]["reason"]), ("leave", "left_restricted"))
+
+    def test_an_escalation_whose_reason_could_not_be_read_never_moves(self):
+        r = self.row(escalated("3"), api_tickets={})
+        self.assertEqual((r["action"], r["reason"]), ("leave", "left_escalation_unread"))
+        self.assertNotIn("default_class", r)
+
+    def test_the_note_goes_on_every_moved_thread_and_is_internal(self):
+        answered = guard_blocked("2")
+        answered["conversation_parts"]["conversation_parts"].append(part("comment", "admin", PERSON, NOW - 100, "done"))
+        api = FakeApi([guard_blocked("1"), answered, guard_blocked("3")])
+        stats = qr.apply_plan(api, self.scoped(api), PERSON, "Pat Person", self.ledger, "run-1", 50, "", pace_s=0, note=self.NOTE)
+        self.assertEqual((stats["moved"], stats["notes"], stats["failed"], stats["closed_by_this_run"]), (2, 2, 0, 0))
+        self.assertEqual(api.convs["2"]["admin_assignee_id"], int(PERSON))
+        self.assertNotIn("2", [p.split("/")[2] for p, _b in api.writes])
+        for _path, body in api.writes:
+            self.assertEqual(body["admin_id"], BOT)
+            self.assertIn(body["message_type"], ("assignment", "note"))
+        self.assertEqual({b["body"] for _p, b in api.writes if b["message_type"] == "note"}, {self.NOTE})
+        done = [json.loads(line) for line in self.ledger.read_text().splitlines() if '"done"' in line]
+        self.assertEqual({(r["id"], r["default_class"], r["note_posted"]) for r in done}, {("1", "to_ai_queue", True), ("3", "to_ai_queue", True)})
+
+    def test_the_move_reverts_to_the_person(self):
+        api = FakeApi([guard_blocked("1")])
+        qr.apply_plan(api, self.scoped(api), PERSON, "Pat Person", self.ledger, "run-1", 50, "", pace_s=0, note=self.NOTE)
+        self.assertEqual(qr.revert(api, self.ledger, pace_s=0)["reverted"], 1)
+        self.assertEqual(api.convs["1"]["admin_assignee_id"], int(PERSON))
+
+    def test_the_default_scope_is_unchanged_without_the_flag(self):
+        api = FakeApi([escalated("3")], tickets={"86abc123": '{"escalation_reason": "legal_threat"}'})
+        r = plan(api)[0]
+        self.assertEqual((r["action"], r["reason"]), ("leave", "left_explicit_escalation"))
+        self.assertNotIn("default_class", r)
+
+    def test_the_cli_refuses_a_bad_window_and_the_team_queue_together(self):
+        for argv in (["plan", "--from-admin", PERSON, "--unanswered-within-days", "0"],
+                     ["apply", "--from-admin", PERSON, "--ledger", "x", "--unanswered-within-days", "30", "--escalation-team", "7"]):
+            with self.assertRaises(SystemExit):
+                qr.main(argv)
+
+
 class SourceTests(unittest.TestCase):
     """What the file may contain at all: a write this tool does not make cannot be added quietly."""
 

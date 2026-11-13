@@ -137,7 +137,7 @@ like a conversation id or an inbox link.
    - `copy`: she promises something wrong.
    - `refusal`: she must not answer it, and says why and how to re-apply.
    - `person`: it truly needs a person. The row must say why. These shapes together may not
-     pass 6% of conversations (4.2% today).
+     pass 6% of conversations (4.0% today).
 4. **Automate only `rule` and `tool`.** The checker refuses an automation entry on any other row.
 5. **Re-measure.** When a fix ships, its row gets `shipped_at` and a link. From then on every
    tick compares that shape's rate in the week before the fix with the week after, against all

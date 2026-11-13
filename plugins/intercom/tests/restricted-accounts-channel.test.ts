@@ -122,7 +122,7 @@ beforeEach(async () => {
           type: "conversation", id: url.split("/").pop(), open: true, state: "open", assignee: liveAssignee,
           conversation_parts: {
             conversation_parts: liveAssignee && !liveStale
-              ? [{ id: "p1", part_type: "comment", created_at: Math.floor(Date.now() / 1000) - 60, author: { type: "admin", id: liveAssignee.id } }]
+              ? [{ id: "p1", part_type: "comment", body: "On it.", created_at: Math.floor(Date.now() / 1000) - 60, author: { type: "admin", id: liveAssignee.id } }]
               : [],
           },
         }),

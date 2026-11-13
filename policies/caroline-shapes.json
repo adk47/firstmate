@@ -491,13 +491,12 @@
       "shipped_at": null
     },
     "human_request": {
-      "fix_type": "person",
-      "status": "open",
+      "fix_type": "rule",
+      "status": "in_progress",
       "metric": "handoff_no_assignment",
-      "why": "The customer asks for a human and states no need.",
-      "fix": "Assign in the same step as the hand-off line.",
-      "person_reason": "A plain request for a person is honoured, not argued with; there is no ask for a rule to answer.",
-      "owner": null,
+      "why": "The customer asks for a human and states no need. The hand-off line went out and the escalation queue has no members, so nobody came.",
+      "fix": "Asking for a person is not a hand-off: Caroline answers and asks what they need (assignment-policy.ts escalationGoesToQueue; captain 2026-11-13).",
+      "owner": "caroline-unanswered-drain-u1",
       "ref": null,
       "shipped_at": null
     },

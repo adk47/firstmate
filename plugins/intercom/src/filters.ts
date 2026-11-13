@@ -1,5 +1,6 @@
 import type {
   IntercomWebhookPayload,
+  IntercomConversation,
   IntercomPartAttachment,
   ClassifiedEvent,
   AssigneeType,
@@ -295,6 +296,27 @@ export function extractDocumentAttachments(
 // lead, or the generic `contact`). Everything else (admin, bot, team) is us.
 function isCustomerAuthored(type: string | undefined): boolean {
   return type === "user" || type === "lead" || type === "contact";
+}
+
+/**
+ * Whether the newest message a reader can see is the customer's, i.e. their message is the one
+ * nobody has answered yet. Used when a conversation is handed back to Caroline: a thread the
+ * customer spoke last in needs a reply now, not on their next message.
+ *
+ * Only a customer-visible `comment` part is a message. A close, a note, an assignment or a
+ * snooze answers nobody, so the drain's own assignment + note parts do not count as our reply.
+ */
+export function customerSpokeLast(conversation: IntercomConversation): boolean {
+  const parts = conversation.conversation_parts?.conversation_parts ?? [];
+  const lastAuthored = [...parts]
+    .reverse()
+    .find(
+      (p) =>
+        p?.part_type === "comment" &&
+        Boolean(p?.author?.type) &&
+        (isCustomerAuthored(p.author?.type) || Boolean(String(p.body ?? "").replace(/<[^>]*>/g, "").trim())),
+    );
+  return isCustomerAuthored((lastAuthored?.author ?? conversation.source?.author)?.type);
 }
 
 /**

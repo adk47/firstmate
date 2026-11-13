@@ -15,7 +15,8 @@ WHAT IT DOES
   apply   re-pull LIVE (never trusts an old plan), then for each `reassign` row: assign the
           conversation to Caroline, read it back, append a ledger row carrying the before-state.
           A conversation the person had replied in also gets ONE internal note (never a customer
-          message) so a human can resume it.
+          message) so a human can resume it; --note replaces that text and posts it on every
+          conversation the run moves.
   revert  --ledger FILE: put every conversation this run moved back on its previous assignee,
           unless somebody has moved it since (then it is left alone and reported).
   verify  (read-only) how many conversations were assigned to --from-admin in the last --hours,
@@ -26,11 +27,32 @@ WHAT STAYS WHERE IT IS, each with a named reason (reported, never silently skipp
   left_snoozed               a human snoozed it; it wakes to them
   left_restricted            banned / proof-review account (plugins/intercom/src/restricted-accounts.ts)
   left_explicit_escalation   the plugin escalated it for a reason that needs a person (legal threat,
-                             security incident, abuse report, fraud complaint, public shaming). It
+                             security incident, abuse report, fraud complaint, public shaming; a
+                             cancel or refund intent is reassigned here, see
+                             UNANSWERABLE_ESCALATION_REASONS). It
                              moves to the escalation queue once that queue is live:
                              apply --escalation-team TEAM_ID
   left_escalation_unread     an escalation whose reason could not be read (no ticket reference, or
                              ClickUp unreadable). Unmeasured is not "safe to hand to the bot".
+
+THE NARROWER SCOPE (captain 2026-11-13: "assign everything back to Caroline that Jan hasn't
+responded if 30 days or newer"): --unanswered-within-days N moves every OPEN conversation on the
+person with activity in the last N days in which the person has NOT replied since the customer's
+last message, whatever rule put it there. Each row keeps `default_class` (what the default scope
+would have done with it), so a legal threat that moved is still named. Three classes are
+invariant and never move, because Caroline cannot answer them herself:
+  left_restricted            banned / proof-review account
+  left_explicit_escalation   the plugin escalated it for one of the seven reasons outside her
+                             authority (legal threat, refund intent, cancel intent, fraud,
+                             security, abuse, public shaming), whichever rule moved the thread
+                             onto the person afterwards
+  left_escalation_unread     an escalation whose reason could not be read
+It also leaves:
+  left_answered_by_source    the person replied after the customer's last message
+  left_inactive              no activity in the last N days
+  left_no_customer_message   no customer message to answer
+  left_snoozed               as above
+--note TEXT posts that internal note on every conversation the run moves.
 
 IT NEVER closes, snoozes, tags, or posts a customer-visible message: the only writes are an
 `assignment` part and an internal `note`, both as Caroline.
@@ -38,6 +60,8 @@ IT NEVER closes, snoozes, tags, or posts a customer-visible message: the only wr
 USAGE (the token is read from the environment, else from /etc/openclaw/edge.env)
   intercom-queue-reassign.py plan   --from-admin ADMIN_ID --out plan.jsonl
   intercom-queue-reassign.py apply  --from-admin ADMIN_ID --ledger run.jsonl [--cap 700]
+  intercom-queue-reassign.py apply  --from-admin ADMIN_ID --ledger run.jsonl --out plan.jsonl \
+                                    --unanswered-within-days 30 --note 'why it moved'
   intercom-queue-reassign.py revert --ledger run.jsonl
   intercom-queue-reassign.py verify --from-admin ADMIN_ID [--hours 24]
 """
@@ -211,8 +235,116 @@ def escalation_reason_from_ticket(task: dict | None) -> str:
     return m.group(1).strip() if m else ""
 
 
-def classify(conv: dict, source_admin: str, api: Api, restricted_contacts: frozenset[str], now_s: float) -> dict:
+CUSTOMER_AUTHORS = ("user", "lead", "contact")
+# Reasons that stay where they are even under --unanswered-within-days: Caroline must not answer
+# these threads herself (restricted-accounts.ts), an explicit escalation needs a person, and an
+# unread escalation reason is unmeasured.
+INVARIANT_REASONS = frozenset({"left_restricted", "left_escalation_unread", "left_explicit_escalation"})
+# The seven reasons outside Caroline's authority, exactly as plugins/intercom/src/
+# assignment-policy.ts QUEUE_ESCALATION_REASONS names them. The default scope reassigns an
+# escalation for a cancel or a refund intent (HUMAN_SEAT_REASONS does not list them); the narrow
+# scope must not, because the thread would come back to Caroline with the escalation already fired
+# and she would answer a thread that needs a person.
+UNANSWERABLE_ESCALATION_REASONS = HUMAN_SEAT_REASONS | {"cancel_intent", "refund_intent"}
+
+
+def escalated_outside_her_authority(row: dict) -> bool:
+    return any(
+        r.strip() in UNANSWERABLE_ESCALATION_REASONS for r in re.split(r"[,/ ]+", str(row.get("escalation_reason") or ""))
+    )
+
+
+def recorded_escalation_reason(conv: dict, api: Api) -> tuple[bool, str]:
+    """(the thread carries a plugin escalation, the reason its ticket records).
+
+    The mechanism that put the thread on the person afterwards (their own assignment, an operator
+    rule) does not change why the plugin escalated it."""
+    for p in reversed(parts_of(conv)):
+        if str((p.get("author") or {}).get("id") or "") != INTERCOM_ADMIN_ID or p.get("part_type") != "comment":
+            continue
+        body = text_of(p.get("body"))
+        if HANDOFF_LINE not in body or ESCALATION_TAIL not in body:
+            continue
+        m = re.search(r"Reference:\s*([A-Za-z0-9]+)", body)
+        if not m:
+            return True, ""
+        return True, escalation_reason_from_ticket(api.clickup_task(m.group(1)))
+    return False, ""
+
+
+def unanswered_scope(conv: dict, source_admin: str, now_s: float, days: int) -> tuple[str, str, dict]:
+    """(action, reason, facts) for --unanswered-within-days. Pure.
+
+    A reply is a customer-visible `comment` by the person (or a conversation the person opened): a
+    close, a note or an assignment answers nobody. The customer's last message is their newest part,
+    or the opening when they wrote it."""
+    parts = parts_of(conv)
+    src_author = (conv.get("source") or {}).get("author") or {}
+    created = int(conv.get("created_at") or 0)
+    customer_at = [int(p.get("created_at") or 0) for p in parts if (p.get("author") or {}).get("type") in CUSTOMER_AUTHORS]
+    if src_author.get("type") in CUSTOMER_AUTHORS:
+        customer_at.append(created)
+    reply_at = [
+        int(p.get("created_at") or 0)
+        for p in parts
+        if p.get("part_type") == "comment" and str((p.get("author") or {}).get("id") or "") == source_admin
+    ]
+    if src_author.get("type") == "admin" and str(src_author.get("id") or "") == source_admin:
+        reply_at.append(created)
+    last_customer = max(customer_at or [0])
+    last_reply = max(reply_at or [0])
+    last_activity = max([int(conv.get("updated_at") or 0), created] + [int(p.get("created_at") or 0) for p in parts])
+    facts = {
+        "last_customer_message_at": last_customer or None,
+        "last_source_reply_at": last_reply or None,
+        "last_activity_at": last_activity or None,
+    }
+    if str(conv.get("state") or "") == "snoozed":
+        return "leave", "left_snoozed", facts
+    if not last_customer:
+        return "leave", "left_no_customer_message", facts
+    if last_reply >= last_customer:
+        return "leave", "left_answered_by_source", facts
+    if now_s - last_activity > days * 86400:
+        return "leave", "left_inactive", facts
+    return "reassign", "unanswered_by_source", facts
+
+
+def classify(
+    conv: dict,
+    source_admin: str,
+    api: Api,
+    restricted_contacts: frozenset[str],
+    now_s: float,
+    unanswered_days: int | None = None,
+) -> dict:
     """One plan row. Pure apart from the ClickUp read for an escalation's reason."""
+    row = classify_default(conv, source_admin, api, restricted_contacts, now_s)
+    if unanswered_days is None or row.get("action") == "skip":
+        return row
+    if row.get("reason") in INVARIANT_REASONS:
+        return row
+    if escalated_outside_her_authority(row):
+        return {**row, "default_class": row.get("reason"), "action": "leave", "reason": "left_explicit_escalation"}
+    action, reason, facts = unanswered_scope(conv, source_admin, now_s, unanswered_days)
+    if action == "reassign":
+        carried, recorded = recorded_escalation_reason(conv, api)
+        if carried and not recorded:
+            return {**row, **facts, "default_class": row.get("reason"), "action": "leave", "reason": "left_escalation_unread"}
+        if carried and escalated_outside_her_authority({"escalation_reason": recorded}):
+            return {
+                **row,
+                **facts,
+                "default_class": row.get("reason"),
+                "action": "leave",
+                "reason": "left_explicit_escalation",
+                "escalation_reason": recorded,
+            }
+    return {**row, **facts, "default_class": row.get("reason"), "action": action, "reason": reason}
+
+
+def classify_default(conv: dict, source_admin: str, api: Api, restricted_contacts: frozenset[str], now_s: float) -> dict:
+    """The default scope: the whole open queue, minus the classes a person keeps."""
     conv_id = str(conv.get("id"))
     admin = str(conv.get("admin_assignee_id") or "")
     team = str(conv.get("team_assignee_id") or "")
@@ -328,13 +460,20 @@ def load_restricted_contacts(path: str | None) -> frozenset[str]:
     return frozenset()
 
 
-def build_plan(api: Api, source_admin: str, restricted: frozenset[str], workers: int = 6, now_s: float | None = None) -> list[dict]:
+def build_plan(
+    api: Api,
+    source_admin: str,
+    restricted: frozenset[str],
+    workers: int = 6,
+    now_s: float | None = None,
+    unanswered_days: int | None = None,
+) -> list[dict]:
     ids = search_open_on(api, source_admin)
     now_s = time.time() if now_s is None else now_s
 
     def one(conv_id: str) -> dict:
         try:
-            return classify(fetch_conversation(api, conv_id), source_admin, api, restricted, now_s)
+            return classify(fetch_conversation(api, conv_id), source_admin, api, restricted, now_s, unanswered_days)
         except Exception as exc:  # an unreadable conversation is reported, never moved
             return {"id": conv_id, "action": "leave", "reason": "left_unreadable", "mechanism": "unread", "error": str(exc)[:200]}
 
@@ -358,6 +497,12 @@ def summarize(rows: list[dict]) -> dict:
         "by_mechanism": count(lambda r: r.get("mechanism")),
         "escalation_reasons": count(lambda r: r.get("escalation_reason", "-")),
         "reassign": len(reassign),
+        "reassign_by_default_class": dict(
+            sorted(
+                ((k, sum(1 for r in reassign if r.get("default_class", "-") == k)) for k in {r.get("default_class", "-") for r in reassign}),
+                key=lambda kv: -kv[1],
+            )
+        ),
         "reassign_human_replied": sum(1 for r in reassign if r.get("human_replied")),
         "reassign_mid_reply_recent": sum(1 for r in reassign if r.get("mid_reply_recent")),
         "truncated_threads": sum(
@@ -394,7 +539,8 @@ def resume_note(source_name: str, last_human_reply_at: int | None) -> str:
         f"Internal note (not visible to the customer). This conversation was moved from {source_name} to Caroline "
         f"(the AI queue) on {datetime.now(timezone.utc).strftime('%Y-%m-%d')} by the queue clean-up "
         f"(intercom-no-human-assignment-k1). {source_name} last replied to the customer here on {when}. "
-        "Nothing was sent to the customer and nothing was closed. Caroline answers the customer's next message. "
+        "Nothing was sent to the customer and nothing was closed. A customer message left waiting here "
+        "is answered when this conversation is handed to her, not on the customer's next message. "
         "To resume as a person, assign the conversation to yourself and reply."
     )
 
@@ -417,6 +563,7 @@ def apply_plan(
     cap: int,
     escalation_team: str = "",
     pace_s: float = 0.25,
+    note: str = "",
 ) -> dict:
     todo = [r for r in rows if r.get("action") == "reassign"]
     if escalation_team:
@@ -434,6 +581,8 @@ def apply_plan(
             "kind": "escalation_team" if to_team else "ai_queue",
             "before": r["before"],
             "mechanism": r.get("mechanism"),
+            "reason": r.get("reason"),
+            "default_class": r.get("default_class"),
             "human_replied": bool(r.get("human_replied")),
             "mid_reply_recent": bool(r.get("mid_reply_recent")),
             "note_posted": False,
@@ -454,8 +603,8 @@ def apply_plan(
             entry["verified"] = ok
             if after.get("state") == "closed" and r["before"].get("state") != "closed":
                 stats["closed_by_this_run"] += 1  # must stay 0: this tool never closes
-            if ok and r.get("human_replied") and not to_team:
-                post_internal_note(api, conv_id, resume_note(source_name, r.get("last_human_reply_at")))
+            if ok and not to_team and (note or r.get("human_replied")):
+                post_internal_note(api, conv_id, note or resume_note(source_name, r.get("last_human_reply_at")))
                 entry["note_posted"] = True
                 stats["notes"] += 1
             if ok:
@@ -611,7 +760,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--escalation-team", default="", help="apply: also move left_explicit_escalation rows to this TEAM queue")
     ap.add_argument("--restricted-file", help="path to restricted-accounts.ts (default: the repo copy)")
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument(
+        "--unanswered-within-days",
+        type=int,
+        help="plan / apply: move only conversations active in the last N days that the person has not answered since the customer's last message",
+    )
+    ap.add_argument("--note", default="", help="apply: internal note posted on every conversation this run moves")
+    ap.add_argument("--run-label", default="k1", help="apply: prefix of the run id on the ledger (default k1)")
     args = ap.parse_args(argv)
+    if args.unanswered_within_days is not None and args.unanswered_within_days <= 0:
+        ap.error("--unanswered-within-days must be a positive number of days")
+    if args.unanswered_within_days is not None and args.escalation_team:
+        ap.error("--unanswered-within-days moves to Caroline only; it cannot be combined with --escalation-team")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", args.run_label):
+        ap.error("--run-label is lower-case letters, digits and dashes")
 
     token = read_env_value("MUSOAI_INTERCOM_TOKEN")
     if not token:
@@ -639,7 +801,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"verify": result}, indent=1))
         return 0 if result["verdict"] == "ZERO" else 1
 
-    rows = build_plan(api, args.from_admin, load_restricted_contacts(args.restricted_file), args.workers)
+    rows = build_plan(
+        api,
+        args.from_admin,
+        load_restricted_contacts(args.restricted_file),
+        args.workers,
+        unanswered_days=args.unanswered_within_days,
+    )
     summary = summarize(rows)
     if args.out:
         out = Path(args.out)
@@ -649,11 +817,23 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"plan": summary, "clickup_readable": bool(api.clickup_key)}, indent=1))
         return 0
 
-    run_id = "k1-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = args.run_label + "-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     ledger = Path(args.ledger)
-    append_ledger(ledger, {"phase": "run", "run_id": run_id, "ts": now_iso(), "from_admin": args.from_admin, "plan": summary})
+    append_ledger(
+        ledger,
+        {
+            "phase": "run",
+            "run_id": run_id,
+            "ts": now_iso(),
+            "from_admin": args.from_admin,
+            "unanswered_within_days": args.unanswered_within_days,
+            "note": args.note.strip(),
+            "plan": summary,
+        },
+    )
     stats = apply_plan(
-        api, rows, args.from_admin, admin_name(api, args.from_admin), ledger, run_id, args.cap, args.escalation_team
+        api, rows, args.from_admin, admin_name(api, args.from_admin), ledger, run_id, args.cap, args.escalation_team,
+        note=args.note.strip(),
     )
     remaining = len(search_open_on(api, args.from_admin))
     result = {"run_id": run_id, "plan": summary, "applied": stats, "still_open_on_source": remaining}

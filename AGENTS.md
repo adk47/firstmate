@@ -856,18 +856,34 @@ conversation is decided in ONE module, `plugins/intercom/src/assignment-policy.t
 - **No escalation outcome is assumed.** `applyHandOff` reads the conversation back after EVERY
   escalation, accepted requests included, and reports only what the read shows: `failed` while
   any admin (the bot included) holds it, when it sits in another team, or when it cannot be read.
-- **A human assignee silences Caroline only while that human is working the thread**
-  (`humanHold`, `humanHoldHours`, default 72). A stale assignment is reclaimed on the customer's
-  next message. Hand-back from the escalation queue is "assign to Caroline".
+- **A human assignee silences Caroline only while that human is ANSWERING the customer**
+  (`humanHold`): a reply with words inside `humanHoldHours` (72), and no customer message left
+  without one for more than 4 h. A bare close, note or assignment is not a reply: on 2026-11-11 a
+  bulk close counted as "working the thread" and silenced her for 72 h on every customer who wrote
+  back. An escalated thread on a person is the exception: `escalationFiredAt`, set on every escalation
+  this plugin fires (the seven-reason rules, a judge verdict and the legacy regex path alike), holds it for
+  the whole window, and the 4 h grace never reclaims it. Hand-back
+  from the escalation queue is "assign to Caroline".
+- **Only a reason outside Caroline's authority leaves her** (`QUEUE_ESCALATION_REASONS`: the seven
+  content rules). "I want a human" and the turn cap are answered by her (`escalationGoesToQueue`,
+  captain 2026-11-13); the queue's team has no members, so each of those was a promise and silence.
 - **A writer outside the plugin that posts as Caroline re-opens the conversation ON its old
   assignee.** On 2026-11-11 one notification campaign re-opened 312 long-closed conversations on a
   person in 52 minutes; no assignment part is written, so an assignment count alone misses it. The
   plugin reclaims on that webhook; a new sender should still assign to Caroline before it posts.
 - A ticket (`create_ticket`) is never a hand-off: Caroline's workspace doctrine says so
   (`workspaces/support/AGENTS.md` "Who holds the conversation").
+- **A thread handed back to Caroline with the customer speaking last is answered then, not on the
+  customer's next message** (`handleWebhookEvent`, `assigned` branch). Only a conversation
+  exiting `human_takeover` resumes this way, so the bot's own self-assignment on a dispatch never
+  re-sends the message it is already answering; the whole customer-message path runs, guards
+  included (restricted accounts, output guard, live check, `canAgentReply`).
 - Clearing a person's queue is `scripts/intercom-queue-reassign.py` (plan / apply / revert /
   verify): assignment parts and internal notes only, a ledger row with the inverse before each
-  write, never a close or a customer message.
+  write, never a close or a customer message. `--unanswered-within-days` takes every thread the
+  person has not answered, except the classes Caroline cannot answer herself
+  (`left_restricted`, `left_escalation_unread`) and every escalation for one of the seven reasons
+  outside her authority (`left_explicit_escalation`).
 
 ## Outbound customer copy passes a signed reviewer gate
 

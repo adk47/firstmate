@@ -10,10 +10,10 @@ import type {
   DocumentAttachmentRef,
 } from "./types.js";
 import { RateLimitError } from "./outbound.js";
-import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply } from "./filters.js";
+import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, customerSpokeLast } from "./filters.js";
 import { checkEscalation, assessRisk, type AssessRiskDeps } from "./escalation.js";
 import { restrictionFor } from "./restricted-accounts.js";
-import { humanHold } from "./assignment-policy.js";
+import { escalationGoesToQueue, humanHold } from "./assignment-policy.js";
 import { updateKnownFacts } from "./extractors.js";
 import { shouldEnrich, type VerifiedIdentity } from "./enrichment.js";
 import {
@@ -246,8 +246,8 @@ export interface HandlerOptions {
   // channels (instagram, facebook, x, etc.). See IntercomAccountConfig.
   blockedChannelTags?: string[];
   // Human-hold rule (assignment-policy.ts humanHold): how long a human admin assignee silences
-  // Caroline after their last action, and which team is the explicit escalation queue. Absent =
-  // the default window and no escalation team. `nowMs` is a test seam.
+  // Caroline after their last reply to the customer, and which team is the explicit escalation
+  // queue. Absent = the default window and no escalation team. `nowMs` is a test seam.
   humanHold?: { hours?: number; escalationTeamId?: string; nowMs?: () => number };
   // Personalization gate + hook. When `personalization.enabled` and the message
   // is from a verified `type: "user"` author, `enrich` is invoked just before a
@@ -311,6 +311,39 @@ export async function handleWebhookEvent(
 
   const eventId = payload.id;
   const classified = classifyEvent(payload);
+
+  // A conversation handed back to Caroline (the queue drain, a person's hand-back) where the
+  // customer spoke last is answered NOW: the assignment is the trigger, not the customer's next
+  // message. Only a thread a person actually held is resumed, so the bot's own self-assignment on
+  // dispatch never re-sends a message it is already answering. Everything from here on is the
+  // ordinary customer-message path, guards included.
+  if (
+    classified.kind === "assigned" &&
+    state &&
+    client &&
+    classified.assigneeId === botAdminId &&
+    state.handoffMode === "human_takeover"
+  ) {
+    let live: IntercomConversation | null = null;
+    try {
+      live = await client.getConversation({ conversationId: classified.conversationId });
+    } catch (err) {
+      console.warn(
+        `[intercom:handler] hand-back conv=${classified.conversationId} could not be read, so its waiting customer is not answered until they write again: ${err}`,
+      );
+      live = null;
+    }
+    if (live && live.state === "open" && customerSpokeLast(live)) {
+      handleAssignment(state, classified.assigneeId, classified.assigneeType, botAdminId);
+      return handleWebhookEvent(
+        { ...payload, topic: "conversation.user.replied", data: { ...payload.data, item: live } },
+        state,
+        botAdminId,
+        client,
+        options,
+      );
+    }
+  }
 
   // Check idempotency if we have state
   if (state) {
@@ -601,10 +634,18 @@ export async function handleWebhookEvent(
           recentPartsV2,
         );
 
-        const isMagic = assessment.source === "user_request";
         const alreadyFired = !!state?.escalationFiredAt;
 
-        if (assessment.triggered && (isMagic || !alreadyFired)) {
+        // Only a reason outside Caroline's authority leaves her (assignment-policy.ts). A request
+        // for a person and the turn cap fall through to her own reply.
+        const toQueue = assessment.triggered && escalationGoesToQueue(assessment);
+        if (assessment.triggered && !toQueue) {
+          options?.riskDeps?.log?.warn?.(
+            `[intercom:handler] no hand-off conv=${classified.conversationId} reason=${assessment.source}/${assessment.reason}: Caroline answers`,
+          );
+        }
+
+        if (toQueue && !alreadyFired) {
           if (state) {
             state.handoffMode = "human_takeover";
             state.updatedAt = new Date().toISOString();
@@ -933,7 +974,7 @@ export async function handleWebhookEvent(
       // ops write wrapper). Measured 2026-11-11 17:33-18:25Z: one notification campaign replied
       // into 312 long-closed conversations whose assignee was a person; each reply re-opened the
       // conversation ON that person and his open queue went from 581 to 913 in an hour. Caroline
-      // sent the message, so Caroline holds the thread, unless a human is really working it
+      // sent the message, so Caroline holds the thread, unless a human is really answering it
       // (assignment-policy.ts humanHold: same rule as the customer-message live check).
       if (classified.adminId === botAdminId && client && classified.conversationId) {
         try {

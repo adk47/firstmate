@@ -62,7 +62,7 @@ import { handleWebhookEvent } from "../src/handler.js";
 import { createInitialSessionState } from "../src/handoff.js";
 import { MockIntercomClient } from "../src/outbound.js";
 import { createJevBackedJudge, createJevTurnRunner, renderJevBlock, type JevActionsConfig, type JevBands, type JevTurnOutcome, type JevTurnResult } from "../src/jev-router.js";
-import type { IntercomWebhookPayload, IntercomSessionState } from "../src/types.js";
+import type { IntercomWebhookPayload, IntercomConversation, IntercomSessionState } from "../src/types.js";
 import userCreated from "./fixtures/conversation-user-created.json";
 import adminReplied from "./fixtures/conversation-admin-replied.json";
 import assigned from "./fixtures/conversation-assigned.json";
@@ -185,6 +185,87 @@ describe("handleWebhookEvent", () => {
     expect(result.action).toBe("state_updated");
     expect(updated?.handoffMode).toBe("agent_active");
     expect(updated?.currentAssigneeId).toBe("4359478");
+  });
+
+  const liveConversation = (over: Partial<IntercomConversation> = {}): IntercomConversation =>
+    ({
+      type: "conversation",
+      id: "conv_123",
+      title: null,
+      created_at: 1711234567,
+      updated_at: 1711234567,
+      open: true,
+      state: "open",
+      source: { body: "Hi, I need help with my account", author: { type: "user", id: "user_abc" } },
+      conversation_parts: { conversation_parts: [] },
+      ...over,
+    }) as IntercomConversation;
+
+  const handedBackToBot = { ...assigned, id: "evt_handback", data: { ...assigned.data, item: { ...assigned.data.item, assignee: { type: "admin", id: BOT_ADMIN_ID } } } };
+
+  it("answers a customer-last thread handed back to Caroline, without waiting for the customer", async () => {
+    const client = new MockIntercomClient();
+    client.getConversation = vi.fn(async () => liveConversation());
+    const state = createInitialSessionState("conv_123", "ws_1");
+    state.handoffMode = "human_takeover";
+    state.currentAssigneeId = "admin_99";
+    const { result, state: updated } = await handleWebhookEvent(handedBackToBot as IntercomWebhookPayload, state, BOT_ADMIN_ID, client);
+    expect(result.action).toBe("dispatch_to_agent");
+    if (result.action === "dispatch_to_agent") {
+      expect(result.body).toBe("Hi, I need help with my account");
+      expect(result.authorId).toBe("user_abc");
+    }
+    expect(updated?.handoffMode).toBe("agent_active");
+    expect(updated?.currentAssigneeId).toBe(BOT_ADMIN_ID);
+  });
+
+  it("does not answer again when the thread's last message is Caroline's own", async () => {
+    const client = new MockIntercomClient();
+    client.getConversation = vi.fn(async () =>
+      liveConversation({
+        conversation_parts: {
+          conversation_parts: [
+            { type: "conversation_part", id: "p1", body: "<p>Here is the update</p>", part_type: "comment", created_at: 1711234600, author: { type: "admin", id: BOT_ADMIN_ID } },
+          ],
+        },
+      }),
+    );
+    const state = createInitialSessionState("conv_123", "ws_1");
+    state.handoffMode = "human_takeover";
+    const { result } = await handleWebhookEvent(handedBackToBot as IntercomWebhookPayload, state, BOT_ADMIN_ID, client);
+    expect(result.action).toBe("state_updated");
+    expect(client.getConversation).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers a thread the drain just handed over, whose newest parts are the drain's own", async () => {
+    const client = new MockIntercomClient();
+    client.getConversation = vi.fn(async () =>
+      liveConversation({
+        conversation_parts: {
+          conversation_parts: [
+            { type: "conversation_part", id: "p1", body: "<p>It still needs review; we will update you here.</p>", part_type: "comment", created_at: 1711234600, author: { type: "admin", id: BOT_ADMIN_ID } },
+            { type: "conversation_part", id: "p2", body: "<p>Hello, can I get an update?</p>", part_type: "comment", created_at: 1711234700, author: { type: "user", id: "user_abc" } },
+            { type: "conversation_part", id: "p3", body: null, part_type: "assignment", created_at: 1711234800, author: { type: "admin", id: BOT_ADMIN_ID }, assigned_to: { type: "admin", id: BOT_ADMIN_ID } },
+            { type: "conversation_part", id: "p4", body: "<p>Internal note (not visible to the customer).</p>", part_type: "note", created_at: 1711234801, author: { type: "admin", id: BOT_ADMIN_ID } },
+          ],
+        },
+      }),
+    );
+    const state = createInitialSessionState("conv_123", "ws_1");
+    state.handoffMode = "human_takeover";
+    state.currentAssigneeId = "admin_99";
+    const { result } = await handleWebhookEvent(handedBackToBot as IntercomWebhookPayload, state, BOT_ADMIN_ID, client);
+    expect(result.action).toBe("dispatch_to_agent");
+    if (result.action === "dispatch_to_agent") expect(result.body).toContain("Hello, can I get an update?");
+  });
+
+  it("does not re-send the message Caroline is already answering when the bot self-assigns", async () => {
+    const client = new MockIntercomClient();
+    client.getConversation = vi.fn(async () => liveConversation());
+    const state = createInitialSessionState("conv_123", "ws_1");
+    const { result } = await handleWebhookEvent(handedBackToBot as IntercomWebhookPayload, state, BOT_ADMIN_ID, client);
+    expect(result.action).toBe("state_updated");
+    expect(client.getConversation).not.toHaveBeenCalled();
   });
 
   it("updates lifecycle on close", async () => {
@@ -1040,7 +1121,48 @@ describe("handler — flag on (assessRisk path)", () => {
     expect(result.action).toBe("filtered");
   });
 
-  it("magic keyword bypasses escalationFiredAt (user re-requests human)", async () => {
+  it("asking for a person is not a hand-off: Caroline answers, nothing is escalated", async () => {
+    // captain 2026-11-13: no humans in the loop. Measured 11-12 12:54Z..11-13 14:00Z: 5 of 9
+    // escalations were this reason, into a queue with no members, and then silence.
+    const warn = vi.fn();
+    const { result, state: out } = await handleWebhookEvent(
+      makeUserPayload("can i talk to a human"),
+      makeState(),
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: true }, riskDeps: { log: { warn } } },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+    expect(out?.handoffMode).toBe("agent_active");
+    expect(out?.escalationFiredAt ?? null).toBeNull();
+    expect(warn.mock.calls.flat().join("\n")).toContain("no hand-off conv=conv1 reason=user_request/user_requested_human");
+  });
+
+  it("the turn cap is not a hand-off either: the conversation stays with Caroline", async () => {
+    const { result, state: out } = await handleWebhookEvent(
+      makeUserPayload("still not working"),
+      { ...makeState(), userTurnCount: 40, userExchangeCount: 40 },
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: true }, riskDeps: { turnCountHardCap: 6 } },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+    expect(out?.handoffMode).toBe("agent_active");
+  });
+
+  it("a reason outside her authority still goes to the escalation queue", async () => {
+    const { result } = await handleWebhookEvent(
+      makeUserPayload("my lawyer will be filing a lawsuit against you"),
+      makeState(),
+      "bot",
+      undefined,
+      { riskAssessment: { enabled: true } },
+    );
+    expect(result.action).toBe("escalate");
+    if (result.action === "escalate") expect(result.assessment.reason).toBe("legal_threat");
+  });
+
+  it("asking for a person inside an escalated conversation does not escalate it a second time", async () => {
     const state = makeState();
     state.escalationFiredAt = "2026-05-04T00:00:00Z";
     state.handoffMode = "human_takeover";
@@ -1051,7 +1173,7 @@ describe("handler — flag on (assessRisk path)", () => {
       undefined,
       { riskAssessment: { enabled: true } },
     );
-    expect(result.action).toBe("escalate");
+    expect(result.action).toBe("filtered");
   });
 
   it("turn count: a customer message continuing their own unanswered burst is the same turn", async () => {

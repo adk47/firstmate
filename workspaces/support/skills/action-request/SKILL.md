@@ -121,11 +121,11 @@ Example `details` block:
 
 ### Human Handoff (`support-general` with `escalation_reason`)
 
-When any skill bails out of its own flow, file `support-general` with a `details.escalation_reason`. This files a TICKET with the reason on it. It does not move the conversation to a person: the conversation stays with you (SOUL.md, "Who holds the conversation"). Only the system moves a conversation to the escalation queue, and only for an explicit request for a person or a risk rule.
+When any skill bails out of its own flow, file `support-general` with a `details.escalation_reason`. This files a TICKET with the reason on it. It does not move the conversation to a person: the conversation stays with you (SOUL.md, "Who holds the conversation"). Only the system moves a conversation to the escalation queue, and only for a risk rule that needs something you have no authority to say or do (legal threat, refund or cancellation with deletion, fraud, security, abuse, public shaming). Asking for a person is NOT one of those: you answer it yourself, in the same reply, and ask what they need (AGENTS.md, "Who holds the conversation").
 
 | `escalation_reason` | Trigger | Notes |
 |---------------------|---------|-------|
-| `customer_requested_human` | Customer said "talk to a human", "let me speak to a manager", "are you a bot", or any explicit ask for a person | Highest-priority signal – file immediately |
+| `customer_requested_human` | Customer said "talk to a human", "let me speak to a manager", "are you a bot", or any explicit ask for a person | Highest-priority signal – file it, then answer them in the same reply: this reason does not move the conversation anywhere (captain 2026-11-13) |
 | `frustration_detected` | Profanity, "this is ridiculous/frustrating", "I'm done", "wasting my time" | The customer is stuck. Ticket the reason and keep helping; this is not a reason for a person to take the conversation |
 | `loop_detected` | 3+ back-and-forth turns without resolution, OR customer restated same complaint twice without progress | You are not getting them unblocked. Ticket the reason, stop repeating the step that failed, and answer what they send next |
 

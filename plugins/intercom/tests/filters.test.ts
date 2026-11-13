@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyEvent, surfaceLinkTargets, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, extractImageAttachments, extractDocumentAttachments, IMAGE_MIME_ALLOWLIST, CANDIDATE_IMAGE_MIME_ALLOWLIST } from "../src/filters.js";
+import { classifyEvent, customerSpokeLast, surfaceLinkTargets, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, extractImageAttachments, extractDocumentAttachments, IMAGE_MIME_ALLOWLIST, CANDIDATE_IMAGE_MIME_ALLOWLIST } from "../src/filters.js";
 import type { IntercomWebhookPayload, IntercomPartAttachment } from "../src/types.js";
 import userCreated from "./fixtures/conversation-user-created.json";
 import userReplied from "./fixtures/conversation-user-replied.json";
@@ -977,3 +977,50 @@ describe("surfaceLinkTargets", () => {
   });
 });
 
+
+describe("customerSpokeLast", () => {
+  const conversation = (parts: unknown[], sourceAuthor = { type: "user", id: "u1" }) =>
+    ({
+      type: "conversation",
+      id: "conv_123",
+      title: null,
+      created_at: 1711234567,
+      updated_at: 1711234567,
+      open: true,
+      state: "open",
+      source: { body: "the opening message", author: sourceAuthor },
+      conversation_parts: { conversation_parts: parts },
+    }) as never;
+
+  const partOf = (authorType: string) => ({ type: "conversation_part", id: "p", body: "x", part_type: "comment", created_at: 1, author: { type: authorType, id: "a" } });
+
+  it("is true when the customer's message is the newest one", () => {
+    expect(customerSpokeLast(conversation([partOf("admin"), partOf("user")]))).toBe(true);
+    expect(customerSpokeLast(conversation([partOf("lead")]))).toBe(true);
+  });
+
+  it("is false when we replied after them", () => {
+    expect(customerSpokeLast(conversation([partOf("user"), partOf("admin")]))).toBe(false);
+    expect(customerSpokeLast(conversation([partOf("user"), partOf("bot")]))).toBe(false);
+  });
+
+  it("ignores parts that answer nobody, such as the drain's assignment and its internal note", () => {
+    const drainParts = [
+      { ...partOf("user"), id: "p1" },
+      { ...partOf("admin"), id: "p2", body: null, part_type: "assignment" },
+      { ...partOf("admin"), id: "p3", body: "Internal note", part_type: "note" },
+    ];
+    expect(customerSpokeLast(conversation(drainParts))).toBe(true);
+    expect(customerSpokeLast(conversation([...drainParts, { ...partOf("admin"), id: "p4", body: "", part_type: "comment" }]))).toBe(true);
+    expect(customerSpokeLast(conversation([...drainParts, { ...partOf("admin"), id: "p4", body: "<p>An update</p>", part_type: "comment" }]))).toBe(false);
+  });
+
+  it("counts a customer message that carries no words", () => {
+    expect(customerSpokeLast(conversation([partOf("admin"), { ...partOf("user"), body: "" }]))).toBe(true);
+  });
+
+  it("falls back to who wrote the opening message when there are no parts", () => {
+    expect(customerSpokeLast(conversation([]))).toBe(true);
+    expect(customerSpokeLast(conversation([], { type: "admin", id: "5465657" }))).toBe(false);
+  });
+});

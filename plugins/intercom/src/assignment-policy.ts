@@ -15,14 +15,18 @@
  *      call is made and the customer is never told a person is coming.
  *   2. A human only on an EXPLICIT ESCALATION, and an escalation carries a REASON
  *      (`risk_escalation`, `restricted_hold`, `legacy_escalation`). No reason, no escalation:
- *      resolveHandOffTarget throws.
+ *      resolveHandOffTarget throws. A risk escalation leaves Caroline only for a reason outside
+ *      her authority (QUEUE_ESCALATION_REASONS); "asked for a person" and a long conversation
+ *      are not such reasons (escalationGoesToQueue; captain 2026-11-13).
  *   3. An escalation goes to a QUEUE, never a person. The target is `escalationTeamId`, sent with
  *      `type: "team"`, so an admin id configured there is refused by Intercom rather than quietly
  *      becoming somebody's personal inbox again. Unset = Intercom's Unassigned inbox.
  *   4. `defaultInboxId` is retired. It is never read for an assignment (config.ts warns when a
  *      host still sets it; scripts/check-intercom-no-personal-assignee.sh fails CI on it).
- *   5. A human assignee only silences Caroline while that human is actually working the thread
- *      (humanHold). A stale assignment is reclaimed on the customer's next message.
+ *   5. A human assignee only silences Caroline while that human is ANSWERING the customer
+ *      (humanHold): a reply inside the hold window, and no customer message left without one for
+ *      longer than the reply grace. A close, a note or an assignment answers nobody. Anything else
+ *      is reclaimed on the customer's next message.
  *
  * Pure and import-free: every decision here is unit-tested without a client.
  */
@@ -297,14 +301,59 @@ export async function applyHandOff(p: {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Which risk escalations leave Caroline at all?
+
+/**
+ * The reasons a conversation goes to the escalation queue: the customer needs something Caroline
+ * has no authority to say or do (a legal statement, a payment dispute, an account deletion, a
+ * security, abuse or fraud report). Every one is a content rule in escalation.ts RISK_RULES.
+ *
+ * NOT on the list, and so answered by Caroline (captain 2026-11-13: "issues like this need
+ * responses by caroline"; no humans in the loop, a hand-off is a defect):
+ *   - `user_requested_human`: asking for a person does not produce one. Measured on the edge
+ *     journal 2026-11-12 12:54Z..11-13 14:00Z, the first day escalations went to the queue: 5 of
+ *     the 9 were this reason, and the queue's team has no members, so each customer was told "I'm
+ *     pulling in a teammate" and then got silence on every later message.
+ *   - `turn_count_cap` (2 of the 9): a long conversation is a reason to answer better, and after
+ *     the hand-off nobody answered at all.
+ *
+ * A `judge` verdict is not decided here: it exists only behind its own switch (jev
+ * `actions.escalate`, off in production, where the journal reads `suppressed=escalate`).
+ */
+export const QUEUE_ESCALATION_REASONS: ReadonlySet<string> = new Set([
+  "legal_threat",
+  "refund_intent",
+  "cancel_intent",
+  "fraud_complaint",
+  "security_incident",
+  "abuse_report",
+  "public_shaming_intent",
+]);
+
+/** Does this risk assessment move the conversation to the escalation queue? Otherwise Caroline answers it. */
+export function escalationGoesToQueue(assessment: { source?: string; reason?: string }): boolean {
+  if (assessment.source === "judge") return true;
+  return assessment.source === "rule" && QUEUE_ESCALATION_REASONS.has(String(assessment.reason ?? ""));
+}
+
+// ---------------------------------------------------------------------------
 // Human hold: when does a human assignee silence Caroline?
 
 /** A human assignee holds a conversation for this long after their last action in it. */
 export const DEFAULT_HUMAN_HOLD_HOURS = 72;
 
+/**
+ * A human who answered holds the thread only while no customer message has waited longer than this
+ * for a reply. Four hours is the sentinel's limit for `intercom_customer_last`.
+ */
+export const DEFAULT_REPLY_GRACE_HOURS = 4;
+
+const CUSTOMER_AUTHOR_TYPES: ReadonlySet<string> = new Set(["user", "lead", "contact"]);
+
 export interface HoldPart {
   created_at?: number;
   part_type?: string;
+  body?: string | null;
   author?: { type?: string; id?: string | number };
   assigned_to?: { type?: string; id?: string | number } | null;
 }
@@ -323,6 +372,8 @@ export interface HumanHoldInput {
   nowMs: number;
   /** Hold window. Undefined = DEFAULT_HUMAN_HOLD_HOURS. Zero or negative = a human assignee always holds (legacy). */
   holdHours?: number;
+  /** How long a customer message may wait for the human's reply before Caroline takes it. Undefined = DEFAULT_REPLY_GRACE_HOURS. */
+  replyGraceHours?: number;
 }
 
 export interface HumanHoldDecision {
@@ -333,16 +384,35 @@ export interface HumanHoldDecision {
   reason: string;
 }
 
-/** Epoch SECONDS of the newest part authored by a human admin (not the bot, not Operator), or null. */
-export function lastHumanActionAt(parts: readonly HoldPart[] | undefined, botAdminId: string): number | null {
+/**
+ * Epoch SECONDS of the newest REPLY a human admin (not the bot, not Operator) sent the customer,
+ * or null. A reply is a part with words the customer can read: not a note, and not a bare close,
+ * re-open, snooze or assignment. On 2026-11-11 16:00Z one person bulk-closed their queue; every
+ * close counted as "working the thread" and silenced Caroline for 72 h on each customer who wrote
+ * back (convs 215476524541332 and 215475055007096 on 11-13, 45 h after a close with no reply).
+ */
+export function lastHumanReplyAt(parts: readonly HoldPart[] | undefined, botAdminId: string): number | null {
   let last: number | null = null;
   for (const p of parts ?? []) {
     if (p?.author?.type !== "admin") continue;
     if (String(p.author.id ?? "") === botAdminId) continue;
+    if (p.part_type === "note") continue;
+    if (!String(p.body ?? "").replace(/<[^>]*>/g, "").trim()) continue;
     const at = typeof p.created_at === "number" ? p.created_at : null;
     if (at !== null && (last === null || at > last)) last = at;
   }
   return last;
+}
+
+/** Epoch SECONDS of the OLDEST customer part newer than `since` (the message that has waited longest), or null. */
+export function oldestCustomerPartAfter(parts: readonly HoldPart[] | undefined, since: number): number | null {
+  let oldest: number | null = null;
+  for (const p of parts ?? []) {
+    if (!CUSTOMER_AUTHOR_TYPES.has(String(p?.author?.type ?? ""))) continue;
+    const at = typeof p.created_at === "number" ? p.created_at : null;
+    if (at !== null && at > since && (oldest === null || at < oldest)) oldest = at;
+  }
+  return oldest;
 }
 
 /** Did the bot itself place this conversation in `team`? (An escalation's second step.) */
@@ -363,9 +433,14 @@ export function botPlacedInTeam(parts: readonly HoldPart[] | undefined, botAdmin
  *     it back to Caroline. Team membership ALONE is not a hold: a team id is reused history
  *     (measured 2026-11-11: the configured team already carried 12,791 closed conversations with
  *     no admin, none of them escalations, and each would have gone silent on its next message).
- *   - Assigned to a human admin: held while that human is working it, meaning a human admin did
- *     something in the conversation inside the hold window, or this plugin escalated it with a
- *     reason inside the window. Otherwise it is a stale assignment and Caroline reclaims it.
+ *   - Assigned to a human admin AND this plugin escalated it with a reason (a
+ *     QUEUE_ESCALATION_REASONS case, so outside Caroline's authority): held for the whole hold
+ *     window, whatever the customer has waited. The reply grace never applies: a legal or fraud
+ *     case does not become Caroline's to answer because its follow-up is four hours old.
+ *   - Assigned to a human admin otherwise: held while a human is ANSWERING it, meaning a human
+ *     admin sent the customer a reply inside the hold window, AND no customer message since has
+ *     waited longer than the reply grace. Otherwise Caroline reclaims it: an assignee who is not
+ *     answering holds nothing.
  *     (Measured: 109 of the 581 threads open on one person were assigned more than 15 days
  *     earlier, and 168 customer replies in 24 h were dropped because of a human assignee who had
  *     never answered.)
@@ -393,17 +468,35 @@ export function humanHold(input: HumanHoldInput): HumanHoldDecision {
   if (!(hours > 0)) return { held: true, reclaim: false, reason: `human assignee ${admin}` };
   const windowMs = hours * 3600 * 1000;
 
-  const humanAt = lastHumanActionAt(input.parts, input.botAdminId);
-  if (humanAt !== null && input.nowMs - humanAt * 1000 <= windowMs) {
-    return { held: true, reclaim: false, reason: `human assignee ${admin}` };
-  }
+  const grace = input.replyGraceHours ?? DEFAULT_REPLY_GRACE_HOURS;
+  const graceMs = grace * 3600 * 1000;
+  // The customer message that has waited longest since `sinceS` and is past the grace, if any.
+  const unanswered = (sinceS: number): boolean => {
+    const waiting = oldestCustomerPartAfter(input.parts, sinceS);
+    return waiting !== null && input.nowMs - waiting * 1000 > graceMs;
+  };
+  const notAnswering = {
+    held: false,
+    reclaim: true,
+    reason: `human assignee ${admin} has not replied to the customer in ${grace}h`,
+  };
+
+  // The escalation gate is checked FIRST and takes no grace: the reason this plugin handed the
+  // thread over is one Caroline has no authority to answer, and a person taking it from the queue
+  // does not change that. Only the hold window ends it.
   const firedMs = input.escalationFiredAt ? Date.parse(input.escalationFiredAt) : NaN;
   if (Number.isFinite(firedMs) && input.nowMs - firedMs <= windowMs) {
     return { held: true, reclaim: false, reason: `human assignee ${admin} (escalated)` };
   }
+
+  const humanAt = lastHumanReplyAt(input.parts, input.botAdminId);
+  if (humanAt !== null && input.nowMs - humanAt * 1000 <= windowMs) {
+    if (unanswered(humanAt)) return notAnswering;
+    return { held: true, reclaim: false, reason: `human assignee ${admin}` };
+  }
   return {
     held: false,
     reclaim: true,
-    reason: `stale human assignee ${admin}: no human action in ${hours}h`,
+    reason: `stale human assignee ${admin}: no human reply in ${hours}h`,
   };
 }
