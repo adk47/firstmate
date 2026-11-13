@@ -1,0 +1,662 @@
+[
+ {
+  "created_at": "2026-11-13T01:11:46Z",
+  "head_ref": "fm/node8-fly-gate-v2",
+  "head_sha": "37d839f38ec73ebb438715fb1662eb546fb2a3ea",
+  "labels": [
+   "credit-approval-change",
+   "tier:2"
+  ],
+  "merge_commit_sha": "7a761a4e97bd8647a5a1e7cda3df256db6ede048",
+  "merged_at": "2026-11-13T02:21:10Z",
+  "number": 1926,
+  "deployed_at": "2026-11-13T02:41:29Z",
+  "deploy_run": 43351840530
+ },
+ {
+  "created_at": "2026-11-12T20:53:36Z",
+  "head_ref": "fm/verif-bulk-throughput-v1",
+  "head_sha": "a5ecb0a432a50a8fb249f7c6282ba0e20ffffb5f",
+  "labels": [
+   "credit-approval-change",
+   "tier:1"
+  ],
+  "merge_commit_sha": "3e57ca8754df179c8b3224e21b227bf6c53d665c",
+  "merged_at": "2026-11-13T01:11:03Z",
+  "number": 1922,
+  "deployed_at": "2026-11-13T02:41:29Z",
+  "deploy_run": 43351840530
+ },
+ {
+  "created_at": "2026-11-12T22:16:17Z",
+  "head_ref": "fm/claim-doc-ladder-v2",
+  "head_sha": "2f999516243c731a95be036f551f05e90b0ff6a5",
+  "labels": [
+   "credit-approval-change",
+   "tier:1"
+  ],
+  "merge_commit_sha": "ded88f688e19d8b923bde3ac2a2a2525f42584ca",
+  "merged_at": "2026-11-13T00:41:29Z",
+  "number": 1925,
+  "deployed_at": "2026-11-13T02:41:29Z",
+  "deploy_run": 43351840530
+ },
+ {
+  "created_at": "2026-11-12T21:59:12Z",
+  "head_ref": "fm/node8-load-split-f1",
+  "head_sha": "ee65fcb427c25c29011185b1718d0a4aa36e30b9",
+  "labels": [],
+  "merge_commit_sha": "5f17a579d887341bf96566541f168b1825be2f09",
+  "merged_at": "2026-11-12T22:07:58Z",
+  "number": 1924,
+  "deployed_at": "2026-11-13T02:41:29Z",
+  "deploy_run": 43351840530
+ },
+ {
+  "created_at": "2026-11-12T18:49:25Z",
+  "head_ref": "fm/verif-send-throughput-v2",
+  "head_sha": "1ddfecd675fbc98fb9c03b8a4b7cb7d000330943",
+  "labels": [
+   "credit-approval-change",
+   "tier:2"
+  ],
+  "merge_commit_sha": "66491d5525b7a5e2994de9937f794d822b8c23e8",
+  "merged_at": "2026-11-12T21:37:56Z",
+  "number": 1919,
+  "deployed_at": "2026-11-12T21:59:13Z",
+  "deploy_run": 43312306659
+ },
+ {
+  "created_at": "2026-11-12T12:55:25Z",
+  "head_ref": "fm/outbound-copy-test-store-fix",
+  "head_sha": "33de4c75c97f30fb5d4b0b6b36c3707424146c7b",
+  "labels": [
+   "tier:1"
+  ],
+  "merge_commit_sha": "258c9e3c29f69c4798e05c90a6ff0952db575d8e",
+  "merged_at": "2026-11-12T21:00:48Z",
+  "number": 1914,
+  "deployed_at": "2026-11-12T21:32:32Z",
+  "deploy_run": 43308462572
+ },
+ {
+  "created_at": "2026-11-12T17:36:32Z",
+  "head_ref": "fm/hydra-queue-report-credits",
+  "head_sha": "0e51a4d00f60a46ccc5930b2d672d50220880a74",
+  "labels": [
+   "tier:2"
+  ],
+  "merge_commit_sha": "66f5bacecdf961106c092fa3150dab3a37b1a424",
+  "merged_at": "2026-11-12T20:51:07Z",
+  "number": 1918,
+  "deployed_at": "2026-11-12T21:32:32Z",
+  "deploy_run": 43308462572
+ },
+ {
+  "created_at": "2026-11-12T07:09:55Z",
+  "head_ref": "fm/gdpr-ai-handling-v1",
+  "head_sha": "15196a9ffb203c74cff1ac42823ca67a8a693d00",
+  "labels": [
+   "tier:1"
+  ],
+  "merge_commit_sha": "ab1ade71d1ef80be2c702e28fecd700f0790b044",
+  "merged_at": "2026-11-12T17:46:48Z",
+  "number": 1908,
+  "deployed_at": "2026-11-12T21:32:32Z",
+  "deploy_run": 43308462572
+ },
+ {
+  "created_at": "2026-11-12T14:50:23Z",
+  "head_ref": "fm/hydra-cap-read-ro",
+  "head_sha": "e9d392eab1797272086613c8f70f3d9571b6e599",
+  "labels": [
+   "credit-approval-change",
+   "tier:2"
+  ],
+  "merge_commit_sha": "fa1c3072cc3de6988ffc13567dc790ff9d2e8609",
+  "merged_at": "2026-11-12T16:21:03Z",
+  "number": 1917,
+  "deployed_at": "2026-11-12T16:38:16Z",
+  "deploy_run": 43257759792
+ },
+ {
+  "created_at": "2026-11-12T10:52:01Z",
+  "head_ref": "fm/hydra-capture-decide-live",
+  "head_sha": "ce4697e443e05b7adef67d0374aa5da9e1765d93",
+  "labels": [
+   "credit-approval-change",
+   "tier:2"
+  ],
+  "merge_commit_sha": "8b9e7568afbb75c070b66411c9c788a7d35be3cb",
+  "merged_at": "2026-11-12T12:30:40Z",
+  "number": 1912,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T05:35:16Z",
+  "head_ref": "fm/ai-support-quality-v1",
+  "head_sha": "1e9f97e92938480134945decb4d2fbbdfbaefd57",
+  "labels": [
+   "credit-approval-change",
+   "tier:2"
+  ],
+  "merge_commit_sha": "600e1b1cfae61a43cf853b450e69f5c89f31bf4a",
+  "merged_at": "2026-11-12T11:49:28Z",
+  "number": 1902,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T05:13:08Z",
+  "head_ref": "fm/hydra-capture-scale-drain-diagnostics",
+  "head_sha": "64bd4e298a07200fd5efeeecaf065146a8de79be",
+  "labels": [
+   "credit-approval-change",
+   "tier:2"
+  ],
+  "merge_commit_sha": "54e6d13eb7d6485bbb565f764dd4ddeb0357fabe",
+  "merged_at": "2026-11-12T11:14:06Z",
+  "number": 1900,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T10:47:08Z",
+  "head_ref": "fm/hydra-marker-admin-api",
+  "head_sha": "d39e56960155ca9fbc6755b5268d6f5382f69761",
+  "labels": [
+   "credit-approval-change"
+  ],
+  "merge_commit_sha": "d9deab9a91783dd89a4609c48fd8daf647a52fc1",
+  "merged_at": "2026-11-12T11:13:56Z",
+  "number": 1911,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T10:46:13Z",
+  "head_ref": "fm/hydra-capture-soul-live",
+  "head_sha": "a1fd82c51194273eba21ad36a72fe6d5ef85eae3",
+  "labels": [],
+  "merge_commit_sha": "5d33d3292f5d7d1df159c2a4c030a28572c297ca",
+  "merged_at": "2026-11-12T11:13:47Z",
+  "number": 1910,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T04:13:29Z",
+  "head_ref": "fm/outbound-copy-fable-gate-v1",
+  "head_sha": "b53800a78ee94121e32f300436384c0575340d8a",
+  "labels": [
+   "credit-approval-change",
+   "tier:2"
+  ],
+  "merge_commit_sha": "278fcc8fe84d36a3f51412c94b8cbc46fa95418a",
+  "merged_at": "2026-11-12T10:42:01Z",
+  "number": 1895,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T07:06:55Z",
+  "head_ref": "fm/fleet-velocity-fable-v1",
+  "head_sha": "6505e0ac9855b02cf1790a2e3ac571a6c3462ad5",
+  "labels": [
+   "tier:1"
+  ],
+  "merge_commit_sha": "eeccc9cbbf74587094b390f5e9f85e1fa931fdac",
+  "merged_at": "2026-11-12T10:12:17Z",
+  "number": 1906,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T06:17:49Z",
+  "head_ref": "fm/hydra-opt-stale-main-marker",
+  "head_sha": "c98257189cf5ba1cf760e6d31dc0f39b6fa0147d",
+  "labels": [
+   "credit-approval-change",
+   "tier:1"
+  ],
+  "merge_commit_sha": "c5e4557808f0eb6fc7faf5391ef87ce94090cfcf",
+  "merged_at": "2026-11-12T09:21:21Z",
+  "number": 1905,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T03:25:43Z",
+  "head_ref": "fm/caroline-monitor-and-fixloop-k2",
+  "head_sha": "74fa8be632ecda32e9ec1c3f4b63056435b9cc08",
+  "labels": [
+   "tier:1"
+  ],
+  "merge_commit_sha": "441a7bada16237999f85d3d768722320682b84b6",
+  "merged_at": "2026-11-12T09:12:20Z",
+  "number": 1894,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T05:12:54Z",
+  "head_ref": "fm/hydra-capture-paid-ask-limiter",
+  "head_sha": "e8a22b569e217825f3d0ce1ec639b145eab4c523",
+  "labels": [
+   "tier:2"
+  ],
+  "merge_commit_sha": "8d299698b260cc5e5830609ceb9c56112a665ef9",
+  "merged_at": "2026-11-12T08:57:13Z",
+  "number": 1898,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T07:07:33Z",
+  "head_ref": "adk47/fm-claim-list-timer-s4-qa",
+  "head_sha": "a2f040a1a278d0d81dca1d67b8e03d0169726d28",
+  "labels": [
+   "credit-approval-change",
+   "tier:1"
+  ],
+  "merge_commit_sha": "b0a1bc8b73c3a691bab7671c4186629cc5287e47",
+  "merged_at": "2026-11-12T07:49:24Z",
+  "number": 1907,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T02:04:22Z",
+  "head_ref": "fm/intercom-no-human-assignment-k1-qa",
+  "head_sha": "86381944617f4f1e2a95614b9da893004b30b0aa",
+  "labels": [
+   "tier:2"
+  ],
+  "merge_commit_sha": "bc381c819441d5208bb25ccc864b02aa451551a5",
+  "merged_at": "2026-11-12T07:26:14Z",
+  "number": 1892,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T06:09:28Z",
+  "head_ref": "fm/fable-standing-review-v1",
+  "head_sha": "e46255f0a6c4280a62e997c13a79f0bec52832da",
+  "labels": [],
+  "merge_commit_sha": "840b46c75f67dfd6d83ffe5ef355b3f76ab4bcc4",
+  "merged_at": "2026-11-12T06:53:33Z",
+  "number": 1904,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T01:45:24Z",
+  "head_ref": "fm/hydra-tick-budget-fix-v1",
+  "head_sha": "0807d13120bae0039104f7948d87e80907d34585",
+  "labels": [
+   "credit-approval-change",
+   "tier:2"
+  ],
+  "merge_commit_sha": "9cff23981be6b55d938036e33083085eb80c2f5f",
+  "merged_at": "2026-11-12T06:03:20Z",
+  "number": 1890,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T05:43:55Z",
+  "head_ref": "adk47/fm-claim-list-timer-s4",
+  "head_sha": "c5cd866ff15ca37440b1852ab30e5c55608c2c05",
+  "labels": [
+   "credit-approval-change"
+  ],
+  "merge_commit_sha": "dfd6679926e3b7cee132daa7023bf07d9027bac1",
+  "merged_at": "2026-11-12T05:55:44Z",
+  "number": 1903,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T04:19:46Z",
+  "head_ref": "adk47/fm-caroline-billing-and-hide-k3-deploy-marker",
+  "head_sha": "da630d99949f74b72840b97bf41ca643572cb7cc",
+  "labels": [],
+  "merge_commit_sha": "ec20a19a10f18bf63ae43bc6ec65f067e0bd12cc",
+  "merged_at": "2026-11-12T05:11:49Z",
+  "number": 1896,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-12T02:14:25Z",
+  "head_ref": "fm/credit-verif-closeout-v1",
+  "head_sha": "fb8c6aa9ec0331625bd197b2d011577508d79ae1",
+  "labels": [
+   "credit-approval-change"
+  ],
+  "merge_commit_sha": "da3df0b07eeaf4d63ef53a36fbc852d0fa0f0967",
+  "merged_at": "2026-11-12T02:23:32Z",
+  "number": 1893,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-11T03:43:02Z",
+  "head_ref": "fm/support-intent-gate-r2",
+  "head_sha": "c18a86133b9563d05b0d851c01eb3271db233827",
+  "labels": [
+   "tier:2",
+   "stale-finding"
+  ],
+  "merge_commit_sha": "2a19e4bc7111f58a0d90025631c8110f71eb8d6e",
+  "merged_at": "2026-11-12T02:19:37Z",
+  "number": 1881,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-11T22:04:48Z",
+  "head_ref": "fm/intercom-no-human-assignment-k1",
+  "head_sha": "d850805d3f7fea25d2dddd7500ee401041a3ee88",
+  "labels": [],
+  "merge_commit_sha": "994867229d0100b226514e19a2573831f232cee3",
+  "merged_at": "2026-11-12T01:40:30Z",
+  "number": 1889,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-11T21:20:05Z",
+  "head_ref": "adk47/fm-caroline-billing-and-hide-k3",
+  "head_sha": "2e520ae783ed41e656c37320bdb0fd75c0c54c1b",
+  "labels": [],
+  "merge_commit_sha": "d9e67e21b44832638a3c56dd952147357c03d7b8",
+  "merged_at": "2026-11-11T23:10:33Z",
+  "number": 1888,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-11T04:36:47Z",
+  "head_ref": "fm/hydra-opt-tick-budget",
+  "head_sha": "db0d5994aca590e8be31a8ac1432e12b550cf23d",
+  "labels": [
+   "tier:1"
+  ],
+  "merge_commit_sha": "2e3e55ac664cd372b7078565d85f5a3a26a5c1cd",
+  "merged_at": "2026-11-11T18:50:38Z",
+  "number": 1882,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-11T05:01:45Z",
+  "head_ref": "fm/verification-scale-drain-v1",
+  "head_sha": "f1959ffc46a4d62bae163c6bb0ab0df915f8ec75",
+  "labels": [
+   "credit-approval-change",
+   "tier:2"
+  ],
+  "merge_commit_sha": "3a3bdcd4519c145fee4086ad8cbc5d81ee1195b9",
+  "merged_at": "2026-11-11T18:27:16Z",
+  "number": 1883,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-11T10:01:31Z",
+  "head_ref": "fm/creds-apply-parallel-v1",
+  "head_sha": "2b751bd972d917538de0e0797bc250a77da6b57e",
+  "labels": [
+   "credit-approval-change",
+   "tier:1"
+  ],
+  "merge_commit_sha": "466feac87f4bed27d5288c8752404a5d41b9a98f",
+  "merged_at": "2026-11-11T14:34:13Z",
+  "number": 1884,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-08T02:13:42Z",
+  "head_ref": "fm/credit-per-role-decision-h1",
+  "head_sha": "da825913d1262e54455bfa8c148771bd67f36b7b",
+  "labels": [
+   "credit-approval-change",
+   "tier:1"
+  ],
+  "merge_commit_sha": "583886f3a0d60679d63fdb5181a725203be05035",
+  "merged_at": "2026-11-11T09:29:59Z",
+  "number": 1851,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-10T02:51:41Z",
+  "head_ref": "fm/hydra-watchdog-datebomb-d1",
+  "head_sha": "9da5123b50dce5495c8ab8443b5e35d00c39991f",
+  "labels": [
+   "tier:1"
+  ],
+  "merge_commit_sha": "28dbf31cf6c967d8da679fbf5437d9bc3f995e72",
+  "merged_at": "2026-11-10T16:59:22Z",
+  "number": 1878,
+  "deployed_at": "2026-11-12T13:11:12Z",
+  "deploy_run": 43221968103
+ },
+ {
+  "created_at": "2026-11-09T21:59:57Z",
+  "head_ref": "fm/hydra-verify-notify-marker-m1",
+  "head_sha": "928fa680d5d0683d3017168848da2704351906fa",
+  "labels": [
+   "credit-approval-change"
+  ],
+  "merge_commit_sha": "87027e7404d56b5e97f7029933fc54c908a08228",
+  "merged_at": "2026-11-09T22:12:06Z",
+  "number": 1876,
+  "deployed_at": "2026-11-09T22:52:56Z",
+  "deploy_run": 42711492712
+ },
+ {
+  "created_at": "2026-11-09T12:02:34Z",
+  "head_ref": "fm/exec-posture-renewal-qa-six",
+  "head_sha": "b2110f9c8e6de07630452efb1f456445f8946a07",
+  "labels": [
+   "tier:1"
+  ],
+  "merge_commit_sha": "2438c06810d11cef6135e09fb1dc08a39095530e",
+  "merged_at": "2026-11-09T21:31:21Z",
+  "number": 1870,
+  "deployed_at": "2026-11-09T22:52:56Z",
+  "deploy_run": 42711492712
+ },
+ {
+  "created_at": "2026-11-08T06:57:32Z",
+  "head_ref": "fm/verify-realtime-fable-r1",
+  "head_sha": "6d267aeb58d44bb38e0964dd5d5a1ceacf8b818e",
+  "labels": [
+   "credit-approval-change",
+   "tier:2",
+   "stale-finding"
+  ],
+  "merge_commit_sha": "479447b91d7db7bf1b601288b5d3c476c72cfbd1",
+  "merged_at": "2026-11-09T19:55:25Z",
+  "number": 1857,
+  "deployed_at": "2026-11-09T22:52:56Z",
+  "deploy_run": 42711492712
+ },
+ {
+  "created_at": "2026-11-09T06:29:25Z",
+  "head_ref": "fix/exec-posture-expiry-failsafe",
+  "head_sha": "bb600ebcb99d1a42614263b3d32f7d5a3cbe5e93",
+  "labels": [
+   "tier:2"
+  ],
+  "merge_commit_sha": "5afb95206002c69c262b318b1c41eb89738d186d",
+  "merged_at": "2026-11-09T11:53:44Z",
+  "number": 1867,
+  "deployed_at": "2026-11-09T22:52:56Z",
+  "deploy_run": 42711492712
+ },
+ {
+  "created_at": "2026-11-08T19:22:14Z",
+  "head_ref": "fm/gdpr-new-page-in-open-thread",
+  "head_sha": "f36a13df7f04470a656acbd2bc94850fe8b04df9",
+  "labels": [
+   "tier:1"
+  ],
+  "merge_commit_sha": "cb339541647b0198000b9b8c9b2d8a81fb3b1fd6",
+  "merged_at": "2026-11-08T20:20:14Z",
+  "number": 1864,
+  "deployed_at": "2026-11-09T22:52:56Z",
+  "deploy_run": 42711492712
+ },
+ {
+  "created_at": "2026-11-08T11:24:15Z",
+  "head_ref": "fm/gdpr-triage-bridge-redo",
+  "head_sha": "c9227bff5d46629a3b4c74e0c9a429e0aebc5aee",
+  "labels": [
+   "tier:1"
+  ],
+  "merge_commit_sha": "f36c371f4a3750d2bee5b3dc411a440dacc7c8ae",
+  "merged_at": "2026-11-08T18:11:10Z",
+  "number": 1858,
+  "deployed_at": "2026-11-09T22:52:56Z",
+  "deploy_run": 42711492712
+ },
+ {
+  "created_at": "2026-11-08T16:50:10Z",
+  "head_ref": "fm/main-red-legacy-domain-1108",
+  "head_sha": "b767acf570ead3c67b3c91748515f8a413f6c0c1",
+  "labels": [],
+  "merge_commit_sha": "c4ba93af253ac1d7bdc5461277d3413dab3505c0",
+  "merged_at": "2026-11-08T17:26:20Z",
+  "number": 1861,
+  "deployed_at": "2026-11-09T22:52:56Z",
+  "deploy_run": 42711492712
+ },
+ {
+  "created_at": "2026-11-06T13:49:13Z",
+  "head_ref": "cto/mus-31161-edge-prune-7d",
+  "head_sha": "01f860cc9448ee83a18d3fddf466e1f8a54bafe7",
+  "labels": [
+   "tier:1"
+  ],
+  "merge_commit_sha": "77dffb0e67c8e090a53488f857f81c7eda8de125",
+  "merged_at": "2026-11-08T16:06:24Z",
+  "number": 1819,
+  "deployed_at": "2026-11-09T22:52:56Z",
+  "deploy_run": 42711492712
+ },
+ {
+  "created_at": "2026-11-06T15:32:15Z",
+  "head_ref": "cto/mus-31227-legacy-domain",
+  "head_sha": "740ace056b4cd3cbff8af06ae9dc87823590b48d",
+  "labels": [
+   "tier:1"
+  ],
+  "merge_commit_sha": "a161d5aecb1d5e30bc78dece525c0ba629c781d3",
+  "merged_at": "2026-11-08T16:06:11Z",
+  "number": 1822,
+  "deployed_at": "2026-11-09T22:52:56Z",
+  "deploy_run": 42711492712
+ },
+ {
+  "created_at": "2026-11-08T00:23:18Z",
+  "head_ref": "fm/ci-hardening-x1",
+  "head_sha": "be9851f9933edd652d649f8e64113db53ff07bca",
+  "labels": [
+   "credit-approval-change",
+   "tier:1"
+  ],
+  "merge_commit_sha": "2d0d8642edbac06df506efc4c5fc84b0e3e41f32",
+  "merged_at": "2026-11-08T05:28:24Z",
+  "number": 1849,
+  "deployed_at": "2026-11-09T22:52:56Z",
+  "deploy_run": 42711492712
+ },
+ {
+  "created_at": "2026-11-06T14:25:33Z",
+  "head_ref": "fm/gdpr-preflight-refusal",
+  "head_sha": "b16476f2bc1bf49ae80d7560227fab78b4f887b5",
+  "labels": [
+   "tier:1",
+   "stale-finding"
+  ],
+  "merge_commit_sha": "685a9e598838f291365368d42b108f9b9db3cc84",
+  "merged_at": "2026-11-08T04:56:09Z",
+  "number": 1820,
+  "deployed_at": "2026-11-08T05:31:02Z",
+  "deploy_run": 42449584733
+ },
+ {
+  "created_at": "2026-11-07T23:31:40Z",
+  "head_ref": "fm/gdpr-resolve-wedged-sends",
+  "head_sha": "d4865119fb961f33beb72cfcec216bb3929f7efc",
+  "labels": [
+   "tier:1"
+  ],
+  "merge_commit_sha": "9f25b0b23c31f66f744d4bfdbd0c6452786c22e7",
+  "merged_at": "2026-11-08T01:46:50Z",
+  "number": 1848,
+  "deployed_at": "2026-11-08T02:54:14Z",
+  "deploy_run": 42438822283
+ },
+ {
+  "created_at": "2026-11-06T07:48:40Z",
+  "head_ref": "fm/pr-validate-retarget",
+  "head_sha": "cd7283706a7dab8984cdbbdeb4f306f8c413f15b",
+  "labels": [
+   "tier:1",
+   "stale-finding"
+  ],
+  "merge_commit_sha": "bf68dd31e65b491a7d2386cb83b37f35b43f086b",
+  "merged_at": "2026-11-08T01:11:07Z",
+  "number": 1813,
+  "deployed_at": "2026-11-08T02:54:14Z",
+  "deploy_run": 42438822283
+ },
+ {
+  "created_at": "2026-11-07T07:52:05Z",
+  "head_ref": "fm/credit-removal-h1",
+  "head_sha": "0cd85564fa0157eb75cfc39d3e26f988366e2365",
+  "labels": [
+   "credit-approval-change",
+   "tier:3"
+  ],
+  "merge_commit_sha": "121a502af2605eb52e6a761149d438cf152aae61",
+  "merged_at": "2026-11-08T00:50:04Z",
+  "number": 1839,
+  "deployed_at": "2026-11-08T02:54:14Z",
+  "deploy_run": 42438822283
+ },
+ {
+  "created_at": "2026-11-07T07:52:19Z",
+  "head_ref": "fm/support-churn-winback-fix-first-w1",
+  "head_sha": "6658a9cfe179a22436992d717bdb7c0f090ac7c9",
+  "labels": [
+   "credit-approval-change",
+   "tier:1"
+  ],
+  "merge_commit_sha": "d4bdac948497e3445d2c92507bcc8dd8815a3799",
+  "merged_at": "2026-11-08T00:33:19Z",
+  "number": 1840,
+  "deployed_at": "2026-11-08T02:54:14Z",
+  "deploy_run": 42438822283
+ },
+ {
+  "created_at": "2026-11-06T07:12:25Z",
+  "head_ref": "fm/qa-autoreview-redispatch",
+  "head_sha": "de91b425668ab430ea375ef13dd27b0b404ff2e3",
+  "labels": [
+   "tier:1",
+   "stale-finding"
+  ],
+  "merge_commit_sha": "8eef0a5d2bc963feafa558ade6493b356d5147c5",
+  "merged_at": "2026-11-08T00:28:15Z",
+  "number": 1812,
+  "deployed_at": "2026-11-08T02:54:14Z",
+  "deploy_run": 42438822283
+ }
+]

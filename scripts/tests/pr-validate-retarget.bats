@@ -201,10 +201,21 @@ assert jobs["validate-code"]["if"] == (
 # And the mirror must actually mirror: on a metadata edit it re-reports the head's earned
 # conclusion rather than reporting a green nobody validated.
 mirror = "\n".join(s.get("run") or "" for s in jobs["validate"]["steps"])
-assert "check-runs" in mirror, "the mirror must read the head's check runs"
+# Since 2026-11-13 the read lives in scripts/ci/validate-mirror.py (it waits for a suite that is
+# still running instead of failing on it); test_validate_mirror.py pins what that script decides.
+assert "scripts/ci/validate-mirror.py" in mirror, "the mirror must call the mirror script"
+script = open(os.path.join(os.path.dirname(os.environ["WF"]), "..", "..", "scripts", "ci", "validate-mirror.py")).read()
+assert "check-runs" in script, "the mirror must read the head's check runs"
 assert "exit 1" in mirror, "the mirror must fail when the head has not earned a success"
-assert jobs["bats-tests"]["name"] == (
-    "Bats (scripts/ + ops-admin gates) (${{ matrix.shard }}/2)"), jobs["bats-tests"]["name"]
+# One shard count, in four places: the job name, the matrix, and the two awk splits.
+import re
+bats = jobs["bats-tests"]
+shards = bats["strategy"]["matrix"]["shard"]
+n = len(shards)
+assert shards == list(range(1, n + 1)), shards
+assert bats["name"] == "Bats (scripts/ + ops-admin gates) (${{ matrix.shard }}/%d)" % n, bats["name"]
+split = "\n".join(s.get("run") or "" for s in bats["steps"])
+assert re.findall(r"awk -v n=(\d+) ", split) == [str(n), str(n)], re.findall(r"awk -v n=(\d+) ", split)
 PY
   [ "$status" -eq 0 ]
 }

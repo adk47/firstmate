@@ -35,6 +35,11 @@ Not measured, and so not claimed: brief -> worker start, start -> first commit, 
   `credit-verify-outbound.bats` took 35m10s alone on the 2-CPU pod, 120 cases in series,
   so no shard order gets a round under that. The fix is to split that file, in the lane
   that owns it. The other shard ran 24m24s without it.
+  **2026-11-13, second pass:** the shard is CPU-bound, not order-bound. That file took 630 s
+  alone on 2 pinned CPUs and 1,168 s with three other jobs on the same two, which is what a
+  shard at `--jobs 4` gives it. Bats now runs in four shards, so the long pole shares its
+  pod with half as much other work. Before / after and the other six causes of a stuck PR:
+  `data/pr-pipeline-unblock-f1/report.md`.
 - **Rank 1 has no code fix here.** It is a waiting-for-a-person cost; rules 1 and 2 are
   the fix.
 

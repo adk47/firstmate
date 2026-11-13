@@ -95,11 +95,26 @@ jobs:
     # edit) or failed. Without it a failed validation would leave `validate` absent, not red.
     if: always()
     runs-on: ovh-hydra
-    timeout-minutes: 5
+    # 30, not 5: on a metadata edit this job WAITS for the head's running suite (below). It must
+    # outlive the mirror's longest wait (25 min, `WAIT_SECONDS`), which in turn covers the suite's
+    # own 20-minute cap. On a code run it still finishes in seconds.
+    timeout-minutes: 30
     permissions:
+      # `actions: read`: the mirror lists this workflow's runs on the head, so a validation that a
+      # retarget or a reopen has just started is waited for even before its suite job is listed.
+      actions: read
       checks: read
       contents: read
     steps:
+      # Only a metadata edit needs the mirror script, so a code run's `validate` gains no new step
+      # that could fail between a green suite and its required check.
+      - name: Fetch the mirror script (metadata edit only)
+        if: needs.validate-code.result == 'skipped'
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          sparse-checkout: scripts/ci/validate-mirror.py
+          sparse-checkout-cone-mode: false
       - name: Report the head's real validation conclusion
         env:
           GH_TOKEN: ${{ github.token }}
@@ -116,24 +131,16 @@ jobs:
             skipped)
               # A title/body edit does not re-run the suite. Mirror what the head actually earned
               # instead of reporting a green nobody validated.
-              prior=$(curl -sS \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/$REPO/commits/$SHA/check-runs?per_page=100" \
-                | python3 -c '
-          import json, sys
-          runs = json.load(sys.stdin).get("check_runs", [])
-          done = [r for r in runs if r.get("name") == "validate" and r.get("conclusion")]
-          done.sort(key=lambda r: r.get("started_at") or "")
-          print(done[-1]["conclusion"] if done else "none")
-          ')
-              echo "metadata edit: head $SHA last validate conclusion = $prior"
-              if [ "$prior" = "success" ]; then
-                echo "::notice::metadata edit — head already validated, not re-running"
-                exit 0
-              fi
-              echo "::error::metadata edit — head $SHA has no successful validate (last: $prior). A metadata edit cannot stand in for a validation."
-              exit 1
+              #
+              # GitHub grades `validate` by the NEWEST workflow run, and this run is newer than
+              # the push it follows. Reading the head once failed every edit made while the
+              # push's suite was still running (about 6 minutes), and that failure then outranked
+              # the suite's own green: 6 of the last 50 merged PRs sat validated and unmergeable
+              # until this job was re-run by hand (data/pr-pipeline-unblock-f1/report.md). The
+              # mirror waits for a running suite, then reports what it concluded. It exits 0
+              # only when the head's newest real `validate-code` succeeded, and never while a
+              # newer run of this workflow has yet to post its own.
+              python3 scripts/ci/validate-mirror.py --repo "$REPO" --sha "$SHA" --run-id "$GITHUB_RUN_ID"
               ;;
             *)
               echo "::error::validate-code concluded '$RESULT' on $SHA"
@@ -1627,7 +1634,7 @@ jobs:
           echo "✓ All plugin env-var references resolve in /etc/openclaw/{shared,<profile>}.env"
 
   bats-tests:
-    name: Bats (scripts/ + ops-admin gates) (${{ matrix.shard }}/2)
+    name: Bats (scripts/ + ops-admin gates) (${{ matrix.shard }}/4)
     if: github.event.action != 'edited' || github.event.changes.base != null
     # Added 2026-05-20 after PR #297: Clio caught a `set -u` regression in
     # find-dupes.sh --catalog that emitted "unbound variable" to stderr
@@ -1641,6 +1648,17 @@ jobs:
     # timing-sensitive watchdog suites would miss deadlines nondeterministically — the very
     # failure #1403 measured on node-8. Two shards at `--jobs 4` each split the files
     # round-robin from the slowest-first list below, so each shard gets every other long pole.
+    #
+    # 2026-11-13: FOUR shards. This job, not the required check, is what a ready PR waits for:
+    # over the last 50 merged PRs (medians) `validate` was green 6 min after the push, Bats
+    # finished 37 min after that, and the merge came 47 min after the green
+    # (data/pr-pipeline-unblock-f1/report.md).
+    # A shard is CPU-bound: 4 jobs on 2 CPUs. Its longest file, credit-verify-outbound.bats
+    # (131 serial cases), took 630 s alone on 2 pinned CPUs and 1,168 s with three other jobs
+    # competing for them, so re-ordering files inside two shards could not help (tried and
+    # reverted 2026-11-12) and more CPU does. Same files, same cases, same --jobs 4 per pod;
+    # the count check below still makes a dropped file a red job. The shard count appears in
+    # four places (job name, matrix, both awk lines); pr-validate-retarget.bats pins them equal.
     runs-on: ovh-hydra
     # Bound the job, not just the step: GitHub's default job timeout is 6 h,
     # so a single hung test can hold a runner for six hours (measured 2026-11-06:
@@ -1657,7 +1675,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     # Until 2026-10-27 this job ran ON node-8, as root, where /etc/hydra/jev.env holds the real Jev
     # key and /var/lib/hydra-jev/shadow is the PRODUCTION shadow log that the
     # Phase 3 decisions are made from. Any test that reaches a real jev.sh or a
@@ -1866,14 +1884,14 @@ jobs:
           # pole. Every discovered file lands in exactly one shard; the count check below
           # makes a dropped file a red job, not a silently shorter suite.
           shard="${{ matrix.shard }}"
-          mine=$(awk -v n=2 -v i="$shard" 'NF && (NR - 1) % n == i - 1' <<<"$ordered")
-          other=$(awk -v n=2 -v i="$shard" 'NF && (NR - 1) % n != i - 1' <<<"$ordered")
+          mine=$(awk -v n=4 -v i="$shard" 'NF && (NR - 1) % n == i - 1' <<<"$ordered")
+          other=$(awk -v n=4 -v i="$shard" 'NF && (NR - 1) % n != i - 1' <<<"$ordered")
           total=$(( $(grep -c . <<<"$mine" || true) + $(grep -c . <<<"$other" || true) ))
           if [ "$total" -ne "$count" ]; then
             echo "::error::shard split covers $total of $count discovered bats files"
             exit 1
           fi
-          echo "Shard $shard/2 runs $(grep -c . <<<"$mine" || true) of $count file(s):"
+          echo "Shard $shard/4 runs $(grep -c . <<<"$mine" || true) of $count file(s):"
           echo "$mine" | sed 's/^/  /'
           # HOST-WIDE SLOT (2026-10-27 ruling): at most one bats suite per box. The
           # flock is per host, not per runner service, so the several hydra runners on
@@ -2659,6 +2677,13 @@ jobs:
           # every test file this workflow runs with `python3 <file>` must RUN every test in it: a class
           # defined below `unittest.main()` is invisible to direct invocation (qa-review #1766 r7).
           python3 scripts/tests/test_ci_test_discovery.py
+          # the required `validate` check of a metadata-edit run (scripts/ci/validate-mirror.py): it waits
+          # for the head's running suite instead of failing, and never passes a head whose newest real
+          # suite did not succeed. Also pins how the `validate` job calls it.
+          python3 scripts/tests/test_validate_mirror.py
+          # scripts/pr-doctor.py: reads a head the way GitHub grades it, and the only thing it can
+          # perform is a re-run of failed jobs (a re-run reports what is true; it cannot invent a pass).
+          python3 scripts/tests/test_pr_doctor.py
           # L12 executor (fable-decider closes): tray validation, every write-boundary guard (each with a
           # red mutant), daily cap, kill file, registry re-check, read-back, audit. Hermetic.
           python3 scripts/tests/test_credit_fable_executor.py

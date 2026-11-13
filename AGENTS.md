@@ -627,11 +627,27 @@ LAST statement; `scripts/tests/test_ci_test_discovery.py` (wired into PR Validat
 file the workflow invokes that way and fails if anything follows it or if direct invocation runs
 fewer tests than pytest collects.
 
-**A base retarget does not re-trigger PR Validation.** `pr-validate.yml` listens on
-`pull_request: branches: [main]` with the DEFAULT activity types (`opened, synchronize,
-reopened`). A push made while the base is another branch fires `synchronize` and the
-`branches: [main]` filter drops it; `gh pr edit --base main` fires `edited`, which is not a
-default type. `gh pr close <n> && gh pr reopen <n>` fires `reopened` and starts the run.
+**GitHub grades a required check by the NEWEST workflow run that posted it, and a title/body
+edit starts a run.** That run does not re-run the suite; its `validate` mirrors the head's real
+suite (`scripts/ci/validate-mirror.py`: it waits for a running suite, and for a retarget's or
+reopen's new run that has not listed its suite yet, and exits 0 only when the newest real one
+succeeded). Until 2026-11-13 it read once and failed, so an edit made inside the
+six minutes after a push left a validated head unmergeable (6 of 50 merged PRs, measured in
+`data/pr-pipeline-unblock-f1/report.md`). Still: get the body right at open
+(`scripts/pr-doctor.py preflight --body FILE` runs the credit guard's own section check) rather
+than editing after the push. **What is holding a PR, and the cheapest correct way to clear it,
+is `scripts/pr-doctor.py plan <pr>`** (`--apply` performs re-runs of failed jobs only). An edit
+run also posts a skipped check for every other job of the suite, and `gh pr checks` keeps one row
+per name, the newest: after an edit a `skipping` row says nothing about the suite's own job of
+that name. Read the suite run's jobs (`plan` does).
+
+**Never push an empty commit to re-trigger CI.** Every Actions check here can be re-run in place
+for 30 days (`gh run rerun <run> --failed`), which keeps the head and its QA verdict. A re-run
+reads the SAME merge commit as the original run, so it clears an interrupted run or a flake;
+`gh pr close <n> && gh pr reopen <n>` fires `reopened` and validates the head against today's
+`main`. A retarget onto `main` starts a full validation by itself (`edited` with `changes.base`);
+a push made while the base is another branch starts none (`branches: [main]`), and a conflicting
+head starts none at all.
 
 **Before concluding a rebase erased base work, check the base first.**
 `git rev-list --left-right --count origin/main...HEAD` — a stale base makes `main`'s newer work
