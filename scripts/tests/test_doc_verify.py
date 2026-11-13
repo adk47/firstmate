@@ -2057,6 +2057,79 @@ class IntakeD2Tests(unittest.TestCase):
         stats, _ = self._run()                                                    # decided: not read again
         self.assertEqual(stats.intake, 0)
 
+    def test_a_claimants_filing_with_no_credit_request_is_extracted_and_its_claim_is_decided(self):
+        # The claim ladder decides on the extraction doc-verify stored. A filing was selected by its candidate
+        # credit requests only, so a claimant with none was never read: `unreadable: not_extracted` (10 of the
+        # 12 replies to the claim ask on 2026-11-12).
+        from claim_verify import decline_rules, doc_ladder, doc_sources
+        os.makedirs(self.cache, exist_ok=True)
+        shas = {}
+        ps = ProofStore(self.proof_path)
+        for uid in (77, 78):                       # 77 has an open claim; 78 has none
+            data = f"%PDF-1.4 a statement account {uid} sent, no credit request open".encode()
+            shas[uid] = hashlib.sha256(data).hexdigest()
+            path = os.path.join(self.cache, f"{uid}.pdf")
+            Path(path).write_bytes(data)
+            ps.file_document(file_sha256=shas[uid], user_id=uid, conversation_id=str(uid), file_path=path,
+                             candidate_request_ids=[], received_at="2026-11-12T10:00:00Z",
+                             matched_by="professional_id")
+        ps.close()
+        pid = "aaaaaaaa-1111-2222-3333-444444444444"
+        core = {"id": 7, "userId": 77, "profileId": pid, "profileType": "artist", "reason": None,
+                "status": "pending", "createdAt": "2026-10-01T00:00:00Z", "email_domain": "example.org",
+                "verificationLinks": {}, "pk_profile_other_claims": []}
+        claim = doc_ladder.ClaimFacts.from_dict({
+            "claim_id": 7, "user_id": 77, "profile_id": pid, "profile_type": "artist", "status": "pending",
+            "claimant_names": ["Ann Alpha"], "paid": False, "account_hold": False, "code_found_other_claims": [],
+            "profile_in_catalog": True, "releases": {shas[77]: {"named": 1, "on_profile": 1}},
+            "decline_snapshot": decline_rules.snapshot(core, {"name": "Ann Alpha", "popularity": 12,
+                                                              "creditCount": 40})})
+
+        def decided():
+            docs = doc_sources.documents(sqlite3.connect(self.proof_path), self.store.db, [77])["77"]
+            d = doc_ladder.decide_claim(claim, [doc_ladder.DocFacts.from_dict(x) for x in docs],
+                                        doc_ladder.load_policy())
+            return d.outcome, d.reason
+
+        def extracts():
+            return sorted(self.store.db.execute("SELECT proof_id, status FROM dv_steps WHERE step='extract'").fetchall())
+        self.assertEqual(decided(), (doc_ladder.UNREADABLE, "not_extracted"))
+        answers, asked = [""], []                  # the replica answers nothing, then one open-claim account
+
+        def trino(sql):
+            asked.append(sql)
+            return answers[0]
+        self.deps.claimants = lambda: runner.claim_accounts(self.store, trino)
+        stats, rows = self._run()                  # unmeasured is not "nobody claims": none read, and the run says so
+        self.assertEqual((stats.claim_only, stats.outcomes, len(stats.errors)), (0, {"verified": 1}, 1))
+        self.assertIn("claim-only filings not selected", stats.errors[0])
+        self.assertEqual((extracts(), decided()), ([(self.sha, "ok")], (doc_ladder.UNREADABLE, "not_extracted")))
+        answers[0] = '"_col0"\n"77"\n'
+        stats, rows = self._run()
+        self.assertEqual((stats.claim_only, stats.documents, stats.errors, rows), (1, 1, [], []))
+        self.assertEqual(extracts(), sorted([(self.sha, "ok"), (shas[77], "ok")]))     # 78: no open claim, not read
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM dv_outcomes WHERE proof_id=?",
+                                               (shas[77],)).fetchone()[0], 0)        # an extraction, never a verdict
+        self.assertEqual(len(self.h3_calls), 1)                                         # H3 ran for the credit filing only
+        # decided by the ladder's own gates, on the stored extraction (a label's letter naming claimant and profile)
+        self.assertEqual(decided(), (doc_ladder.APPROVED, "document_names_claimant_and_profile"))
+        self.assertEqual(self._run()[0].claim_only, 0)                                  # read once
+        self.assertEqual(len(asked), 2)                                                 # the answer is kept for an hour
+
+    def test_a_claim_only_selection_that_cannot_read_the_filings_is_a_run_error(self):
+        # QA review of the PR: a `proof_intake` this selection cannot read (locked, another schema) used to answer
+        # "no such filing", and the tick looked clean while every claim stayed `not_extracted`.
+        ps = ProofStore(self.proof_path)
+        ps.db.execute("ALTER TABLE proof_intake RENAME COLUMN matched_by TO matched_how")
+        ps.db.commit()
+        ps.close()
+        self.deps.claimants = lambda: frozenset({42})
+        with self.assertRaises(sqlite3.OperationalError):
+            runner.claim_only_docs(sqlite3.connect(self.proof_path), self.store, self.deps, 10)
+        stats, rows = self._run()
+        self.assertEqual((stats.claim_only, stats.documents, rows, len(stats.errors)), (0, 0, [], 1))
+        self.assertIn("claim-only filings not selected: OperationalError", stats.errors[0])
+
     def test_the_intake_path_never_writes_a_hold(self):
         self.answer = {**GOOD_ANSWER, "sender": {"email": "dana@bluefern-records.co", "confidence": 0.9}}
         stats, rows = self._run()

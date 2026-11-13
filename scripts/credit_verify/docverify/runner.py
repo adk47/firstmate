@@ -27,6 +27,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -158,6 +159,79 @@ def _intake_docs(proof_db: sqlite3.Connection, store: DocVerifyStore, deps: Deps
                                    readable=readable)
 
 
+CLAIM_ACCOUNTS_KEY = "open_claim_accounts"
+CLAIM_ACCOUNTS_TTL_S = 3600
+
+
+def claim_accounts(store: DocVerifyStore, trino: Callable[[str], str], *,
+                   now: Callable[[], float] = time.time) -> frozenset[int]:
+    """The accounts with an open claim, from ONE replica read an hour shared by every worker (dv_state): a replica
+    question costs ~2 s whatever it asks, and 12 workers run every 15 min. "Open" is the claim ladder's own list
+    (`decline_rules.OPEN_STATUSES`). An answer with no account raises: it is never "nobody has an open claim"."""
+    from claim_verify import decline_rules
+    try:
+        cached = json.loads(store.get_state(CLAIM_ACCOUNTS_KEY) or "{}")
+        if now() - float(cached["at"]) < CLAIM_ACCOUNTS_TTL_S:
+            return frozenset(int(u) for u in cached["ids"])
+    except (ValueError, KeyError, TypeError):
+        pass
+    statuses = ",".join(f"'{s}'" for s in decline_rules.OPEN_STATUSES)
+    ids = sorted({int(r[0]) for r in decline_rules._rows(trino(
+        "SELECT DISTINCT cast(userid as varchar) FROM postgresql_core.public.claiming "
+        f"WHERE deletedat IS NULL AND userid IS NOT NULL AND status IN ({statuses})")) if r and r[0].isdigit()})
+    if not ids:
+        raise RuntimeError("open claim accounts read: no rows")
+    store.set_state(CLAIM_ACCOUNTS_KEY, json.dumps({"at": now(), "ids": ids}))
+    return frozenset(ids)
+
+
+def extract_settled(store: DocVerifyStore, proof_id: str) -> bool:
+    """This document has an extraction answer under this VERSION: read ok, failed for good, or out of attempts.
+    A provider outage is no answer, and a transient failure is one only after MAX_EXTRACT_ATTEMPTS."""
+    got = store.db.execute("SELECT status, detail_json FROM dv_steps WHERE proof_id=? AND step='extract' AND "
+                           "version=? AND status IN ('ok', 'error') ORDER BY id", (proof_id, VERSION)).fetchall()
+    if not got or got[-1][0] == "ok":
+        return bool(got)
+    try:
+        err = str((json.loads(got[-1][1] or "{}") or {}).get("error") or "")
+    except ValueError:
+        err = ""
+    return not err.startswith(TRANSIENT) or sum(1 for s, _ in got if s == "error") >= MAX_EXTRACT_ATTEMPTS
+
+
+def claim_only_docs(proof_db: sqlite3.Connection, store: DocVerifyStore, deps: Deps, limit: int, *,
+                    keep: Callable[[str], bool] | None = None,
+                    paying: set[int] | frozenset[int] | None = None) -> list[intake_read.IntakeDoc]:
+    """Filed documents with NO candidate credit request whose account has an open claim and whose bytes have no
+    extraction yet: paid first, then oldest. `intake_docs` selects a filing by its credit requests, so these were
+    never read and the claim ladder answered `unreadable: not_extracted` for them (all 51 such claims on
+    2026-11-13; this selects 110 documents of 48 accounts there). They are read for the extraction only
+    (`verify_document` with no keys stops after it): no claim key, no H3, no outcome row. `deps.claimants` None =
+    this selection is off. A read that fails RAISES, the open-claims read and the `proof_intake` read alike: a
+    store that cannot be read is never "no such filing" (QA review of the PR; `intake_docs` answers `[]` there)."""
+    if limit <= 0 or deps.claimants is None:
+        return []
+    accounts = deps.claimants()
+    rows = proof_db.execute(
+        "SELECT intake_id, user_id, file_sha256, conversation_id, file_path, contact_h, received_at, matched_by "
+        "FROM proof_intake WHERE candidate_request_ids_json = '[]' ORDER BY received_at, intake_id").fetchall()
+    if paying:
+        rows = sorted(rows, key=lambda r: int(r[1]) not in paying)     # stable: oldest first within each
+    out: list[intake_read.IntakeDoc] = []
+    seen: set[str] = set()
+    for r in rows:
+        if len(out) >= limit:
+            break
+        if int(r[1]) not in accounts or not r[2] or r[2] in seen or (keep is not None and not keep(r[2])):
+            continue
+        doc = intake_read.IntakeDoc(r[0], int(r[1]), r[2], str(r[3]), r[4], r[5] or "", [], r[6] or "", r[7] or "")
+        if intake_read.needs_backfill(doc, deps.blobs, store.blob_registered) or extract_settled(store, doc.sha):
+            continue                      # bytes owed by blob-backfill, or already answered: not a slot
+        seen.add(doc.sha)
+        out.append(doc)
+    return out
+
+
 def candidates(proof_db: sqlite3.Connection, store: DocVerifyStore, since: str, limit: int,
                keep: Callable[[str], bool] | None = None) -> dict[str, list[str]]:
     """proof id -> its claim keys ('<uuid>#<role>') still to verify, oldest
@@ -248,6 +322,9 @@ class Deps:
     # Muso credits graph name index for the people check (intel.trino_name_index); None = skipped.
     people_graph: intel.NameIndex | None = None
     blobs: Any = None              # docverify/blobs.BlobStore: filed bytes by sha256 (Fable 10-31; never Gmail)
+    # The accounts with an open claim (claim_accounts): their filings with no candidate credit request are read
+    # for the extraction the claim ladder decides on. None = those filings are not read.
+    claimants: Callable[[], "set[int] | frozenset[int]"] | None = None
 
 
 @dataclass
@@ -263,12 +340,13 @@ class Stats:
     provider_down: str | None = None          # the account-wide refusal that stopped this run (a FAILED run)
     blob_owed: int = 0                        # filings whose bytes only blob-backfill restores (never read here)
     keyed: int = 0                            # filings whose candidate requests were keyed this run (no read)
+    claim_only: int = 0                       # filings with no credit request, read for a claim's extraction only
 
     def as_dict(self) -> dict[str, Any]:
         return {"run_id": self.run_id, "documents": self.documents, "pairs": self.pairs, "retry": self.retry,
                 "superseded": self.superseded, "intake": self.intake,
                 "outcomes": dict(self.outcomes), "errors": self.errors[:10], "blob_owed": self.blob_owed,
-                "keyed": self.keyed,
+                "keyed": self.keyed, "claim_only": self.claim_only,
                 **({"provider_down": self.provider_down} if self.provider_down else {})}
 
 
@@ -516,6 +594,7 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
     rows: list[dict[str, Any]] = []
     try:
         pre_docs: list = []
+        claim_docs: list = []
         if reread_carried:
             pairs, intake_from_store = {}, True
         elif pairs is None:
@@ -528,8 +607,17 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
             # because there the re-reads ARE the work being asked for.
             if intake_from_store:
                 pre_docs = _intake_docs(proof_db, store, deps, max_docs, keep=keep, paying=paying)
-            pairs = candidates(proof_db, store, cutoff, max(0, max_docs - len(pre_docs)), keep=keep)
-            log(f"since {cutoff}: {len(pre_docs)} filings + {len(pairs)} documents to verify")
+                # A claimant's filing with no credit request is a filed document too: behind the credit filings,
+                # ahead of the re-reads, inside the same `max_docs`.
+                try:
+                    claim_docs = claim_only_docs(proof_db, store, deps, max_docs - len(pre_docs), keep=keep,
+                                                 paying=paying)
+                except Exception as exc:  # noqa: BLE001 - unmeasured: none is read this run, and the run says so
+                    stats.errors.append(f"claim-only filings not selected: {type(exc).__name__}: {str(exc)[:160]}")
+                    log(f"claim-only filings NOT selected ({type(exc).__name__}: {str(exc)[:160]})")
+            pairs = candidates(proof_db, store, cutoff, max(0, max_docs - len(pre_docs) - len(claim_docs)), keep=keep)
+            log(f"since {cutoff}: {len(pre_docs)} filings + {len(claim_docs)} claim-only filings + {len(pairs)} "
+                "documents to verify")
         restored = store.restore_over_provider_down()    # idempotent: a no-op once the 10-29 rows are restored
         if restored:
             log(f"restored {restored} claim verdicts masked by a provider-refusal unknown")
@@ -582,6 +670,21 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
                     store.step(run_id, doc.sha, "run", "error", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"},
                                f"intake:{doc.intake_id}")
                 log(f"intake {doc.intake_id[:16]}: {len(doc.candidate_ids)} candidate request(s)")
+        for doc in claim_docs:
+            stats.documents += 1
+            stats.claim_only += 1
+            try:
+                verify_document(store, proof_db, doc.sha, [], deps, run_id, stats, held, intake=doc)
+            except ProviderDown as exc:
+                stats.provider_down = str(exc)
+                stats.errors.append(f"provider down ({exc}): run stopped, nothing recorded")
+                log(f"provider down ({exc}): run stopped; the documents are read again next run")
+                return stats, rows
+            except Exception as exc:  # noqa: BLE001 - one document must not stop the run
+                stats.errors.append(f"intake {doc.intake_id[:16]}: {type(exc).__name__}: {str(exc)[:160]}")
+                store.step(run_id, doc.sha, "run", "error", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"},
+                           f"intake:{doc.intake_id}")
+            log(f"intake {doc.intake_id[:16]}: no credit request, read for its claim")
         for proof_id, keys in pairs.items():
             stats.documents += 1
             try:

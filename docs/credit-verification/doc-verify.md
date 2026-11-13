@@ -86,6 +86,21 @@ The first `run` records the cutoff (`dv_state.since` = now). From then on, every
 
 **A rule change is a `VERSION` bump** (proof-loop lead 075). Nobody writes outcome rows by hand. `CARRY` in `docverify/__init__.py` names the previous version and the outcomes that send a document back to the reader. On the first open after the deploy, `store.carry_forward` copies, once, the rows of every document whose standing outcomes include none of those (marked `detail.carried_from`); the deployed reader re-reads the rest. `dv-1 → dv-2` (the #1452/#1457 sender rules) re-reads the documents standing `forged` or `verified`, because those rules can only remove a `forged` or block a `verified`. A rule that can change any outcome sets the set to `None`, and nothing carries. Until a document is re-read its old rows stand in no tray; the tray footer counts them (`store.awaiting_reread`). Use `--since` to widen a single run. The admin client needs the gateway env (`MUSO_API_URL` …, in `/etc/openclaw/main.env`), which the cron inherits.
 
+## A claimant's filing with no credit request
+
+A filed document is selected by its candidate credit requests. One with none (`candidate_request_ids_json = '[]'`)
+is read when its account has an open claim (`runner.claim_only_docs`), because the claim document ladder
+([claim-doc-ladder.md](./claim-doc-ladder.md)) decides on the extraction stored here and does not extract.
+
+- It is read for the extraction only: `locate`, `text`, `extract`, `artifact`. No claim key, no H3, no outcome row, no hold.
+- It is read once per `VERSION`. A transient failure is retried up to `MAX_EXTRACT_ATTEMPTS`; a provider outage is no answer.
+- Order: behind the credit filings, ahead of the re-reads, inside the same `--max-docs`; paid accounts first.
+- The open-claim accounts are one replica read an hour (`runner.claim_accounts`, kept in `dv_state` for every worker).
+  A read that fails or answers nothing selects none of these filings and is a run error (`claim-only filings not selected`);
+  so is a `proof_intake` this selection cannot read, which is never "no such filing".
+- The run line counts them as `claim_only`.
+- The same blob rules as below apply: a filing whose bytes are owed by `blob-backfill` is not selected.
+
 ## Filed bytes: stored once, never re-downloaded (Fable 10-31)
 
 On 10-30 the carried re-read loop pulled 4 support@ email filings from Gmail **2,019 times in 8 h**, then kept

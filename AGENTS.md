@@ -750,9 +750,10 @@ revert per field: `docs/credit-verification/claim-doc-ladder.md`; first real-row
 - **It records and nothing else.** No executor, no admin API call, no message. Wiring one is a new approval
   automation (a `policies/credit-approval-automation.json` row and a recorded captain decision).
 - **The predicates decide; the model's part ends at the extraction**, which is the one doc-verify already recorded.
-  The ladder does not extract, and doc-verify selects a filing by its candidate CREDIT requests, so a claim-only
-  filer's document is `unreadable: not_extracted` until doc-verify selects it (10 of the 12 real replies to the
-  claim ask on 2026-11-12).
+  The ladder does not extract. doc-verify reads a filing with no candidate credit request when its account has an
+  open claim (`runner.claim_only_docs`: the extraction only, no key, no H3, no outcome row; before it, 10 of the
+  12 real replies to the claim ask were `unreadable: not_extracted`). A failed open-claims read selects none and
+  is a run error, never "nobody claims".
 - **No document, no decision; parsed-but-empty is `unreadable`; unmeasured is its own reason, never a pass.**
 - **A credits page is not accepted and a document must name a release on the profile**
   (`policies/claim-doc-ladder.json`): without those two the first real run approved 15 claims, 11 on a public page.

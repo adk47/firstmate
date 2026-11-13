@@ -157,17 +157,20 @@ claim-doc-ladder.py plan --snapshot /dev/shm/snap.json --policy my-policy.json
   captain decision before it can run.
 - **It does not message anybody.** Telling a claimant "we could not read your document" or "we
   need a different one" is copy that goes through the outbound copy gate, and is not written.
-- **It does not extract, and that is its largest gap today.** doc-verify selects a filed document
-  by its candidate CREDIT requests (`docverify/intake_read.intake_docs`:
-  `candidate_request_ids_json != '[]'`), so a document from a claimant with no open credit request
-  is never read. In the first recorded run that is 51 of 192 claims: for all 51, every document
-  with bytes has no candidate request and no dv-4 step of any kind. It is also most of the claims
-  this ladder exists for: of the 12 open claims whose document arrived AFTER the claim proof ask
-  was sent to them, 10 are `unreadable: not_extracted` and none is decided. The read itself already
-  exists (`runner.verify_document` with an intake document and no keys records locate, text and
-  extract and stops); what is missing is a selection that hands it these documents. That is a
-  doc-verify change with its own cost (one model call per document under doc-verify's daily cap)
-  and is not in this ladder.
+- **It does not extract; doc-verify does.** doc-verify selected a filed document by its candidate
+  CREDIT requests only (`docverify/intake_read.intake_docs`: `candidate_request_ids_json != '[]'`),
+  so a document from a claimant with no open credit request was never read: 51 of 192 claims in the
+  first recorded run, and 10 of the 12 open claims whose document arrived AFTER the claim proof ask.
+  `docverify/runner.claim_only_docs` now selects those filings when the account has an open claim
+  (110 documents of 48 accounts on 2026-11-13, read-only on the live stores: the decided document of
+  all 51 `not_extracted` claims is among them; 12 more are owed by `blob-backfill`) and hands each to
+  `runner.verify_document` with no keys, which records locate, text and extract and stops: no claim
+  key, no H3, no outcome row. They are read behind the credit filings and ahead of the re-reads,
+  inside the same `--max-docs`, at one model call per document under doc-verify's daily cap. The
+  open-claim accounts are one replica read an hour (`runner.claim_accounts`, kept in `dv_state`);
+  when that read fails or answers nothing, or `proof_intake` cannot be read, none of these filings
+  is selected and the run reports it as an error. A filing whose bytes were never stored is still
+  `no_bytes_on_file`.
 - **It does not read a team claim.** 522 open claims carry no account (`userid` is null, the claim
   belongs to a team); documents are filed by account, so the ladder has no way to attach one.
 - **It cannot tell a claim document from a credit document.** Every document on file today was

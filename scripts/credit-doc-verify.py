@@ -46,6 +46,7 @@ def real_deps(store, *, intercom_fetch: bool = True, strict_pacing: bool = False
     from credit_verify.docverify import crosscheck as xc
     from credit_verify.docverify import name_index
     from credit_verify.docverify.extract import Extractor
+    from credit_verify.docverify import runner
     from credit_verify.docverify.runner import Deps
     from credit_verify.proof import intercom, sandbox, stage2
     from credit_verify.docverify.pace import Pacer
@@ -64,7 +65,9 @@ def real_deps(store, *, intercom_fetch: bool = True, strict_pacing: bool = False
                     tid, ad.paced(lambda t: admin_api.track_raw_credits(admin, t))),
                 requests=lambda ids: stage2.requests(ids), fetch=fetch, dl=stage2.download,
                 # The local name index (built from one Trino export per 6 h), never a scan per document.
-                people_graph=name_index.lazy(log=log), blobs=BlobStore())
+                people_graph=name_index.lazy(log=log), blobs=BlobStore(),
+                # a claimant's filing with no credit request is read for its extraction (the claim ladder's input)
+                claimants=lambda: runner.claim_accounts(store, stage2.trino_query))
 
 
 def paying_users() -> frozenset[int] | None:
