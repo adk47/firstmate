@@ -35,10 +35,12 @@ Use `treehouse status` for treehouse-backed tmux, herdr, zellij, or cmux tasks, 
 Do not sweep another home's endpoints or infer ownership from a matching window label.
 
 Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
+`bin/fm-crew-state.sh <id>` answers that from the process table (state `alive` or `idle`, source `process`), not from an endpoint or a window; `bin/fm-agent-proc-lib.sh` owns the proof of death, including its refusal to claim absence for a harness it cannot recognize.
 Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 When the captain has ordered a dead worker left as it is, main records that order with `bin/fm-leave-stopped.sh <id> mark --reason '<the captain's words>'` (its header owns the marker): the watcher then stops alarming on that endpoint, while the record, worktree, and endpoint stay untouched.
+`mark` does not stop the agent and refuses when an agent process still runs in that worktree: `mark --exit` exits it through `bin/fm-control.sh` first, and `mark --force-silence` silences the watcher anyway.
 
 ## Live-endpoint escalation
 
