@@ -2712,6 +2712,9 @@ jobs:
           python3 scripts/tests/test_credit_forged_tray.py
           # decision-told (Fable decided-not-told-531): one core decision notice per user, signed dry run, ladder.
           python3 scripts/tests/test_credit_decision_told.py
+          # notify-tick: the class precedent_v1_untold, the subtraction of users already tried, paid first, and a
+          # dry run of its list that sends nothing. Hermetic.
+          python3 scripts/tests/test_credit_notify_tick.py
           python3 scripts/tests/test_credit_claim_executor.py
           # C6 claim declines as code (claim_verify/decline_rules): d2's 17 as fixtures (14/3), the related-trio
           # negative, every rail, and the tray round-tripped through the executor loader. Hermetic.
