@@ -265,7 +265,7 @@ family_for_basename() {
     fm-session-lock-ancestry.test.sh|fm-cursor-primary.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-drain-unread-status.test.sh|fm-wake-drain-fleet-cost.test.sh|\
-    fm-tool-update-check.test.sh|\
+    fm-tool-update-check.test.sh|fm-drift-check.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
     fm-watch-triage.test.sh|fm-watchdog-worker.test.sh|fm-task-inbox.test.sh|fm-leave-stopped.test.sh|\
     fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh|fm-lock-reap.test.sh)
@@ -613,6 +613,7 @@ tests/fm-cursor-primary-live-e2e.test.sh 21
 tests/fm-cursor-primary.test.sh 57327
 tests/fm-daemon.test.sh 27533
 tests/fm-documentation-audiences.test.sh 732
+tests/fm-drift-check.test.sh 4077
 tests/fm-extension-binding.test.sh 12639
 tests/fm-fable-runway.test.sh 25316
 tests/fm-fleet-snapshot-impl.test.sh 121000
@@ -1347,6 +1348,10 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' watcher-wake-lock
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
+      ;;
+    bin/fm-origin-refresh-lib.sh)
+      printf '%s\n' session-bootstrap
+      printf '%s\n' "__script__:fm-drift-check.test.sh"
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)

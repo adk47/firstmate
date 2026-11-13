@@ -168,7 +168,7 @@ EOF
 run_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
   shift 6
-  HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  HOME="$home" XDG_CACHE_HOME='' FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -193,11 +193,13 @@ EOF
 test_kimi_launch_then_send_is_verified() {
   local id rec out rc launch pointer brief_real meta task_tmp
   id="kimi-success-z1-$$"
-  task_tmp="/tmp/fm-$id"
-  KIMI_RUNTIME_TASK_TMP=$task_tmp
-  rm -rf "$task_tmp"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
+  # The per-task temp root lives under the throwaway HOME's cache directory, not
+  # /tmp, so it survives a boot and never competes for tmpfs space.
+  task_tmp="$HOME_DIR/.cache/fm/$id"
+  KIMI_RUNTIME_TASK_TMP=$task_tmp
+  rm -rf "$task_tmp"
   out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model kimi-code/k3 --effort high)
@@ -238,11 +240,13 @@ test_kimi_launch_then_send_is_verified() {
 test_kimi_spawn_honours_task_tmpdir_opt_out() {
   local id rec out rc task_tmp
   id="kimi-tmpdir-off-z2-$$"
-  task_tmp="/tmp/fm-$id"
-  KIMI_RUNTIME_TASK_TMP=$task_tmp
-  rm -rf "$task_tmp"
   rec=$(make_spawn_case tmpdir-off "$id")
   read_spawn_record "$rec"
+  # Same cache-backed per-task root as the launch case above; the opt-out only
+  # suppresses the per-task TMPDIR export, never the resolved root itself.
+  task_tmp="$HOME_DIR/.cache/fm/$id"
+  KIMI_RUNTIME_TASK_TMP=$task_tmp
+  rm -rf "$task_tmp"
   printf 'off\n' > "$HOME_DIR/config/task-tmpdir"
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?

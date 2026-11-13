@@ -1197,6 +1197,50 @@ test_network_phases_record_per_step_elapsed_times() {
   pass "bootstrap: each deferred network phase, secondmate, and clone records its own elapsed time"
 }
 
+# The running-chair drift check compares HEAD against refs/remotes/origin/main,
+# and fleet sync only fetches project clones. Without a chair-side refresh that
+# ref stays frozen at the last /updatefirstmate, so the detector compares against
+# a stale reference and stays silent while upstream moves on.
+test_chair_origin_main_is_refreshed_at_session_start() {
+  local case_dir fakebin root origin_src origin_bare before after
+  case_dir="$TMP_ROOT/chair-origin-refresh"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/projects"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  origin_src="$case_dir/origin-src"
+  origin_bare="$case_dir/origin.git"
+  root="$case_dir/root"
+  fm_git_init_commit "$origin_src"
+  mkdir -p "$origin_src/bin"
+  cat > "$origin_src/bin/fm-fleet-sync.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$origin_src/bin/fm-fleet-sync.sh"
+  git -C "$origin_src" add bin/fm-fleet-sync.sh
+  git -C "$origin_src" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'fake fleet sync'
+  git -C "$origin_src" branch -M main
+  git clone --quiet --bare "$origin_src" "$origin_bare"
+  git clone --quiet "$origin_bare" "$root"
+  before=$(git -C "$root" rev-parse refs/remotes/origin/main)
+  # Upstream advances without the chair fetching.
+  printf 'upstream\n' >> "$origin_src/README.md"
+  git -C "$origin_src" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qam upstream
+  git -C "$origin_src" push -q "$origin_bare" HEAD:main
+  after=$(git -C "$origin_bare" rev-parse refs/heads/main)
+  [ "$before" != "$after" ] || fail "fixture did not advance origin/main past the chair's ref"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only \
+    "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+
+  [ "$(git -C "$root" rev-parse refs/remotes/origin/main)" = "$after" ] \
+    || fail "bootstrap did not refresh the chair's own origin/main at session start"
+  pass "bootstrap refreshes the chair's own origin/main at session start"
+}
+
 test_tasks_axi_verdict_handoff_is_consumed_once() {
   local case_dir fakebin log out
   case_dir="$TMP_ROOT/tasks-axi-handoff"
@@ -1347,6 +1391,7 @@ test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership
+test_chair_origin_main_is_refreshed_at_session_start
 test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info

@@ -288,7 +288,11 @@ fm_test_run_spawn() {
   # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
   local spawn_home=$home/user-home
   mkdir -p "$spawn_home"
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
+  # XDG_CACHE_HOME is pinned EMPTY for the same reason CLAUDE_CONFIG_DIR is: the
+  # per-task temp root resolves as ${XDG_CACHE_HOME:-$HOME/.cache}/fm/<id>, so a
+  # value inherited from the developer's shell would move it out of the throwaway
+  # HOME and make every tasktmp assertion depend on the host.
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" XDG_CACHE_HOME='' \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \

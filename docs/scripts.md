@@ -92,7 +92,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with loud cycle endings and bounded lifecycle ledger |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
-| `fm-watch.sh`            | Singleton-safe watcher: absorb benign wakes, detect stalled local-secondmate wake queues when the mate is not provably busy and its Pi supervision branch is not mid-turn, and exit on actionable ones |
+| `fm-watch.sh`            | Singleton-safe watcher: absorb benign wakes, retire the busy-state record of a gone endpoint, detect stalled local-secondmate wake queues when the mate is not provably busy and its Pi supervision branch is not mid-turn, and exit on actionable ones |
 | `fm-inactive-reconcile.sh` | Reconcile long-inactive direct crewmate terminal outcomes without forge access |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
 | `fm-afk-launch.sh`       | Own away-mode entry, exit, rollback, and any backend terminal lifecycle                 |
@@ -103,6 +103,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-nm-run-lib.sh`       | Single owner of shared no-mistakes run-attribution primitives and rules             |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-timeout-lib.sh`      | Single owner of hard-bounded command execution and its fallback watchdog |
+| `fm-origin-refresh-lib.sh` | Single owner of the bounded best-effort refresh of a home's own origin/main |
 | `fm-timing-lib.sh`       | Single owner of the deferred network stage's per-step elapsed-time records, inert unless a run asks for them |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and secondmate syncs             |
@@ -126,13 +127,14 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-control-lib.sh`      | One executable owner of the control-plane verb allowlist, per-harness interrupt/exit mechanics, and per-backend capability |
 | `fm-leave-stopped.sh`    | Record or clear the captain's order to leave a task stopped (`state/<id>.stopped`), which silences its endpoint in the watcher |
 | `fm-busy-lib.sh`         | Single owner of the semantic busy-state contract: verdicts, source attribution, and per-harness sources |
-| `fm-busy-event.sh`       | The only writer of a task's semantic busy-state record; arms an incarnation and applies lifecycle events |
+| `fm-busy-event.sh`       | The only writer of a task's semantic busy-state record; arms an incarnation, applies lifecycle events, and retires an exact generation or an orphan record |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for composer capture, verified submit, and the submit-time busy check |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-unregister.sh` | Retire a custom watcher check and its trust binding by validated task id            |
 | `fm-check-lib.sh`        | Validate custom-check registrations, prepare private execution snapshots, and arm or disarm a self-registered check's shim and trust binding |
 | `fm-tool-update-check.sh` | Report watched tooling with an update available, and updates installed but left inert by PATH order |
+| `fm-drift-check.sh`      | Registered check that compares the running chair's HEAD with origin/main hourly and wakes firstmate once a drift episode passes a day |
 | `fm-fable-runway.sh`     | Print one read-only GREEN/YELLOW/RED line for the supervisor's Fable credential and the account pool |
 | `fm-fable-runway-check.sh` | Registered slow-poll check that wakes firstmate on a Fable or pool runway change, a sustained RED, or an account needing a login |
 | `fm-fable-runway-alert.sh` | The runway check's outward actions: the once-per-episode handoff note, Grok doorbell, and notifications |
