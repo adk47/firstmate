@@ -617,6 +617,21 @@ def read_gmail_hold(path: str = POLICY_PATH) -> dict[str, Any]:
 _GMAIL_HOLD = read_gmail_hold()
 
 
+def user_email_rows(ledger: str, group: tuple[str, ...], user_key: str, user_id: str, day: str) -> int:
+    """[key=apply-pipeline] THIS user's email notes of `group` claimed on `day` (attempted or sent): the same rows
+    `ledger_left()` counts for everyone, for one person. With several users in flight a before/after of the whole cap
+    cannot say whose claim moved it, so an outcome-unknown claim is read per user. A read ([key=read-never-writes])."""
+    db = verify_ledger.connect_ro(ledger)
+    try:
+        marks = ",".join("?" * len(group))
+        return int(db.execute(
+            f"SELECT COUNT(*) FROM verify_messages WHERE campaign IN ({marks}) AND kind='initial' AND day=? "
+            "AND message_type='email' AND status IN ('attempted','sent') AND (user_key=? OR account_id=?)",
+            (*group, day, user_key, user_id)).fetchone()[0])
+    finally:
+        db.close()
+
+
 def gmail_held(uid: Any, paid: bool) -> dict[str, Any]:
     due = _GMAIL_HOLD.get("due_at")
     return {"user": str(uid), "result": "held", "reason": STALE_GMAIL_REASON,
@@ -1364,12 +1379,12 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         setattr(report, HOLDS[why], getattr(report, HOLDS[why]) + 1)
         report.note(why)
 
-    def next_batch(want: int) -> list[tuple[set[str], dict[str, Any], int]]:
-        """Up to `want` (listed request ids, sendable payload, rows left out) triples from the
+    def next_batch(want: int) -> list[tuple[set[str], dict[str, Any], int, dict[str, Any]]]:
+        """Up to `want` (listed request ids, sendable payload, rows left out, list entry) tuples from the
         candidates after `pos`, dropping (and on a real run closing) the users the ledger or the
         replica already answers for."""
         nonlocal pos
-        batch: list[tuple[set[str], dict[str, Any], int]] = []
+        batch: list[tuple[set[str], dict[str, Any], int, dict[str, Any]]] = []
         db = verify_ledger.connect(path)
         try:
             def close(u: dict[str, Any]) -> None:
@@ -1518,7 +1533,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         # QA #1517: the row is classified on the PAYLOAD's own request ids - exactly what the gate's
                         # comm_state receives at send (the raw list row has request_ids, not credits)
                         report.reply_due_rows.append(reply_due_row(uid, {**u, "credits": payload.get("credits") or []}, query=query))
-                    batch.append((listed, payload, 0 if as_count else left_out(listed, pending, is_ask, asked)))
+                    batch.append((listed, payload, 0 if as_count else left_out(listed, pending, is_ask, asked), u))
         finally:
             db.close()
         return batch
@@ -1603,6 +1618,19 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         left = remaining_cap() if mode == "apply" else max_users
         return min(max_users - counted, max_calls - calls, left), left
 
+    # [key=apply-pipeline] what a WORKER's send-time read has to say about a user it holds. A worker never touches the
+    # report: it returns these steps, and the walk's own thread runs them in list order.
+    cap_group = CREDIT_GROUP if campaign in CREDIT_GROUP else (campaign,)
+
+    def bump(attr: str) -> Callable[[], None]:
+        return lambda: setattr(report, attr, getattr(report, attr) + 1)
+
+    def noting(why: str) -> Callable[[], None]:
+        return lambda: report.note(why)
+
+    def on_hold(*steps: Callable[[], Any]) -> verify_notify.Held:
+        return verify_notify.Held(apply=lambda: [s() for s in steps])
+
     # [key=uvn-daily-cap-400] (C p10: 5 of 53 sent, rc 0): a SIGNED apply goes whole or not at all - when what is left of
     # today's cap cannot take every signed user of this list, it refuses BEFORE the first send (daily_cap_short; the
     # CLI exits 3). The tick pages by design (--page) and is not refused here.
@@ -1655,14 +1683,14 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     if res.returncode == 0 and verify_notify._first_line(res.stdout).startswith(("RECIPIENT OK", "VALID ", "DRY-RUN ")):
                         outs[uid_] = "ok"
                     return res
-                verify_notify.send_all([p for _, p, _ in take], report, mode=mode, wrapper=wrapper, runner=seen,
+                verify_notify.send_all([p for _, p, _, _ in take], report, mode=mode, wrapper=wrapper, runner=seen,
                                        extra=["--campaign", campaign] + (["--copy", wording] if wording else [])
                                        + (["--gmail-fallback-o"] if gmail_fallback_o else [])
                                        + (["--no-correction"] if no_correction else []),
                                        pace_seconds=0, preview_dir=preview_dir,
                                        check_recipients=check_recipients)
                 calls += len(take)
-                for _, p, dropped in take:
+                for _, p, dropped, _ in take:
                     if outs.get(str(p["user"].get("id") or "")) == "ok":
                         report.users += 1
                         counted += 1
@@ -1672,204 +1700,231 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 if report.halted or report.stopped_on_unmeasured:   # Defect A: the bar is a loud stop, not a next batch
                     break
                 continue
-            for i, (listed, p, dropped) in enumerate(batch):
+            # [key=apply-pipeline] (captain 2026-11-13: "1000s a minute/hour verifications; run not walk"). This walk used
+            # to take ONE user at a time through re-read -> gate -> accounting, so a tick sent a note every 21 s (50
+            # people in 32 minutes, ledger rows 13694-13743) and the pool in send_all never engaged. The same three steps
+            # now run for verify_notify.PIPELINE_WORKERS users at once:
+            #   admit   (this thread, list order)  the caps, with every user in flight charged as if already sent;
+            #   prepare (a worker)                 the send-time re-read, immediately before that user's own gate call;
+            #   settle  (this thread, list order)  the accounting, so the report and the segment record keep one writer.
+            # Nothing a user is checked against has changed, and one note per user per UTC day is still the ledger's
+            # rule (verify_ledger.claim inside the gate), not a property of the order the workers finish in.
+            todo: list[tuple[set[str], dict[str, Any], dict[str, Any]]] = []
+            meta: dict[str, dict[str, Any]] = {}
+            for listed, p, _dropped, u in batch:
+                uid_s = str(p["user"]["id"])
                 if verify_notify.not_signed(mode, p["user"]["id"]):
                     # QA #1611: a signed apply never spends a slot, a re-plan or a gate call on an unsigned user
-                    report.outcomes.append({"user": str(p["user"]["id"]), "result": "filtered",
-                                            "reason": "not_in_signed_accepted"})
+                    report.outcomes.append({"user": uid_s, "result": "filtered", "reason": "not_in_signed_accepted"})
                     continue
+                if uid_s in meta:
+                    # the same account twice in one list: the second entry would only race the first to the ledger's
+                    # claim and be told "already notified". Said here instead, so two workers never hold one person.
+                    report.skipped += 1
+                    report.outcomes.append({"user": uid_s, "result": "skipped",
+                                            "reason": "already in this run: one note per user per UTC day"})
+                    continue
+                meta[uid_s] = {"listed": listed, "u": u, "dropped": 0, "channel": "", "email_rows": 0}
+                todo.append((listed, p, u))
+            if not todo:
+                continue
+            in_email: list[str] = []         # users in flight holding an EMAIL slot of today's cap
+            cap_stop: list[str] = []         # why admit ended the walk: the cap, or the run's size
+
+            def admit(p: dict[str, Any], in_flight: int) -> str:
+                m = meta[str(p["user"]["id"])]
                 allowed, left = room()
-                if allowed <= 0:
-                    report.over_daily_max += len(batch) - i
-                    # r5 [key=cap-stop-p10] (3): every user a cap stop leaves is an outcome row, so the run balances
-                    why = "daily_cap" if left <= 0 else "run_size"
-                    report.outcomes += [{"user": str(b[1]["user"]["id"]), "result": "deferred", "reason": why}
-                                        for b in batch[i:]]
-                    examined.difference_update(str(b[1]["user"]["id"]) for b in batch[i:])   # not got to
-                    break
-                if mode == "apply":
-                    uid = int(p["user"]["id"])
-                    # Re-read the strict proof-on-file list right before an ask (QA: proof that
-                    # reached support@ or core while earlier users were being messaged is not
-                    # in Intercom, so the gate would not see it). Unreadable = nothing more sent.
-                    mine = released
-                    if is_ask:
-                        try:
-                            documented = asks_proof_on_file(proof_path, now=now, ledger_path=ledger_path)
-                        except verify_notify.ProofFileError as exc:
-                            report.halted = str(exc)
-                            break
-                        held_o = getattr(documented, "scoped", False) and str(uid) in documented.support_contacts
-                        if gmail_fallback_o and not held_o:
-                            # [key=gmail-o-forward]: left the held set (or Gmail read fresh) since the batch read - no /o
-                            report.note("not_in_gmail_held_set")
-                            continue
-                        if held_o and not gmail_fallback_o:
-                            # QA #1573: vouched for by cs-gmail since the batch read - held AND listed, never sent
-                            report.note(STALE_GMAIL_REASON)
-                            report.outcomes.append(gmail_held(uid, want_paid))
-                            continue
-                        # The stage-2 release, re-read for this user right before the send (a
-                        # later run may have judged a credit again). Unreadable = no release.
-                        if documented.get(str(uid)) and campaign in stage2_verdicts.RELEASES:
-                            try:
-                                mine = stage2_released(campaign, stage2_path, user_ids=[uid])
-                            except stage2_verdicts.Stage2Error:
-                                mine = set()
-                        # a stage-2-populated campaign (gap-ask): the population IS the release - a credit no longer
-                        # released is a document on file, date or not. Every other ask: the one date-aware check below
-                        # (documents_block with the request date), the same as the dry run (QA #1508).
-                        if from_stage2 and documented.get(str(uid)) and not mine:
-                            report.proof_on_file += 1
-                            report.note("documents_on_file")
-                            continue
-                    # Re-plan on a fresh replica read right before this user's send (QA: a request
-                    # approved, withdrawn, opened or blanked while earlier users were being
-                    # messaged must neither get a 'waiting on you' note nor be left out of it).
-                    fresh = pending_rows([uid], campaign, mine, query, with_released=from_stage2,
-                                         partial_ids=partial_ids).get(uid, [])
-                    if str(u.get("class") or "") == "PARTIAL":
-                        # Re-read the split for THIS user's listed requests right before the send.
-                        # `partial_roles` is a run-start snapshot: a request the decider moved off
-                        # `approve_partial` (or whose pending roles changed) while earlier users
-                        # were being messaged must not be asked about with the stale role text
-                        # (QA 2026-11-11, hydra#1851).
-                        owed_now = partial_pending_roles(path, request_ids=u.get("request_ids") or [])
-                        fresh = partial_scoped(fresh, owed_now, u.get("request_ids") or [])
-                    asked = asked_ids(path, campaign, listed, fresh)
-                    if is_ask:
-                        why, live = owed_ask(documented, mine, str(uid), listed, fresh, asked)
+                if allowed - in_flight <= 0:
+                    if in_flight:
+                        return "wait"        # a user in flight may still not be sent: ask again when one has answered
+                    cap_stop.append("daily_cap" if left <= 0 else "run_size")
+                    return "stop"
+                if inapp_overflow:
+                    # the caps pace EMAIL only: the channel is chosen here, where the email slots in flight are known
+                    left_e = email_left()
+                    if left_e <= 0:
+                        m["channel"] = "inapp"
+                    elif left_e - len(in_email) > 0:
+                        in_email.append(str(p["user"]["id"]))
                     else:
-                        why, live = plan(listed, fresh, is_ask, asked)
-                    why, live, as_count, total = count_copy_of(campaign, listed, fresh, why, live)
-                    if why in HOLDS:
-                        held(why)
-                        continue
-                    dropped = 0 if as_count else left_out(listed, fresh, is_ask, asked)
-                    if why == DOCUMENTS_ON_FILE:
-                        report.proof_on_file += 1
-                        report.note(DOCUMENTS_ON_FILE)
-                        continue
-                    if not live:
-                        if is_ask:
-                            report.no_longer_uvn += 1
-                        else:
-                            report.not_pending += 1
-                        report.note("changed_before_send")
-                        continue
-                    # r8 (firstmate 771) (3): a user whose own read failed on a previous tick is HELD - the walk does not
-                    # walk into the same unreadable read again until the hold expires (READ_RETRY_H; see verify_ledger).
-                    hold_ukey = str(p["user"].get("email") or "").strip().lower()
-                    hold_until = read_hold_until(path, campaign, hold_ukey, now=now) if mode == "apply" else ""
-                    if hold_until:
-                        report.deferred_users += 1
-                        report.outcomes.append({"user": str(uid), "result": "deferred",
-                                                "reason": f"read_failed_hold until {hold_until}"})
-                        report.deferrals.append(f"user {uid}: read failed on an earlier tick; retry after {hold_until}")
-                        continue
-                    acct = {k: p["user"].get(k, "") for k in ("email", "professional_id", "auth_id", "first_name")}
-                    # rebuilt from a fresh replica read: the answer's gate args (reply_due) carry over (QA #1509)
-                    p = with_reply_due(with_filing(note_payload(acct, uid, live, as_count, total, created_of(fresh, live)),
-                                                   p["user"]), {"reply_due": reply_due_of(p)})
-                    if campaign == WAIT_APOLOGY:
-                        # d2's copy: the fact comes from the LIVE read, and a state outside F1/F2/F3/F4 refuses THIS
-                        # user (a named deferral, never a default sentence and never a failure of the family).
-                        # QA #1788 finding 6: the APPLY re-derives the fact from a FRESH send-time read of this one
-                        # user, never from the page-level `states` snapshot taken before the walk. A request that flips
-                        # waiting -> approved between the snapshot and this send would otherwise still get F1 ("waiting
-                        # on one thing from you") for a credit that was just decided. The read is per user and happens
-                        # immediately before the gate call, so the sentence describes the state at send time.
+                        return "wait"
+                m["email_rows"] = user_email_rows(path, cap_group, str(p["user"].get("email") or "").strip().lower(),
+                                                  str(p["user"]["id"]), day)
+                return "go"
+
+            def prepare(p: dict[str, Any], _meta: dict[str, dict[str, Any]] = meta) -> Any:
+                """A WORKER's half: every send-time read for ONE user, immediately before that user's gate call. It
+                returns the payload to send, or a Held whose report changes are applied on the walk's own thread."""
+                uid = int(p["user"]["id"])
+                m = _meta[str(uid)]
+                listed, u = m["listed"], m["u"]
+                # Re-read the strict proof-on-file list right before an ask (QA: proof that
+                # reached support@ or core while earlier users were being messaged is not
+                # in Intercom, so the gate would not see it). Unreadable = nothing more sent.
+                mine = released
+                docs: Any = None
+                if is_ask:
+                    try:
+                        docs = asks_proof_on_file(proof_path, now=now, ledger_path=ledger_path)
+                    except verify_notify.ProofFileError as exc:
+                        return verify_notify.Held(halt=str(exc))
+                    held_o = getattr(docs, "scoped", False) and str(uid) in docs.support_contacts
+                    if gmail_fallback_o and not held_o:
+                        # [key=gmail-o-forward]: left the held set (or Gmail read fresh) since the batch read - no /o
+                        return on_hold(noting("not_in_gmail_held_set"))
+                    if held_o and not gmail_fallback_o:
+                        # QA #1573: vouched for by cs-gmail since the batch read - held AND listed, never sent
+                        return on_hold(noting(STALE_GMAIL_REASON),
+                                       lambda: report.outcomes.append(gmail_held(uid, want_paid)))
+                    # The stage-2 release, re-read for this user right before the send (a
+                    # later run may have judged a credit again). Unreadable = no release.
+                    if docs.get(str(uid)) and campaign in stage2_verdicts.RELEASES:
                         try:
-                            send_state = apology_states([int(uid)], query).get(int(uid))
-                        except Exception as exc:  # noqa: BLE001 - an unreadable read is a refusal for THIS user
-                            report.refused_no_fact += 1
-                            report.outcomes.append({"user": str(uid), "result": "refused",
-                                                    "reason": f"apology_state_unreadable: {str(exc)[:160]}"})
-                            report.note("apology_fact_missing")
-                            continue
-                        # QA #1788 finding 1 (carried three times): the DOCUMENT half of the fact was still the
-                        # page-level snapshot taken before the walk, so a document that arrived (or was removed) while
-                        # earlier users were being messaged could still produce F1 for a user whose document is now on
-                        # file. Re-read it here, beside the state read, so both halves of the sentence describe the
-                        # same instant. Unreadable = the family stops, exactly as the batch read does.
-                        try:
-                            send_docs = asks_proof_on_file(proof_path, now=now, ledger_path=ledger_path)
-                        except verify_notify.ProofFileError as exc:
-                            report.halted = str(exc)
-                            break
-                        # QA #1788 r10: coverage is per LIVE waiting request, not "the user appears somewhere in the
-                        # export" - a document for one of two requests must never produce F2 for both.
-                        fact, aa = apology_fact(send_state, str(uid) in send_docs,
-                                                doc_coverage(send_docs.get(str(uid)),
-                                                             (send_state or {}).get("undecided_ids") or []))
-                        if not fact:
-                            report.refused_no_fact += 1
-                            report.outcomes.append({"user": str(uid), "result": "refused",
-                                                    "reason": "apology_fact_missing: the live request state is not F1, F2, F3 or F4"})
-                            report.note("apology_fact_missing")
-                            continue
-                        p = with_apology(p, fact, segment == "paid", aa)
-                    if calls and pace_seconds:
-                        time.sleep(pace_seconds)
-                before = report.sent_notes if mode == "apply" else report.validated + report.recipient_ok
-                before_budget = report.budget_deferred_users
-                l0 = ledger_left() if mode == "apply" else 0
-                # QA #1780 (Important): the read-failure streak resets on a VERIFIED SUCCESSFUL READ, not only on a
-                # send. A user who read fine and was then refused or deferred has not failed to read, so leaving the
-                # prior failures in the ledger makes the next failed read page a human for NONCONSECUTIVE failures.
-                # The read failed for THIS user iff send_all recorded a per-user read hold for them.
-                fh0 = len(report.failed_held)
-                verify_notify.send_all([p], report, mode=mode, wrapper=wrapper, runner=runner,
-                                       extra=["--campaign", campaign] + (["--copy", wording] if wording else [])
-                                       + (["--gmail-fallback-o"] if gmail_fallback_o else [])
-                                       + (["--no-correction"] if no_correction else [])
-                                       + (["--channel", "inapp"] if inapp_overflow and email_left() <= 0 else []),
-                                       pace_seconds=0, preview_dir=preview_dir,
-                                       check_recipients=check_recipients and mode != "apply",
-                                       # r5 (firstmate 770) (3): the POPULATION this walk covers, so a systemic stop is
-                                       # measured against the family it stopped, not against one payload.
-                                       walked=len(cands))
+                            mine = stage2_released(campaign, stage2_path, user_ids=[uid])
+                        except stage2_verdicts.Stage2Error:
+                            mine = set()
+                    # a stage-2-populated campaign (gap-ask): the population IS the release - a credit no longer
+                    # released is a document on file, date or not. Every other ask: the one date-aware check below
+                    # (documents_block with the request date), the same as the dry run (QA #1508).
+                    if from_stage2 and docs.get(str(uid)) and not mine:
+                        return on_hold(bump("proof_on_file"), noting("documents_on_file"))
+                # Re-plan on a fresh replica read right before this user's send (QA: a request
+                # approved, withdrawn, opened or blanked while earlier users were being
+                # messaged must neither get a 'waiting on you' note nor be left out of it).
+                fresh = pending_rows([uid], campaign, mine, query, with_released=from_stage2,
+                                     partial_ids=partial_ids).get(uid, [])
+                if str(u.get("class") or "") == "PARTIAL":
+                    # Re-read the split for THIS user's listed requests right before the send.
+                    # `partial_roles` is a run-start snapshot: a request the decider moved off
+                    # `approve_partial` (or whose pending roles changed) while earlier users
+                    # were being messaged must not be asked about with the stale role text
+                    # (QA 2026-11-11, hydra#1851). `u` is THIS user's list entry, carried with the
+                    # batch: the serial loop read a variable left over from building the page, which
+                    # was some other user's entry whenever the page held more than one.
+                    owed_now = partial_pending_roles(path, request_ids=u.get("request_ids") or [])
+                    fresh = partial_scoped(fresh, owed_now, u.get("request_ids") or [])
+                asked = asked_ids(path, campaign, listed, fresh)
+                if is_ask:
+                    # the one rule the batch builder and a list builder's count apply (`owed_ask`), on the fresh read
+                    why, live = owed_ask(docs, mine, str(uid), listed, fresh, asked)
+                else:
+                    why, live = plan(listed, fresh, is_ask, asked)
+                why, live, as_count, total = count_copy_of(campaign, listed, fresh, why, live)
+                if why in HOLDS:
+                    return on_hold(lambda: held(why))
+                m["dropped"] = 0 if as_count else left_out(listed, fresh, is_ask, asked)
+                if why == DOCUMENTS_ON_FILE:
+                    return on_hold(bump("proof_on_file"), noting(DOCUMENTS_ON_FILE))
+                if not live:
+                    return on_hold(bump("no_longer_uvn" if is_ask else "not_pending"), noting("changed_before_send"))
+                # r8 (firstmate 771) (3): a user whose own read failed on a previous tick is HELD - the walk does not
+                # walk into the same unreadable read again until the hold expires (READ_RETRY_H; see verify_ledger).
+                hold_until = read_hold_until(path, campaign, str(p["user"].get("email") or "").strip().lower(), now=now)
+                if hold_until:
+                    return on_hold(bump("deferred_users"),
+                                   lambda: report.outcomes.append({"user": str(uid), "result": "deferred",
+                                                                   "reason": f"read_failed_hold until {hold_until}"}),
+                                   lambda: report.deferrals.append(
+                                       f"user {uid}: read failed on an earlier tick; retry after {hold_until}"))
+                acct = {k: p["user"].get(k, "") for k in ("email", "professional_id", "auth_id", "first_name")}
+                # rebuilt from a fresh replica read: the answer's gate args (reply_due) carry over (QA #1509)
+                new = with_reply_due(with_filing(note_payload(acct, uid, live, as_count, total, created_of(fresh, live)),
+                                                 p["user"]), {"reply_due": reply_due_of(p)})
+                if campaign == WAIT_APOLOGY:
+                    # d2's copy: the fact comes from the LIVE read, and a state outside F1/F2/F3/F4 refuses THIS
+                    # user (a named deferral, never a default sentence and never a failure of the family).
+                    # QA #1788 finding 6: the APPLY re-derives the fact from a FRESH send-time read of this one
+                    # user, never from the page-level `states` snapshot taken before the walk. A request that flips
+                    # waiting -> approved between the snapshot and this send would otherwise still get F1 ("waiting
+                    # on one thing from you") for a credit that was just decided. The read is per user and happens
+                    # immediately before the gate call, so the sentence describes the state at send time.
+                    def no_fact(reason: str) -> Any:
+                        return on_hold(bump("refused_no_fact"),
+                                       lambda: report.outcomes.append({"user": str(uid), "result": "refused",
+                                                                       "reason": reason}),
+                                       noting("apology_fact_missing"))
+                    try:
+                        send_state = apology_states([int(uid)], query).get(int(uid))
+                    except Exception as exc:  # noqa: BLE001 - an unreadable read is a refusal for THIS user
+                        return no_fact(f"apology_state_unreadable: {str(exc)[:160]}")
+                    # QA #1788 finding 1 (carried three times): the DOCUMENT half of the fact was still the
+                    # page-level snapshot taken before the walk, so a document that arrived (or was removed) while
+                    # earlier users were being messaged could still produce F1 for a user whose document is now on
+                    # file. Re-read it here, beside the state read, so both halves of the sentence describe the
+                    # same instant. Unreadable = the family stops, exactly as the batch read does.
+                    try:
+                        send_docs = asks_proof_on_file(proof_path, now=now, ledger_path=ledger_path)
+                    except verify_notify.ProofFileError as exc:
+                        return verify_notify.Held(halt=str(exc))
+                    # QA #1788 r10: coverage is per LIVE waiting request, not "the user appears somewhere in the
+                    # export" - a document for one of two requests must never produce F2 for both.
+                    fact, aa = apology_fact(send_state, str(uid) in send_docs,
+                                            doc_coverage(send_docs.get(str(uid)),
+                                                         (send_state or {}).get("undecided_ids") or []))
+                    if not fact:
+                        return no_fact("apology_fact_missing: the live request state is not F1, F2, F3 or F4")
+                    new = with_apology(new, fact, segment == "paid", aa)
+                if m["channel"] == "inapp":
+                    new = {**new, "extra": [*(new.get("extra") or []), "--channel", "inapp"]}
+                return new
+
+            def settle(p: dict[str, Any], *, gated: bool, reached: int, read_failed: bool,
+                       _meta: dict[str, dict[str, Any]] = meta) -> None:
+                nonlocal calls, counted
+                uid_ = str(p["user"]["id"])
+                m = _meta[uid_]
+                if uid_ in in_email:
+                    in_email.remove(uid_)
+                if not gated:
+                    return                   # held by its own send-time read: no gate call, nothing to account for
                 calls += 1
-                reached = (report.sent_notes if mode == "apply" else report.validated + report.recipient_ok) - before
                 report.users += reached
                 counted += reached
-                read_failed = any(str(e.get("user")) == str(uid) for e in report.failed_held[fh0:])
-                if mode == "apply" and not read_failed:
+                ukey = str(p["user"].get("email") or "").strip().lower()
+                if not read_failed:
                     # r8 (firstmate 771) (4): the read worked this time - the consecutive counter starts over.
-                    # QA #1780 (Important): APPLY ONLY. A dry run is a read, so it must never open a writable ledger
-                    # to DELETE failure history - a preview after two failed ticks used to reset the streak silently.
-                    clear_read_hold(path, campaign, hold_ukey)
-                if reached and dropped:
-                    report.rows_held += dropped
+                    # QA #1780 (Important): the streak resets on a VERIFIED SUCCESSFUL READ, not only on a send.
+                    clear_read_hold(path, campaign, ukey)
+                if reached and m["dropped"]:
+                    report.rows_held += m["dropped"]
                     report.note("rows_left_out")
-                if mode == "apply":
-                    unknown = max(0, l0 - ledger_left() - reached)
-                    report.outcome_unknown += unknown
-                    counted += unknown
-                    if segment_daily_cap is not None and reached + unknown:
-                        # QA #1541: this segment's messages (sent + outcome-unknown), under the run lock
-                        record_segment(path, campaign, segment, day, str(uid), reached + unknown)
-                if report.halted:
-                    break
-                if report.stopped_on_failures or report.stopped_on_unmeasured:
-                    # r5 (firstmate 770) (3): the systemic stop is the ROUND's, and this loop is the round. Without this
-                    # the probe walked 8 of 8 after stopping at 3: send_all() returned, the walk carried on, and the stop
-                    # only coloured the exit code.
-                    break
-                if report.budget_deferred_users > before_budget:
-                    # [key=note-step-budget] (QA #1756 Important): the run's share ended AT THIS user - the send loop
-                    # refuses to START one whose worst case (the whole retry budget) would not fit and records them
-                    # `deferred / apply_budget`. This user IS in `examined` (picked before the send), so the page clamp
-                    # at the end of this function would step PAST them: they - and every user after them in the batch -
-                    # would wait a whole ROTATION of the list instead of the next tick. Mirror the cap stop exactly:
-                    # an outcome row each, drop them from `examined` (which is what moves page.end), and stop.
-                    report.outcomes += [{"user": str(b[1]["user"]["id"]), "result": "deferred",
-                                         "reason": "apply_budget: the tick's apply share ended before this user; "
-                                                   "never started, stays owed for the next tick"}
-                                        for b in batch[i + 1:]]
-                    examined.difference_update(str(b[1]["user"]["id"]) for b in batch[i:])
-                    budget_stop = True
-                    break
+                # A gate call that left its claim in the ledger without a verified post: outcome unknown, charged to
+                # the budget. Counted per USER (this user's own email rows before and after), because with several
+                # users in flight a before/after of the whole cap would charge one user's send to another.
+                try:
+                    rows_now = user_email_rows(path, cap_group, ukey, uid_, day)
+                except sqlite3.Error:
+                    rows_now = m["email_rows"] + 1       # unreadable: charged, never assumed clean
+                unknown = max(0, rows_now - m["email_rows"] - reached)
+                report.outcome_unknown += unknown
+                counted += unknown
+                if segment_daily_cap is not None and reached + unknown:
+                    # QA #1541: this segment's messages (sent + outcome-unknown), under the run lock
+                    record_segment(path, campaign, segment, day, uid_, reached + unknown)
+
+            walk = verify_notify.ApplyPipeline(admit=admit, prepare=prepare, settle=settle)
+            before_budget = report.budget_deferred_users
+            verify_notify.send_all([p for _, p, _ in todo], report, mode=mode, wrapper=wrapper, runner=runner,
+                                   extra=["--campaign", campaign] + (["--copy", wording] if wording else [])
+                                   + (["--gmail-fallback-o"] if gmail_fallback_o else [])
+                                   + (["--no-correction"] if no_correction else []),
+                                   # a floor between two STARTS (the shared rate limit), never a sleep per worker
+                                   pace_seconds=pace_seconds, preview_dir=preview_dir, check_recipients=False,
+                                   # r5 (firstmate 770) (3): the POPULATION this walk covers, so a systemic stop is
+                                   # measured against the family it stopped, not against one payload.
+                                   walked=len(cands), pipeline=walk)
+            if cap_stop:
+                # r5 [key=cap-stop-p10] (3): every user a cap stop leaves is an outcome row, so the run balances
+                report.over_daily_max += len(walk.unstarted)
+                report.outcomes += [{"user": x, "result": "deferred", "reason": cap_stop[0]} for x in walk.unstarted]
+            # Never started = not got to: the cursor's next start (QA #1612). That is the cap stop, the budget stop
+            # ([key=note-step-budget], QA #1756: a budget-deferred user must wait for the next TICK, never a whole
+            # rotation of the list; send_all wrote their `apply_budget` rows) and a systemic stop alike.
+            examined.difference_update(walk.unstarted)
+            if report.budget_deferred_users > before_budget:
+                budget_stop = True
+            if walk.unstarted:
+                break
             if report.halted or report.stopped_on_failures or report.stopped_on_unmeasured or budget_stop:
                 break
     finally:

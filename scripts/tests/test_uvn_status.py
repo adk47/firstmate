@@ -28,6 +28,13 @@ _vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come
 # use of it (fatal load, fraud_held, ask_only), are tested in test_fraud_lens.py.
 uvn_status.DEFAULT_LENS = lambda query, **kw: fraud_lens.null_lens
 
+# [key=apply-pipeline] This suite pins WHAT each user is checked against, and it does that with gates that change the
+# world for the NEXT user from inside the previous user's call ("a document arrives while user 1 is being messaged").
+# That scripting needs one user in flight at a time, so the apply walk runs one wide here: the same admit / prepare /
+# settle code, in list order. What several users in flight at once must never do (two notes to one person, a cap
+# overrun, a lost outcome) is pinned at the production width in test_apply_pipeline.py.
+verify_notify.PIPELINE_WORKERS = 1
+
 NOW = datetime.now(timezone.utc).replace(microsecond=0)  # proof-on-file freshness is judged on the real clock
 FIXED = datetime(2026, 10, 20, 9, 0, tzinfo=timezone.utc)
 
@@ -953,7 +960,10 @@ class UvnStatusTests(unittest.TestCase):
         finally:
             verify_notify.set_apply_budget(None)
             verify_notify._SESSION_STARTED = None
-        self.assertEqual(rep.budget_deferred_users, 1)
+        # [key=apply-pipeline] the count is every user the share left (2..6), the same five who get a row below. When
+        # the walk handed send_all one user per call it counted only the first and wrote the other four rows uncounted,
+        # so the report said "1 account(s) not started this run" beside five deferred rows.
+        self.assertEqual(rep.budget_deferred_users, 5)
         # the SECOND user is the one the share could not fit: the cursor stops AT them (raw index 1), not past them
         self.assertEqual(rep.page["end"], 1)
         deferred = [o for o in rep.outcomes if o["result"] == "deferred" and "apply_budget" in o["reason"]]

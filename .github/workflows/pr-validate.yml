@@ -2580,6 +2580,9 @@ jobs:
           # uvn-status reminder runner + withdrawal-confirm (credit_review/uvn_status.py,
           # withdrawal_confirm.py): gate and Trino faked. Stdlib only.
           python3 scripts/tests/test_uvn_status.py
+          # [key=apply-pipeline] the pooled apply at its production width, real threads and a real ledger: one note
+          # per user under a race, the caps exact across workers, no outcome lost on a stop. Stdlib only.
+          python3 scripts/tests/test_apply_pipeline.py
           # paid-status daily credit-status run (scripts/paid-status): no document ask without ASKS=1 (captain 10-27).
           python3 scripts/tests/test_paid_status_daily.py
           python3 scripts/tests/test_paid_status_b0_gap.py

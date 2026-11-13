@@ -986,6 +986,53 @@ CHECK_WORKERS = 4
 # writer, and results are consumed in list order, so the accounting is identical to a serial pass.
 APPLY_WORKERS = 6
 
+# [key=apply-pipeline] (captain 2026-11-13: "1000s a minute/hour verifications; run not walk"). The pool above only ever
+# ran the GATE CALL at once, and only for a caller that hands send_all() its whole list. uvn_status re-reads each user
+# right before that user's send, so it handed over ONE user at a time, the pool never engaged, and a tick sent 50 people
+# in 32 minutes (ledger rows 13694-13743, 2026-11-13: a note every 21 s, 1-2 s of it the POST). A pipeline lets such a
+# caller keep its send-time re-read AND run PIPELINE_WORKERS users at once: the re-read moves into the worker, beside
+# the gate call it guards. What is shared is bounded here, in one place:
+#   - at most PIPELINE_WORKERS users are in flight, so at most that many replica reads and Intercom calls at once
+#     (Intercom allows 10,000 calls/min per workspace; a user costs ~6);
+#   - `pace_seconds` stays a floor between two STARTS (see _start), so the start rate never exceeds 1/pace;
+#   - one note per user per UTC day stays the LEDGER's rule (verify_ledger.claim's BEGIN IMMEDIATE), never an effect
+#     of the order the workers finish in.
+PIPELINE_WORKERS = 8
+
+
+class Held:
+    """[key=apply-pipeline] a pipeline's answer when the send-time re-read says this user is NOT sent now.
+
+    `apply` carries the report changes; it runs on the caller's thread, in list order, so the report keeps one writer.
+    `halt` stops the run (an unreadable shared source): users already in flight finish and are recorded."""
+
+    def __init__(self, apply: Callable[[], Any] | None = None, halt: str = "") -> None:
+        self.apply, self.halt = apply, halt
+
+
+class PipelineReadError(RuntimeError):
+    """[key=apply-pipeline] one user's send-time re-read raised: that user's failed READ, never the batch's crash."""
+
+
+class ApplyPipeline:
+    """[key=apply-pipeline] the per-user steps a pooled apply runs around the gate call (apply only).
+
+    admit(payload, in_flight) -> "go" | "skip" | "wait" | "stop"   caller's thread, list order, before a user starts.
+        "wait" = cannot tell until a user in flight finishes (only legal while in_flight > 0): this is how a cap is
+        held EXACTLY across workers - every user in flight is charged as if sent, and nobody is refused on that guess.
+        "stop" = nobody from here on starts.
+    prepare(payload) -> payload | Held                               WORKER thread: the send-time re-read. It must not
+        touch the report; what it has to say about a held user travels in the Held.
+    settle(payload, gated=, reached=, read_failed=)                  caller's thread, list order, once per admitted
+        user. gated=False for a Held user.
+    After the run `unstarted` names the users never started (a stop, the budget): no gate call, still owed."""
+
+    def __init__(self, *, admit: Callable[[dict[str, Any], int], str], prepare: Callable[[dict[str, Any]], Any],
+                 settle: Callable[..., None], workers: int | None = None) -> None:
+        self.admit, self.prepare, self.settle = admit, prepare, settle
+        self.workers = PIPELINE_WORKERS if workers is None else workers
+        self.unstarted: list[str] = []
+
 # Fable r5's ruled bar (firstmate 764, restated in 765): a run of failed users becomes a systemic stop at
 # max(3, 2% of the users walked) - NOT 5%, which was my reading and r5's ruling corrects. Below the bar every failed
 # user is HELD and the round continues; at or above it the run stops and says so, because at that point the failures
@@ -1268,8 +1315,11 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
              pace_seconds: float = 0.0, preview_dir: str | None = None, reminder: bool = False,
              check_recipients: bool = False, workers: int | None = None,
              walked: int | None = None, ledger_path: str | None = None,
-             campaign: str = "", queue: Any = None) -> None:
-    """``ledger_path`` + ``campaign`` turn on the read-failure hold for this lane (Fable r5 2026-11-06 00:53Z): a user
+             campaign: str = "", queue: Any = None, pipeline: ApplyPipeline | None = None) -> None:
+    """``pipeline`` (apply only, [key=apply-pipeline]): the caller's per-user send-time steps, run in the pool beside
+    the gate call. Without one the loop is exactly what it was.
+
+    ``ledger_path`` + ``campaign`` turn on the read-failure hold for this lane (Fable r5 2026-11-06 00:53Z): a user
     whose own send-time read failed on an earlier tick is SKIPPED until the hold expires, and a read that works clears
     the streak. Both are apply-only; a dry run neither honours nor writes a hold.
 
@@ -1340,7 +1390,7 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
         send_gate = queue.open(payloads, gate) if (queue is not None and mode == "apply") else gate
         _send_loop(payloads, report, mode=mode, pace_seconds=pace_seconds, pre=pre, gate=send_gate, extra=extra,
                    preview_dir=preview_dir, reminder=reminder, walked=walked, ledger_path=ledger_path,
-                   campaign=campaign)
+                   campaign=campaign, pipeline=pipeline if mode == "apply" else None)
     finally:
         if lock is not None:
             lock.close()
@@ -1388,7 +1438,7 @@ def _already_noted_today(path: str, campaign: str, user_key: str, user_id: str, 
 def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pace_seconds: float, pre: Any,
                gate: Callable[[dict[str, Any]], Any], extra: list[str] | None, preview_dir: str | None,
                reminder: bool, walked: int | None = None, ledger_path: str | None = None,
-               campaign: str = "") -> None:
+               campaign: str = "", pipeline: ApplyPipeline | None = None) -> None:
     # r5 (firstmate 770) (3): `walked` is the POPULATION the run walks, never len(payloads). uvn_status sends one user
     # per send_all() call, so len(payloads) was 1 and the systemic bar became max(3, 2% of 1) = 3 threshold against a
     # denominator of 1 - and a family that stopped at 3 of 8 kept walking all 8 because the outer loop never looked.
@@ -1403,16 +1453,32 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
     # CALL (the slow subprocess) leaves this thread: every guard, every counter, the outcome file and the stop bars
     # keep exactly one writer, and results are consumed in LIST order, so the accounting is identical to a serial pass.
     # The pool is bounded at 6 on purpose - raise it only after measuring what the admin API sustains.
-    workers = APPLY_WORKERS if (mode == "apply" and pre is None and len(payloads) > 1) else 1
+    width = APPLY_WORKERS if pipeline is None else max(1, int(pipeline.workers))
+    workers = width if (mode == "apply" and pre is None and len(payloads) > 1) else 1
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
     futures: dict[int, Any] = {}
     skipped: set[int] = set()
     seen: set[str] = set()          # the idempotency keys already submitted in THIS run
     next_j = 0
     budget_stopped = False
+    admit_stopped = False           # [key=apply-pipeline] the pipeline's admit said nobody further starts
+    unstarted: set[int] = set()     # [key=apply-pipeline] never started: no gate call, no claim, still owed
+    sent_as: dict[int, dict[str, Any]] = {}     # [key=apply-pipeline] the payload a worker's re-read rebuilt for user j
 
-    def _capture(p: dict[str, Any]) -> Any:
+    def _capture(j: int) -> Any:
         # a worker's exception is that user's row, never the batch's: _send_loop re-raises it inside its per-user try
+        p = payloads[j]
+        if pipeline is not None:
+            try:
+                ready = pipeline.prepare(p)
+            except Exception as exc:  # noqa: BLE001 - this user's failed read, recorded per user by _consume
+                return PipelineReadError(f"the send-time read raised {type(exc).__name__}: {exc}"[:300])
+            if isinstance(ready, Held):
+                return ready
+            # the identity send_all attached to the batch (the presented profile ids) belongs to the ACCOUNT, so it
+            # carries over to the payload the re-read rebuilt for the same account
+            carry = {k: p["user"][k] for k in ("presented_ids",) if k in p["user"] and k not in ready["user"]}
+            sent_as[j] = p = {**ready, "user": {**ready["user"], **carry}} if carry else ready
         try:
             return gate(p)
         except Exception as exc:  # noqa: BLE001 - re-raised per user below
@@ -1484,36 +1550,65 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
             seen.add(key)
         return True
 
+    def _over_budget() -> bool:
+        return (mode == "apply" and APPLY_BUDGET_S is not None
+                and (time.monotonic() - started) + WORST_USER_S > APPLY_BUDGET_S)
+
     def _fill(upto: int) -> None:
         """Start users in list order until `workers` note steps are in flight (or `upto` is reached)."""
         nonlocal next_j, budget_stopped
+        nonlocal admit_stopped
         while next_j <= upto and next_j < len(payloads) and len(futures) < workers:
             j = next_j
+            if pipeline is not None and not (budget_stopped or admit_stopped) and not _over_budget():
+                # [key=apply-pipeline] the caller's own bound (its caps), asked BEFORE the pace sleep and before any
+                # guard that records a row, so a "wait" can be asked again after the next result without a trace.
+                try:
+                    verdict = pipeline.admit(payloads[j], len(futures))
+                except Exception as exc:  # noqa: BLE001 - a bound that cannot be read admits nobody
+                    # raised here it would leave the users in flight unrecorded: stop starting, account for them
+                    report.halted = report.halted or f"the apply's own bound could not be read ({exc}); nobody further started"[:300]
+                    verdict = "stop"
+                if verdict == "wait" and futures:
+                    return                  # a user in flight decides it: the main loop consumes one, then asks again
+                if verdict in ("wait", "stop"):
+                    admit_stopped = True    # ("wait" with nobody in flight can never be answered: a stop)
+                elif verdict == "skip":
+                    next_j += 1
+                    skipped.add(j)
+                    continue
             next_j += 1
+            if admit_stopped:
+                skipped.add(j)
+                unstarted.add(j)
+                continue
             if budget_stopped:
                 skipped.add(j)
+                unstarted.add(j)
                 continue
             # [key=note-step-budget] (Fable 753): never START a user whose WORST case (the whole retry budget) would not
             # fit in the share this run was given. The rest keep no row at all - they stay owed and unsent, exactly like
             # a user the page never reached - so nothing here is a refusal and nothing is lost; the next tick starts
             # them again. This is what lets the tick size an apply at the EXPECTED cost (40 s) instead of the worst case
             # (200 s). With a pool the workers run at once, so the wall-clock worst case is still ONE retry budget.
-            if mode == "apply" and APPLY_BUDGET_S is not None:
-                spent = time.monotonic() - started
-                if spent + WORST_USER_S > APPLY_BUDGET_S:
-                    budget_stopped = True
-                    _defer_budget(j, spent)
-                    skipped.add(j)
-                    continue
+            if _over_budget():
+                budget_stopped = True
+                _defer_budget(j, time.monotonic() - started)
+                skipped.add(j)
+                unstarted.add(j)
+                continue
             if not _start(j):
                 skipped.add(j)
+                if pipeline is not None:
+                    # admitted, then refused by a guard above (its row is written): the caller's reservation ends here
+                    _settle(payloads[j], gated=False, reached=0, read_failed=False)
                 continue
             if pre is not None:
                 futures[j] = pre[j]
             elif ex is not None:
-                futures[j] = ex.submit(_capture, payloads[j])
+                futures[j] = ex.submit(_capture, j)
             else:
-                futures[j] = _capture(payloads[j])
+                futures[j] = _capture(j)
 
     def _record(i: int, p: dict[str, Any], res: Any) -> None:
         """Classify ONE user's gate result and account for it, on the caller's thread and in list order.
@@ -1685,22 +1780,48 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
         row at all - still owed, walked again next tick - which is what makes a stop safe.
         """
         for j in sorted(futures):
-            res = futures[j]
-            if isinstance(res, concurrent.futures.Future):
-                res = res.result()
-            _record(j, payloads[j], res)
+            _consume(j, futures[j])
         futures.clear()
+
+    def _settle(p: dict[str, Any], **facts: Any) -> None:
+        # the caller's accounting for one user. An error in it must not strand the users still in flight unrecorded:
+        # the run stops starting anyone, and every result already owed is still consumed and written down.
+        try:
+            pipeline.settle(p, **facts)
+        except Exception as exc:  # noqa: BLE001
+            report.halted = report.halted or f"the apply's accounting failed for user {_uid(p)} ({exc}); nobody further started"[:300]
+
+    def _consume(i: int, res: Any) -> None:
+        """Account for ONE started user, on the caller's thread and in list order."""
+        if isinstance(res, concurrent.futures.Future):
+            res = res.result()              # _capture returns the exception, so this never raises
+        p = sent_as.get(i, payloads[i])
+        if pipeline is None:
+            _record(i, p, res)
+            return
+        if isinstance(res, Held):
+            if res.halt:
+                report.halted = report.halted or res.halt[:300]
+            elif res.apply is not None:
+                res.apply()
+            _settle(p, gated=False, reached=0, read_failed=False)
+            return
+        sent0, held0 = report.sent_notes, len(report.failed_held)
+        if isinstance(res, PipelineReadError):
+            # the same fact as the gate's own failed read: held for this user, retried after the hold, and a run of
+            # them is the systemic stop (fail_stop_after) - never a refusal and never the batch's crash
+            _failed(report, p, str(res), walked)
+        else:
+            _record(i, p, res)
+        _settle(p, gated=True, reached=report.sent_notes - sent0, read_failed=len(report.failed_held) > held0)
 
     try:
         for i, p in enumerate(payloads):
             _fill(i + workers - 1)
             if i in skipped:
                 continue
-            res = futures.pop(i)
-            if isinstance(res, concurrent.futures.Future):
-                res = res.result()          # _capture returns the exception, so this never raises
-            _record(i, p, res)
-            if report.stopped_on_failures or report.stopped_on_unmeasured:
+            _consume(i, futures.pop(i))
+            if report.stopped_on_failures or report.stopped_on_unmeasured or (pipeline is not None and report.halted):
                 _drain()
                 return
     finally:
@@ -1708,6 +1829,8 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
             # wait=True: a worker that is already inside the gate runs to completion and is waited for, so no note can
             # outlive this call (and therefore the apply lock). cancel_futures only drops work never started.
             ex.shutdown(wait=True, cancel_futures=True)
+        if pipeline is not None:
+            pipeline.unstarted = [_uid(payloads[j]) for j in sorted(unstarted | set(range(next_j, len(payloads))))]
 
 
 # r8 (firstmate 771) (2): the gate's exit codes are distinct facts. 4 = NOTHING WAS SENT (a pre-send check failed),
