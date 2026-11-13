@@ -248,7 +248,7 @@ fm_agent_liveness() {  # <worktree> <harness> <backend> <target> [<classifier-ve
 # "<pid>\t<name>\t<r|w>\t<path>" rows; test seam), then /proc/<pid>/fd with the
 # access mode from /proc/<pid>/fdinfo, then `lsof`.
 fm_agent_proc_file_writers() {  # <file>
-  local file=$1 dir phys rows link pid fd flags name
+  local file=$1 dir phys rows link pid fd flags mode name
   [ -n "$file" ] || return 2
   dir=$(cd "$(dirname "$file")" 2>/dev/null && pwd -P) || return 2
   phys="$dir/$(basename "$file")"
@@ -264,9 +264,11 @@ fm_agent_proc_file_writers() {  # <file>
           pid=${pid%%/*}
           fd=${link##*/}
           flags=$(sed -n 's/^flags:[[:space:]]*//p' "/proc/$pid/fdinfo/$fd" 2>/dev/null) || continue
-          case "$flags" in ''|*[!0-7]*) continue ;; esac
+          [ -n "$flags" ] || continue
+          [ -z "${flags//[0-7]/}" ] || continue
           # The access mode is the low two bits: 1 write-only, 2 read-write.
-          case $((8#$flags & 3)) in 1|2) ;; *) continue ;; esac
+          mode=$((8#$flags & 3))
+          [ "$mode" -eq 1 ] || [ "$mode" -eq 2 ] || continue
           name=$(cat "/proc/$pid/comm" 2>/dev/null) || name=
           printf '%s\t%s\n' "$pid" "${name:-?}"
         done | sort -u
