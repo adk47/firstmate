@@ -86,6 +86,72 @@ claim_verify_pace_gate() {
   return 0
 }
 
+# --- Removal gate (2026-11-04) -----------------------------------------------
+# DELETE /admin/profile/<id> is the profile soft-delete: it tombstones the
+# profile AND every served credit on it, there is no inverse, and legal hold
+# 1350 means the data is never destroyed. The operations bot ran it 21 times in
+# 14 days on Jan's word (a workspace skill that was never reviewed as policy),
+# which is what this gate stops.
+#
+# "Hide" is NOT this endpoint. Profile hides are not available to the agent: the
+# request goes on the GDPR register (scripts/gdpr-pipeline.py), which decides
+# identity per paths A-E and prepares the reversible hide PRs for a named human
+# to merge. AGENTS.md: "The pipeline only PREPARES the reversible hide PRs ...
+# Never DELETE /api/v3/admin/profile".
+#
+# Same wording as muso-admin-api.sh's removal refusal (MUSO_REMOVAL_NO_SELF_APPROVE)
+# so both wrappers refuse identically. This hook cannot see approval flags or a
+# --dry-run marker, so the refusal is unconditional: a dry run of a removal is
+# worth less than the write it rehearses. DELETE /admin/profile/<id>/cache is a
+# CDN purge, not a removal, and is untouched.
+# normalize_removal_path PATH -> canonical, lower-cased path on stdout.
+#
+# The path is concatenated straight into the request URL, and curl resolves
+# dot-segments while Express routes case-insensitively, so /ADMIN/profile/<id>,
+# /admin/profile/./<id>, /admin/profile/x/../<id> and /admin/profile/<id>// all
+# reach the SAME handler as the canonical spelling. Matching the raw string let
+# every one of those past the gate. Normalizing can only make MORE paths match.
+normalize_removal_path() {
+  local p="$1" out="" seg
+  p="${p%%#*}"
+  p="${p%%\?*}"
+  p="$(printf %s "$p" | tr '[:upper:]' '[:lower:]')"
+  local IFS=/
+  for seg in $p; do
+    case "$seg" in
+      ''|.) ;;
+      ..) out="${out%/*}" ;;
+      *) out="$out/$seg" ;;
+    esac
+  done
+  printf %s "${out:-/}"
+}
+
+removal_gate() {
+  local method path
+  method="$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')"
+  path="$(normalize_removal_path "${2:-}")"
+  [ "$method" = "DELETE" ] || return 0
+  local restore_extglob=0
+  shopt -q extglob || { shopt -s extglob; restore_extglob=1; }
+  local rc=1 ep
+  for ep in "*/admin/track/+([!/])" "*/admin/track/+([!/])/profile/+([!/])/credits" "*/admin/profile/+([!/])"; do
+    # shellcheck disable=SC2053  # RHS unquoted so the extglob pattern is active.
+    if [[ "$path" == $ep ]]; then rc=0; break; fi
+  done
+  (( restore_extglob )) && shopt -u extglob
+  [ "$rc" -eq 0 ] || return 0
+  cat >&2 <<EOM
+MUSO_REMOVAL_NO_SELF_APPROVE: ${method} ${path} is a removal (whole-track tombstone, a credit removed from a profile, or the profile soft-delete). God-mode self-approve never covers removals, and core refuses agent removals (credit_removal_agent_refused). Do not retry through another wrapper or identity.
+Instead: read the entity back and tell the requester what removal would do (the track + its N credits, or the profile + its N served credits). Ask for the reason if none is recorded (DSP-removal proof or different-profile proof, plus a label check). Profile hides are not available to the agent; the request goes on the GDPR register for identity verification (verified claim or matching ID) and a person-approved takedown. A recorded removal goes to a named human from their own login.
+EOM
+  return 1
+}
+
+if ! removal_gate "${1:-}" "${2:-}"; then
+  exit 3
+fi
+
 if ! claim_verify_pace_gate "$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')" "${2:-}"; then
   exit 3
 fi

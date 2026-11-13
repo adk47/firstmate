@@ -2337,24 +2337,40 @@ is_godmode_approval_required_endpoint() {
 }
 
 # Removals: whole-track deletion (a Catalog/IDP tombstone of the track and EVERY served credit on
-# it) and credit removal from a profile. God-mode self-approve NEVER covers these (firstmate 122,
+# it), credit removal from a profile, and the profile soft-delete (DELETE /admin/profile/:id).
+# God-mode self-approve NEVER covers these (firstmate 122,
 # incident 2026-10-20 14:05Z: a bare "hide track from public" was self-approved into two track
 # DELETEs). Core refuses agent removals anyway (403 credit_removal_agent_refused); refusing here
 # stops the attempt itself. A removal needs a recorded reason (DSP-removal or different-profile
 # proof + a label check) and goes through the guarded named-human path, not this wrapper's
 # self-approve. A ":param" segment matches exactly one path segment.
+#
+# The profile soft-delete is here because it is a ONE-WAY tombstone: it takes the profile AND
+# every credit served on it (2026-10-22..11-04: 24 DELETEs on a staff request tombstoned 23
+# profiles and 717 served credits, with no list entry and no inverse). Profile hides are not
+# available to the agent: the request goes on the GDPR register (scripts/gdpr-pipeline.py),
+# which prepares the reversible hide PRs for a named human to merge.
 is_removal_endpoint() {
     local method="$1" path="$2"
-    path="${path%%\?*}"
-    path="${path%/}"
     local method_uc; method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
     [[ "$method_uc" == "DELETE" ]] || return 1
+    local base="${MUSO_API_URL:-}"
+    base="${base#*://}"
+    if [[ "$base" == */* ]]; then base="/${base#*/}"; else base=""; fi
+    base="$(normalize_admin_path "$base")"
+    [[ "$base" == "/" ]] && base=""
+    base="${base%/}"
     local restore_extglob=0
     shopt -q extglob || { shopt -s extglob; restore_extglob=1; }
-    local rc=1 ep
-    for ep in "/admin/track/+([!/])" "/admin/track/+([!/])/profile/+([!/])/credits"; do
-        # shellcheck disable=SC2053  # RHS unquoted so the extglob pattern is active.
-        if [[ "$path" == $ep ]]; then rc=0; break; fi
+    local rc=1 ep route
+    for route in "$(normalize_admin_path "$path")" "$(normalize_admin_path "${base}${path}")"; do
+        if [[ -n "$base" && "$route" == "$base"/* ]]; then
+            route="${route#"$base"}"
+        fi
+        for ep in "/admin/track/+([!/])" "/admin/track/+([!/])/profile/+([!/])/credits" "/admin/profile/+([!/])"; do
+            # shellcheck disable=SC2053  # RHS unquoted so the extglob pattern is active.
+            if [[ "$route" == $ep ]]; then rc=0; break 2; fi
+        done
     done
     (( restore_extglob )) && shopt -u extglob
     return "$rc"
@@ -2362,8 +2378,8 @@ is_removal_endpoint() {
 
 refuse_removal_self_approve() {
     cat >&2 <<EOM
-MUSO_REMOVAL_NO_SELF_APPROVE: ${1} ${2} is a removal (whole-track tombstone, or a credit removed from a profile). God-mode self-approve never covers removals, and core refuses agent removals (credit_removal_agent_refused). Do not retry through another wrapper or identity.
-Instead: read the track back and tell the requester what removal would do (the track + its N credits). Ask for the reason if none is recorded (DSP-removal proof or different-profile proof, plus a label check). "Hide" is not a removal: there is no track hide/unlist in core. A recorded removal goes to a named human from their own login.
+MUSO_REMOVAL_NO_SELF_APPROVE: ${1} ${2} is a removal (whole-track tombstone, a credit removed from a profile, or the profile soft-delete). God-mode self-approve never covers removals, and core refuses agent removals (credit_removal_agent_refused). Do not retry through another wrapper or identity.
+Instead: read the entity back and tell the requester what removal would do (the track + its N credits, or the profile + its N served credits). Ask for the reason if none is recorded (DSP-removal proof or different-profile proof, plus a label check). Profile hides are not available to the agent; the request goes on the GDPR register for identity verification (verified claim or matching ID) and a person-approved takedown. A recorded removal goes to a named human from their own login.
 EOM
 }
 

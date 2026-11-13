@@ -94,6 +94,13 @@ FUNCTIONS=(
     # DELETE both became editable in one copy only, with nothing in CI to notice.
     write_bulk_destructive_audit
     is_tier2_godmode_requester
+    # Added 2026-11-04 with the removal refusal (the profile soft-delete and the
+    # track/credit removal routes). Every copy must refuse them: the canonical
+    # copy is the documented one, the workspace copy is the one the operations
+    # agent runs.
+    is_removal_endpoint
+    enforce_removal_gate
+    refuse_removal_self_approve
 )
 
 [[ -f "$CANONICAL" ]] || {

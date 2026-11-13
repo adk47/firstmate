@@ -53,7 +53,7 @@ levers:
 | Lever | How | Notes |
 |---|---|---|
 | (a) Change the credits | Per-track `DELETE /admin/track/<track_id>/profile/<profile_id>/credits` | The only lever that removes a *backed* pair. See `muso-ops-tracks` § Removal Requests — **never** the bulk `DELETE /admin/profile/:id/credits`, it 200s and changes nothing visible |
-| (b) Whole-profile tombstone | `DELETE /admin/profile/:profileId` | Excluded on both write and read (`_is_tombstoned`, `profile_collaboration_writer.py:178-205`). All-or-nothing, Aaron-only |
+| (b) Whole-profile tombstone | the reversible hide-list PR, not an API call | Excluded on both write and read (`_is_tombstoned`, `profile_collaboration_writer.py:178-205`). All-or-nothing. The profile soft-delete endpoint is a REMOVAL and is refused by both wrappers (`MUSO_REMOVAL_NO_SELF_APPROVE`, 2026-11-04) — hiding is a merged list PR a named human lands, and undo is removing the id from both lists |
 | (c) Pair-level suppression | **DOES NOT EXIST** | No endpoint, no column, no table. Do not imply it is coming |
 
 Things that look like they should help and **do not**: profile cache clear,

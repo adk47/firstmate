@@ -1045,7 +1045,8 @@ Erasure / takedown / Art. 15 requests from every channel live in ONE machine reg
 Identity is decided by code per gdpr-ack-v2 paths A-E (a claim is one path, never a requirement); request text
 never selects a hide. The pipeline only PREPARES the reversible hide PRs (H-DevOps `HIDDEN_ENTITY_IDS` + PDP
 sitemap `LEGAL_HIDDEN_ENTITY_IDS`); a person merges. Never `DELETE /api/v3/admin/profile` or muso-cli delete
-(legal hold 1350). Customer sends stay locked until Fable's GO lands in a PR.
+(legal hold 1350): both wrapper copies and `scripts/muso-prewrite-hook.sh` refuse that route as a removal
+(`MUSO_REMOVAL_NO_SELF_APPROVE`). Customer sends stay locked until Fable's GO lands in a PR.
 A track / album passes only through its ONE catalog artist's profile on the same paths (`identity.decide_item`).
 Each repo has one live batch PR carrying the whole set; a changed set opens a new PR and closes the old one, never a
 force-push. What Caroline answers, does and hands off for billing and hides, the refund caps and every undo:

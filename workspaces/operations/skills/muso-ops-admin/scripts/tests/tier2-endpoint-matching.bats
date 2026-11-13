@@ -190,7 +190,7 @@ teardown() {
         call DELETE /admin/track/2631b04d-3dc2-40dd-8a69-b1cad202d9d3
     [ "$status" -eq 1 ]
     [[ "$output" == *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
-    [[ "$output" == *"no track hide/unlist"* ]]
+    [[ "$output" == *"Profile hides are not available to the agent"* ]]
     if [ -f "$TIER2_AUDIT_PATH" ]; then
         if grep -q '"bypass":"god_mode_self_approve"' "$TIER2_AUDIT_PATH"; then false; fi
     fi
@@ -227,5 +227,65 @@ teardown() {
     run env OPS_DRY_RUN=1 bash "$SCRIPT" call DELETE /admin/track/t1/profile/p1/credits
     [[ "$output" != *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
     run bash "$SCRIPT" call DELETE /admin/track/t1/analytics-sources '{"x":1}'
+    [[ "$output" != *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
+}
+
+# --- Profile soft-delete is a REMOVAL (incident 2026-11-04: 21 DELETEs in 14d) ---
+# The workspace copy is the one the operations god-mode caller actually runs, so
+# the profile refusal is pinned HERE as well as on the canonical copy
+# (scripts/tests/muso-admin-api-removal-gate.bats).
+# Profile hides are not available to the agent: the request goes on the GDPR
+# register for identity verification and a person-approved takedown, never this
+# endpoint.
+
+@test "god-mode admin is REFUSED on a profile DELETE even WITH --approval-msg-id (removal)" {
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1793704998.000001 \
+        call DELETE /admin/profile/0d898512-1111-2222-3333-444455556666
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
+    [[ "$output" == *"Profile hides are not available to the agent"* ]]
+    [[ "$output" != *"127.0.0.1"* ]]
+    if [ -f "$TIER2_AUDIT_PATH" ]; then
+        if grep -q '"bypass":"god_mode_self_approve"' "$TIER2_AUDIT_PATH"; then false; fi
+    fi
+}
+
+@test "removal gate: profile DELETE is refused for ANY requester and any flag set" {
+    for path in /admin/profile/p1 /admin/profile/p1/ '/admin/profile/p1?force=true'; do
+        run bash "$SCRIPT" --requester someone@muso.ai --confirmed-by aaron --approval-msg-id 1777474838.796239 \
+            call DELETE "$path"
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
+    done
+}
+
+@test "removal gate: a dot-segment spelling through the configured base is still refused" {
+    local base_url="$MUSO_API_URL"
+    export MUSO_API_URL="http://127.0.0.1:1/api/v3"
+    for path in /admin/profile/p1 /../../api/v3/admin/profile/p1 \
+                /../../api/v3/admin/track/t1 /../../api/v3/admin/track/t1/profile/p1/credits; do
+        run bash "$SCRIPT" call DELETE "$path"
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
+    done
+    for path in /admin/profile/p1/cache /admin/profile/p1/credits /admin/profile/p1/member; do
+        run bash "$SCRIPT" call DELETE "$path"
+        [ "$status" -ne 0 ]
+        [[ "$output" == *'"transport_error"'* ]]
+        [[ "$output" == *'"curl_exit":7'* ]]
+        [[ "$output" != *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
+    done
+    export MUSO_API_URL="$base_url"
+}
+
+@test "removal gate: the profile CACHE purge and the credits/member sub-resources are not removals" {
+    for path in /admin/profile/p1/cache /admin/profile/p1/credits /admin/profile/p1/member; do
+        run bash "$SCRIPT" call DELETE "$path"
+        [[ "$output" != *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
+    done
+}
+
+@test "removal gate: dry-run of a profile DELETE still shows the call" {
+    run env OPS_DRY_RUN=1 bash "$SCRIPT" call DELETE /admin/profile/p1
     [[ "$output" != *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
 }

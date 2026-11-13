@@ -142,6 +142,9 @@ that way or use the pair).
   cached token died — `muso auth status --check --json` to diagnose.
 - exit 5 / `policy_refused`: the message names the missing artifact
   (requester / `--yes` / approval pair) or the tripped gate (bulk cap, merge
-  overlap, prewrite hook). The prewrite hook refusing means codex model
-  health is degraded — do NOT retry around it; defer to a human.
+  overlap, prewrite hook). A prewrite-hook refusal is one of two things: codex
+  model health is degraded, or the write is a REMOVAL (whole-track deletion,
+  credit removal, or the profile soft-delete) that no agent may self-approve —
+  the message says which (`MUSO_REMOVAL_NO_SELF_APPROVE` is the second). Retry
+  around neither; a removal goes to a named human.
 - `non-JSON response (HTTP 403)`: Cloudflare WAF — you are not on node-8.
