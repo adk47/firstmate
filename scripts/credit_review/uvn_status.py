@@ -301,7 +301,11 @@ class UvnReport(verify_notify.Report):
     unlisted: int = 0
     facts_changed: list = field(default_factory=list)   # QA #1565: listed users whose owed set changed since the build
     facts_stale_min: int | None = None  # [key=facts-stale-fallback]: the re-read timed out; this page's facts are Nm old
-    recently_asked: int = 0
+    recently_asked: int = 0            # pre-filter: inside the 90-day one-ask lock; never in deferred_users
+    # pre-filter: inside the 7-day note cooldown. A SUBSET of deferred_users, which stays the total of every deferral
+    # (the tick's exit code and the other families read it as that). Not `recently_asked_users`: that inherited field
+    # is verify_notify's hold_recently_asked count, a different path.
+    messaged_7d_users: int = 0
     excluded: int = 0                  # --exclude-users (another lane messages them today)
     count_copy: int = 0                # status-team-review users sent the count-only note (not held)
     stage2_released: int = 0           # documented users let through by a stage-2 verdict
@@ -1449,6 +1453,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     # the 90-day ask lock and one-per-user-ever still apply
                     if why in verify_ledger.DEFER_REASONS:
                         report.deferred_users += 1
+                        if why == "messaged_7d":
+                            report.messaged_7d_users += 1
                         report.note(why)
                         continue
                     if why:
@@ -1986,6 +1992,23 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
              if mode == "apply" else f"{head}: {report.listed} on the list, {report.users} would be messaged"]
     if mode == "apply":
         parts.append(f"{report.sent_notes} sent")
+    # deferred_users is the total of EVERY deferral, so it is never printed under one reason's name. The 7-day figure is
+    # the ledger pre-filter's cooldown plus the gate's own 'messaged_7d' answer at send (window_after_gate). The remainder
+    # is everything else in deferred_users: a hold, the run's budget, another ledger or gate answer - and it is NOT free
+    # of clocks: the gate's core_notice_within_7d, refused-recheck and daily-cap, and its own recently-asked answer, all
+    # land here, so the label names them rather than claiming what the remainder is not. uvn_user_done checks the 7-day
+    # cooldown before the ask lock, EXCEPT for a reply_due answer (skip_7d) and for an ask that corrects our own sent
+    # status line: there the cooldown is not applied, so a user inside both clocks is counted under the ask lock. The
+    # label therefore says such a user MAY also be inside the ask lock, never that every one of them is counted here.
+    # lock_days is the window the lock ENFORCES: asked_within's `days` default, which is what the callers get when they
+    # pass no window. Reading the exported constant would name a window nothing enforces once it is rebound at runtime.
+    cooldown_7d = min(report.deferred_users, report.messaged_7d_users + report.window_after_gate)
+    lock_days = (getattr(verify_ledger.asked_within, "__kwdefaults__", None) or {}).get("days") or \
+        verify_ledger.REASK_LOCK_DAYS
+    # The ask lock belongs to the ask: a status note never applies it, so its remainder line does not name it.
+    other_reason = ("deferred for another reason (a hold, the run's budget, or another answer from the ledger or the "
+                    "gate at send; the gate has waits of its own: a core notice in the last 7 days, a refusal "
+                    "re-check, the daily cap" + (", the ask lock" if report.campaign == CAMPAIGN else "") + ")")
     for label, n in (("list entries outside this run's --max-entries page (other runs')", report.not_walked),
                      ("documents on file (not asked)", report.proof_on_file),
                      ("with documents on file, let through by a stage-2 verdict", report.stage2_released),
@@ -2018,8 +2041,13 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
                      ("validated (the gate would send)", report.validated if mode != "apply" else 0),
                      ("skipped by the gate (documents in Intercom, already sent)",
                       report.skipped if mode == "apply" else 0),
-                     ("deferred (messaged in the last 7 days or today)", report.deferred_users),
-                     ("deferred (asked in the last 90 days)", report.recently_asked),
+                     ("deferred (messaged in the last 7 days: a note from this gate, or an admin or Caroline message "
+                      "in Intercom"
+                      + (f"; a user counted here may also be inside the {lock_days}-day ask lock, which is checked "
+                         f"after this cooldown"
+                         if report.campaign == CAMPAIGN else "") + ")", cooldown_7d),
+                     (f"deferred (asked in the last {lock_days} days)", report.recently_asked),
+                     (other_reason, report.deferred_users - cooldown_7d),
                      ("refused: the live request state is not one of the three the approved copy can name "
                       "(F1 waiting on them / F2 in review / F3 decided) - no message beats a wrong one",
                       report.refused_no_fact),

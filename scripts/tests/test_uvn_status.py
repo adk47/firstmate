@@ -1194,6 +1194,149 @@ class UvnStatusTests(unittest.TestCase):
         finally:
             db.close()
 
+    def _seed_sent(self, campaign, uid, days_ago):
+        """A SENT note of `campaign` to user `uid`, `days_ago` days before NOW, in this test's ledger."""
+        db = verify_ledger.connect(self.ledger)
+        try:
+            c = verify_ledger.claim(db, campaign=campaign, user_key=f"old{uid}@x.com",
+                                    day=(NOW - timedelta(days=days_ago)).strftime("%Y-%m-%d"),
+                                    request_ids=[f"{campaign}-{uid}"], message_type="email", approved_by="U7RP6HKUZ",
+                                    approval_ref="ref", now=NOW - timedelta(days=days_ago), user_id=str(uid))
+            verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=f"{campaign}-{uid}")
+        finally:
+            db.close()
+
+    def test_the_7_day_cooldown_and_the_90_day_ask_lock_are_reported_under_their_own_labels(self):
+        # firstmate 2026-11-13: 1,822 users under one 7-day label were read as "eligible in a week".
+        # Two clocks, two counters, two labels - and neither user is counted in the other's figure.
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 4)]
+        self.write_list()
+        self._seed_sent("withdrawal-confirm", 1, 2)      # a notice two days ago: the 7-day cooldown only
+        self._seed_sent("verify-live", 2, 8)             # an ask eight days ago: the 90-day lock only
+        rep, gate = self.run_(query=replica(range(1, 4)))
+        self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["3"])
+        self.assertEqual((rep.messaged_7d_users, rep.recently_asked), (1, 1))
+        self.assertEqual(rep.deferred_users, 1, "the total of deferrals never includes the 90-day pre-filter lock")
+        self.assertEqual(rep.by_reason.get("messaged_7d"), 1)
+        self.assertEqual(rep.by_reason.get("recently_asked"), 1)
+        text = uvn_status.render(rep, "apply", "paid")
+        self.assertIn("1 deferred (messaged in the last 7 days: a note from this gate", text)
+        self.assertIn("1 deferred (asked in the last 90 days)", text)
+        self.assertNotIn("deferred for another reason", text)
+        self.assertNotIn("or today", text)
+
+    def test_a_user_inside_both_clocks_is_in_the_7_day_figure_and_its_label_says_the_lock_is_checked_second(self):
+        # an ask two days ago starts BOTH clocks. The ledger answers the 7-day cooldown first, so the run counts the
+        # user there - and six days later the same user is still deferred, by the 90-day lock. The label must not
+        # read as "wait a week".
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1"]}]
+        self.write_list()
+        self._seed_sent("verify-live", 1, 2)
+        rep, gate = self.run_(query=replica((1,)))
+        self.assertEqual(gate.calls, [])
+        self.assertEqual((rep.messaged_7d_users, rep.recently_asked, rep.deferred_users), (1, 0, 1))
+        text = uvn_status.render(rep, "apply", "paid")
+        self.assertIn("1 deferred (messaged in the last 7 days:", text)
+        self.assertIn("a user counted here may also be inside the 90-day ask lock, which is checked after this "
+                      "cooldown)", text)
+        self.assertNotIn("asked in the last 90 days", text)
+        db = verify_ledger.connect(self.ledger)
+        try:
+            whys = [verify_ledger.uvn_user_done(db, "old1@x.com", now=NOW + timedelta(days=d), user_id="1")
+                    for d in (0, 6)]
+        finally:
+            db.close()
+        self.assertEqual(whys, ["messaged_7d", "recently_asked"])
+
+    def test_a_deferral_that_is_not_the_7_day_cooldown_is_never_printed_under_the_7_day_label(self):
+        class DailyCapGate(FakeGate):
+            def __call__(self, argv):
+                super().__call__(argv)
+                return subprocess.CompletedProcess(
+                    argv, 3, "DEFERRED daily-cap credits=1 (this user already had a message on 2026-11-13 UTC)", "")
+
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1"]}]
+        self.write_list()
+        rep, _ = self.run_(gate=DailyCapGate(), query=replica((1,)))
+        self.assertEqual((rep.deferred_users, rep.messaged_7d_users, rep.window_after_gate), (1, 0, 0))
+        text = uvn_status.render(rep, "apply", "paid")
+        self.assertIn("1 deferred for another reason", text)
+        self.assertIn("the gate has waits of its own: a core notice in the last 7 days, a refusal re-check, the daily "
+                      "cap, the ask lock", text)
+        self.assertNotIn("not the 7-day cooldown", text)
+        self.assertNotIn("messaged in the last 7 days", text)
+        # the gate's OWN 7-day answer at send is the 7-day figure, not "another reason"
+        rep, _ = self.run_(gate=RecentGate({"1"}), query=replica((1,)))
+        self.assertEqual((rep.deferred_users, rep.messaged_7d_users, rep.window_after_gate), (1, 0, 1))
+        text = uvn_status.render(rep, "apply", "paid")
+        self.assertIn("1 deferred (messaged in the last 7 days:", text)
+        self.assertNotIn("deferred for another reason", text)
+
+    def test_the_deferral_lines_add_up_to_the_total_and_only_uvn_status_names_the_ask_lock(self):
+        rep = uvn_status.UvnReport(campaign="uvn-status", deferred_users=5, messaged_7d_users=2, window_after_gate=1,
+                                   recently_asked=4)
+        text = uvn_status.render(rep, "apply", "paid")
+        self.assertIn("3 deferred (messaged in the last 7 days:", text)
+        self.assertIn("2 deferred for another reason", text)
+        self.assertIn("4 deferred (asked in the last 90 days)", text)
+        self.assertEqual(rep.deferred_users, 5, "render never rewrites the total the tick's exit code reads")
+        # the 90-day lock belongs to the ask: a status note's 7-day line does not mention it
+        note = uvn_status.render(uvn_status.UvnReport(campaign="status-doc-received", deferred_users=2,
+                                                      messaged_7d_users=2), "apply", "paid")
+        self.assertIn("2 deferred (messaged in the last 7 days: a note from this gate, or an admin or Caroline "
+                      "message in Intercom)", note)
+        self.assertNotIn("ask lock", note)
+        # neither does its remainder line: a status note never applies the ask lock
+        note = uvn_status.render(uvn_status.UvnReport(campaign="status-doc-received", deferred_users=3,
+                                                      messaged_7d_users=2), "apply", "paid")
+        self.assertIn("1 deferred for another reason", note)
+        self.assertNotIn("ask lock", note)
+
+    def test_the_re_ask_label_prints_the_window_the_lock_enforces(self):
+        # REASK_LOCK_DAYS is a captain decision (firstmate 2026-11-13: "Do NOT change REASK_LOCK_DAYS; that is with
+        # Aaron now"). The label prints the window the lock actually enforces - asked_within's `days` default - so a
+        # runtime override of the exported constant cannot make the summary name a window users are not held to.
+        self.assertEqual(verify_ledger.REASK_LOCK_DAYS, 90)
+        enforced = verify_ledger.asked_within.__kwdefaults__["days"]
+        self.assertEqual(enforced, 90)
+        rep = uvn_status.UvnReport(campaign="uvn-status", recently_asked=1, deferred_users=1, messaged_7d_users=1)
+        with unittest.mock.patch.object(verify_ledger, "REASK_LOCK_DAYS", 30):
+            text = uvn_status.render(rep, "apply", "paid")
+        self.assertIn(f"1 deferred (asked in the last {enforced} days)", text)
+        self.assertIn(f"a user counted here may also be inside the {enforced}-day ask lock, which is checked "
+                      f"after this cooldown", text)
+        self.assertIn("asked in the last 90 days", text)
+        self.assertNotIn("asked in the last 30 days", text)
+        self.assertNotIn("30-day ask lock", text)
+
+    def test_a_reply_due_user_skips_the_7_day_cooldown_and_is_reported_under_the_ask_lock(self):
+        # skip_7d lifts the note cooldown, so a user inside both clocks answers recently_asked, not messaged_7d - which
+        # is why the 7-day label claims only that a user counted there MAY also be inside the ask lock.
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1"]}]
+        self.write_list()
+        self._seed_sent("verify-live", 1, 5)
+        db = verify_ledger.connect(self.ledger)
+        try:
+            self.assertEqual(verify_ledger.uvn_user_done(db, "old1@x.com", campaign="uvn-status", now=NOW, user_id="1"),
+                             "messaged_7d")
+            self.assertEqual(verify_ledger.uvn_user_done(db, "old1@x.com", campaign="uvn-status", now=NOW, user_id="1",
+                                                         skip_7d=True), "recently_asked")
+        finally:
+            db.close()
+
+    def test_the_ask_lock_holds_a_user_asked_89_days_ago_and_frees_one_asked_91_days_ago(self):
+        # the boundary the labels name, exercised through the entry point the tick uses instead of a declaration.
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in (1, 2)]
+        self.write_list()
+        self._seed_sent("verify-live", 1, 89)
+        self._seed_sent("verify-live", 2, 91)
+        db = verify_ledger.connect(self.ledger)
+        try:
+            whys = [verify_ledger.uvn_user_done(db, f"old{u}@x.com", now=NOW, user_id=str(u)) for u in (1, 2)]
+        finally:
+            db.close()
+        self.assertEqual(whys, ["recently_asked", ""])
+
     def test_repeated_runs_reach_new_users_instead_of_stalling_on_handled_ones(self):
         self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 8)]
         self.write_list()
