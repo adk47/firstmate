@@ -23,6 +23,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 for _name in ("google", "google.oauth2", "google.oauth2.service_account",
               "googleapiclient", "googleapiclient.discovery"):
@@ -784,6 +785,102 @@ class SendAckExecution(unittest.TestCase):
         self.assertNotIn("touch", shell_text[0])
         self.assertNotIn("$(id)", shell_text[0])
         self.assertFalse(seen["kw"].get("shell"))
+
+
+class SenderBackfill(Harness):
+    """`--backfill-sender` writes the requester's ADDRESS onto rows written before that field existed.
+
+    QA finding on #1803: `email.utils.parseaddr` is a parser, not a validator, so a legacy thread whose `From:` says
+    "not-an-address" came back non-empty, got stored as the sender, counted as filled, and the run exited 0 -- while
+    the GDPR consumer rejected the value and a rerun skipped the now-nonempty field. The request stayed
+    unanswerable behind a clean report.
+    """
+
+    def ledger_with(self):
+        pathlib.Path(li.LEDGER).write_text(json.dumps({
+            "legal@muso.ai:legacy1": {"alias": "legal@muso.ai", "thread": "legacy1", "class": "dmca_takedown",
+                                          "msgs": 1, "first_msg": FIRST_MSG,
+                                          "last_seen": "2026-10-01T00:00Z"}}))
+        return pathlib.Path(li.LEDGER)
+
+    def run_backfill(self, threads):
+        li.svc = lambda subject, scope: FakeGmail(threads)
+        argv, sys.argv = sys.argv, ["legal-intake.py", "--backfill-sender"]
+        out = []
+        try:
+            with mock.patch("builtins.print", lambda *x, **k: out.append(" ".join(str(i) for i in x))):
+                with self.assertRaises(SystemExit) as cm:
+                    li.main()
+        finally:
+            sys.argv = argv
+        return cm.exception.code, "\n".join(out)
+
+    def test_an_undeliverable_from_header_leaves_the_row_alone_and_fails(self):
+        path = self.ledger_with()
+        code, out = self.run_backfill({"legacy1": thread("not-an-address")})
+        self.assertEqual(code, 2, "a row it could not fill must not be reported as a clean run")
+        row = json.loads(path.read_text())["legal@muso.ai:legacy1"]
+        self.assertEqual(row.get("sender", ""), "", "an undeliverable value is not a sender")
+        self.assertNotIn("req_key", row)
+        self.assertIn("not-an-address", out, "the report must name the value it refused")
+
+    def test_a_refused_sender_is_retried_on_the_next_run(self):
+        """The half that made the original bug permanent: a filled field is never revisited, so writing a BAD value
+        retired the row forever. A refused value must keep the row offerable."""
+        self.ledger_with()
+        self.run_backfill({"legacy1": thread("not-an-address")})
+        code, out = self.run_backfill({"legacy1": thread("Kyran <kyran@muso.ai>")})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(pathlib.Path(li.LEDGER).read_text())["legal@muso.ai:legacy1"]["sender"],
+                         "kyran@muso.ai")
+
+    def test_a_display_name_with_no_address_in_it_is_not_an_address(self):
+        for frm in ("Kyran Delmo", "kyran@", "@muso.ai", "kyran@muso", "kyran @muso.ai", "a@b.c"):
+            self.assertEqual(li.usable_address(frm), "", frm)
+
+    def test_the_backfill_writes_the_lowercased_address(self):
+        path = self.ledger_with()
+        code, out = self.run_backfill({"legacy1": thread("Kyran <KYRAN@Muso.AI>")})
+        self.assertEqual(code, 0, out)
+        row = json.loads(path.read_text())["legal@muso.ai:legacy1"]
+        self.assertEqual(row["sender"], "kyran@muso.ai")
+        self.assertEqual(row["req_key"], "kyran@muso.ai|dmca_takedown")
+
+    def test_the_producer_and_the_consumer_accept_the_same_addresses(self):
+        """QA finding on #1803: the two sides of the ledger each carried their own hand-written regex, and they
+        disagreed on `foo!bar@example.com` -- a legal RFC 5321 local part the producer accepted and the consumer
+        rejected. The backfill then wrote a sender, exited 0, and `parse_gmail_ledger` turned it into an empty
+        `requester_email`; the next backfill skipped the now-nonempty field, so the request stayed unaddressable
+        behind a clean report. One definition now, and this is the test that keeps it one."""
+        sys.path.insert(0, str(_SCRIPT.parent))
+        from gdpr_pipeline import intake
+        self.assertEqual(intake.EMAIL_RE.pattern, li.ADDRESS_PATTERN,
+                         "the consumer must read the producer's rule, not re-declare it")
+        for addr in ("foo!bar@example.com", "kyran@muso.ai", "A.B+c@sub.muso.ai", "o'brien@example.co.uk",
+                     "not-an-address", "kyran@", "@muso.ai", "kyran@muso", "kyran @muso.ai", "a@b.c",
+                     ".a@b.com", "a..b@c.com", ""):
+            self.assertEqual(bool(li.usable_address(addr)), bool(intake.EMAIL_RE.match(addr)), addr)
+
+    def test_a_bang_local_part_survives_the_whole_path(self):
+        """The end-to-end half: what the backfill writes must be what the GDPR consumer reads back as
+        `requester_email`, or the row is unaddressable no matter how clean the backfill report looked."""
+        sys.path.insert(0, str(_SCRIPT.parent))
+        from gdpr_pipeline import intake
+        path = self.ledger_with()
+        code, out = self.run_backfill({"legacy1": thread("Foo Bar <foo!bar@example.com>")})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(path.read_text())["legal@muso.ai:legacy1"]["sender"], "foo!bar@example.com")
+        rows = intake.parse_gmail_ledger(json.loads(path.read_text()))
+        self.assertEqual([r["requester_email"] for r in rows], ["foo!bar@example.com"],
+                         "a sender the backfill accepted must not become an empty requester_email")
+
+    def test_fresh_intake_never_stores_an_undeliverable_sender(self):
+        """The same parse feeds the live intake path, so the same bad header used to be written there too -- and the
+        GDPR consumer reads `sender` first."""
+        ledger = self.run_intake({"t-bad": thread("not-an-address")}, args=("--page",))
+        self.assertEqual(ledger["legal@muso.ai:t-bad"]["sender"], "")
+        self.assertEqual(ledger["legal@muso.ai:t-bad"]["req_key"], "not-an-address|dmca_takedown",
+                         "grouping stays on the raw value: changing how rows group is not this change")
 
 
 if __name__ == "__main__":

@@ -4951,6 +4951,35 @@ class CandidateIntake(unittest.TestCase):
     def test_every_erasure_class_is_in_the_known_ledger_vocabulary(self):
         self.assertTrue(set(intake.ERASURE_CLASSES) <= set(intake.LEDGER_CLASSES))
 
+    # ---- the requester's ADDRESS: a request the pipeline cannot address is a request it cannot answer ----
+    def test_the_sender_field_is_read_before_the_req_key_it_replaced(self):
+        """`sender` is the field legal-intake writes now; the address used to live only inside `req_key`, which was
+        added later. Reading both is what lets an older row be answered at all."""
+        cands = intake.parse_gmail_ledger({"notices@muso.ai|t1": {
+            "alias": "notices@muso.ai", "class": "privacy_erasure", "thread": "1a17", "first_msg": 1760000000,
+            "sender": "jani@example.com", "req_key": "stale@example.com|privacy_erasure"}})
+        self.assertEqual(cands[0]["requester_email"], "jani@example.com")
+
+    def test_a_row_written_before_the_sender_field_still_yields_its_address(self):
+        cands = intake.parse_gmail_ledger({"notices@muso.ai|t1": {
+            "alias": "notices@muso.ai", "class": "privacy_erasure", "thread": "1a17", "first_msg": 1760000000,
+            "req_key": "jani@example.com|privacy_erasure"}})
+        self.assertEqual(cands[0]["requester_email"], "jani@example.com")
+
+    def test_a_row_with_neither_field_is_registered_with_no_address_rather_than_dropped(self):
+        """The 8 past-statutory-date rows this change exists for: no sender anywhere. The request must still be
+        REGISTERED (it is owed a deadline and a watchdog) - it just cannot be addressed yet."""
+        cands = intake.parse_gmail_ledger({"notices@muso.ai|t1": {
+            "alias": "notices@muso.ai", "class": "privacy_erasure", "thread": "1a17", "first_msg": 1760000000}})
+        self.assertEqual(len(cands), 1)
+        self.assertEqual(cands[0]["requester_email"], "")
+
+    def test_a_malformed_sender_is_not_taken_as_an_address(self):
+        cands = intake.parse_gmail_ledger({"notices@muso.ai|t1": {
+            "alias": "notices@muso.ai", "class": "privacy_erasure", "thread": "1a17", "first_msg": 1760000000,
+            "sender": "not-an-address"}})
+        self.assertEqual(cands[0]["requester_email"], "")
+
 
 class TwoConfirmationLetters(unittest.TestCase):
     """r5 finding 2: an interim confirmation ("the remaining step is in progress") and the final one ("the pages no

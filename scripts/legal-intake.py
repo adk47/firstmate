@@ -4,6 +4,7 @@
 Runs on node-8 (service-account key there). Every 15 min from node-1 cron.
 
   legal-intake.py [--since-days N] [--label] [--ack] [--report]
+  legal-intake.py --backfill-sender     (read-only: name the sender on ledger rows written before that field)
 
 --ack (captain-approved copy pack A-D, 916.3): one templated ack per NEW thread (first message after
 ack-start.txt), from support@ via gog, English, never for legal_threat / spam / other, never to
@@ -15,7 +16,10 @@ ack-start.txt), from support@ via gog, English, never for legal_threat / spam / 
 - Links Muso ids (profile/track/album uuid prefixes) found in the bodies; flags any already on
   the cs removal register (dedupe by id prefix).
 - Ledger: /root/fmc1-intake/ledger.json (root-only): one row per thread, first/last seen,
-  class, ids, replied-by-us flag. Never stores bodies.
+  class, ids, replied-by-us flag, and the requester's ADDRESS (`sender`). Never stores bodies.
+- --backfill-sender: re-reads the thread of every ledger row that has no `sender` and writes it. Read-only
+  (no labels, no acks, no pages, no new rows); exits 2 if any thread cannot be read. The GDPR pipeline
+  cannot answer an erasure request it cannot address, and the field was added after most rows were written.
 - --label: ADDS Gmail labels "OpenClaw/<class>" (+ "OpenClaw/unanswered" when no reply from
   @muso.ai / Intercom in the thread). Never removes labels, never archives, never marks read,
   NEVER sends anything (the ack copy pack is not approved), never touches a legal_threat
@@ -493,6 +497,82 @@ def frozen() -> int:
         return 2
     return 0
 
+# An address we could actually write to. `email.utils.parseaddr` is a PARSER, not a validator: it happily returns
+# ('', 'not-an-address') for a bare token, so "the parse returned something" is not the same as "this is an address".
+#
+# ONE definition, read by BOTH sides of the ledger: this script writes `sender`, and gdpr_pipeline.intake decides
+# whether that value becomes `requester_email`. They used to be two hand-written regexes, and they disagreed -- this
+# one accepted `foo!bar@example.com` (a legal RFC 5321 local part) while the consumer's `[\w.+-]+` rejected it, so the
+# backfill wrote a sender, exited 0, and the request stayed unaddressable behind a clean report (QA finding on #1803).
+# `intake.py` ast-parses this literal rather than importing this module (which needs google-auth), so a rename here
+# fails loud there instead of silently re-diverging. Local part = RFC 5321 atext with dots between atoms; domain =
+# dot-separated labels with an alphabetic TLD of 2+.
+ADDRESS_PATTERN = (r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
+                   r"@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$")
+_ADDRESS = re.compile(ADDRESS_PATTERN)
+
+
+def usable_address(raw: str) -> str:
+    """The lowercased address if it is deliverable-looking, else "".
+
+    Why this exists (QA finding on #1803): the backfill trusted a non-empty `parseaddr` result, so a legacy thread
+    whose `From:` is a display name with no address in it ("not-an-address") was FILLED with that text, counted as a
+    success, and the run exited 0 -- while the GDPR consumer rejects the value and a rerun skips the now-nonempty
+    field. The request stayed unanswerable behind a clean report. A value we cannot write to is not a sender; leaving
+    the field empty keeps the row offerable to the next run and to a human."""
+    addr = (raw or "").strip().lower()
+    return addr if _ADDRESS.match(addr) else ""
+
+
+def backfill_sender(ledger: dict) -> int:
+    """Write `sender` onto every ledger row that lacks one, by re-reading that row's thread.
+
+    READ-ONLY and side-effect free: no labels, no acks, no pages, no new rows. It exists because `sender` (and the
+    `req_key` that carried it) was added after most of the ledger was written, so the older rows name a thread and
+    nothing else -- and a GDPR erasure request with no address cannot be answered at all. Returns the number of
+    rows still without a sender (a read failure is counted, never silently skipped)."""
+    todo = {k: r for k, r in ledger.items() if not (r.get("sender") or "").strip()}
+    if not todo:
+        print("backfill-sender: every ledger row already names its sender")
+        return 0
+    by_alias = {alias: mailbox for mailbox, alias in BOXES}
+    clients, failed, filled = {}, 0, 0
+    for key, row in sorted(todo.items()):
+        alias, _, tid = key.partition(":")
+        mailbox = by_alias.get(alias)
+        if not mailbox or not tid:
+            print(f"backfill-sender: {key} names no mailbox/thread this script reads; left alone")
+            failed += 1
+            continue
+        try:
+            if alias not in clients:
+                clients[alias] = svc(mailbox, "gmail.readonly")
+            t = clients[alias].users().threads().get(userId="me", id=tid, format="metadata").execute()
+            msgs = t.get("messages") or []
+            if not msgs:
+                print(f"backfill-sender: {key} came back with no messages; left alone")
+                failed += 1
+                continue
+            h0 = {x["name"].lower(): x["value"] for x in msgs[0]["payload"]["headers"]}
+            _, raw = email.utils.parseaddr(h0.get("from", ""))
+            addr = usable_address(raw)
+            if not addr:
+                # Name the value we refused: "has no parseable From:" sent a reader looking at the wrong thing when
+                # the header parsed fine into something undeliverable.
+                print(f"backfill-sender: {key} has no usable From: address "
+                      f"({(raw or '').strip()[:80]!r}); left alone")
+                failed += 1
+                continue
+            row["sender"] = addr
+            if not row.get("req_key") and row.get("class"):
+                row["req_key"] = f"{addr}|{row['class']}"
+            filled += 1
+        except Exception as e:                      # a thread we cannot read is a failure, never a quiet skip
+            print(f"backfill-sender: {key}: {str(e)[:160]}")
+            failed += 1
+    print(f"backfill-sender: {filled} row(s) now name their sender, {failed} could not be read")
+    return failed
+
 
 def main():
     _frozen = frozen()
@@ -513,6 +593,14 @@ def main():
     os.makedirs(HOME, exist_ok=True)
     os.umask(0o077)
     ledger = json.load(open(LEDGER)) if os.path.exists(LEDGER) else {}
+    if "--backfill-sender" in sys.argv:
+        # Its own mode: it reads threads the normal pass never looks at (older than --since-days) and writes nothing
+        # but the sender field, so it must not also label, ack or page.
+        os.makedirs(HOME, exist_ok=True)
+        os.umask(0o077)
+        bad = backfill_sender(ledger)
+        json.dump(ledger, open(LEDGER, "w"))
+        sys.exit(2 if bad else 0)
     reg = set(open(REGISTER_IDS).read().split()) if os.path.exists(REGISTER_IDS) else set()
     failed = 0
     new = 0
@@ -565,6 +653,15 @@ def main():
                 name2, sender_raw = email.utils.parseaddr(h0.get("from", ""))
                 sender_addr = sender_raw.lower()
                 req_key = f"{sender_addr}|{cls}"
+                # The requester's ADDRESS, on its own field. It used to exist only inside `req_key`, which was added
+                # later, so every row written before it carries no sender at all -- and the GDPR pipeline cannot
+                # answer a request it cannot address (25 open erasure rows, 8 of them past the statutory month, had
+                # no requester_email for exactly this reason). `--backfill-sender` fills the older rows.
+                # `req_key` keeps the raw value on purpose: it groups notifications from one sender, and changing how
+                # rows group is not this change. The ADDRESS the GDPR pipeline will write to is the validated one, so
+                # an undeliverable `From:` leaves `sender` empty (the consumer registers the row without an address
+                # and the requester can still be asked) instead of being stored as if it were an address.
+                row["sender"] = usable_address(sender_addr)
                 fm = int(msgs[0].get("internalDate", 0))
                 # A sibling is the same request only if it is the same notice (same notice_key). When identity
                 # is uncertain we page (MUS-20285): a row with a different key, or a legacy row written before

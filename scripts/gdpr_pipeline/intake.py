@@ -25,8 +25,29 @@ URL_ID_RE = re.compile(r"(?:muso\.ai|credits\.muso\.ai)/(profile|track|album)/("
 CONV_RE = re.compile(r"/conversation/(\d{12,18})")
 SESSION_CONV_RE = re.compile(r":conversation:(\d{12,18})")
 ACTION_RE = re.compile(r"---ACTION-REQUEST---\s*(\{.*?\})\s*---END-ACTION-REQUEST---", re.S)
-EMAIL_RE = re.compile(r"^[\w.+-]+@[\w-]+(\.[\w-]+)+$")
 LEGAL_INTAKE = Path(__file__).resolve().parents[1] / "legal-intake.py"
+
+
+def _legal_address_pattern() -> str:
+    r"""The address rule, read from the script that WRITES `sender` rather than re-declared here.
+
+    Why (QA finding on #1803): this module used to carry its own `^[\w.+-]+@...` while legal-intake.py carried a
+    different one. They disagreed on `foo!bar@example.com` -- a legal RFC 5321 local part that the producer accepted
+    and this consumer rejected -- so `--backfill-sender` wrote a sender, exited 0, and `parse_gmail_ledger` turned it
+    into an empty `requester_email`. The next backfill skipped the now-nonempty field and the request stayed
+    unaddressable behind a clean report. Two hand-written copies of one rule is the bug; one definition is the fix.
+
+    Read with `ast` (the same way `_legal_rules()` reads RULES) because importing legal-intake.py would drag in
+    google-auth. A missing or renamed constant raises here instead of silently re-diverging."""
+    tree = ast.parse(LEGAL_INTAKE.read_text())
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "ADDRESS_PATTERN"):
+            return ast.literal_eval(node.value)
+    raise RuntimeError("legal-intake.py ADDRESS_PATTERN not found: refusing to guess which addresses are deliverable")
+
+
+EMAIL_RE = re.compile(_legal_address_pattern())
 ERASURE_CLASSES = ("privacy_erasure", "legal_threat", "dmca_takedown")
 # Every class the upstream mail ledgers legitimately carry. A class OUTSIDE this set is not "not an erasure" - it is a
 # class this pipeline has never seen, and filtering it out silently is how a collaborating lane's new kind (a notices@
@@ -448,7 +469,9 @@ def parse_gmail_ledger(ledger: dict, alias_filter=("notices@muso.ai", "legal@mus
             continue
         if r.get("class") not in ERASURE_CLASSES:
             continue
-        sender = (r.get("req_key") or "|").rsplit("|", 1)[0]
+        # `sender` is the field legal-intake writes now; `req_key` is where the address lived before that field
+        # existed, and most of the ledger predates it. Reading both is what lets an older row be answered at all.
+        sender = (r.get("sender") or "").strip() or (r.get("req_key") or "|").rsplit("|", 1)[0]
         pages = []
         for i in r.get("ids") or []:
             ent, _, pid = str(i).partition(":")
