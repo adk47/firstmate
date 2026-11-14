@@ -1923,6 +1923,21 @@ case "$out" in
     pass "a beta poll longer than the ceiling is clamped so the whole wait stays inside it" ;;
   *) fail "a long beta poll escaped the wait ceiling: $out" ;;
 esac
+# A configured bound that is not a usable count cannot opt out of the ceiling.
+out=$(BETA_ATTEMPTS=4x run_beta "$HOME_B5" 1790000000 register b5 \
+  'https://github.com/Muso-AI/web-credits-next/pull/87') || fail "non-numeric-bound register failed"
+case "$out" in
+  *"awaiting the deploy:"*"after 4 attempt(s)"*)
+    pass "a non-numeric beta wait bound falls back to the default" ;;
+  *) fail "a non-numeric beta wait bound was honoured: $out" ;;
+esac
+out=$(FM_CW_BETA_POLL_SECONDS=0 BETA_ATTEMPTS=400 run_beta "$HOME_B5" 1790000000 register b5 \
+  'https://github.com/Muso-AI/web-credits-next/pull/88') || fail "zero-poll register failed"
+case "$out" in
+  *"awaiting the deploy:"*"after 60 attempt(s)"*)
+    pass "a zero beta poll still bounds the wait by the ceiling" ;;
+  *) fail "a zero beta poll left the beta wait unbounded: $out" ;;
+esac
 # A beta fingerprint that could not be read is no proof the merged sha landed,
 # so the stage states an unmeasured beta instead of reading the pre-change pods.
 HOME_B9=$(seed_beta_world b9)
@@ -2019,6 +2034,20 @@ esac
 [ "$(awk -F'\t' 'NF { n++ } END { print n + 0 }' "$HOME_B11/state/change-watch/b11-84/beta-baseline")" = 5 ] \
   || fail "one beta target kept more than one baseline: $(cat "$HOME_B11/state/change-watch/b11-84/beta-baseline")"
 pass "one beta target keeps exactly one fingerprint and baseline"
+
+# The beta map is hand-edited, so any whitespace separates a key from its target:
+# a tab-separated entry resolves the target it names instead of silently
+# completing clean with nothing to measure.
+HOME_B12=$(seed_beta_world b12)
+seed_clean_beta "$HOME_B12"
+printf 'web-credits-next\tmuso-dev/credits-gate\n' > "$HOME_B12/config/change-watch-beta"
+out=$(run_beta "$HOME_B12" 1790000000 register b12 \
+  'https://github.com/Muso-AI/web-credits-next/pull/89') || fail "tab-map beta register failed"
+case "$out" in
+  *"beta: beta clean: 5 metric(s) read on muso-dev/credits-gate, none crossed its bar"*)
+    pass "a tab-separated beta map entry resolves its target" ;;
+  *) fail "a tab-separated beta map entry measured nothing: $out" ;;
+esac
 
 # A metric with no readable baseline is unmeasured, never scored against an
 # absolute bar, because an absolute bar is not evidence about the change.

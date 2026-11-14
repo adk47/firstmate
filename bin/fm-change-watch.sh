@@ -347,13 +347,15 @@ BETA_METRICS="restarts oomkilled rss_ratio http_5xx_per_min p95_ms"
 BETA_WAIT_ATTEMPTS=${FM_CW_BETA_WAIT_ATTEMPTS:-4}
 BETA_POLL_SECONDS=${FM_CW_BETA_POLL_SECONDS:-15}
 BETA_WAIT_CEILING_SECONDS=60
-if [ "$BETA_POLL_SECONDS" -gt 0 ] 2>/dev/null && [ "$BETA_WAIT_ATTEMPTS" -gt 0 ] 2>/dev/null; then
-  [ "$BETA_POLL_SECONDS" -le "$BETA_WAIT_CEILING_SECONDS" ] \
-    || BETA_POLL_SECONDS=$BETA_WAIT_CEILING_SECONDS
-  BETA_WAIT_MAX=$((BETA_WAIT_CEILING_SECONDS / BETA_POLL_SECONDS))
-  [ "$BETA_WAIT_MAX" -ge 1 ] || BETA_WAIT_MAX=1
-  [ "$BETA_WAIT_ATTEMPTS" -le "$BETA_WAIT_MAX" ] || BETA_WAIT_ATTEMPTS=$BETA_WAIT_MAX
-fi
+case "$BETA_WAIT_ATTEMPTS" in ''|*[!0-9]*) BETA_WAIT_ATTEMPTS=4 ;; esac
+case "$BETA_POLL_SECONDS" in ''|*[!0-9]*) BETA_POLL_SECONDS=15 ;; esac
+[ "$BETA_POLL_SECONDS" -ge 1 ] || BETA_POLL_SECONDS=1
+[ "$BETA_POLL_SECONDS" -le "$BETA_WAIT_CEILING_SECONDS" ] \
+  || BETA_POLL_SECONDS=$BETA_WAIT_CEILING_SECONDS
+BETA_WAIT_MAX=$((BETA_WAIT_CEILING_SECONDS / BETA_POLL_SECONDS))
+[ "$BETA_WAIT_MAX" -ge 1 ] || BETA_WAIT_MAX=1
+[ "$BETA_WAIT_ATTEMPTS" -ge 1 ] || BETA_WAIT_ATTEMPTS=1
+[ "$BETA_WAIT_ATTEMPTS" -le "$BETA_WAIT_MAX" ] || BETA_WAIT_ATTEMPTS=$BETA_WAIT_MAX
 # The built-in beta map: the pre-production copy of each service that has one.
 CW_BETA_BUILTIN='web-credits-next muso-dev/credits-gate'
 BASELINE_WINDOW_SECONDS=3600
@@ -1075,7 +1077,7 @@ cw_beta_map_summary() {
 cw_beta_targets() {  # <repo-name> <files>
   local repo=$1 files=$2 key target path matched
   {
-    while IFS=' ' read -r key target; do
+    while read -r key target; do
       [ -n "$key" ] && [ -n "$target" ] || continue
       case "$target" in */*) ;; *) continue ;; esac
       matched=''
