@@ -33,7 +33,36 @@ setup() {
   chmod +x "$TEST_TMPDIR/muso-ok" "$TEST_TMPDIR/muso-fail"
   export DELIVERS_OK="$TEST_TMPDIR/muso-ok"
   export DELIVERS_FAIL="$TEST_TMPDIR/muso-fail"
+  install_fixed_clock
 }
+
+# --- ONE clock for the whole file --------------------------------------------------------------------------------------
+# --now pins only the AGE judgement (the ledger helper). The audit's WINDOW (the cursor it writes, the 7-day lookback, the
+# 60-day catch-up bound) is read from the wall clock with `date -u +%s`, and rightly so: a cursor taken from --now could
+# be advanced past time nobody read. The cursor tests used to build their fixtures from the REAL wall clock ("a refund
+# ten days old") and then judge them at the fixed --now 2026-11-05: from 2026-11-14T00:00:00Z on, wall-clock minus ten
+# days is less than 24 h before that --now, the refund stopped being a finding, and two tests went red on every PR at
+# the UTC day boundary. So the suite runs the audit under a `date` that answers its one "what time is it" form with a
+# fixed instant, the same instant as the default --now. Every other use of date (conversions, bats' own timing) is the
+# real one.
+CLOCK_EPOCH=1793836800   # 2026-11-05T00:00:00Z
+install_fixed_clock() {
+  local real
+  real="$(command -v date)"
+  mkdir -p "$TEST_TMPDIR/bin"
+  cat > "$TEST_TMPDIR/bin/date" <<STUB
+#!/bin/sh
+if [ "\$#" -eq 2 ] && [ "\$1" = "-u" ] && [ "\$2" = "+%s" ] && [ -n "\${REFUND_TEST_CLOCK_EPOCH:-}" ]; then
+  echo "\$REFUND_TEST_CLOCK_EPOCH"
+  exit 0
+fi
+exec "$real" "\$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/date"
+  export PATH="$TEST_TMPDIR/bin:$PATH"
+  export REFUND_TEST_CLOCK_EPOCH="$CLOCK_EPOCH"
+}
+clock_at() { export REFUND_TEST_CLOCK_EPOCH="$1"; }   # <epoch>: move the audit's wall clock
 delivering() { export MUSO_BIN="$DELIVERS_OK" MUSO_SLACK_BOT_TOKEN_DEVOPS=test-token; }
 
 # --- a real local processor: response fixtures by request order, every request path recorded -------------------------
@@ -69,13 +98,23 @@ with open(os.path.join(root, "port"), "w") as fh:
 srv.serve_forever()
 PYSRV
   # the server's own stdout/stderr must not be the command substitution's pipe, or this function never returns
-  python3 "$dir/srv.py" "$dir" > "$dir/srv.out" 2>&1 &
-  SERVER_PID=$!
+  # ... and it must not hold bats' fd 3 either. The pid goes to a FILE: every caller runs this in a command
+  # substitution, so a variable set here never reaches teardown, and the server it failed to kill kept bats from
+  # returning at the end of the file.
+  python3 "$dir/srv.py" "$dir" > "$dir/srv.out" 2>&1 3>&- &
+  echo "$!" > "$dir/pid"
   local i
   for i in $(seq 1 100); do [ -s "$dir/port" ] && break; sleep 0.05; done
   cat "$dir/port"
 }
-stop_fake_stripe() { [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null; SERVER_PID=""; return 0; }
+stop_fake_stripe() {
+  local f
+  for f in "$TEST_TMPDIR"/*/pid; do
+    [ -s "$f" ] && kill "$(cat "$f")" 2>/dev/null
+    rm -f "$f"
+  done
+  return 0
+}
 teardown() { stop_fake_stripe; }
 
 # a TESTABLE copy of the feed writer: the only way to point it at a local server (a deployed copy refuses the seams)
@@ -296,7 +335,8 @@ STUB
 # check recovers, and the audit reports clean without ever naming it. The AUDIT (not the writer, which cannot know
 # whether its answer was ever compared) keeps a durable cursor of the instant it last made a comparison it trusted, and
 # retains every untold refund id until a note is sent, so an untold refund cannot age out of the alert.
-old_epoch() { echo $(( $(date -u +%s) - $1 * 86400 )); }
+# <days> before the suite's FIXED clock, never before the real one (see install_fixed_clock)
+old_epoch() { echo $(( CLOCK_EPOCH - $1 * 86400 )); }
 
 feed_state_init() { # <covered_through epoch> [<outstanding json>]
   mkdir -p "$(dirname "$FEED_STATE_FILE")"
@@ -327,11 +367,12 @@ silent_refund_fixture() { # <dir> <epoch>
   grep -q 'expand\[\]=data.charge' "$TEST_TMPDIR/srv/requests.log"
   # the cursor advanced to THIS run's start, and the untold refund is retained BY ID
   covered="$(jq -r '.covered_through' "$FEED_STATE_FILE")"
-  [ "$covered" -gt "$(( $(date -u +%s) - 120 ))" ]
+  [ "$covered" -eq "$CLOCK_EPOCH" ]
   [ "$(jq -r '.outstanding[0].refund_id' "$FEED_STATE_FILE")" = "re_3UXkW8LsjTo3Ar3l0cunpPeE" ]
   # NOW the window has moved past the refund and the processor returns nothing: retention keeps the finding standing and
   # the run red, WITHOUT paging immutable evidence a second time.
   printf '{"object":"list","has_more":false,"data":[]}' > "$TEST_TMPDIR/srv/resp.json"
+  clock_at "$(( CLOCK_EPOCH + 86400 ))"   # the wall clock moves with --now: one day later on both
   run "$AUDIT" --now 2026-11-06T00:00:00Z
   [ "$status" -eq 1 ]
   [[ "$output" == *"standing: 1 refund(s) already paged and still unconfirmed"* ]]
@@ -404,7 +445,7 @@ silent_refund_fixture() { # <dir> <epoch>
   # the query started at the FIXED bootstrap instant, not at now-7d: the refund is in the answer set
   grep -q "created\[gte\]=$bootstrap" "$TEST_TMPDIR/srv/requests.log"
   # and the cursor is written only now, with the untold refund retained by id
-  [ "$(jq -r '.covered_through' "$FEED_STATE_FILE")" -gt "$(( $(date -u +%s) - 120 ))" ]
+  [ "$(jq -r '.covered_through' "$FEED_STATE_FILE")" -eq "$CLOCK_EPOCH" ]
   [ "$(jq -r '.outstanding[0].refund_id' "$FEED_STATE_FILE")" = "re_3UXkW8LsjTo3Ar3l0cunpPeE" ]
 }
 
