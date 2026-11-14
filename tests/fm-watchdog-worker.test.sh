@@ -196,6 +196,28 @@ test_a_dead_worker_comes_back_in_one_pass_with_no_wake() {
   pass "a killed worker is relaunched inside one pass with no firstmate turn and no wake"
 }
 
+# A lane whose own last status line is terminal is legitimately quiet. Relaunching
+# it is not recovery, it is resurrecting finished work - and it burns the relaunch
+# budget a genuinely dead lane needs. 2026-11-07: five lanes were reported "endpoint
+# dead, relaunch budget spent, needs a hand" while their own last lines said
+# `failed: retired`, `paused: clean and idle`, `done: inbox empty` and
+# `resolved [key=default]`. Every one of those was correct.
+test_a_terminal_lane_is_never_relaunched() {
+  local home now
+  home=$(make_home terminal); fake_tools "$home"
+  worker "$home" w1 dead
+  printf 'done: PR https://example.invalid/1 - finished\n' > "$home/state/w1.status"
+  pane "$home" w1 idle ''
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 700))" >/dev/null
+  assert_eq "$(counter "$home" 'control w1 relaunch')" "0" \
+    "a lane whose last line says done: was relaunched"
+  assert_eq "$(wakes "$home" | grep -c 'needs a hand')" "0" \
+    "a finished lane was reported as needing a hand"
+  pass "a terminal lane is left alone and never reported"
+}
+
 test_a_reboot_rebuilds_the_fleet_and_starts_the_chair_last() {
   local home now out chair_line relaunch_line
   home=$(make_home boot); fake_tools "$home"
@@ -680,6 +702,7 @@ test_a_dry_run_plan_matches_the_connection_relaunch_model() {
 }
 
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake
+test_a_terminal_lane_is_never_relaunched
 test_an_unread_steer_is_interrupted_then_relaunched_once_each
 test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model
 test_a_pi_lane_is_never_asked_to_move_to_a_model_it_cannot_reach

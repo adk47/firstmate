@@ -910,6 +910,19 @@ task_pass() {
     case "$state" in
       alive) ;;
       dead|missing)
+        # A lane whose own last status line is terminal is legitimately quiet, and
+        # relaunching it is not recovery - it is resurrecting finished work. The
+        # same rule the health check already applies: silence means something only
+        # when the lane claims to be working. 2026-11-07: five lanes were reported
+        # "endpoint dead, relaunch budget spent, needs a hand" while their own last
+        # lines said `failed: retired`, `paused: clean and idle`, `done: inbox
+        # empty`, and `resolved [key=default]`. Every one of those was correct.
+        case "$(tail -1 "$STATE/$id.status" 2>/dev/null)" in
+          done:*|failed:*|paused:*|resolved*|blocked:*)
+            task_store "$id"
+            continue
+            ;;
+        esac
         if [ "$DRY_RUN" = 1 ]; then
           printf '%s\t%s\tn/a\t-\t%d\t%d\twould relaunch (endpoint %s)\n' \
             "$id" "$state" "$(quiet_minutes_of "$id" "$now")" "$(inbox_minutes_of "$id")" "$state"
