@@ -156,7 +156,7 @@ awk -v v="$io_full" 'BEGIN{exit !(v>10)}' && find_ io-pressure "Disk pressure: t
 if [ "${pids_max:-0}" -gt 0 ] && [ -n "${pids_cur:-}" ]; then
   pids_pct=$(( pids_cur * 100 / pids_max ))
   if [ "$pids_pct" -ge "$PAGE_TASKS_PCT" ]; then
-    page_ tasks-sustain "user task cap ${pids_pct}% used (${pids_cur} of ${pids_max} tasks for uid $USER) - holders: $(tasks_heat | sed 's/ $//') - past 100% every fork fails EAGAIN and the fleet stops starting; raise /etc/systemd/system/user@$(id -u).service.d/60-ak47-tasksmax.conf TasksMax, and find the lane that grew: ~/.local/state/ak47/tasks-latest.md"
+    page_ tasks-sustain "user task cap ${pids_pct}% used (${pids_cur} of ${pids_max} tasks for uid $USER) - holders: $(tasks_heat | sed 's/ $//') - past 100% every fork fails EAGAIN and the fleet stops starting; the slice cap is tasksmax-slice.conf and the per-unit cap is /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf - find the lane that grew: ~/.local/state/ak47/tasks-latest.md"
     touch "$SD/.page-active"
     { echo "# ak47 task cap $et ($now)"; echo; echo "${pids_cur} of ${pids_max} tasks (${pids_pct}%) for uid $USER"; echo; echo "by unit:"; tasks_heat | sed 's/ $//'; echo; echo "scopes and their largest task counts:"; for d in "$USLICE"/*.slice/*.slice "$USLICE"/*.slice/*.scope; do [ -r "$d/pids.current" ] && printf '%-10s %s\n' "$(cat "$d/pids.current")" "$(basename "$d")"; done | sort -rn | head -20; } >"$SD/tasks-latest.md"
   fi
