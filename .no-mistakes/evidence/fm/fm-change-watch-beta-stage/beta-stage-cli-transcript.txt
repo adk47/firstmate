@@ -1,0 +1,84 @@
+
+===== A. web-credits-next route change: beta reading recorded before any prod read =====
+
+===== A: bin/fm-change-watch.sh register a <web-credits-next#77> =====
+change-watch: registered a-77 for https://github.com/Muso-AI/web-credits-next/pull/77 (2 target(s)); beta: beta clean: 5 metric(s) read on muso-dev/credits-gate, none crossed its bar
+
+===== A: the beta record the stage persisted (state/change-watch/a-77/beta) =====
+verdict	beta clean: 5 metric(s) read on muso-dev/credits-gate, none crossed its bar
+reading	restarts	muso-dev/credits-gate	0	0		0
+reading	oomkilled	muso-dev/credits-gate	0	0		0
+reading	rss_ratio	muso-dev/credits-gate	0.4	0		0.4
+reading	http_5xx_per_min	muso-dev/credits-gate	0	0		0
+reading	p95_ms	muso-dev/credits-gate	100	0		100
+
+===== A: FM_CW_TRACE read record — stage<TAB>metric<TAB>target, in read order =====
+beta	restarts	muso-dev/credits-gate
+beta	oomkilled	muso-dev/credits-gate
+beta	rss_ratio	muso-dev/credits-gate
+beta	http_5xx_per_min	muso-dev/credits-gate
+beta	p95_ms	muso-dev/credits-gate
+beta	restarts	muso-dev/credits-gate
+beta	oomkilled	muso-dev/credits-gate
+beta	rss_ratio	muso-dev/credits-gate
+beta	http_5xx_per_min	muso-dev/credits-gate
+beta	p95_ms	muso-dev/credits-gate
+prod	restarts	muso-prod/credits-gate
+prod	oomkilled	muso-prod/credits-gate
+prod	rss_ratio	muso-prod/credits-gate
+prod	http_5xx_per_min	muso-prod/credits-gate
+prod	p95_ms	muso-prod/credits-gate
+prod	pgbouncer_cl_waiting	muso-prod/credits-gate
+prod	sentry_new_issues	sentry/credits-web-next
+
+===== A: ordering verdict from the read record =====
+beta_before_prod -> ok
+first read of the whole registration -> beta muso-dev/credits-gate
+
+===== A: verdict / status =====
+change-watch clean so far (+0m of +720m)
+a-77	change-watch clean so far (+0m of +720m)	beta: beta clean: 5 metric(s) read on muso-dev/credits-gate, none crossed its bar	unmeasured: http_5xx_per_min@muso-prod/credits-gate, oomkilled@muso-prod/credits-gate, p95_ms@muso-prod/credits-gate, pgbouncer_cl_waiting@muso-prod/credits-gate, restarts@muso-prod/credits-gate, rss_ratio@muso-prod/credits-gate, sentry_new_issues@sentry/credits-web-next	rollout never proven: muso-prod/credits-gate
+
+===== B. change touching no beta-served path: clean with an explicit reason =====
+
+===== B: bin/fm-change-watch.sh register b <H-DevOps#3317> =====
+change-watch: beta stage for https://github.com/Muso-AI/H-DevOps/pull/3317: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)
+change-watch: no deployable service touched by https://github.com/Muso-AI/H-DevOps/pull/3317; nothing registered
+
+===== B: the durable row (beta reason is persisted, not only printed) =====
+{"version": "fm-change-watch-row-v1", "watch_id": "b-3317", "task": "b", "pr_url": "https://github.com/Muso-AI/H-DevOps/pull/3317", "merge_epoch": 1790000000, "registered_epoch": 1790000000, "completed_epoch": 1790000000, "readings": {"900": null, "3600": null, "21600": null}, "real_user_check": "not-applicable", "real_user_reason": "no http_5xx_per_min target: this watch has no real-user surface", "unmeasured_metrics": "", "unproven_targets": "", "terminal_state": "not-applicable", "reason": "no deployable surface touched by https://github.com/Muso-AI/H-DevOps/pull/3317; beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)"}
+
+===== C. beta failure: reported as a beta failure, no prod target read, no prod watch armed =====
+
+===== C: bin/fm-change-watch.sh register c <web-credits-next#78> =====
+change-watch: registered c-78 for https://github.com/Muso-AI/web-credits-next/pull/78 (beta stage failed: beta regressed on http_5xx_per_min (50 vs baseline 0) at muso-dev/credits-gate; no production target was read and no production watch was armed)
+
+===== C: verdict (exit code follows the failure) =====
+change-watch beta regressed on http_5xx_per_min (50 vs baseline 0) at muso-dev/credits-gate
+verdict exit code -> 1
+
+===== C: status =====
+c-78	beta regressed on http_5xx_per_min (50 vs baseline 0) at muso-dev/credits-gate	beta: beta regressed on http_5xx_per_min (50 vs baseline 0) at muso-dev/credits-gate
+
+===== C: read trace — a beta failure reads no prod target =====
+beta	restarts	muso-dev/credits-gate
+beta	oomkilled	muso-dev/credits-gate
+beta	rss_ratio	muso-dev/credits-gate
+beta	http_5xx_per_min	muso-dev/credits-gate
+beta	p95_ms	muso-dev/credits-gate
+beta	restarts	muso-dev/credits-gate
+beta	oomkilled	muso-dev/credits-gate
+beta	rss_ratio	muso-dev/credits-gate
+beta	http_5xx_per_min	muso-dev/credits-gate
+beta	p95_ms	muso-dev/credits-gate
+prod reads -> 0
+
+===== C: the check wake queued for the lane =====
+1794657748	1	check	change-watch-c-78-beta	check: change-watch c https://github.com/Muso-AI/web-credits-next/pull/78 beta http_5xx_per_min regressed
+
+===== C: the steer sent to the owning task =====
+c change-watch https://github.com/Muso-AI/web-credits-next/pull/78 failed the beta stage: beta regressed on http_5xx_per_min (50 vs baseline 0) at muso-dev/credits-gate; the production watch was not armed
+
+===== C: production arm log (must be empty: no prod watch armed) =====
+demo-beta.sh: line 209: /tmp/evidence-beta.PJRMgE/c/arm.log: No such file or directory
+lines in arm.log -> 0

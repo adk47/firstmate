@@ -1,0 +1,18 @@
+
+----- UNMUTATED branch head 0284922c -----
+script under test: /home/aaron/.no-mistakes/worktrees/72295860b10d/01M7CWEZA2K1SJ3VVR0TZEJRQQ/bin/fm-change-watch.sh
+registration line: change-watch: registered x-77 for https://github.com/Muso-AI/web-credits-next/pull/77 (2 target(s)); beta: beta clean: 5 metric(s) read on muso-dev/credits-gate, none crossed its bar
+read order (count stage):
+       10 beta
+        7 prod
+first read is a beta read of muso-dev/credits-gate
+beta_before_prod -> ok
+
+----- MUTANT: beta block moved after the production baseline capture -----
+script under test: /home/aaron/.no-mistakes/worktrees/72295860b10d/01M7CWEZA2K1SJ3VVR0TZEJRQQ/bin/.fm-change-watch-mutant-tmp.sh
+registration line: change-watch: registered x-77 for https://github.com/Muso-AI/web-credits-next/pull/77 (2 target(s)); beta: beta clean: 5 metric(s) read on muso-dev/credits-gate, none crossed its bar
+read order (count stage):
+        7 prod
+       10 beta
+first read is a prod read of muso-prod/credits-gate
+beta_before_prod -> beta read after the production read on line 1: restarts muso-dev/credits-gate

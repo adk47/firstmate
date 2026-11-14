@@ -1,0 +1,106 @@
+ok - register reports one derived target
+ok - the target is the Deployment the hunk landed in, under the manifest's namespace
+ok - repeat register is idempotent
+ok - due gates the first sample
+ok - a hunk only in a Service document targets no Deployment
+ok - an unplaceable hunk falls back to the whole manifest and says so
+ok - several hunks in one Deployment target that Deployment once
+ok - a Deployment without metadata.namespace is a stated gap, never guessed
+ok - an unreadable manifest is a stated measurement gap, not a PR without a service
+ok - a deleted manifest registers nothing and is named as removed, not unread
+ok - 5xx series reports the first regression at +15m
+ok - regression queues one wake and steers the lane with the numbers
+ok - the regression is reported exactly once
+ok - a metric with a relative bar and no baseline is recorded but not scored
+ok - an OOMKilled event regresses the watch
+notice: change-watch: clean for https://github.com/Muso-AI/H-DevOps/pull/3317 on every metric it could read, but these metrics were never measured: oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; the rollout could not be proven for: muso-prod/feed-service
+ok - a clean 12h series records the clean note and queues nothing
+ok - a merge writes exactly one row with the +15m/+1h/+6h readings and a terminal state
+notice: change-watch: unmeasurable for https://github.com/Muso-AI/H-DevOps/pull/3317: nothing measured at +15m, +60m, +360m; never measured: muso-prod/feed-service; last read reason: read exited 1 with no value
+ok - an unmeasurable watch queues a check wake and blocks the done claim
+ok - re-registering an unmeasurable watch reopens it and re-measures
+notice: change-watch: unmeasurable for https://github.com/Muso-AI/H-DevOps/pull/3317: never measured: muso-prod/core-backend-api; last read reason: read exited 1 with no value
+notice: change-watch: unmeasurable for https://github.com/Muso-AI/H-DevOps/pull/3317: nothing measured at +15m, +60m, +360m; never measured: muso-prod/core-backend-api, muso-prod/feed-service; last read reason: read exited 1 with no value
+ok - re-registering a completed watch re-measures from scratch
+notice: change-watch: unmeasurable for https://github.com/Muso-AI/H-DevOps/pull/3317: nothing measured at +15m, +60m, +360m; never measured: muso-prod/feed-service; last read reason: read exited 1 with no value
+notice: change-watch: completion note skipped for https://github.com/Muso-AI/H-DevOps/pull/3317 (task v1 has no status record)
+notice: change-watch: clean for https://github.com/Muso-AI/H-DevOps/pull/3317 on every metric it could read, but these metrics were never measured: oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; the rollout could not be proven for: muso-prod/feed-service
+ok - a deleted verdict does not hide the durable row from recovery
+notice: change-watch: unmeasurable for https://github.com/Muso-AI/H-DevOps/pull/3317: no reading at +360m; last read reason: read exited 1 with no value
+ok - a row with a missing reading is not proven
+ok - the audit fails on an unmeasurable row and on a completed-unmeasured status line
+ok - the pool metric reads the Deployment's resolved pool
+ok - an unresolvable pool leaves the pool metric unmeasured
+ok - a drive stopped mid-schedule records interrupted and queues one wake
+ok - re-registering an interrupted watch re-arms the remaining samples
+notice: change-watch: clean for https://github.com/Muso-AI/H-DevOps/pull/3317 on every metric it could read, but these metrics were never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; the rollout could not be proven for: muso-prod/feed-service
+ok - a re-armed watch finishes its remaining schedule
+ok - a drive killed outright is recorded as interrupted at its last heartbeat
+ok - a reused pid never reads as a live drive and the watch can be re-armed
+ok - a live pid with the recorded identity is the drive
+ok - docs-only PR registers nothing
+ok - docs-only PR leaves no watch behind but still writes its row
+ok - an application repo resolves to its service Deployment
+ok - live reads take the worst replica's memory column and rate a capped log over its span
+ok - the pool read leaves every later metric key to be read
+ok - the console is read as ubuntu through the pgbouncer admin unix socket
+ok - an unmeasured metric is named per target, never collapsed to its metric kind
+ok - doctor proves each target's pool read and names an unresolved pool
+ok - doctor reads the documented pooler by default and states a failed read
+ok - a hung console read is bounded, unmeasured, and stated by the doctor
+ok - an unreachable pooler is dialled once per sample, not once per target
+ok - an explicit kubeconfig is what every cluster read uses
+ok - a home's config/change-watch-kubeconfig is the next kubeconfig in line
+ok - an unreachable cluster costs one probe and is named as every metric's reason
+ok - the doctor states an unreachable cluster instead of calling an unmeasured watch fine
+ok - an application release is watched by the Deployments that run its image
+ok - a family over the cap is reduced to its busiest and says so
+ok - a Deployment with several containers or a digest-pinned image still matches its image family
+ok - a repository mapped to differently named Deployments resolves through the map
+ok - a sample before the rollout is recorded as awaiting the deploy, never as health
+ok - the new image lands and the same watch scores the release
+notice: change-watch: completion note skipped for https://github.com/Muso-AI/core-backend/pull/4242 (task aw1 has no status record)
+notice: change-watch: clean for https://github.com/Muso-AI/core-backend/pull/4242 on every metric it could read, but these metrics were never measured: http_5xx_per_min@muso-prod/core-backend-api, p95_ms@muso-prod/core-backend-api, pgbouncer_cl_waiting@muso-prod/core-backend-api
+ok - a reading that only awaited its deploy is measured, not a gap
+ok - one pod read per target serves the landing gate and every pod-backed metric
+ok - new Sentry error and fatal issues regress the release, warnings do not
+ok - a missing Sentry token is stated at registration, never a silent zero
+ok - a repository with nothing measurable registers nothing instead of a clean verdict
+ok - a failed deploy-workflow run regresses the release and a missing run is awaiting it
+ok - a map line keeps the workflow path of its run: spec and still drops its comment
+ok - a watch reports the metrics it never measured instead of implying they were clean
+ok - an OOMKilled termination from before the merge is not the release's
+ok - an OOMKilled termination after the merge regresses the watch
+ok - the forge budget is per sample and a spent one is stated
+ok - a workflow-deployed release's Sentry read waits for its own deploy run
+ok - an env-only rollout opens the landing gate with the image unchanged
+ok - an unchanged rollout fingerprint stays awaiting the deploy
+ok - a spent sample budget costs no pod read, states itself, and still reads Sentry
+ok - a target whose pods cannot be read is attempted once per sample
+ok - an unreadable image inventory is stated instead of read as no deployable service
+ok - a status line names every target whose rollout was never proven
+ok - a clean wiki note names only the metrics and targets the watch measured
+ok - a web-credits-next route change records a healthy beta reading
+ok - a web-credits-next route change is read in beta before any production target
+ok - the first read of the whole registration is the beta target muso-dev/credits-gate
+ok - the production watch still reads its own targets after the beta stage
+ok - a healthy beta target records a beta clean verdict naming what it read
+ok - the beta stage re-reads the pod fingerprint until the rollout lands
+ok - a change touching no beta-served path completes clean with the reason stated
+ok - the reason a change measured nothing beta-served is durable, not only printed
+ok - a beta regression is reported as a beta failure
+ok - a beta failure reads no production target at all
+ok - a beta failure arms no production watch
+ok - the verdict states the beta failure and exits non-zero
+ok - status states the beta failure and never as a production result
+ok - a beta failure queues its own beta wake
+ok - the lane is steered with the beta failure and that no production watch was armed
+ok - a beta rollout that has not landed is stated as unmeasured
+ok - an unlanded beta rollout scores nothing
+ok - an unlanded beta rollout still arms the production watch
+ok - a beta fingerprint that cannot be read is stated as unmeasured
+ok - a beta target already above the absolute bar but unchanged is clean
+ok - every matching beta target is read, not only the last one
+ok - each matched beta target keeps its own fingerprint and baseline
+ok - a metric with no readable beta baseline is unmeasured, not scored absolutely
+ok - the record states why a metric with no beta baseline could not be scored
