@@ -145,8 +145,9 @@ Without this, the source fix rots and the sweeper becomes load-bearing again.
 `hdevops/apply.sh` lands the system in H-DevOps as a PR: the ak47 scripts,
 libraries, budget and producer table, the hygiene user timers, the two sysctls
 that were hand-written on the box and recorded nowhere else, systemd-oomd
-with its swap and avoid drop-ins, and the health beat that pages on swap and
-memory pressure as well as load. The playbook is
+with its swap and avoid drop-ins, the two task-cap drop-ins described in §5a,
+and the health beat that pages on swap and memory pressure as well as load and
+the user task cap. The playbook is
 `ansible/playbooks/07-ak47-hygiene.yml`, deliberately not in `site.yml` — that
 targets the OVH cluster, this targets one workstation.
 
@@ -180,13 +181,14 @@ only bound, 12000 was barely above the ~4,600 the slice normally runs, and no
 unit inside the slice was capped at anything — each inherited 140,836 and shared
 nothing, so one lane could take the whole uid.
 
-Three changes, in `hdevops/ansible/playbooks/07-ak47-hygiene.yml`:
+Three changes, all landed by `hdevops/ansible/playbooks/07-ak47-hygiene.yml`:
 
 1. **A per-unit default** — `/etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf`
    sets `DefaultTasksMax=4096`. This is the change that matters: transient tmux
    pane scopes have no drop-in path, and the user manager's default is the only
-   place a per-unit cap can reach them. 4096 is six times the largest legitimate
-   lane measured here, and a quarter of the slice cap.
+   place a per-unit cap can reach them. 4096 is four times the largest
+   legitimate lane measured here (the biggest real pane held ~950 tasks), and a
+   sixth of the slice cap.
 2. **A slice cap with room** — `/etc/systemd/system/user@1000.service.d/60-ak47-tasksmax-slice.conf`
    sets `TasksMax=24576`, six times the per-unit default. Raising it alone would
    have moved the cliff, not removed it, so both land together.
@@ -348,7 +350,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-86 tests across six files: the budget, the census, the guards, the guarded
+89 tests across six files: the budget, the census, the guards, the guarded
 delete, the tick, and the weekly review. They are hermetic — no tmux, no
 network, no live fleet state — and registered as `pure-contract-unit` in
 `bin/fm-test-run.sh`.

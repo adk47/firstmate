@@ -12,6 +12,10 @@
 # CPU/IO pressure, inotify near its limit, disk or /tmp filling, NVMe heat or
 # errors, zero-byte git objects, failed user units, no watcher beat.
 #
+# The one other PAGE is the user task cap: past 80% of user@<uid>.service
+# pids.max the uid cannot fork, and its own watcher is the first thing that
+# stops, so the page names the leaf scopes holding the tasks.
+#
 # Reporting: one line per new finding in ~/.local/state/ak47/health.log, a
 # rolling ~/.local/state/ak47/health-latest.md, and a note in the chair's inbox
 # (bin/fm-inbox.sh note) at most once per finding key per 6 h.

@@ -215,9 +215,14 @@ What this commit captures is everything a rebuild would otherwise lose:
 - systemd-oomd, with ManagedOOMSwap=kill on user@1000.service (systemd 255
   monitors swap only for `kill`, never for `auto`) and
   ManagedOOMPreference=avoid on the six units that are the fleet's spine
-- ak47-health.sh and its 10-minute timer, now paging on swap >= 70% and
-  available RAM < 15 GB as well as load, and paging when the hygiene tick
-  itself stops writing for 30 minutes
+- ak47-health.sh and its 10-minute timer, now paging on swap >= 70%,
+  available RAM < 15 GB, load, and 80% of the user task cap, and paging when
+  the hygiene tick itself stops writing for 30 minutes
+- the user task cap, both bounds: DefaultTasksMax=4096 in
+  /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf, so one transient tmux
+  pane scope can no longer take the whole slice, and TasksMax=24576 on
+  user@1000.service, because on 2026-11-14 the uid reached pids.max 12000 and
+  every fork in it returned EAGAIN for five hours
 
 The playbook is not in site.yml on purpose: site.yml targets the OVH cluster,
 and this targets one workstation over a local connection.

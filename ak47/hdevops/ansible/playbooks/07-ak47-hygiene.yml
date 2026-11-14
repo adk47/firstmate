@@ -20,7 +20,8 @@
 # What this playbook owns is everything that would be lost in a rebuild: the
 # scripts, the hygiene user timers, the two sysctls that were hand-written on
 # the box on 2026-11-03 and 2026-11-10 with no record anywhere else,
-# systemd-oomd with its swap and avoid drop-ins, and the 10-minute health beat.
+# systemd-oomd with its swap and avoid drop-ins, the user task-cap drop-ins, and
+# the 10-minute health beat.
 # The installed units run from the payload copy under ~/.local/lib/ak47, not
 # from a firstmate checkout.
 #
@@ -187,7 +188,7 @@
     # first is the one that matters: a per-unit default so no single lane (one
     # tmux pane scope peaked at 138,696 tasks) can take the whole slice, and a
     # slice cap with room for several bursting lanes at once.
-    - name: Cap every user unit at a quarter of the slice
+    - name: Cap every user unit at a sixth of the slice
       ansible.builtin.copy:
         src: templates/60-ak47-tasksmax-user.conf
         dest: /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf
