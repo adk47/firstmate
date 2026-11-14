@@ -1887,6 +1887,50 @@ _ENC_QUERY = re.compile(r"\S*%[0-9A-Fa-f]{2}\S*")          # a URL-encoded query
 
 
 _ERR_HINT = re.compile(r"(FAILED|ERROR|refused|no readable|not set|timed out|Traceback|rc=\d+)", re.I)
+_TRACEBACK_HEAD = "Traceback (most recent call last)"
+# An exception's message can quote the command that failed (subprocess.CalledProcessError prints its argv), and a
+# curl argv carries the Authorization header. The reason is written to the tick log, the outcomes file and the
+# per-user read-failure row, so a credential in it is masked before it is kept anywhere.
+# QA on #1923 (second finding): a credential has no minimum length - `Basic YTpi` is a valid header (base64 of "a:b")
+# and an 8-character floor kept it whole. So there is no floor: the token after the word Bearer or Basic is masked
+# whatever its length. The cost is a word of prose after "basic"/"bearer" reading as elided; a lost word is cheaper
+# than a kept credential. The character class is RFC 6750's token68 (base64 and base64url are inside it).
+# What this does NOT mask: a credential sent under another scheme word, or with none. Every Authorization header the
+# gate and its helpers build is Bearer (comm_state, intercom_reconcile, judge, intercom-verify-request.sh), so that is
+# the shape that can reach a reason; masking "whatever follows Authorization:" was tried and left out because the
+# gate's api-log rows carry an `authorization:"captain approved ..."` field that is prose, not a credential.
+_CREDENTIAL = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+")
+
+
+def _traceback_exception(stderr: str) -> str:
+    """The exception a Python traceback on stderr ENDS with ('' when there is none).
+
+    [key=failure-names-itself] (2026-11-12): the 19:00Z tick's free uvn-status apply failed with 4 of 4 gate calls
+    recorded as 'rc=2 Traceback (most recent call last):' - the header, which is the one line of a traceback that
+    says nothing. The exception text was never kept, so the tick sent nobody and nothing on the box could say why.
+    A traceback's body is indented; the exception is the first line after the header that is not. With chained
+    tracebacks the LAST one is what the process died of."""
+    raw = str(stderr or "").splitlines()
+    found = ""
+    for i, ln in enumerate(raw):
+        if not ln.startswith(_TRACEBACK_HEAD):
+            continue
+        for nxt in raw[i + 1:]:
+            if nxt.strip() and not nxt[0].isspace():
+                found = nxt.strip()
+                break
+    return found
+
+
+def _kept_reason(text: str) -> str:
+    """What a failure reason looks like once it is safe to keep: one line, no credential, no encoded query.
+
+    QA on #1923: the mask was applied on one of _failure_text's two exits only, so a gate that failed with an EMPTY
+    stderr and a Bearer/Basic credential in its stdout (or in the caller's fallback) still wrote the token to the tick
+    log, the outcomes file and the per-user read-failure row. Every reason leaves through here, so a new exit cannot
+    skip it. The credential is masked BEFORE the cut to 300 characters: a cut first could leave a token's head."""
+    text = _CREDENTIAL.sub(lambda m: f"{m.group(1)} [credential elided]", " ".join(str(text or "").split()))
+    return _ENC_QUERY.sub("[query elided]", text)[:300]
 
 
 def _failure_text(res: Any, fallback: str = "") -> str:
@@ -1901,10 +1945,16 @@ def _failure_text(res: Any, fallback: str = "") -> str:
         text = " ".join(str(fallback or getattr(res, "stdout", "") or "").split())
         if not text:
             return f"rc={getattr(res, 'returncode', '?')} with no message"
-        return _ENC_QUERY.sub("[query elided]", text)[:300]
+        return _kept_reason(text)
     pick = next((ln for ln in lines if _ERR_HINT.search(ln) and not _ENC_QUERY.search(ln)), None) \
         or next((ln for ln in lines if _ERR_HINT.search(ln)), None) or lines[-1]
-    return _ENC_QUERY.sub("[query elided]", " ".join(pick.split()))[:300]
+    if pick.startswith(_TRACEBACK_HEAD):
+        # the header names nothing: keep the exception the traceback ends with (the header stays when a cut-off
+        # stderr holds no exception line - still a traceback, and never an invented cause)
+        exc = _traceback_exception(str(getattr(res, "stderr", "") or ""))
+        if exc:
+            pick = f"Traceback: {exc}"
+    return _kept_reason(pick)
 
 
 def hold_failed_users(db: Any, report: Report, campaign: str, *, now: Any = None) -> int:

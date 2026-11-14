@@ -1490,6 +1490,147 @@ class RunTests(unittest.TestCase):
         self.assertEqual(verify_notify._post_rejected_line("POST REJECTED by Intercom"), "POST REJECTED by Intercom")
         self.assertEqual(verify_notify._post_rejected_line("POST FAILED (curl rc=28)"), "")
 
+    def test_a_gate_call_that_dies_on_a_traceback_records_the_exception_not_the_header(self):
+        """[key=failure-names-itself] - the 2026-11-12 19:00Z tick: 4 of 4 gate calls in the free uvn-status apply
+        were recorded as 'rc=2 Traceback (most recent call last):' and nothing kept what they died of."""
+        decisions_db(self.path, [dec("r1"), dec("r2", pid=PID2)])
+        admin = FakeAdmin([req("r1"), req("r2", pid=PID2, email="b@example.com")])
+        tb = ("Traceback (most recent call last):\n"
+              '  File "/opt/hydra/scripts/credit_review/verify_ledger.py", line 2760, in <module>\n'
+              "    sys.exit(main())\n"
+              "             ~~~~^^\n"
+              '  File "/opt/hydra/scripts/credit_review/verify_ledger.py", line 431, in connect\n'
+              "    db.execute(\"BEGIN IMMEDIATE\")\n"
+              "sqlite3.OperationalError: attempt to write a readonly database\n")
+        fake = Fake({"jane@example.com": (2, "", tb), "b@example.com": (0, "VALID email credits=1", "")})
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="dry-run", runner=fake, wrapper="/w")
+        self.assertEqual(rep.failed_users, 1)
+        why = rep.failed_held[0]["reason"]
+        self.assertIn("sqlite3.OperationalError: attempt to write a readonly database", why)
+        self.assertNotIn("most recent call last", why, "the header is the one line that names nothing")
+        self.assertNotIn("BEGIN IMMEDIATE", why, "a frame's source line is not the cause")
+        self.assertEqual(rep.validated, 1, "the user after the failed one was still checked")
+
+    def test_failure_text_keeps_the_last_exception_of_a_chain_and_never_invents_one(self):
+        class R:
+            returncode = 2
+            stdout = ""
+
+            def __init__(self, stderr):
+                self.stderr = stderr
+
+        head = "Traceback (most recent call last):\n"
+        chained = (head + '  File "a.py", line 1, in f\n    raise KeyError("contact")\nKeyError: \'contact\'\n\n'
+                   "During handling of the above exception, another exception occurred:\n\n"
+                   + head + '  File "a.py", line 3, in g\n    raise RuntimeError("no Intercom contact to read")\n'
+                   "RuntimeError: no Intercom contact to read\n")
+        self.assertEqual(verify_notify._failure_text(R(chained)), "Traceback: RuntimeError: no Intercom contact to read")
+        # a stderr cut off inside the traceback has no exception line: the header stays, nothing is made up
+        cut = head + '  File "a.py", line 1, in f\n    raise KeyError("contact")\n'
+        self.assertEqual(verify_notify._failure_text(R(cut)), "Traceback (most recent call last):")
+        self.assertEqual(verify_notify._traceback_exception(cut), "")
+        self.assertEqual(verify_notify._traceback_exception("no traceback here"), "")
+        # an exception that quotes the failed command quotes its Authorization header: masked before it is kept
+        leak = (head + '  File "a.py", line 1, in f\n    subprocess.run(cmd, check=True)\n'
+                "subprocess.CalledProcessError: Command '['curl', '-H', 'Authorization: Bearer dG9rOmFiY2RlZjAxMjM0NQ==',"
+                " 'https://api.intercom.io/contacts/1']' returned non-zero exit status 28.\n")
+        kept = verify_notify._failure_text(R(leak))
+        self.assertNotIn("dG9rOmFiY2RlZjAxMjM0NQ", kept)
+        self.assertIn("Bearer [credential elided]", kept)
+        self.assertIn("returned non-zero exit status 28", kept)
+        # the gate's OWN sentence still wins when it comes first: only a header is ever replaced
+        own = "CORE NOTICE CHECK FAILED (rc=2); nothing was sent or claimed\n" + chained
+        self.assertEqual(verify_notify._failure_text(R(own)), "CORE NOTICE CHECK FAILED (rc=2); nothing was sent or claimed")
+
+    def test_a_credential_is_masked_on_every_exit_of_the_failure_text(self):
+        """QA on #1923: the mask sat on the stderr exit only. A gate that fails with an EMPTY stderr is described from
+        its stdout or the caller's fallback, and that exit kept a Bearer/Basic credential whole."""
+        class R:
+            returncode = 2
+
+            def __init__(self, stdout="", stderr=""):
+                self.stdout, self.stderr = stdout, stderr
+
+        token, basic = "dG9rOmFiY2RlZjAxMjM0NQ==", "dXNlcjpwYXNzd29yZDEyMw=="
+        curl = f"curl -H 'Authorization: Bearer {token}' https://api.intercom.io/contacts/1 returned 28"
+        # stderr empty, the credential on stdout
+        kept = verify_notify._failure_text(R(stdout=curl))
+        self.assertNotIn(token[:-2], kept)
+        self.assertIn("Bearer [credential elided]", kept)
+        self.assertIn("returned 28", kept, "the part a reader can act on is kept")
+        # stderr empty, the credential in the caller's fallback (which wins over stdout)
+        kept = verify_notify._failure_text(R(stdout="ignored"), f"proxy said: Authorization: Basic {basic} rejected")
+        self.assertNotIn(basic[:-2], kept)
+        self.assertIn("Basic [credential elided]", kept)
+        self.assertIn("rejected", kept)
+        # a credential that starts inside the first 300 characters is not left half-kept by the cut
+        kept = verify_notify._failure_text(R(stdout="x" * 285 + f" Bearer {token}"))
+        self.assertNotIn(token[:6], kept)
+        self.assertLessEqual(len(kept), 300)
+        # the stderr exit still masks, and the two exits still say what they said
+        self.assertIn("Bearer [credential elided]", verify_notify._failure_text(R(stderr=f"FAILED: {curl}")))
+        self.assertEqual(verify_notify._failure_text(R()), "rc=2 with no message")
+        self.assertEqual(verify_notify._failure_text(R(stdout="POST FAILED  (curl rc=28)")), "POST FAILED (curl rc=28)")
+
+    def test_a_gate_that_fails_with_no_stderr_never_records_its_credential(self):
+        """The same exit, reached the way the tick reaches it: through a gate call, into the reason that is written to
+        the outcomes file and the per-user read-failure row."""
+        decisions_db(self.path, [dec("r1")])
+        admin = FakeAdmin([req("r1")])
+        token = "dG9rOmFiY2RlZjAxMjM0NQ=="
+        fake = Fake({"jane@example.com": (2, f"curl: (28) timed out; -H 'Authorization: Bearer {token}'", "")})
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="dry-run", runner=fake, wrapper="/w")
+        self.assertEqual(rep.failed_users, 1)
+        why = rep.failed_held[0]["reason"]
+        self.assertNotIn(token[:-2], why)
+        self.assertIn("Bearer [credential elided]", why)
+        self.assertNotIn(token[:-2], rep.render("dry-run"), "the rendered report is what the tick log keeps")
+        self.assertNotIn(token[:-2], json.dumps(rep.failures))
+
+    def test_a_short_credential_is_masked_like_a_long_one(self):
+        """QA on #1923, second finding: the mask had an 8-character floor, and a credential has no minimum length.
+        `Basic YTpi` is base64 of "a:b" - a valid header - and it was kept whole."""
+        class R:
+            returncode = 2
+
+            def __init__(self, stdout="", stderr=""):
+                self.stdout, self.stderr = stdout, stderr
+
+        for scheme, token in (("Basic", "YTpi"), ("Bearer", "t0K"), ("bearer", "x"), ("BASIC", "YTpiYw=="),
+                              ("Bearer", "ab-cd_ef.gh~ij+kl/mn=")):
+            line = f"curl -H 'Authorization: {scheme} {token}' https://api.intercom.io/contacts/1 returned 28"
+            for label, res in (("stderr", R(stderr=f"FAILED: {line}")), ("stdout", R(stdout=line))):
+                with self.subTest(scheme=scheme, token=token, exit=label):
+                    kept = verify_notify._failure_text(res)
+                    self.assertNotIn(f"{scheme} {token}", kept)
+                    self.assertIn(f"Authorization: {scheme} [credential elided]'", kept,
+                                  "the whole token is replaced, up to the quote that closes the header")
+                    self.assertIn("returned 28", kept, "the part a reader can act on is kept")
+        # in the caller's fallback, and with nothing after the token
+        kept = verify_notify._failure_text(R(), "proxy said: Basic YTpi")
+        self.assertEqual(kept, "proxy said: Basic [credential elided]")
+        # a reason with no credential in it is kept word for word
+        plain = "CORE NOTICE CHECK FAILED (rc=2); nothing was sent or claimed"
+        self.assertEqual(verify_notify._failure_text(R(stderr=plain)), plain)
+
+    def test_a_gate_that_fails_never_records_a_short_credential(self):
+        """The short credential, reached the way the tick reaches it: through a gate call, on each stream, into the
+        reason kept in the outcomes, the rendered report and the failures list."""
+        for stream in ("stderr", "stdout"):
+            with self.subTest(stream=stream):
+                path = self.path + f".{stream}"
+                decisions_db(path, [dec("r1")])
+                admin = FakeAdmin([req("r1")])
+                line = "curl: (22) FAILED 401; -H 'Authorization: Basic YTpi'"
+                out = (2, "", line) if stream == "stderr" else (2, line, "")
+                rep = verify_notify.run(admin, ledger_path=path, mode="dry-run", runner=Fake({"jane@example.com": out}),
+                                        wrapper="/w")
+                self.assertEqual(rep.failed_users, 1)
+                why = rep.failed_held[0]["reason"]
+                self.assertIn("Basic [credential elided]", why)
+                for kept in (why, rep.render("dry-run"), json.dumps(rep.failures), json.dumps(rep.outcomes)):
+                    self.assertNotIn("YTpi", kept)
+
     def test_one_users_failed_read_holds_that_user_and_the_round_goes_on(self):
         """r5 / firstmate 764 - the 22Z round: ONE user's core read failed (a Trino query, recorded as a URL-encoded SQL
         fragment) and the r1 family - plus every claim family behind it - stopped for the night. The user is the unit of
