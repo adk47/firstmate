@@ -1081,26 +1081,31 @@ cw_beta_baseline_path() { printf '%s/beta-baseline\n' "$(cw_watch_dir "$1")"; }
 # The beta target's pre-merge rollout fingerprint, recorded before the wait so
 # the arrival of the merged sha can be proven rather than assumed. The record
 # carries the same fields the production landing gate reads.
-cw_beta_record_fingerprint() {  # <watch-id> <ns> <deploy>
-  local id=$1 target="$2/$3" images hashes fingerprint
-  images=$(cw_pod_fact "$2" "$3" 3 2>/dev/null || true)
-  hashes=$(cw_pod_fact "$2" "$3" 5 2>/dev/null || true)
+cw_beta_record_fingerprint() {  # <ns> <deploy>
+  local target="$1/$2" images hashes fingerprint
+  images=$(cw_pod_fact "$1" "$2" 3 2>/dev/null || true)
+  hashes=$(cw_pod_fact "$1" "$2" 5 2>/dev/null || true)
   fingerprint=''
   [ -z "$images$hashes" ] || fingerprint="$images|$hashes"
-  printf '%s\t%s\t%s\n' "$target" "$images" "$fingerprint" \
-    | cw_write "$(cw_beta_landed_path "$id")"
+  printf '%s\t%s\t%s\n' "$target" "$images" "$fingerprint"
 }
 
 # Wait, bounded, for the beta target to roll out the merged sha. Prints the
 # reason and returns 1 when the rollout is not proven inside the bound, so the
 # stage states an unmeasured beta instead of reading the pre-change pods.
 cw_beta_await_rollout() {  # <watch-id> <ns> <deploy>
-  local id=$1 ns=$2 deploy=$3 attempt=0 landed sleep_cmd
+  local id=$1 ns=$2 deploy=$3 attempt=0 landed sleep_cmd recorded landed_file
   sleep_cmd=${FM_CW_SLEEP_CMD:-sleep}
+  landed_file=$(cw_beta_landed_path "$id")
   while :; do
     cw_pod_facts_clear
+    recorded=$(awk -F'\t' -v t="$ns/$deploy" '$1 == t { print $2; exit }' "$landed_file" 2>/dev/null || true)
+    if [ -z "$recorded" ]; then
+      printf 'deploy landing unreadable: the beta target pod fingerprint could not be read at registration\n'
+      return 1
+    fi
     landed=0
-    cw_target_landed "$id" "$ns" "$deploy" "$(cw_beta_landed_path "$id")" || landed=$?
+    cw_target_landed "$id" "$ns" "$deploy" "$landed_file" || landed=$?
     case "$landed" in
       0) return 0 ;;
       2) ;;
@@ -1134,7 +1139,7 @@ cw_beta_capture_baseline() {  # <watch-id> <ns> <deploy> <since-epoch>
 "
   done
   [ "$err" = /dev/null ] || rm -f -- "$err" 2>/dev/null || true
-  printf '%s' "$out" | cw_write "$(cw_beta_baseline_path "$id")"
+  printf '%s' "$out"
 }
 
 cw_beta_baseline_value() {  # <watch-id> <metric> <target>
@@ -1169,7 +1174,7 @@ cw_beta_read() {  # <watch-id> <ns> <deploy> <since-epoch>
     elif [ -z "$baseline" ]; then
       reason='no beta baseline was readable for this metric, so the reading cannot be scored against the change'
       value=''
-    elif cw_metric_regressed "$metric" "$value" "$baseline" ''; then
+    elif cw_beta_metric_regressed "$metric" "$value" "$baseline"; then
       regressed=1
     fi
     printf 'reading\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -1185,6 +1190,7 @@ cw_beta_read() {  # <watch-id> <ns> <deploy> <since-epoch>
 cw_beta_stage() {  # <watch-id> <repo-name> <url> <provider> <owner> <repo> <number> <since-epoch>
   local id=$1 repo_name=$2 url=$3 provider=$4 owner=$5 repo=$6 number=$7 since=$8
   local files resolved targets ns deploy path readings='' cluster verdict blocked metric
+  local landed_rows='' baseline_rows=''
   local read_count=0 regressed_line='' unmeasured_reason='' targets_seen=''
   local gap_count=0 gap_metrics=''
   if ! files=$(cw_forge_files "$url" "$provider" "$owner" "$repo" "$number" 2>/dev/null); then
@@ -1212,11 +1218,17 @@ cw_beta_stage() {  # <watch-id> <repo-name> <url> <provider> <owner> <repo> <num
     [ -n "$ns" ] || continue
     targets_seen="$targets_seen${targets_seen:+, }$ns/$deploy"
     [ -n "$cluster" ] && continue
-    cw_beta_record_fingerprint "$id" "$ns" "$deploy"
-    cw_beta_capture_baseline "$id" "$ns" "$deploy" "$since"
+    landed_rows="$landed_rows$(cw_beta_record_fingerprint "$ns" "$deploy")"$'\n'
+    baseline_rows="$baseline_rows$(cw_beta_capture_baseline "$id" "$ns" "$deploy" "$since")"$'\n'
   done <<TARGETS
 $targets
 TARGETS
+  if [ -n "$landed_rows" ]; then
+    printf '%s' "$landed_rows" | cw_write "$(cw_beta_landed_path "$id")"
+  fi
+  if [ -n "$baseline_rows" ]; then
+    printf '%s' "$baseline_rows" | cw_write "$(cw_beta_baseline_path "$id")"
+  fi
   # Then wait for the merged sha to reach the beta target, and only then read.
   while IFS=$'\t' read -r ns deploy path; do
     [ -n "$ns" ] || continue
@@ -2201,6 +2213,14 @@ cw_metric_regressed() {  # <metric> <value> <baseline> <previous>
         'BEGIN { exit !((v+0) >= min && (v+0) > (b+0)) }' ;;
     deploy_run) awk -v v="$value" 'BEGIN { exit !((v+0) < 1) }' ;;
     *) return 1 ;;
+  esac
+}
+
+cw_beta_metric_regressed() {  # <metric> <value> <baseline>
+  case "$1" in
+    oomkilled) awk -v v="$2" -v b="$3" 'BEGIN { exit !((v+0) > (b+0)) }' ;;
+    rss_ratio) awk -v v="$2" -v b="$3" 'BEGIN { exit !((v+0) > (b+0) + 0.05) }' ;;
+    *) cw_metric_regressed "$1" "$2" "$3" '' ;;
   esac
 }
 

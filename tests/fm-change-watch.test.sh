@@ -1907,13 +1907,25 @@ esac
 pass "an unlanded beta rollout scores nothing"
 [ -s "$HOME_B5/arm.log" ] || fail "an unlanded beta rollout stopped the production watch from arming"
 pass "an unlanded beta rollout still arms the production watch"
+# A beta fingerprint that could not be read is no proof the merged sha landed,
+# so the stage states an unmeasured beta instead of reading the pre-change pods.
+HOME_B9=$(seed_beta_world b9)
+seed_clean_beta "$HOME_B9"
+out=$(FM_CW_SHIM_PODS_FAIL=1 run_beta "$HOME_B9" 1790000000 register b9 \
+  'https://github.com/Muso-AI/web-credits-next/pull/84') || fail "unreadable-fingerprint register failed"
+case "$out" in
+  *"beta: beta unmeasured: deploy landing unreadable:"*)
+    pass "a beta fingerprint that cannot be read is stated as unmeasured" ;;
+  *"beta clean"*) fail "an unproven beta rollout was read as clean: $out" ;;
+  *) fail "an unreadable beta fingerprint was not stated: $out" ;;
+esac
 
 # A beta target already above the absolute bar but unchanged is clean: the
 # verdict is relative to the beta baseline, never to an absolute bar.
 HOME_B6=$(seed_beta_world b6)
 seed_beta_series "$HOME_B6" restarts 0 0
-seed_beta_series "$HOME_B6" oomkilled 0 0
-seed_beta_series "$HOME_B6" rss_ratio 0.4 0.4
+seed_beta_series "$HOME_B6" oomkilled 2 2
+seed_beta_series "$HOME_B6" rss_ratio 0.86 0.86
 seed_beta_series "$HOME_B6" http_5xx_per_min 40 40
 seed_beta_series "$HOME_B6" p95_ms 900 900
 out=$(run_beta "$HOME_B6" 1790000000 register b6 \
@@ -1923,6 +1935,34 @@ case "$out" in
     pass "a beta target already above the absolute bar but unchanged is clean" ;;
   *) fail "the beta verdict used an absolute bar instead of the beta baseline: $out" ;;
 esac
+
+# Every beta target a change is served by keeps its own fingerprint and
+# baseline, so a second matching key cannot displace the first target's records.
+HOME_B8=$(seed_beta_world b8)
+seed_clean_beta "$HOME_B8"
+printf 'src muso-dev/web\n' > "$HOME_B8/config/change-watch-beta"
+printf 'muso-dev\tweb\t2\tregistry.muso.ai/muso/web:1.0.0\n' >> "$HOME_B8/workloads/workloads"
+for m in restarts oomkilled rss_ratio http_5xx_per_min p95_ms; do
+  case "$m" in
+    rss_ratio) b=0.4; v=0.4 ;;
+    p95_ms) b=100; v=100 ;;
+    *) b=0; v=0 ;;
+  esac
+  printf '%s\n' "$b" > "$HOME_B8/cluster/$m.muso-dev_web.baseline"
+  printf '%s\n' "$v" > "$HOME_B8/cluster/$m.muso-dev_web.sample"
+done
+out=$(run_beta "$HOME_B8" 1790000000 register b8 \
+  'https://github.com/Muso-AI/web-credits-next/pull/83') || fail "multi-target beta register failed"
+case "$out" in
+  *"beta: beta clean: 10 metric(s) read on muso-dev/credits-gate, muso-dev/web"*)
+    pass "every matching beta target is read, not only the last one" ;;
+  *) fail "a matching beta target lost its baseline or fingerprint: $out" ;;
+esac
+[ "$(awk -F'\t' 'NF { n++ } END { print n + 0 }' "$HOME_B8/state/change-watch/b8-83/beta-landed")" = 2 ] \
+  || fail "the beta fingerprints overwrote one another: $(cat "$HOME_B8/state/change-watch/b8-83/beta-landed")"
+[ "$(awk -F'\t' 'NF { n++ } END { print n + 0 }' "$HOME_B8/state/change-watch/b8-83/beta-baseline")" = 10 ] \
+  || fail "the beta baselines overwrote one another: $(cat "$HOME_B8/state/change-watch/b8-83/beta-baseline")"
+pass "each matched beta target keeps its own fingerprint and baseline"
 
 # A metric with no readable baseline is unmeasured, never scored against an
 # absolute bar, because an absolute bar is not evidence about the change.
