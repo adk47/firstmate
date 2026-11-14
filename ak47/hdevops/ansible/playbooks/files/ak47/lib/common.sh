@@ -352,6 +352,24 @@ swap_reclaim() {
   return "$rc"
 }
 
+# ak47_unit_start - ring a user unit without waiting for it.
+#
+# The long actions cannot live inside the tick: systemd would kill them at the
+# tick's start timeout, and a kill halfway through is exactly the state the
+# always-restore rule exists to avoid. The unit is rung with --no-block and the
+# tick records that it rang, not that it finished. AK47_SYSTEMCTL overrides the
+# binary so a test can watch what was rung.
+ak47_unit_start() {
+  local systemctl=${AK47_SYSTEMCTL:-systemctl}
+  "$systemctl" --user start --no-block "$1"
+}
+
+# ak47_unit_active - 0 when the named user unit is running right now.
+ak47_unit_active() {
+  local systemctl=${AK47_SYSTEMCTL:-systemctl}
+  "$systemctl" --user is-active --quiet "$1" 2>/dev/null
+}
+
 # swap_privileged - 0 when this process may actually stop and start swap.
 #
 # swapoff and swapon are root-only, and the tick runs as a user unit. Arming the

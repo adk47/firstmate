@@ -125,6 +125,28 @@ test_an_unprivileged_tick_says_so_instead_of_failing_to_swap() {
   pass "an unprivileged tick reports the missing privilege instead of failing to swap"
 }
 
+test_a_privileged_tick_rings_the_reclaim_and_does_not_swap_inline() {
+  # swapoff -a on a full swap takes tens of minutes, so a tick that ran it would
+  # be killed at its own start timeout - half way through, which is the one state
+  # the always-restore rule exists to avoid. A privileged tick must ring the
+  # separate unit and leave the swapping to it.
+  box=$(mktemp -d "${TMPDIR:-/tmp}/ak47-swapunit.XXXXXX")
+  printf '#!/bin/sh\necho "$*" >>"%s/systemctl.calls"\ncase "$*" in *is-active*) exit 3 ;; esac\nexit 0\n' "$box" >"$box/systemctl"
+  printf '#!/bin/sh\necho called >>"%s/swapoff.calls"\nexit 0\n' "$box" >"$box/swapoff"
+  printf '#!/bin/sh\nexit 0\n' >"$box/swapon"
+  chmod +x "$box/systemctl" "$box/swapoff" "$box/swapon"
+  printf 'SwapTotal:      33554428 kB\nSwapFree:         335544 kB\nMemAvailable:  90000000 kB\n' >"$box/meminfo"
+  sed -i 's/^swap_pressure=.*/swap_pressure=1/' "$SANDBOX/config/devops.conf"
+  PATH="$box:$PATH" AK47_SWAP_PRIVILEGE=yes AK47_SYSTEMCTL="$box/systemctl" \
+    AK47_SWAPON="$box/swapon" AK47_SWAPOFF="$box/swapoff" AK47_MEMINFO="$box/meminfo" \
+    AK47_DU_BUDGET=2 "$ROOT/ak47/tick.sh" --apply >"$box/tick.out" 2>&1
+  sed -i 's/^swap_pressure=.*/swap_pressure=0/' "$SANDBOX/config/devops.conf"
+  grep -q 'start --no-block ak47-swap-reclaim.service' "$box/systemctl.calls" 2>/dev/null \
+    || fail "a privileged tick did not ring ak47-swap-reclaim.service: $(tail -2 "$box/tick.out") $(cat "$box/systemctl.calls" 2>/dev/null)"
+  [ -s "$box/swapoff.calls" ] && fail "the tick ran swapoff inline instead of leaving it to the unit"
+  pass "a privileged tick rings the reclaim unit and never swaps inline"
+}
+
 test_swap_is_restored_even_when_the_reclaim_fails() {
   # swapoff -a && swapon -a has two failure modes that only appear when it goes
   # wrong: a tick killed between the two calls leaves the box with no swap, and
@@ -652,3 +674,4 @@ test_the_finding_class_is_one_the_inbox_accepts
 test_swap_is_restored_even_when_the_reclaim_fails
 test_swap_privilege_probes_the_granted_command
 test_an_unprivileged_tick_says_so_instead_of_failing_to_swap
+test_a_privileged_tick_rings_the_reclaim_and_does_not_swap_inline

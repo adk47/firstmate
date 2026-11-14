@@ -288,6 +288,7 @@
         - ak47-devops.timer
         - ak47-devops-weekly.service
         - ak47-devops-weekly.timer
+        - ak47-swap-reclaim.service
       register: ak47_units
 
     - name: Reload the user manager

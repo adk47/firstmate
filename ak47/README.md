@@ -334,10 +334,17 @@ nothing, and `oomctl` lists **no** monitored cgroups. Three verified reasons:
    unit has never read it. `daemon-reload` alone does not re-apply service
    properties to a running unit.
 
-**Swap reclamation needs root too.** The tick's `swap-pressure` action does
-`swapoff -a` then `swapon -a` through `sudo -n`; both are root-only, and the tick
-runs as a user unit, so it would WARN and count a failure every tick on a full
-swap while swap stayed full. It now proves the capability with `swap_privileged`
+**Swap reclamation needs root, and time.** The five-minute tick cannot do it at
+all: `swapoff -a` on a full 32 GB swap has to find a home in RAM for tens of
+gigabytes of pages, which takes tens of minutes, so an inline reclaim would be
+killed at the tick's start timeout — halfway through, which is exactly the state
+the always-restore rule exists to avoid. So the reclaim is now its own unit,
+`ak47-swap-reclaim.service`, and the tick only rings it with `--no-block` and
+records that it rang it. The unit owns the operation: bounded swapoff, swap back
+on whatever happened, one line in `swap.log`, and a finding when it could not
+finish. Both commands are root-only and the tick runs as a user unit, so it would
+otherwise WARN and count a failure every tick on a full swap while swap stayed
+full. It now proves the capability with `swap_privileged`
 by running one of the commands the sudoers rule actually grants, and files
 `swap-unprivileged` — the one line Aaron needs, not a transient error. A failed
 restore after a successful `swapoff` is reported as a failure rather than
@@ -520,7 +527,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-114 tests across seven files: the budget, the census, the guards, the guarded
+115 tests across seven files: the budget, the census, the guards, the guarded
 delete, the big-entry take-down, the tick, and the weekly review. They are
 hermetic — no tmux, no network, no live fleet state — and registered as
 `pure-contract-unit` in `bin/fm-test-run.sh`.

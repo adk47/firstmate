@@ -282,11 +282,19 @@ report_only() {
       # proves it can swap before it tries, and files the one line Aaron needs.
       if ! swap_privileged; then
         finding swap-unprivileged "swap ${sw}% full with ${mem} GB RAM free; reclaiming it needs root - grant it with the sudoers rule in ak47/README.md, or run: sudo swapoff -a && sudo swapon -a"
-      elif swap_reclaim; then
-        act "swap-pressure swap=${sw}% mem=${mem}G action='swapoff -a; swapon -a' reclaimed_gb=${AK47_SWAP_RECLAIMED:-0} revert='none needed: pages back in'"
       else
-        act "WARN swap-pressure swap=${sw}% action failed; left alone"
-        failures=$((failures + 1))
+        # swapoff -a on a full swap takes tens of minutes, far longer than this
+        # unit's own start timeout, so the reclaim is a unit of its own and the
+        # tick only rings it. Anything the tick did inline here would be killed
+        # halfway, which is the one state this whole design exists to avoid.
+        if ak47_unit_active ak47-swap-reclaim.service; then
+          act "swap-pressure swap=${sw}% mem=${mem}G action='swap-reclaim already running' revert='none needed: pages back in'"
+        elif ak47_unit_start ak47-swap-reclaim.service; then
+          act "swap-pressure swap=${sw}% mem=${mem}G action='started ak47-swap-reclaim.service' revert='none needed: pages back in; swap is restored when it finishes'"
+        else
+          act "WARN swap-pressure swap=${sw}% could not start ak47-swap-reclaim.service; left alone"
+          failures=$((failures + 1))
+        fi
       fi
     else
       finding swap-pressure "swap ${sw}% full with ${mem} GB RAM free; arm swap_pressure=1 in $AK47_CONFIG/devops.conf to reclaim it"
