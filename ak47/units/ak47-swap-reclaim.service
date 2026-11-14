@@ -9,7 +9,7 @@ After=local-fs.target
 Type=oneshot
 Environment=FM_HOME=%h/Projects/firstmate
 Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
-ExecStart=%h/Projects/firstmate/ak47/swap-reclaim.sh
+ExecStart=%h/.local/lib/ak47/swap-reclaim.sh
 # Tens of minutes is normal; the script bounds its own swapoff. systemd must not
 # kill it halfway, because the last thing it does is turn swap back on.
 TimeoutStartSec=infinity
