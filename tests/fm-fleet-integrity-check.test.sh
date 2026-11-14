@@ -554,12 +554,42 @@ test_hung_process_table_is_bounded_and_retried() {
   pass "a hung process-table read is bounded, silent, and retried on the next poll"
 }
 
+# A per-lane worktree resolve that wedges must be cut at the check's bound too,
+# leave the stamp untouched, and be retried by the next poll.
+test_wedged_worktree_resolution_is_bounded_and_retried() {
+  local d start elapsed out
+  d="$TMP_ROOT/wedged-resolve"
+  mkdir -p "$d/wt"
+  make_home "$d" "lane-a:$d/wt"
+  pwd() {
+    if [ -n "${FM_TEST_WEDGE_DIR:-}" ] && [ "$PWD" = "$FM_TEST_WEDGE_DIR" ]; then
+      sleep 300
+    fi
+    builtin pwd "$@"
+  }
+  export -f pwd
+  export FM_TEST_WEDGE_DIR="$d/wt"
+  start=$(date +%s)
+  out=$(FM_CHECK_TIMEOUT=4 run_check "$d")
+  elapsed=$(($(date +%s) - start))
+  unset -f pwd
+  unset FM_TEST_WEDGE_DIR
+  [ "$elapsed" -le 4 ] || fail "a wedged worktree resolve must be bounded, took ${elapsed}s"
+  [ -z "$out" ] || fail "a wedged worktree resolve is no evidence of death, got: $out"
+  [ "$(cat "$d/state/.fleet-integrity.last")" = 0 ] \
+    || fail "a poll that could not finish its verdict loop must not write its throttle stamp"
+  out=$(run_check "$d")
+  assert_contains "$out" "lane-a" "the next poll must retry the verdict and report the dead lane"
+  pass "a wedged worktree resolve is bounded, silent, and retried on the next poll"
+}
+
 test_lane_whose_record_is_symlinked_still_reads_live
 test_sibling_path_prefix_is_not_live
 test_unclassifiable_process_is_not_reported
 test_lane_whose_harness_vocabulary_cannot_name_is_not_reported
 test_unreadable_process_table_is_silent
 test_hung_process_table_is_bounded_and_retried
+test_wedged_worktree_resolution_is_bounded_and_retried
 test_squash_merged_and_deleted_lane_is_silent
 test_local_only_merged_lane_is_silent
 test_genuinely_unlanded_lane_is_reported

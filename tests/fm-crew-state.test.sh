@@ -193,18 +193,6 @@ spawn_live_agent() {  # <case-dir> <worktree>
   fm_spawn_live_agent_fixture "$1/agentbin" pi "$2"
 }
 
-# A live process shaped like the Gemini CLI: comm and argv[0] say node, and only
-# the script argument names gemini (measured shape in bin/fm-gemini-lib.sh).
-spawn_gemini_shaped_agent() {  # <case-dir> <worktree>
-  local d=$1 wt=$2 bin="$1/agentbin/node" script="$1/agentbin/gemini"
-  mkdir -p "$1/agentbin"
-  cp "$(command -v bash)" "$bin" || return 1
-  chmod +x "$bin" || return 1
-  printf 'read -r -t 300 _ < /dev/zero\n' >"$script" || return 1
-  ( cd "$wt" && exec "$bin" "$script" -y ) &
-  printf '%s\n' "$!"
-}
-
 # Clear the fake-driver vars and (re-)mark them exported, so the per-test plain
 # assignments below stay exported into the fakes without an `export VAR=$(...)`
 # command-substitution assignment (SC2155).

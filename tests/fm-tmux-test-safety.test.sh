@@ -91,7 +91,15 @@ test_rule_allows_only_a_proven_private_socket_directory() {
     fm_test_tmux_refuse_default_socket list-sessions) 2>/dev/null; then
     fail "a half-set private TMUX_TMPDIR pair must stay refused"
   fi
-  pass "the guard accepts only a matching non-empty private socket pair"
+  if (TMUX_TMPDIR=$d FM_TEST_TMUX_PRIVATE_TMPDIR=$d TMUX=/tmp/live-socket,1,0; \
+    fm_test_tmux_refuse_default_socket list-sessions) 2>/dev/null; then
+    fail "an inherited TMUX must be refused even with a matching private pair"
+  fi
+  TMUX_TMPDIR=$d FM_TEST_TMUX_PRIVATE_TMPDIR=$d bash -c \
+    '. "$1"; unset TMUX; fm_test_tmux_refuse_default_socket list-sessions' \
+    _ "$ROOT/tests/tmux-test-safety.sh" \
+    || fail "the matching private pair must be accepted once TMUX is absent"
+  pass "the guard accepts only a matching non-empty private socket pair with no inherited TMUX"
 }
 
 test_rule_refuses_command_option_socket_lookalike() {

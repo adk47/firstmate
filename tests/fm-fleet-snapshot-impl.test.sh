@@ -11,10 +11,10 @@
 #      tokens, and pauses; a ship worktree at detached HEAD; a gone worktree; a
 #      missing target; an Orca terminal absent from the inventory; PR and report
 #      hints; open decisions) and every delegated one (a record-backed busy
-#      verdict with a live agent in the worktree, the same record with no live
-#      agent, a ship branch with a run, including one older than the owner's
-#      bounded listing, a ship branch with no run, a Grok rendered-tail harness,
-#      a local secondmate, a remote secondmate).
+#      verdict with a live agent in the worktree, a ship branch with a run,
+#      including one older than the owner's bounded listing, a ship branch with
+#      no run, a Grok rendered-tail harness, a local secondmate, a remote
+#      secondmate).
 #   2. The runs ledger is read once per repository and reused inside
 #      FM_SNAPSHOT_RUNS_CACHE_SECS, and refreshed when the window is 0, while
 #      every ship branch still gets its own fresh `axi status` read.
@@ -159,8 +159,6 @@ git -C "$WT_DETACHED" checkout -q --detach
 
 orca_task busy pi scout "$WT_SCOUT"
 busy_record busy busy pi-ext
-orca_task busydead pi scout "$WT_DEAD"
-busy_record busydead busy pi-ext
 orca_task idle pi ship "$WT_SHIP" "pr=https://github.com/example/repo/pull/7"
 busy_record idle idle pi-ext
 printf 'working: first\n2026-10-16T01:02Z done: PR https://github.com/example/repo/pull/9 checks green\n\n' \
@@ -246,7 +244,7 @@ test_parity_json_and_home_summary() {
   # The fixture must really exercise the paths it claims, or parity is vacuous.
   local states
   states=$(jq -r '.tasks[] | "\(.id)=\(.current_state.state)/\(.current_state.source)"' "$TMP_ROOT/python--json.json")
-  for want in busy=working/pane busydead=working/pane idle=done/status-log keyed=paused/status-log \
+  for want in busy=working/pane idle=done/status-log keyed=paused/status-log \
     malformed=unknown/pane stalegen=unknown/pane untrusted=unknown/pane norecord=unknown/pane \
     resolvedonly=unknown/none gone=unknown/none shipgone=unknown/none detached=done/status-log \
     wtgone=unknown/none notarget=unknown/none \
@@ -259,6 +257,43 @@ test_parity_json_and_home_summary() {
   [ "$(jq '[.tasks[] | select(.id=="keyed") | .hints.open_decisions[]] | length' "$TMP_ROOT/python--json.json")" -ge 1 ] \
     || fail "the keyed fixture should carry open decisions"
   pass "fleet snapshot: the python and bash per-task passes print identical JSON in both modes"
+}
+
+test_busy_verdict_is_corroborated_against_the_process_table() {
+  local home spec id wt gen procs out
+  home="$TMP_ROOT/busy-corroboration"
+  mkdir -p "$home/state" "$home/wt-live" "$home/wt-dead"
+  for spec in "live:$home/wt-live" "gone:$home/wt-dead"; do
+    id=${spec%%:*}
+    wt=${spec#*:}
+    fm_write_meta "$home/state/task-$id.meta" \
+      "window=fm-task-$id" "endpoint_task_id=task-$id" "worktree=$wt" \
+      "project=$REPO" "harness=pi" "kind=scout" "mode=no-mistakes" "yolo=off" \
+      "spawn_gen=s-$id" "backend=orca" "orca_worktree_id=wt-$id" "terminal=term-cb-$id"
+    printf 'term-cb-%s\n' "$id" >> "$FAKE/orca-live"
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" "task-$id") \
+      || fail "could not arm the $id busy record"
+    "$ROOT/bin/fm-busy-event.sh" apply "$home/state" "task-$id" busy --gen "$gen" \
+      --source pi-ext --event x || fail "could not apply the $id busy record"
+  done
+  procs="$home/procs"
+  printf '900001\tpi\t%s\tpi\n' "$home/wt-live" > "$procs"
+  printf '900002\tbash\t%s\tbash\n' "$home/wt-dead" >> "$procs"
+
+  out=$(PATH="$FAKEBIN:$PATH" FM_FAKE="$FAKE" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_AGENT_PROC_TABLE="$procs" \
+    "$ROOT/bin/fm-crew-state.sh" task-live)
+  assert_contains "$out" "state: working" \
+    "a busy record with a live agent in the worktree must read working, got: $out"
+
+  out=$(PATH="$FAKEBIN:$PATH" FM_FAKE="$FAKE" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_AGENT_PROC_TABLE="$procs" \
+    "$ROOT/bin/fm-crew-state.sh" task-gone)
+  assert_contains "$out" "state: unknown" \
+    "a busy record with no live agent in the worktree must not read working, got: $out"
+  assert_contains "$out" "no live agent process" \
+    "the uncorroborated busy verdict must say why, got: $out"
+  pass "fleet snapshot: a busy record is corroborated against live agents in the process table"
 }
 
 test_runs_ledger_cached_per_repo() {
@@ -310,6 +345,7 @@ test_unknown_impl_refused() {
 }
 
 test_parity_json_and_home_summary
+test_busy_verdict_is_corroborated_against_the_process_table
 test_runs_ledger_cached_per_repo
 test_fold_reuse_matches_and_invalidates
 test_unknown_impl_refused

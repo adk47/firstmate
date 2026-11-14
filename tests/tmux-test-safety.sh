@@ -13,8 +13,11 @@
 # directory. The runner and tests/lib.sh both create such a directory and export
 # TMUX_TMPDIR and FM_TEST_TMUX_PRIVATE_TMPDIR to the same path; tmux itself
 # then keeps its default server inside that directory, away from the fleet.
-# Anything else is refused. The allowance is fail-closed: a blank, unset, or
-# mismatched pair re-enables the refusal.
+# An inherited TMUX names the socket tmux will actually use and takes precedence
+# over TMUX_TMPDIR, so it must be absent as well; the runner and tests/lib.sh
+# scrub it from the test environment. Anything else is refused. The allowance is
+# fail-closed: a blank, unset, or mismatched pair, or a set TMUX, re-enables the
+# refusal.
 #
 # ENFORCEMENT. bin/fm-test-run.sh installs the PATH shim below for every test
 # it launches and gives each launched test that private socket directory, so a
@@ -61,9 +64,11 @@ fm_test_tmux_global_socket() {
 
 # fm_test_tmux_socket_isolated: 0 when tmux's own socket directory is provably
 # a private throwaway one. Both variables must be non-empty and name the same
-# path; losing or mismatching either one re-enables the refusal.
+# path, and no inherited TMUX may name a socket tmux would prefer; losing or
+# mismatching either variable, or a set TMUX, re-enables the refusal.
 fm_test_tmux_socket_isolated() {
-  [ -n "${TMUX_TMPDIR:-}" ] \
+  [ -z "${TMUX:-}" ] \
+    && [ -n "${TMUX_TMPDIR:-}" ] \
     && [ -n "${FM_TEST_TMUX_PRIVATE_TMPDIR:-}" ] \
     && [ "$TMUX_TMPDIR" = "$FM_TEST_TMUX_PRIVATE_TMPDIR" ]
 }
@@ -78,7 +83,7 @@ fm_test_tmux_named_socket() {
 # socket; 1 (with a diagnostic on stderr) when it would reach the default one.
 fm_test_tmux_refuse_default_socket() {
   fm_test_tmux_named_socket "$@" && return 0
-  printf 'tmux test safety guard: refusing "tmux %s" - a test must name its own socket (-L <name> or -S <path>) or run in a proven private TMUX_TMPDIR; the default server is the live fleet\n' \
+  printf 'tmux test safety guard: refusing "tmux %s" - a test must name its own socket (-L <name> or -S <path>) or run in a proven private TMUX_TMPDIR with no inherited TMUX; the default server is the live fleet\n' \
     "$*" >&2
   return 1
 }

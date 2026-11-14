@@ -2156,6 +2156,9 @@ trap cleanup_run EXIT
 # value re-enables the refusal (fail closed).
 FM_TEST_TMUX_PRIVATE_TMPDIR="$RUN_TMP/tmux-socket"
 mkdir -p "$FM_TEST_TMUX_PRIVATE_TMPDIR"
+# An inherited TMUX would name the live fleet's socket and tmux prefers it over
+# TMUX_TMPDIR, so it must never reach a launched test.
+unset TMUX
 TMUX_TMPDIR=$FM_TEST_TMUX_PRIVATE_TMPDIR
 export TMUX_TMPDIR FM_TEST_TMUX_PRIVATE_TMPDIR
 

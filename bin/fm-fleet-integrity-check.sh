@@ -233,7 +233,7 @@ lane_landed_verdict() {  # <worktree> <branch> <pr> <seconds>
 
 action_check() {
   local now stamp interval rows ids wt id claim pr harness branch line findings extra dirty unpushed work
-  local landed_rc deadline remaining seconds scan_table
+  local landed_rc deadline remaining seconds scan_table scan_deadline verdict_rc
   now=$(now_epoch)
   interval=$(interval_secs)
   if [ -f "$STAMP" ] && [ ! -L "$STAMP" ]; then
@@ -252,24 +252,43 @@ action_check() {
   # trusted is silent, and it does not write the stamp: a broken or slow probe
   # must be retried on the next poll, never suppressed for the whole interval.
   scan_table=$(mktemp "$STATE/.fleet-integrity.proc.XXXXXX" 2>/dev/null) || return 0
+  scan_deadline=$(($(date +%s) + SCAN_CAP))
   # shellcheck disable=SC2016
   if ! fm_run_timed "$SCAN_CAP" bash -c '. "$1" || exit 2; fm_agent_proc_table > "$2"' \
     fm-agent-proc "$SCRIPT_DIR/fm-agent-proc-lib.sh" "$scan_table"; then
     rm -f -- "$scan_table" 2>/dev/null
     return 0
   fi
-  printf '%s\n' "$now" > "$STAMP" 2>/dev/null || true
 
   # The required line first: it comes from the bounded table read alone and is
   # printed and recorded before any optional claim comparison runs, so a slow
   # landed test can never starve the intent's one dead-lane wake. A table that
   # was read but holds no recognizable agent is death only when the lane's own
-  # harness is one the shared vocabulary can name.
+  # harness is one the shared vocabulary can name. Each lane's resolve is bounded
+  # by the same scan budget; a wedged resolve aborts the poll silently so the
+  # next interval retries instead of suppressing it with a stamp.
   ids=
   while IFS=$'\x1f' read -r id wt claim pr harness; do
     [ -n "$wt" ] || continue
-    FM_AGENT_PROC_TABLE=$scan_table fm_agent_proc_worktree_verdict "$wt"
-    case $? in
+    remaining=$((scan_deadline - $(date +%s)))
+    if [ "$remaining" -lt 1 ]; then
+      rm -f -- "$scan_table" 2>/dev/null
+      return 0
+    fi
+    # shellcheck disable=SC2016
+    fm_run_timed "$remaining" bash -c '
+      . "$1" || exit 2
+      . "$2" || exit 2
+      . "$3" || exit 2
+      FM_AGENT_PROC_TABLE=$4 fm_agent_proc_worktree_verdict "$5"
+    ' fm-agent-proc "$SCRIPT_DIR/fm-backend.sh" "$SCRIPT_DIR/fm-gemini-lib.sh" \
+      "$SCRIPT_DIR/fm-agent-proc-lib.sh" "$scan_table" "$wt" >/dev/null
+    verdict_rc=$?
+    if [ "$verdict_rc" -eq 124 ]; then
+      rm -f -- "$scan_table" 2>/dev/null
+      return 0
+    fi
+    case $verdict_rc in
       0) ;;
       1) fm_agent_proc_recognizes "$harness" || continue
          ids="${ids:+$ids,}$id" ;;
@@ -331,9 +350,12 @@ EOF
     findings="${findings:+$findings$'\n'}$extra"
   fi
 
-  [ -n "$findings" ] || { rm -f -- "$RECORD" 2>/dev/null; return 0; }
-
-  printf '%s\n' "$findings" > "$RECORD" 2>/dev/null || true
+  if [ -n "$findings" ]; then
+    printf '%s\n' "$findings" > "$RECORD" 2>/dev/null || true
+  else
+    rm -f -- "$RECORD" 2>/dev/null
+  fi
+  printf '%s\n' "$now" > "$STAMP" 2>/dev/null || true
 }
 
 action_status() {

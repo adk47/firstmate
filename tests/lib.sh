@@ -93,6 +93,9 @@ FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") 
 if [ -r "$ROOT/tests/tmux-test-safety.sh" ]; then
   # shellcheck source=tests/tmux-test-safety.sh
   . "$ROOT/tests/tmux-test-safety.sh"
+  # tmux prefers an inherited TMUX over TMUX_TMPDIR, so a hand-run test must not
+  # carry the live fleet's socket into its tmux invocations.
+  unset TMUX
   if [ -n "${FM_TEST_TMUX_SHIM_DIR:-}" ] && [ -x "$FM_TEST_TMUX_SHIM_DIR/tmux" ]; then
     case ":$PATH:" in
       *":$FM_TEST_TMUX_SHIM_DIR:"*) ;;

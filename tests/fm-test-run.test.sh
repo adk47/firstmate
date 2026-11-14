@@ -1529,12 +1529,15 @@ SH
 set -u
 [ -n "${TMUX_TMPDIR:-}" ] && [ "$TMUX_TMPDIR" = "${FM_TEST_TMUX_PRIVATE_TMPDIR:-}" ] \
   || { echo "not ok - the runner did not export a matching private socket pair"; exit 1; }
+[ -z "${TMUX:-}" ] \
+  || { echo "not ok - the runner leaked an inherited TMUX to the test"; exit 1; }
 tmux list-sessions
 echo "ok - bare tmux is confined to the runner's private socket directory"
 SH
   chmod +x "$repo/tests/fm-isolated-bare-tmux.test.sh"
   set +e
   (cd "$repo" && PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$tmp/contacted" \
+    TMUX=/tmp/live-fleet-socket,1,0 \
     bin/fm-test-run.sh tests/fm-isolated-bare-tmux.test.sh) >"$tmp/out" 2>"$tmp/err"
   rc=$?
   set -e
