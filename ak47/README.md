@@ -144,6 +144,37 @@ rather than a deletion. Expiry is also bounded per run by
 `quarantine_expire_max`, and the tick line carries `expire_pending=` so a
 deferred backlog is visible instead of looking like a stuck loop.
 
+### The big-entry take-down
+
+The tick only ever moves a name the producer table enumerates, behind a 24-hour
+idle gate. That is the right shape for routine hygiene and it is useless once
+`/tmp` has already grown to hundreds of GB: the biggest offenders are
+directories no producer row names (a scratch cache, a lane's dump, an eight-GB
+`chg/`), and none of them will ever shrink on their own.
+
+`ak47/tmp-takedown.sh` exists for that state, and it is deliberately narrow:
+
+- **size first** - it ranks `/tmp`'s top-level entries by size (one bounded `du`
+  per child, never a recursive walk of the whole tree) and works from the top;
+- **age, but never age alone** - an entry must be idle for the age gate *and*
+  hold no open handle *and* be outside every protected pattern *and* not be a
+  live task's scratch root *and* not be a mountpoint;
+- **quarantine, never delete** - every entry is renamed into a dated directory
+  under the ak47 state dir, and its exact `mv` revert is printed;
+- **bounded** - at most `AK47_TAKEDOWN_MAX` entries (default 20) per run.
+
+```
+$ ak47/tmp-takedown.sh --dry-run
+tmp-takedown: held or unprovable, leaving alone: /tmp/big (rc=0)
+tmp-takedown: DRY-RUN would quarantine /tmp/old-junk 7820KB idle=72h
+tmp-takedown: moved=0 skipped=4 failures=0 freed_gb=0
+```
+
+A run is a decision, not a sweep: the only reason this exists rather than a
+config knob on the tick is that the entries worth moving are ones the system
+cannot classify, so a human reads the plan before it happens.
+
+
 ## 4. The guards
 
 ```
@@ -379,8 +410,8 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-95 tests across six files: the budget, the census, the guards, the guarded
-delete, the tick, and the weekly review. They are hermetic — no tmux, no
+102 tests across seven files: the budget, the census, the guards, the guarded
+delete, the big-entry take-down, the tick, and the weekly review. They are hermetic — no tmux, no
 network, no live fleet state — and registered as `pure-contract-unit` in
 `bin/fm-test-run.sh`.
 
