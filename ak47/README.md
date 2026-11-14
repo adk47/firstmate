@@ -23,6 +23,59 @@ paying for it. This directory is the rest of the answer.
 | 5 | Codification and self-monitoring | `hdevops/`, and the tick's own `loop_gap` |
 | 6 | A weekly review that proposes diffs | `weekly-review.sh`, `units/ak47-devops-weekly.timer` |
 
+## The commands only Aaron can run
+
+Everything else in this file is code the tick runs as a user unit. These five
+things need root, so they are here in one block rather than scattered through the
+sections that explain them. Each carries its revert.
+
+```bash
+# 1. The task cap. The slice ceiling applies at once; the per-unit default is
+#    read when the user manager next starts, because restarting user@1000.service
+#    would restart every unit in the slice.
+u=ak47/hdevops/ansible/playbooks/templates
+sudo install -D -m644 "$u/60-ak47-tasksmax-slice.conf" \
+  /etc/systemd/system/user@1000.service.d/60-ak47-tasksmax-slice.conf
+sudo install -D -m644 "$u/60-ak47-tasksmax-user.conf" \
+  /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf
+sudo systemctl daemon-reload
+systemctl show -p TasksMax --value user@1000.service          # expect 24576
+grep -h DefaultTasksMax /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf
+# revert: sudo rm /etc/systemd/system/user@1000.service.d/60-ak47-tasksmax-slice.conf \
+#           /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf && sudo systemctl daemon-reload
+
+# 2. systemd-oomd, read fresh. The Nov-10 swap drop-in postdates the running
+#    manager, so restarting oomd is what makes it re-read the slice's policy.
+sudo systemctl restart systemd-oomd
+oomctl | sed -n '/Monitored CGroups/,$p'
+# revert: nothing to revert - a restart restores the same policy it read before
+
+# 3. Let oomd actually SEE the slice. Without this, oomctl lists no monitored
+#    cgroups at all and every oomd policy on this host is decoration. This is the
+#    opt-in one: with it, oomd may kill the largest cgroup under the slice after
+#    20s at 50% pressure, and that cgroup can be a worker or the chair.
+sudo systemctl set-property --runtime user@1000.service MemoryPressureWatch=on
+oomctl | sed -n '/Memory Pressure Monitored CGroups/,$p'      # expect the slice
+# persist it: printf '[Service]\nMemoryPressureWatch=on\n' | sudo tee \
+#   /etc/systemd/system/user@1000.service.d/60-ak47-oomd-mem.conf && sudo systemctl daemon-reload
+# revert: sudo systemctl set-property --runtime user@1000.service MemoryPressureWatch=skip \
+#         && sudo rm -f /etc/systemd/system/user@1000.service.d/60-ak47-oomd-mem.conf \
+#         && sudo systemctl daemon-reload
+
+# 4. Let the reclaim unit the tick rings stop and start swap. swapoff/swapon are
+#    root-only and the unit runs as this user, so today the tick can only report
+#    `swap-unprivileged`.
+printf 'aaron ALL=(root) NOPASSWD: /sbin/swapoff -a, /sbin/swapon -a\n' \
+  | sudo tee /etc/sudoers.d/60-ak47-swap
+sudo chmod 0440 /etc/sudoers.d/60-ak47-swap
+sudo visudo -c                                                  # expect: parsed OK
+# revert: sudo rm /etc/sudoers.d/60-ak47-swap
+
+# 5. The two sysctls, if this box was rebuilt rather than playbooked.
+sudo sysctl --system
+# revert: sudo rm /etc/sysctl.d/60-ak47-{swap,inotify}.conf && sudo sysctl --system
+```
+
 ## 1. The budget
 
 `~/.local/state/ak47/status.md` is one screen. Every metric against its ceiling,
@@ -110,11 +163,71 @@ The four classes in the table are armed by default. `dead-pane`,
 `stale-lock` and `disk` are report-only and never act. `swap-pressure` and
 `fat-process` are report-only until an operator sets `swap_pressure=1` or
 `fat_process=1` in `~/.config/ak47/devops.conf`; once armed, swap-pressure
-reclaims swap when RAM is free, and fat-process renices the process to 19,
+rings `ak47-swap-reclaim.service` when swap is at 70% or more with 20 GB RAM free,
+and fat-process renices the process to 19,
 sends `SIGTERM`, and sends `SIGKILL` if it survives five minutes.
 
 The agent wakes only for findings the table cannot settle, and at most once per
 six hours per finding key.
+
+### A bounded tick may not call an unbounded sampler
+
+`tmp_gb` needs `du`, and on 2026-11-14 `du` over 698 GB of `/tmp` stopped
+finishing at all. The value was cached, the cache went stale, and every run
+blocked inside the sampler until systemd killed the unit at its start timeout:
+five hours with no `devops.log` line, and nothing watching the tick's silence
+closely enough to notice. The tick is the sampler, so a sampler that can hang is
+a loop that can die.
+
+The walk now runs under `timeout` (`AK47_DU_BUDGET`, default 90 s). If it does
+not finish, the budget scores the last known size, and once that size is older
+than two refresh intervals the tick files `tmp-gb-stale` instead of letting a
+stale picture drive the sweep. The rule this leaves behind: **a budget metric
+whose sample is unbounded must return a number or say it could not measure** —
+never block, and never invent.
+
+The delete path had the same shape and the same cure. `safe-delete.sh` used
+`lsof -t +D` to prove nothing held a quarantined entry; that scan is recursive,
+so a quarantine directory worth deleting was exactly the size at which it ran
+past the unit's start timeout. The tick now builds **one** in-use set per run
+(`ak47_inuse_scan`: a single pass over every process's cwd, root, exe and open
+files, ~0.5 s on this box) and tests each candidate against it in constant time.
+An incomplete set — one without its completion marker — answers `2` (*could not
+tell*), never `1` (*free*), so the failure mode of the optimisation is a refusal
+rather than a deletion. Expiry is also bounded per run by
+`quarantine_expire_max`, and the tick line carries `expire_pending=` so a
+deferred backlog is visible instead of looking like a stuck loop.
+
+### The big-entry take-down
+
+The tick only ever moves a name the producer table enumerates, behind a 24-hour
+idle gate. That is the right shape for routine hygiene and it is useless once
+`/tmp` has already grown to hundreds of GB: the biggest offenders are
+directories no producer row names (a scratch cache, a lane's dump, an eight-GB
+`chg/`), and none of them will ever shrink on their own.
+
+`ak47/tmp-takedown.sh` exists for that state, and it is deliberately narrow:
+
+- **size first** - it ranks `/tmp`'s top-level entries by size (one bounded `du`
+  per child, never a recursive walk of the whole tree) and works from the top;
+- **age, but never age alone** - an entry must be idle for the age gate *and*
+  hold no open handle *and* be outside every protected pattern *and* not be a
+  live task's scratch root *and* not be a mountpoint;
+- **quarantine, never delete** - every entry is renamed into a dated directory
+  under the ak47 state dir, and its exact `mv` revert is printed;
+- **bounded** - at most `AK47_TAKEDOWN_MAX` entries (default 20) per run.
+
+```
+$ ak47/tmp-takedown.sh --dry-run
+tmp-takedown: held or unprovable, leaving alone: /tmp/big (rc=0)
+tmp-takedown: DRY-RUN would quarantine /tmp/old-junk 7820KB idle=72h
+tmp-takedown: moved=0 skipped=4 failures=0 freed_gb=0
+```
+
+A run is a decision, not a sweep: the only reason this exists rather than a
+config knob on the tick is that the entries worth moving are ones the system
+cannot classify, so a human reads the plan before it happens.
+
 
 ## 4. The guards
 
@@ -143,7 +256,8 @@ Without this, the source fix rots and the sweeper becomes load-bearing again.
 ## 5. Codification and self-monitoring
 
 `hdevops/apply.sh` lands the system in H-DevOps as a PR: the ak47 scripts,
-libraries, budget and producer table, the hygiene user timers, the two sysctls
+libraries, budget and producer table, the hygiene user timers, the on-demand
+swap-reclaim unit, the two sysctls
 that were hand-written on the box and recorded nowhere else, systemd-oomd
 with its swap and avoid drop-ins, the two task-cap drop-ins described in §5a,
 and the health beat that pages on swap and memory pressure as well as load and
@@ -197,21 +311,63 @@ Three changes, all landed by `hdevops/ansible/playbooks/07-ak47-hygiene.yml`:
    `pids_pct` is also a budget row, so the tick samples it every five minutes
    and the weekly review can propose moving it.
 
+### Why systemd-oomd does not watch this host, and the one line that changes it
+
+The swap drop-in is installed and `systemctl show user@1000.service` reports
+`ManagedOOMSwap=kill`, yet the 2026-11-10 lockup ran at 99% swap and oomd did
+nothing, and `oomctl` lists **no** monitored cgroups. Three verified reasons:
+
+1. **The slice is not watched.** `user@1000.service` resolves
+   `MemoryPressureWatch=skip`, so the kernel collects no memory pressure (PSI)
+   for it. oomd acts on pressure readings; with no reading there is nothing to
+   act on. The packaged
+   `/usr/lib/systemd/system/user@.service.d/10-oomd-user-service-defaults.conf`
+   sets `ManagedOOMMemoryPressure=kill` and a 50% limit, which is why the policy
+   looks armed — but the policy alone does not start the watch.
+   Proven on this box: a transient scope started with
+   `-p MemoryPressureWatch=on -p ManagedOOMMemoryPressure=kill` appears in
+   `oomctl` under "Memory Pressure Monitored CGroups" with live `Avg10`; the same
+   scope without the watch does not.
+2. **Swap pressure does not exist on this kernel.** `/proc/pressure/` has `cpu`,
+   `io` and `memory` and nothing else, so `ManagedOOMSwap=kill` can never fire
+   here. oomd's `Swap Used Limit: 90%` is the only swap lever and it is not
+   per-cgroup, so a slice that swaps instead of paging stays invisible.
+3. **The drop-in postdates the unit.** `user@1000.service` entered active at
+   2026-11-05 19:42 and the swap drop-in was installed 2026-11-10, so the running
+   unit has never read it. `daemon-reload` alone does not re-apply service
+   properties to a running unit.
+
+**Swap reclamation needs root, and time.** The five-minute tick cannot do it at
+all: `swapoff -a` on a full 32 GB swap has to find a home in RAM for tens of
+gigabytes of pages, which takes tens of minutes, so an inline reclaim would be
+killed at the tick's start timeout — halfway through, which is exactly the state
+the always-restore rule exists to avoid. So the reclaim is now its own unit,
+`ak47-swap-reclaim.service`, and the tick only rings it with `--no-block` and
+records that it rang it. The unit owns the operation: bounded swapoff, swap back
+on whatever happened, one line in `swap.log`, and a finding when it could not
+finish. Both commands are root-only and the tick runs as a user unit, so it would
+otherwise WARN and count a failure every tick on a full swap while swap stayed
+full. It now proves the capability with `swap_privileged`
+by running one of the commands the sudoers rule actually grants, and files
+`swap-unprivileged` — the one line Aaron needs, not a transient error. A failed
+restore after a successful `swapoff` is reported as a failure rather than
+swallowed, because that leaves the box with no swap.
+The 2026-11-14 reclaim was run by hand and took swap from 31.9 GB of 31.9 GB to
+0 (RAM 69 GB used, 54 GB available). To let the tick's reclaim unit do it,
+install the sudoers rule in item 4 of [The commands only Aaron can run](#the-commands-only-aaron-can-run).
+
+Aaron's call, not the tick's — enabling the watch lets oomd kill the largest
+cgroup under the slice after 20 s at 50% pressure, and that cgroup can be a
+worker, a lane, or the chair. The runtime opt-in, the persisted drop-in, and
+their reverts are item 3 of the same block.
+
 The per-unit default is read when the user manager starts, and restarting
 `user@1000.service` would restart every unit in the slice — the fleet-wide
 disruption this change exists to prevent. So it applies at the next login; the
-slice cap applies without one. Aaron's one-liner, if applying by hand:
-
-```
-sudo install -D -m644 ak47/hdevops/ansible/playbooks/templates/60-ak47-tasksmax-user.conf \
-  /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf
-sudo install -D -m644 ak47/hdevops/ansible/playbooks/templates/60-ak47-tasksmax-slice.conf \
-  /etc/systemd/system/user@1000.service.d/60-ak47-tasksmax-slice.conf
-sudo systemctl daemon-reload
-```
-
-Revert: remove both files and `sudo systemctl daemon-reload`. The bound returns
-to 12000 on the next unit start; nothing is restarted either way.
+slice cap applies without one. The install and revert lines, if applying by
+hand, are item 1 of [The commands only Aaron can run](#the-commands-only-aaron-can-run).
+The bound returns to 12000 on the next unit start; nothing is restarted either
+way.
 
 ## 6. The weekly review
 
@@ -227,6 +383,29 @@ unified diff against `budget.conf`:
 It writes the diff to `~/.local/state/ak47/review-<date>.diff` and files it. It
 never applies it, never adds a class to the tick's table, and never widens its
 own authority. A new action class needs the captain's word.
+
+### The review holds a ceiling it cannot justify
+
+The first live review proposed `swap_pct|126` (a percentage above 100),
+`tmp_gb|1` (lowered to the zero its sampler writes when the size walk fails) and
+`load15|39` from 14 samples in a week — because the loop had been dead. Each of
+those would have made the box worse: a ceiling at 100% pages forever, a 1 GB
+`/tmp` ceiling pages every tick, and a ceiling moved on 14 samples is a number
+invented. So the review now holds a row and says why, in the diff, where the
+next reader sees it:
+
+- **fewer than 168 samples** (one an hour for a week at the five-minute
+  interval) — `HELD load15: only 14 sample(s), fewer than 168`;
+- **a percentage whose p95 sits at its own maximum** — a raise cannot help, and
+  the honest output is "sustained at ceiling", not 126%;
+- **p95 of zero against a non-zero peak** — the sampler is not measuring, so the
+  value is missing, not quiet;
+- **a proposed raise that would sit below the observed peak** — that ceiling is
+  breached again the moment the box repeats itself.
+
+`HELD` rows and `CHANGE` rows are printed separately, and a review with only
+`HELD` rows still writes its diff, so a quiet review and a suppressed one never
+look the same.
 
 ## Safety
 
@@ -331,6 +510,7 @@ default. Absent keys take the default in the right-hand column.
 | `quarantine_days` | 7 | days a quarantined entry is kept before it is deleted for good |
 | `tmp_max_entries` | 5000 | stop working once `/tmp` is back under this many entries |
 | `tmp_max_moves` | 2000 | the most entries one run may move |
+| `quarantine_expire_max` | 200 | the most expired entries one run may delete; the rest wait, and the line says how many |
 | `swap_pressure` | 0 | arm the swap-pressure class: reclaim swap when RAM is free |
 | `fat_process` | 0 | arm the fat-process class: renice, `SIGTERM`, then `SIGKILL` after 5 min |
 | `fat_process_gb` | 3 | the RSS a process must hold to count as fat |
@@ -350,10 +530,10 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-89 tests across six files: the budget, the census, the guards, the guarded
-delete, the tick, and the weekly review. They are hermetic — no tmux, no
-network, no live fleet state — and registered as `pure-contract-unit` in
-`bin/fm-test-run.sh`.
+116 tests across seven files: the budget, the census, the guards, the guarded
+delete, the big-entry take-down, the tick, and the weekly review. They are
+hermetic — no tmux, no network, no live fleet state — and registered as
+`pure-contract-unit` in `bin/fm-test-run.sh`.
 
 ## Acceptance, after 7 days
 

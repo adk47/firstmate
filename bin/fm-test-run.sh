@@ -265,7 +265,7 @@ family_for_basename() {
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-reap.test.sh|\
     ak47-budget.test.sh|ak47-census.test.sh|ak47-guards.test.sh|\
     ak47-safe-delete.test.sh|ak47-tick.test.sh|ak47-weekly-review.test.sh|\
-    fm-fleet-integrity-check.test.sh|fm-tmux-test-safety.test.sh)
+    ak47-takedown.test.sh|fm-fleet-integrity-check.test.sh|fm-tmux-test-safety.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
@@ -578,6 +578,7 @@ list_portable_serial() {
 # balance rather than coverage. That doc owns the refresh procedure.
 portable_serial_weight_hints() {
   cat <<'EOF'
+tests/ak47-takedown.test.sh 4017
 tests/fm-afk-inject-e2e.test.sh 35792
 tests/fm-afk-pi-herdr-return-e2e.test.sh 100
 tests/fm-afk-return.test.sh 2316

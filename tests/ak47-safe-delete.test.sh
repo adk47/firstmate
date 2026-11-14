@@ -100,6 +100,62 @@ test_mount_hazard_ignores_an_unrelated_mount() {
 
 # --- handle check ---------------------------------------------------------------
 
+
+# --- the in-use set: one /proc scan instead of lsof +D per path ------------------
+# 2026-11-14: `lsof -t +D` on a quarantine directory of 800,000 files outlasted
+# the unit's start timeout, so the tick could not finish a run at all. The set is
+# the replacement, and it must be at least as strict as lsof was.
+
+test_the_in_use_set_sees_a_held_directory() {
+  local d=$TMP_ROOT/set-held set=$TMP_ROOT/set.held
+  mkdir -p "$d"
+  ( cd "$d" && sleep 5 ) &
+  local holder=$!
+  sleep 0.3
+  ak47_inuse_scan "$set" || { kill "$holder" 2>/dev/null; fail "ak47_inuse_scan failed"; }
+  local rc=0
+  AK47_INUSE_SET=$set ak47_has_open_handles "$d" || rc=$?
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  [ "$rc" -eq 0 ] || fail "the in-use set missed a directory a live process is sitting in (rc=$rc)"
+  pass "the in-use set sees a directory a live process is sitting in"
+}
+
+test_the_in_use_set_clears_an_unheld_directory() {
+  local d=$TMP_ROOT/set-free set=$TMP_ROOT/set.free
+  mkdir -p "$d"
+  ak47_inuse_scan "$set" || fail "ak47_inuse_scan failed"
+  local rc=0
+  AK47_INUSE_SET=$set ak47_has_open_handles "$d" || rc=$?
+  [ "$rc" -eq 1 ] || fail "the in-use set reported $rc for an unheld directory; expected 1 (free)"
+  pass "the in-use set clears a directory nothing holds"
+}
+
+test_an_incomplete_in_use_set_is_never_proof() {
+  # A scan that died halfway must not read as "nothing is held": remove the
+  # completion marker and the answer must be 2 (unknown), not 1 (free).
+  local d=$TMP_ROOT/set-partial set=$TMP_ROOT/set.partial
+  mkdir -p "$d"
+  : >"$set"
+  local rc=0
+  AK47_INUSE_SET=$set ak47_has_open_handles "$d" || rc=$?
+  [ "$rc" -eq 2 ] || fail "a markerless set answered $rc; expected 2 (could not tell)"
+  pass "an incomplete in-use set is unknown, never proof that nothing is held"
+}
+
+test_the_in_use_set_answers_without_lsof() {
+  # The whole point: no lsof at all. A PATH with no lsof must still answer.
+  local d=$TMP_ROOT/set-nolsof set=$TMP_ROOT/set.nolsof stub=$TMP_ROOT/stublsof
+  mkdir -p "$d" "$stub"
+  # An lsof that would answer "held" if it were ever called.
+  printf '#!/bin/sh\nexit 0\n' >"$stub/lsof"
+  chmod +x "$stub/lsof"
+  ak47_inuse_scan "$set" || fail "ak47_inuse_scan failed"
+  local rc=0
+  PATH="$stub:$PATH" AK47_INUSE_SET=$set ak47_has_open_handles "$d" || rc=$?
+  [ "$rc" -eq 1 ] || fail "the set answered $rc with a hostile lsof present; expected 1 (free)"
+  pass "the in-use set answers without lsof, which is what made the tick finish"
+}
+
 test_has_open_handles_sees_a_held_directory() {
   local d=$TMP_ROOT/held
   mkdir -p "$d"
@@ -256,3 +312,7 @@ test_safe_delete_refuses_a_mount_point
 test_safe_delete_restores_when_a_handle_appears_mid_move
 test_safe_delete_refuses_a_path_that_does_not_exist
 test_safe_delete_unlinks_a_symlink_without_following_it
+test_the_in_use_set_sees_a_held_directory
+test_the_in_use_set_clears_an_unheld_directory
+test_an_incomplete_in_use_set_is_never_proof
+test_the_in_use_set_answers_without_lsof

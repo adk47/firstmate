@@ -1,0 +1,17 @@
+[Unit]
+Description=ak47: reclaim swap, the slow half of swap pressure
+Documentation=file://%h/Projects/firstmate/ak47/README.md
+# Started on demand by the tick with --no-block. Deliberately not a timer: the
+# reclaim is only worth doing while the ceiling is breached.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+Environment=FM_HOME=%h/Projects/firstmate
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=%h/.local/lib/ak47/swap-reclaim.sh
+# Tens of minutes is normal; the script bounds its own swapoff. systemd must not
+# kill it halfway, because the last thing it does is turn swap back on.
+TimeoutStartSec=infinity
+Nice=19
+IOSchedulingClass=idle

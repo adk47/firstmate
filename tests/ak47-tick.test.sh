@@ -61,7 +61,223 @@ reset_tree() {
   write_config
 }
 
+
+# --- expiry must be bounded and must not shell out per directory ------------------
+# 2026-11-14: an expired quarantine dir large enough to matter made `lsof +D` run
+# past the unit's start timeout, so nothing was ever deleted and the loop logged
+# nothing. Both properties are asserted here.
+
+test_expiry_is_bounded_per_run_and_says_what_is_left() {
+  reset_tree
+  printf 'quarantine_expire_max=3\n' >>"$AK47_CONFIG/devops.conf"
+  local day=$AK47_STATE/quarantine/20200101 i
+  mkdir -p "$day"
+  for i in 1 2 3 4 5; do mkdir -p "$day/entry-$i"; printf 'x\n' >"$day/entry-$i/f"; done
+  "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero"
+  local left; left=$(find "$day" -mindepth 1 -maxdepth 1 | wc -l)
+  [ "$left" -eq 2 ] || fail "the per-run bound did not apply: $left of 5 entries remain, expected 2"
+  tail -n 1 "$AK47_STATE/devops.log" | grep -q 'expire_pending=2' \
+    || fail "the tick line does not say how many expired entries it deferred"
+  pass "expiry deletes at most quarantine_expire_max per run and reports the remainder"
+}
+
+test_expiry_does_not_run_lsof_per_entry() {
+  reset_tree
+  # A hostile lsof: if the tick consults it per quarantine entry, this exits
+  # non-zero with an error, which safe-delete reads as "could not tell" and the
+  # delete is refused. With the in-use set in place lsof is never called.
+  local stub=$SANDBOX/lsofstub day=$AK47_STATE/quarantine/20200101
+  mkdir -p "$stub" "$day/entry-1"
+  printf '#!/bin/sh\necho "lsof should not be called for a quarantine entry" >&2\nexit 2\n' >"$stub/lsof"
+  chmod +x "$stub/lsof"
+  printf 'x\n' >"$day/entry-1/f"
+  PATH="$stub:$PATH" "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero"
+  [ -e "$day/entry-1" ] && fail "the expired entry survived: the tick fell back to a per-entry lsof scan"
+  pass "the tick deletes an expired entry without running lsof on it"
+}
+
+
+test_an_unprivileged_tick_says_so_instead_of_failing_to_swap() {
+  # The tick is a user unit: swapoff and swapon are root-only. If it just tried,
+  # every tick on a full swap would WARN and count a failure while swap stayed
+  # full - a capability it does not have, reported as a transient error. It must
+  # prove it can swap first, then file the one line that grants the capability.
+  local box
+  box=$(mktemp -d "${TMPDIR:-/tmp}/ak47-swappriv.XXXXXX")
+  mkdir -p "$box/bin"
+  printf '#!/bin/sh\necho called >>"%s/swapoff.calls"\nexit 0\n' "$box" >"$box/bin/swapoff"
+  printf '#!/bin/sh\nexit 0\n' >"$box/bin/swapon"
+  chmod +x "$box/bin/swapoff" "$box/bin/swapon"
+  {
+    printf 'SwapTotal:      33554428 kB\n'
+    printf 'SwapFree:         335544 kB\n'
+    printf 'MemAvailable:   90000000 kB\n'
+  } >"$box/meminfo"
+  # The sandbox conf arms the reclaim, so the only thing stopping it is privilege.
+  sed -i 's/^swap_pressure=.*/swap_pressure=1/' "$SANDBOX/config/devops.conf"
+  PATH="$box/bin:$PATH" AK47_SWAP_PRIVILEGE=no AK47_MEMINFO="$box/meminfo" \
+    "$ROOT/ak47/tick.sh" --apply >/dev/null 2>&1
+  sed -i 's/^swap_pressure=.*/swap_pressure=0/' "$SANDBOX/config/devops.conf"
+  [ -s "$box/swapoff.calls" ] && fail "an unprivileged tick tried to run swapoff anyway"
+  grep -q '^.*swap-unprivileged ' "$SANDBOX/state/findings.log" 2>/dev/null \
+    || fail "the tick did not report that reclaiming swap needs root"
+  rm -rf "$box"
+  pass "an unprivileged tick reports the missing privilege instead of failing to swap"
+}
+
+test_a_privileged_tick_rings_the_reclaim_and_does_not_swap_inline() {
+  # swapoff -a on a full swap takes tens of minutes, so a tick that ran it would
+  # be killed at its own start timeout - half way through, which is the one state
+  # the always-restore rule exists to avoid. A privileged tick must ring the
+  # separate unit and leave the swapping to it.
+  box=$(mktemp -d "${TMPDIR:-/tmp}/ak47-swapunit.XXXXXX")
+  printf '#!/bin/sh\necho "$*" >>"%s/systemctl.calls"\ncase "$*" in *is-active*) exit 3 ;; esac\nexit 0\n' "$box" >"$box/systemctl"
+  printf '#!/bin/sh\necho called >>"%s/swapoff.calls"\nexit 0\n' "$box" >"$box/swapoff"
+  printf '#!/bin/sh\nexit 0\n' >"$box/swapon"
+  chmod +x "$box/systemctl" "$box/swapoff" "$box/swapon"
+  printf 'SwapTotal:      33554428 kB\nSwapFree:         335544 kB\nMemAvailable:  90000000 kB\n' >"$box/meminfo"
+  sed -i 's/^swap_pressure=.*/swap_pressure=1/' "$SANDBOX/config/devops.conf"
+  PATH="$box:$PATH" AK47_SWAP_PRIVILEGE=yes AK47_SYSTEMCTL="$box/systemctl" \
+    AK47_SWAPON="$box/swapon" AK47_SWAPOFF="$box/swapoff" AK47_MEMINFO="$box/meminfo" \
+    AK47_DU_BUDGET=2 "$ROOT/ak47/tick.sh" --apply >"$box/tick.out" 2>&1
+  sed -i 's/^swap_pressure=.*/swap_pressure=0/' "$SANDBOX/config/devops.conf"
+  grep -q 'start --no-block ak47-swap-reclaim.service' "$box/systemctl.calls" 2>/dev/null \
+    || fail "a privileged tick did not ring ak47-swap-reclaim.service: $(tail -2 "$box/tick.out") $(cat "$box/systemctl.calls" 2>/dev/null)"
+  [ -s "$box/swapoff.calls" ] && fail "the tick ran swapoff inline instead of leaving it to the unit"
+  pass "a privileged tick rings the reclaim unit and never swaps inline"
+}
+
+test_swap_is_restored_even_when_the_reclaim_fails() {
+  # swapoff -a && swapon -a has two failure modes that only appear when it goes
+  # wrong: a tick killed between the two calls leaves the box with no swap, and
+  # the next run's swapoff fails instantly because nothing is on - so the &&
+  # chain can never turn swap back on. Swap must be restored either way.
+  local box
+  box=$(mktemp -d "${TMPDIR:-/tmp}/ak47-swap.XXXXXX")
+  mkdir -p "$box/bin"
+  printf '#!/bin/sh\nexit 1\n' >"$box/bin/swapoff"
+  printf '#!/bin/sh\necho on >>"%s/swapon.calls"\n' "$box" >"$box/bin/swapon"
+  printf "#!/bin/sh\n[ \"\$1\" = -n ] && shift\necho \"\$*\" >>\"%s/sudo.calls\"\nexec \"\$@\"\n" "$box" >"$box/bin/sudo"
+  chmod +x "$box/bin/swapoff" "$box/bin/swapon" "$box/bin/sudo"
+  cat >"$box/reclaim.sh" <<'SH'
+. "$1/ak47/lib/common.sh"
+swap_reclaim
+printf 'rc=%s\n' "$?"
+SH
+  PATH="$box/bin:$PATH" AK47_STATE="$box/state" \
+    AK47_SWAPOFF="$box/bin/swapoff" AK47_SWAPON="$box/bin/swapon" \
+    bash "$box/reclaim.sh" "$ROOT" >/dev/null 2>&1
+  [ -s "$box/swapon.calls" ] || fail "a failed swapoff left swap off for good"
+  grep -q "$box/bin/swapoff" "$box/sudo.calls" 2>/dev/null \
+    || fail "swap_reclaim ran the root-only command without the documented sudo grant"
+  rm -rf "$box"
+  pass "swap is turned back on even when the reclaim itself fails"
+}
+
+test_swap_privilege_probes_the_granted_command() {
+  # The documented sudoers rule grants only /sbin/swapoff -a and /sbin/swapon -a.
+  # A probe of `sudo -n true` is outside that grant and always denied, so the
+  # capability must be proven with a command the rule actually carries.
+  local box
+  box=$(mktemp -d "${TMPDIR:-/tmp}/ak47-swappriv-probe.XXXXXX")
+  mkdir -p "$box/bin"
+  printf "#!/bin/sh\n[ \"\$1\" = -n ] && shift\ncase \"\$1\" in */swapon|*/swapoff) exit 0 ;; *) exit 1 ;; esac\n" \
+    >"$box/bin/sudo"
+  printf '#!/bin/sh\nexit 0\n' >"$box/bin/swapon"
+  chmod +x "$box/bin/sudo" "$box/bin/swapon"
+  cat >"$box/probe.sh" <<'SH'
+. "$1/ak47/lib/common.sh"
+swap_privileged
+SH
+  PATH="$box/bin:$PATH" AK47_STATE="$box/state" AK47_SWAPON="$box/bin/swapon" \
+    bash "$box/probe.sh" "$ROOT" \
+    || { rm -rf "$box"; fail "the privilege probe did not accept the grant the README installs"; }
+  rm -rf "$box"
+  pass "the swap privilege probe asks for a command the sudoers rule grants"
+}
+
+test_a_finding_is_delivered_to_the_real_inbox() {
+  # Every ak47 finding went undelivered for days because the tick filed under a
+  # class name fm-inbox does not have. The gate was honest - it logged
+  # DELIVERY-FAILED every run - but nothing was reading the gate's own log. This
+  # drives the real inbox: a finding must land as a record in its queue and the
+  # tick must not report a delivery failure.
+  reset_tree
+  [ -r "$ROOT/bin/fm-inbox.sh" ] || { pass "no fm-inbox.sh in this checkout, delivery check skipped"; return; }
+  cp "$ROOT/bin/fm-inbox.sh" "$FM_HOME/bin/fm-inbox.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$FM_HOME/bin/fm-wake-lib.sh"
+  chmod +x "$FM_HOME/bin/fm-inbox.sh"
+  # A lock naming a pid that cannot be alive triggers the stale-lock finding.
+  printf '999999999\n' >"$FM_HOME/state/.lock"
+  "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero while filing a finding"
+  local note
+  note=$(find "$FM_HOME/state/inbox-auto" -maxdepth 1 -name '*.note' -print -quit 2>/dev/null)
+  [ -n "$note" ] || fail "the tick's finding never reached the inbox"
+  grep -qx 'source=health' "$note" || fail "the finding was filed under a class the inbox rewrote"
+  grep -q 'state/.lock names pid' "$note" || fail "the delivered note does not carry the finding"
+  ! grep -q 'DELIVERY-FAILED' "$AK47_STATE/findings.log" 2>/dev/null \
+    || fail "the tick reported a delivery failure for a class the inbox accepts"
+  pass "a finding is delivered to the real inbox under an accepted class"
+}
+
 # --- the refusals ---------------------------------------------------------------
+
+
+# --- the sampler must be bounded -------------------------------------------------
+# 2026-11-14: `du` over 698 GB of /tmp stopped finishing, the cached value went
+# stale, and every run blocked until systemd TERMed the unit - hours of silence
+# with nothing in devops.log. A bounded tick may not call an unbounded sampler.
+
+test_a_size_walk_that_overruns_does_not_hang_the_tick() {
+  reset_tree
+  local slow=$SANDBOX/slowbin
+  mkdir -p "$slow"
+  printf '#!/bin/sh\nexec sleep 300\n' >"$slow/du"
+  chmod +x "$slow/du"
+  local start; start=$(date +%s)
+  PATH="$slow:$PATH" AK47_DU_BUDGET=2 "$TICK" --apply >/dev/null 2>&1 \
+    || fail "the tick exited non-zero when the size walk overran"
+  local took=$(( $(date +%s) - start ))
+  [ "$took" -lt 60 ] || fail "the tick blocked for ${took}s on a size walk that does not finish"
+  [ "$(wc -l <"$AK47_STATE/devops.log")" -eq 1 ] \
+    || fail "the tick did not write its line when the size walk overran"
+  pass "a size walk that overruns is cut off instead of hanging the tick"
+}
+
+test_an_unmeasurable_tree_is_a_finding_not_silence() {
+  reset_tree
+  local slow=$SANDBOX/slowbin2
+  mkdir -p "$slow"
+  printf '#!/bin/sh\nexec sleep 300\n' >"$slow/du"
+  chmod +x "$slow/du"
+  # A successful measurement from long ago, and a walk that no longer finishes.
+  printf 'tmp_gb\t%s\t999\n' $(( $(date +%s) - 100000 )) >"$AK47_STATE/sample.cache"
+  printf 'tmp_gb_ok\t%s\t%s\n' $(( $(date +%s) - 100000 )) $(( $(date +%s) - 100000 )) >>"$AK47_STATE/sample.cache"
+  PATH="$slow:$PATH" AK47_DU_BUDGET=2 AK47_DU_TTL=60 "$TICK" --apply >/dev/null 2>&1 \
+    || fail "the tick exited non-zero with a stale size cache"
+  grep -q tmp-gb-stale "$AK47_STATE/findings.log" 2>/dev/null \
+    || fail "an unmeasurable /tmp produced no finding; the sweep would choose from a stale picture"
+  pass "a tree that can no longer be measured is reported, not silently scored"
+}
+
+test_a_failed_size_walk_is_retried_once_its_window_elapses() {
+  reset_tree
+  local slow=$SANDBOX/slowbin3
+  mkdir -p "$slow"
+  printf '#!/bin/sh\necho x >>"%s/du-calls"\nexit 1\n' "$slow" >"$slow/du"
+  chmod +x "$slow/du"
+  PATH="$slow:$PATH" AK47_DU_BUDGET=2 "$TICK" --apply >/dev/null 2>&1 \
+    || fail "the tick exited non-zero when the first size walk failed"
+  [ "$(wc -l <"$slow/du-calls")" -ge 1 ] || fail "the first failed walk was not attempted"
+  local calls; calls=$(wc -l <"$slow/du-calls")
+  # Inside the retry window the fallback is used; once it elapses the walk is
+  # due again even though the fallback value is still cached.
+  PATH="$slow:$PATH" AK47_DU_BUDGET=2 AK47_DU_RETRY=0 "$TICK" --apply >/dev/null 2>&1 \
+    || fail "the tick exited non-zero when retrying the size walk"
+  [ "$(wc -l <"$slow/du-calls")" -gt "$calls" ] \
+    || fail "the failed walk was never retried after its window elapsed"
+  pass "a failed size walk is retried once its window elapses"
+}
 
 test_refuses_a_directory_a_live_process_is_sitting_in() {
   reset_tree
@@ -478,3 +694,13 @@ test_a_dry_run_does_not_consume_the_escalation
 test_commits_a_finding_key_only_after_delivery
 test_delivery_commits_the_key_so_the_next_tick_is_quiet
 test_reports_a_dry_run_that_outlived_its_24_hours
+test_a_size_walk_that_overruns_does_not_hang_the_tick
+test_an_unmeasurable_tree_is_a_finding_not_silence
+test_a_failed_size_walk_is_retried_once_its_window_elapses
+test_expiry_is_bounded_per_run_and_says_what_is_left
+test_expiry_does_not_run_lsof_per_entry
+test_a_finding_is_delivered_to_the_real_inbox
+test_swap_is_restored_even_when_the_reclaim_fails
+test_swap_privilege_probes_the_granted_command
+test_an_unprivileged_tick_says_so_instead_of_failing_to_swap
+test_a_privileged_tick_rings_the_reclaim_and_does_not_swap_inline
