@@ -84,10 +84,14 @@ A status log with no task record reads `unowned`, with how recently it was writt
 A run head the task copy cannot resolve locally is attributed only when the pipeline's own runs ledger proves it is an active continuation of the submitted head, so a pipeline fix round never reads as an older failed run.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
-Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
+Only when no matching run exists does it consult semantic busy state; exact busy permits the corroborated working verdict described below, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
 The semantic branch reports working only on an exact busy verdict and names the source that produced it; an unknown verdict never becomes working, never permits the status-log fallback, and never becomes a silent idle.
+Any busy verdict is corroborated against a live process before it may read working, because both the stored `state/<id>.busy-state` record and a pull of the harness's own artifact survive a hard kill and on their own report a corpse as working - the 2026-11-05 failure, where the fleet lost roughly 27 lanes while three successive health reads counted 11, then 15, then 27 dead.
+[`bin/fm-agent-proc-lib.sh`](../bin/fm-agent-proc-lib.sh) owns that corroboration: a live process whose current working directory is the lane's recorded worktree and whose process classifies as an agent through the shared name-and-arguments vocabulary, from one bounded read-only scan.
+A busy verdict with no such process reads unknown/stale, and an unreadable process table reads unknown.
+[`bin/fm-fleet-integrity-check.sh`](../bin/fm-fleet-integrity-check.sh) is the fleet-wide backstop over the same rule.
 For whole-fleet review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, local current crew state, supervision-owned endpoint evidence, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 Each home atomically publishes that bounded home summary with freshness epoch metadata at `state/home-summary.json` after a locked session start, a watcher-observed status change, task spawn, task teardown, and on a recurring live-watcher cadence, keeping at most one refresh in flight across watcher generations; `bin/fm-home-summary-refresh.sh` owns the publication mechanics.
 The fleet snapshot and Bearings paths use the concurrent remote-ledger collection, cache, unreadable-home disclosure, and remote-liveness boundary owned by `bin/fm-fleet-snapshot.sh`'s header.
@@ -175,7 +179,8 @@ Codex and standalone Kimi classify unknown behind explicit probes until a semant
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
-Endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
+Within that classification, endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
+Readers apply one further process-level condition, owned by `bin/fm-agent-proc-lib.sh`, before a busy verdict may read working, as described above where `bin/fm-crew-state.sh` reads busy state.
 `state/<id>.turn-ended` files remain wake notifications, not current state.
 A secondmate spawn arms the same busy-state contract but deliberately omits its harness turn-end notification, because a mate's meta lives in the parent's state directory and each touch there would wake the parent firstmate; the wake-stall rung reads the busy record instead.
 
@@ -321,7 +326,7 @@ A confirmed merge leaves a durable role-routed outcome instead of living only in
 The same emitter handles a merge firstmate performed and one its poll detected, while the watcher immediately delivers the emitter's local actionable poll row.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 Before the worktree is returned, teardown concludes the task's own no-mistakes run when it is parked at a gate, including a run whose head the task copy cannot resolve - the shared runs-ledger continuation proof is the only recognition for that case, so cleanup never orphans a parked run the pipeline advanced past the submitted head.
-[`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, pre-teardown run conclusion, and stale-lock recovery procedure.
+[`bin/fm-landed-lib.sh`](../bin/fm-landed-lib.sh) is the single owner of the landed-work proofs, so teardown and the fleet-integrity check apply the same rule; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the PR-discovery fallback, pre-teardown run conclusion, and stale-lock recovery procedure.
 
 ## Post-merge change watch
 

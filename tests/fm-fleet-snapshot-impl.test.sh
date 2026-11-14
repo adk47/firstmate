@@ -6,14 +6,15 @@
 # Pins, through the real executable over one fixture home:
 #   1. Parity: both passes print byte-identical normalized JSON in --json and
 #      --secondmate-home-summary modes over a fixture that exercises every
-#      native classification path (busy, idle, malformed, gen-mismatch, and
-#      untrusted busy records; status-log fallbacks with keys, timestamps,
-#      correlation tokens, and pauses; a ship worktree at detached HEAD; a
-#      gone worktree; a missing target; an Orca terminal absent from the
-#      inventory; PR and report hints; open decisions) and every delegated one
-#      (a ship branch with a run, including one older than the owner's bounded
-#      listing, a ship branch with no run, a Grok rendered-tail harness, a
-#      local secondmate, a remote secondmate).
+#      native classification path (idle, malformed, gen-mismatch, and untrusted
+#      busy records; status-log fallbacks with keys, timestamps, correlation
+#      tokens, and pauses; a ship worktree at detached HEAD; a gone worktree; a
+#      missing target; an Orca terminal absent from the inventory; PR and report
+#      hints; open decisions) and every delegated one (a record-backed busy
+#      verdict with a live agent in the worktree, a ship branch with a run,
+#      including one older than the owner's bounded listing, a ship branch with
+#      no run, a Grok rendered-tail harness, a local secondmate, a remote
+#      secondmate).
 #   2. The runs ledger is read once per repository and reused inside
 #      FM_SNAPSHOT_RUNS_CACHE_SECS, and refreshed when the window is 0, while
 #      every ship branch still gets its own fresh `axi status` read.
@@ -140,6 +141,12 @@ busy_record() {  # <id> <state> <source> [gen-in-record]
     > "$STATE/$1.busy-state"
 }
 
+# A live process whose cwd is <worktree> and whose name classifies as an agent,
+# so a record-backed busy verdict is corroborated by fm-crew-state.sh.
+spawn_live_agent() {  # <dir> <worktree>
+  fm_spawn_live_agent_fixture "$1/agentbin" pi "$2" >/dev/null
+}
+
 : > "$FAKE/orca-live"
 WT_SCOUT=$(add_worktree scout fm/scout)
 WT_SHIP=$(add_worktree ship fm/ship-native)
@@ -199,6 +206,8 @@ fm_write_meta "$STATE/far.meta" "window=fm-far" "endpoint_task_id=far" "worktree
   "remote_backend=tmux" "remote_target=fmses:fm-far" "home=/srv/fm/far"
 printf 'done: remote mate idle\n' > "$STATE/far.status"
 
+spawn_live_agent "$TMP_ROOT" "$WT_SCOUT" || fail "could not spawn the live agent fixture"
+
 RUN_SHA=$(git -C "$WT_RUN" rev-parse --short HEAD)
 printf 'completed fm/run-branch %s 2026-10-15 10:00 https://github.com/example/repo/pull/3\n' "$RUN_SHA" \
   > "$FAKE/runs"
@@ -247,6 +256,43 @@ test_parity_json_and_home_summary() {
   [ "$(jq '[.tasks[] | select(.id=="keyed") | .hints.open_decisions[]] | length' "$TMP_ROOT/python--json.json")" -ge 1 ] \
     || fail "the keyed fixture should carry open decisions"
   pass "fleet snapshot: the python and bash per-task passes print identical JSON in both modes"
+}
+
+test_busy_verdict_is_corroborated_against_the_process_table() {
+  local home spec id wt gen procs out
+  home="$TMP_ROOT/busy-corroboration"
+  mkdir -p "$home/state" "$home/wt-live" "$home/wt-dead"
+  for spec in "live:$home/wt-live" "gone:$home/wt-dead"; do
+    id=${spec%%:*}
+    wt=${spec#*:}
+    fm_write_meta "$home/state/task-$id.meta" \
+      "window=fm-task-$id" "endpoint_task_id=task-$id" "worktree=$wt" \
+      "project=$REPO" "harness=pi" "kind=scout" "mode=no-mistakes" "yolo=off" \
+      "spawn_gen=s-$id" "backend=orca" "orca_worktree_id=wt-$id" "terminal=term-cb-$id"
+    printf 'term-cb-%s\n' "$id" >> "$FAKE/orca-live"
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" "task-$id") \
+      || fail "could not arm the $id busy record"
+    "$ROOT/bin/fm-busy-event.sh" apply "$home/state" "task-$id" busy --gen "$gen" \
+      --source pi-ext --event x || fail "could not apply the $id busy record"
+  done
+  procs="$home/procs"
+  printf '900001\tpi\t%s\tpi\n' "$home/wt-live" > "$procs"
+  printf '900002\tbash\t%s\tbash\n' "$home/wt-dead" >> "$procs"
+
+  out=$(PATH="$FAKEBIN:$PATH" FM_FAKE="$FAKE" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_AGENT_PROC_TABLE="$procs" \
+    "$ROOT/bin/fm-crew-state.sh" task-live)
+  assert_contains "$out" "state: working" \
+    "a busy record with a live agent in the worktree must read working, got: $out"
+
+  out=$(PATH="$FAKEBIN:$PATH" FM_FAKE="$FAKE" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_AGENT_PROC_TABLE="$procs" \
+    "$ROOT/bin/fm-crew-state.sh" task-gone)
+  assert_contains "$out" "state: unknown" \
+    "a busy record with no live agent in the worktree must not read working, got: $out"
+  assert_contains "$out" "no live agent process" \
+    "the uncorroborated busy verdict must say why, got: $out"
+  pass "fleet snapshot: a busy record is corroborated against live agents in the process table"
 }
 
 test_runs_ledger_cached_per_repo() {
@@ -298,6 +344,7 @@ test_unknown_impl_refused() {
 }
 
 test_parity_json_and_home_summary
+test_busy_verdict_is_corroborated_against_the_process_table
 test_runs_ledger_cached_per_repo
 test_fold_reuse_matches_and_invalidates
 test_unknown_impl_refused

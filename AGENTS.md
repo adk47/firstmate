@@ -31,7 +31,7 @@ Hard rules, in priority order:
 2. **Never merge a PR without the captain's explicit word.**
    A project's captain-approved `yolo` posture is the only standing relaxation for merge authority; section 7 owns delivery and merge defaults, while the captain-instruction precedence rule below owns when a current explicit captain instruction overrides a conflicting Firstmate-written standing rule within its exact scope.
 3. **Never tear down unlanded work.**
-   Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
+   Uncommitted changes are never landed, and `bin/fm-landed-lib.sh` owns the complete landed-work test that `bin/fm-teardown.sh` enforces.
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
    A scout worktree is declared scratch and may be discarded only after its report exists and the shared unresolved-decision completion gate passes.
 4. **Crewmates never address the captain.**
@@ -135,6 +135,7 @@ state/               runtime records and signals; gitignored
   fable-runway.check.sh  generated Fable-runway poll shim and its .check-trust binding; present only after bin/fm-fable-runway-check.sh arm; its record .fable-runway, the once-per-episode marker .fable-runway-handoff, and the captain's handoff notes fable-runway-handoff-<epoch>.md are owned by that check and bin/fm-fable-runway-alert.sh (docs/configuration.md "Fable runway monitor")
   fleet-stall.check.sh  generated fleet-stall poll shim and its .check-trust binding; present only after bin/fm-fleet-stall-check.sh arm; its record .fleet-stall.json goes with disarm (docs/configuration.md "Fleet stall watch")
   board-audit.check.sh  generated board-audit poll shim and its .check-trust binding; present only after bin/fm-board-audit.sh arm; its record .board-audit goes with disarm (docs/configuration.md "Board loop")
+  fleet-integrity.check.sh  generated fleet-integrity poll shim and its .check-trust binding; present only after bin/fm-fleet-integrity-check.sh arm; its record .fleet-integrity and throttle stamp .fleet-integrity.last go with disarm (docs/configuration.md "Fleet integrity check")
   sentry-watch.check.sh  generated Sentry watch poll shim and its .check-trust binding; present only after bin/fm-sentry-watch.sh arm; its beat .sentry-watch.beat, armed marker .sentry-watch.armed, and rail record .sentry-watch.rail.json go with disarm, while the shared seen-set sentry-watch.baseline.json survives disarm because the Sentry mobile scout reads it (docs/configuration.md "Sentry watch")
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (section 13)

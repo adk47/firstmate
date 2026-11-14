@@ -116,6 +116,7 @@ Sampling less often does not remove that wait, it only delays detection: raising
 Some of those loops are also catching a transient rather than waiting for a settled condition, so a coarser sample can step over the state they assert on.
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
 Shared test helpers live in `tests/lib.sh` (reporters, temp roots, git fixtures), `tests/fixtures.sh` (fake toolchain and spawn-world builders), `tests/wake-helpers.sh`, and `tests/secondmate-helpers.sh`.
+A test that invokes `tmux` goes through the hard default-socket guard in `tests/tmux-test-safety.sh`, whose header owns how it is installed and called: the runner and `tests/lib.sh` give every suite a private socket directory and a refusing PATH shim, so a test may destroy its own throwaway server but never the fleet's.
 Source those instead of copying a fake toolchain into a new suite.
 A fixture may shorten a production timeout to keep a failure path prompt, but never below what the real work inside that window costs on a loaded machine: a fork, an exec, a lock acquisition, a beacon publication, or a first-poll check.
 Where a case's assertion is not about the timeout itself, give that window headroom over the measured loaded cost, and bound the test's own waiting with iteration-counted poll loops, which stretch under load where a wall-clock budget does not.

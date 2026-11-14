@@ -1403,6 +1403,229 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+# The re-entry sentinel: a test may invoke the runner (this file does), but a
+# run may never select a script that is already running in its own process
+# ancestry. On 2026-11-05 a run was observed recursing three deep this way,
+# each level re-selecting the suite that contains the test that invokes the
+# runner.
+test_reentry_sentinel_refuses_self_selection() {
+  local tmp repo rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reentry.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  # A test that re-invokes the runner selecting ITSELF: the exact recursion.
+  cat >"$repo/tests/fm-self.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+root=$(cd "$(dirname "$0")/.." && pwd)
+"$root/bin/fm-test-run.sh" tests/fm-self.test.sh
+SH
+  chmod +x "$repo/tests/fm-self.test.sh"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-self.test.sh) \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "a run that selects a script already running in its ancestry must be refused"; }
+  grep -Fq 're-entry refused' "$tmp/out" "$tmp/err" \
+    || { rm -rf "$tmp"; fail "the refusal must name re-entry: $(cat "$tmp/out" "$tmp/err")"; }
+  grep -Fq 'tests/fm-self.test.sh' "$tmp/out" "$tmp/err" \
+    || { rm -rf "$tmp"; fail "the refusal must name the offending script"; }
+  rm -rf "$tmp"
+  pass "the re-entry sentinel refuses a run that would select itself"
+}
+
+# The same recursion, but the outer run spells the path differently from the
+# nested selection. Both sides must normalize to the same script, or the
+# sentinel misses and the script runs a second time before the next level
+# catches it.
+test_reentry_sentinel_refuses_differently_spelled_self_selection() {
+  local tmp repo rc runs
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reentry-spelling.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/fm-self.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+root=$(cd "$(dirname "$0")/.." && pwd)
+printf 'ran\n' >>"$root/ran.log"
+"$root/bin/fm-test-run.sh" tests/fm-self.test.sh
+SH
+  chmod +x "$repo/tests/fm-self.test.sh"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh ./tests/fm-self.test.sh) \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "a differently-spelled self-selection must be refused"; }
+  grep -Fq 're-entry refused' "$tmp/out" "$tmp/err" \
+    || { rm -rf "$tmp"; fail "the refusal must name re-entry: $(cat "$tmp/out" "$tmp/err")"; }
+  runs=$(wc -l <"$repo/ran.log" 2>/dev/null || echo 0)
+  [ "$runs" -eq 1 ] \
+    || { rm -rf "$tmp"; fail "the differently-spelled self-selection must be refused before the script runs again (ran $runs times)"; }
+  rm -rf "$tmp"
+  pass "the re-entry sentinel refuses a differently-spelled self-selection"
+}
+
+test_runner_refuses_bare_tmux_from_a_test() {
+  local tmp repo fakebin rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-tmux-guard.XXXXXX")
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  mkdir -p "$repo/bin" "$repo/tests" "$fakebin"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/tmux-test-safety.sh" "$repo/tests/tmux-test-safety.sh"
+  cat >"$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FM_FAKE_TMUX_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  # The runner proves isolation with the private TMUX_TMPDIR pair; detach one
+  # half so the guard fails closed, exactly as it would if a test lost it.
+  cat >"$repo/tests/fm-bare-tmux.test.sh" <<'SH'
+#!/usr/bin/env bash
+unset FM_TEST_TMUX_PRIVATE_TMPDIR
+tmux kill-server
+echo "ok - bare tmux returned"
+SH
+  chmod +x "$repo/tests/fm-bare-tmux.test.sh"
+  set +e
+  (cd "$repo" && PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$tmp/contacted" \
+    bin/fm-test-run.sh tests/fm-bare-tmux.test.sh) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "the runner must refuse a bare tmux kill-server from a test"; }
+  grep -Fq 'tmux test safety guard' "$tmp/out" "$tmp/err" \
+    || { rm -rf "$tmp"; fail "the runner refusal must name the tmux safety guard: $(cat "$tmp/out" "$tmp/err")"; }
+  [ ! -e "$tmp/contacted" ] \
+    || { rm -rf "$tmp"; fail "the runner shim forwarded a default-socket tmux call to the real binary"; }
+  rm -rf "$tmp"
+  pass "the runner refuses a bare tmux kill-server when isolation is not proven"
+}
+
+test_runner_allows_bare_tmux_inside_its_private_socket_dir() {
+  local tmp repo fakebin rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-tmux-isolated.XXXXXX")
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  mkdir -p "$repo/bin" "$repo/tests" "$fakebin"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/tmux-test-safety.sh" "$repo/tests/tmux-test-safety.sh"
+  cat >"$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FM_FAKE_TMUX_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat >"$repo/tests/fm-isolated-bare-tmux.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -n "${TMUX_TMPDIR:-}" ] && [ "$TMUX_TMPDIR" = "${FM_TEST_TMUX_PRIVATE_TMPDIR:-}" ] \
+  || { echo "not ok - the runner did not export a matching private socket pair"; exit 1; }
+[ -z "${TMUX:-}" ] \
+  || { echo "not ok - the runner leaked an inherited TMUX to the test"; exit 1; }
+tmux list-sessions
+echo "ok - bare tmux is confined to the runner's private socket directory"
+SH
+  chmod +x "$repo/tests/fm-isolated-bare-tmux.test.sh"
+  set +e
+  (cd "$repo" && PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$tmp/contacted" \
+    TMUX=/tmp/live-fleet-socket,1,0 \
+    bin/fm-test-run.sh tests/fm-isolated-bare-tmux.test.sh) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "the runner must allow a bare tmux inside its private socket directory, got $rc: $(cat "$tmp/out" "$tmp/err")"; }
+  grep -Fq 'list-sessions' "$tmp/contacted" \
+    || { rm -rf "$tmp"; fail "the isolated bare tmux call must reach the real binary"; }
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=0' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "the isolated bare tmux test did not report green: $(cat "$tmp/out" "$tmp/err")"; }
+  rm -rf "$tmp"
+  pass "the runner allows a bare tmux inside its private socket directory"
+}
+
+test_runner_allows_an_isolated_deliberate_refusal() {
+  local tmp repo fakebin rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-tmux-deliberate.XXXXXX")
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  mkdir -p "$repo/bin" "$repo/tests" "$fakebin"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/tmux-test-safety.sh" "$repo/tests/tmux-test-safety.sh"
+  cat >"$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FM_FAKE_TMUX_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat >"$repo/tests/fm-deliberate-refusal.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+# Detach the isolation pair so the guard has something to refuse, and detach
+# the runner's log so that expected refusal is not reported as unexpected.
+if (unset FM_TEST_TMUX_PRIVATE_TMPDIR; FM_TEST_TMUX_REFUSAL_LOG= tmux kill-server) 2>/dev/null; then
+  echo "not ok - a deliberate refusal was forwarded"
+  exit 1
+fi
+echo "ok - the deliberate refusal was isolated from the runner log"
+SH
+  chmod +x "$repo/tests/fm-deliberate-refusal.test.sh"
+  set +e
+  (cd "$repo" && PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$tmp/contacted" \
+    bin/fm-test-run.sh tests/fm-deliberate-refusal.test.sh) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "the runner must allow a deliberate refusal isolated from its log, got $rc: $(cat "$tmp/out" "$tmp/err")"; }
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=0' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "the deliberate-refusal test did not report green: $(cat "$tmp/out" "$tmp/err")"; }
+  [ ! -e "$tmp/contacted" ] \
+    || { rm -rf "$tmp"; fail "a deliberate refusal still reached the real binary"; }
+  rm -rf "$tmp"
+  pass "the runner allows a deliberate refusal isolated from its refusal log"
+}
+
+# The complement: a test invoking the runner for a DIFFERENT script is
+# legitimate and must still work, so the sentinel is not a blanket refusal of
+# nested runs.
+test_reentry_sentinel_allows_a_different_script() {
+  local tmp repo rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reentry-ok.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/fm-other.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - other fixture"
+exit 0
+SH
+  chmod +x "$repo/tests/fm-other.test.sh"
+  cat >"$repo/tests/fm-nested.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+root=$(cd "$(dirname "$0")/.." && pwd)
+"$root/bin/fm-test-run.sh" tests/fm-other.test.sh
+SH
+  chmod +x "$repo/tests/fm-nested.test.sh"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-nested.test.sh) \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "a nested run for a different script must be allowed, got $rc: $(cat "$tmp/out" "$tmp/err")"; }
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=0' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "the nested run did not report its own green summary: $(cat "$tmp/out")"; }
+  rm -rf "$tmp"
+  pass "the re-entry sentinel allows a nested run for a different script"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -1416,6 +1639,12 @@ test_family_proofs_run_in_separate_concurrent_phases
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
+test_reentry_sentinel_refuses_self_selection
+test_reentry_sentinel_refuses_differently_spelled_self_selection
+test_reentry_sentinel_allows_a_different_script
+test_runner_refuses_bare_tmux_from_a_test
+test_runner_allows_bare_tmux_inside_its_private_socket_dir
+test_runner_allows_an_isolated_deliberate_refusal
 test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family

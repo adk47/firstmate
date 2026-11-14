@@ -87,6 +87,49 @@ pass() {
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
 
+# A hand-run test file gets the same private tmux socket directory and PATH
+# shim the runner installs, so running one file directly cannot reach the
+# default server either. Values already exported by the runner are honoured.
+if [ -r "$ROOT/tests/tmux-test-safety.sh" ]; then
+  # shellcheck source=tests/tmux-test-safety.sh
+  . "$ROOT/tests/tmux-test-safety.sh"
+  # tmux prefers an inherited TMUX over TMUX_TMPDIR, so a hand-run test must not
+  # carry the live fleet's socket into its tmux invocations.
+  unset TMUX
+  if [ -n "${FM_TEST_TMUX_SHIM_DIR:-}" ] && [ -x "$FM_TEST_TMUX_SHIM_DIR/tmux" ]; then
+    case ":$PATH:" in
+      *":$FM_TEST_TMUX_SHIM_DIR:"*) ;;
+      *) PATH="$FM_TEST_TMUX_SHIM_DIR:$PATH" ;;
+    esac
+    export PATH
+  else
+    _fm_test_real_tmux=$(command -v tmux 2>/dev/null || true)
+    if [ -n "$_fm_test_real_tmux" ] && [ -x "$_fm_test_real_tmux" ]; then
+      _fm_test_shim_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-tmux-shim.XXXXXX")
+      if fm_test_tmux_guard_install "$_fm_test_shim_dir" "$_fm_test_real_tmux" >/dev/null; then
+        FM_TEST_TMUX_SHIM_DIR=$_fm_test_shim_dir
+        FM_TEST_TMUX_REAL=$_fm_test_real_tmux
+        export FM_TEST_TMUX_SHIM_DIR FM_TEST_TMUX_REAL
+        PATH="$FM_TEST_TMUX_SHIM_DIR:$PATH"
+        export PATH
+        FM_TEST_CLEANUP_DIRS+=("$_fm_test_shim_dir")
+      else
+        rm -rf "$_fm_test_shim_dir"
+      fi
+    fi
+    unset _fm_test_real_tmux _fm_test_shim_dir
+  fi
+  export FM_TEST_TMUX_TEST_LABEL=${FM_TEST_TMUX_TEST_LABEL:-$(basename "$0")}
+  if [ -z "${TMUX_TMPDIR:-}" ] || [ -z "${FM_TEST_TMUX_PRIVATE_TMPDIR:-}" ]; then
+    _fm_test_tmux_tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-tmux-socket.XXXXXX")
+    TMUX_TMPDIR=$_fm_test_tmux_tmpdir
+    FM_TEST_TMUX_PRIVATE_TMPDIR=$_fm_test_tmux_tmpdir
+    export TMUX_TMPDIR FM_TEST_TMUX_PRIVATE_TMPDIR
+    FM_TEST_CLEANUP_DIRS+=("$_fm_test_tmux_tmpdir")
+    unset _fm_test_tmux_tmpdir
+  fi
+fi
+
 fm_test_pid_identity() {
   local pid=$1
   FM_STATE_OVERRIDE="${TMPDIR:-/tmp}" bash -c \
@@ -343,6 +386,32 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/$tool"
+}
+
+# --- live agent fixtures ----------------------------------------------------
+
+# fm_spawn_live_agent_fixture <bindir> <name> <cwd>: start a live process that
+# holds its cwd in <cwd> and presents <name> to the shared process vocabulary.
+# A bash symlink keeps the wanted name without dispatching through a coreutils
+# multicall binary, whose argv[0]-based applet lookup rejects a copied or
+# renamed binary; the idle loop blocks in sleep instead of spinning on a
+# /dev/zero read. Echoes the pid.
+fm_spawn_live_agent_fixture() {
+  local bindir=$1 name=$2 cwd=$3 bin pid args first i=0
+  mkdir -p "$bindir" || return 1
+  bin="$bindir/$name"
+  ln -sf "$(command -v bash)" "$bin" || return 1
+  ( cd "$cwd" && exec "$bin" -c 'while :; do sleep 30; done' ) >/dev/null 2>&1 &
+  pid=$!
+  while [ "$i" -lt 50 ]; do
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
+    args=${args#"${args%%[![:space:]]*}"}
+    first=${args%%[[:space:]]*}
+    [ "${first##*/}" = "$name" ] && break
+    i=$((i + 1))
+    sleep 0.02
+  done
+  printf '%s\n' "$pid"
 }
 
 # --- deterministic git identity and fixtures --------------------------------

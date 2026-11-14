@@ -207,6 +207,7 @@ Storing evidence in the repo publishes each run's test artifacts to the orphan `
 That branch shares no history with code branches, so evidence never enters a pushed feature branch or the default branch; the worktree's `.no-mistakes/` stays local and CI rejects tracked entries under that path.
 `commands.test` stays changed-file-scoped and must never become a complete `tests/*.test.sh` walk: `--changed` selects only the families the branch's changed files map to, runs concurrency-admitted scripts with bounded concurrency, keeps every unproven stateful script serial, and applies its own generous per-script bound.
 The runner's `--help` output owns the exact selection, scheduling, and timeout rules.
+Every launched test also gets a private throwaway tmux socket directory, exported as both `TMUX_TMPDIR` and `FM_TEST_TMUX_PRIVATE_TMPDIR`, with any inherited `TMUX` scrubbed, plus a `tmux` PATH shim: the shim accepts only an invocation that names its own `-L`/`-S` socket or runs in that matching private pair with no inherited `TMUX`, and refuses everything else, so a test cannot reach the live fleet's default server even through production code that calls bare `tmux`. The allowance is fail-closed - a blank, unset, or mismatched pair, or a set `TMUX`, re-enables the refusal.
 It excludes `real-herdr-gated` on the same grounds the portable CI lanes do, because those scripts drive a live Herdr lab and the dedicated required Herdr lane owns that coverage.
 Because firstmate always supplies `--intent`, that command is a baseline and the Test step still runs its intent-targeted evidence agent on top of it.
 `commands.test` executes code, so no-mistakes honors it only from the default-branch copy of `.no-mistakes.yaml`; a pushed branch cannot change what the gate runs.
@@ -783,6 +784,28 @@ FM_BOARD_REMIND_SECS=1800        # reminder interval while an unchanged verdict 
 
 Arm the check once per home with `bin/fm-board-audit.sh arm`, which writes `state/board-audit.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
 `bin/fm-board-audit.sh status` prints the current verdict without recording anything, and `bin/fm-board-audit.sh disarm` removes the shim, its trust binding, and `state/.board-audit`.
+
+## Fleet integrity check
+
+[`bin/fm-fleet-integrity-check.sh`](../bin/fm-fleet-integrity-check.sh) is a registered watcher check that notices a lane whose agent process is gone while its worktree and records remain.
+It exists because on 2026-11-05 the default tmux server was lost and the fleet lost roughly 27 lanes, and the same fleet was then counted as 11 dead, then 15, then 27 in three successive reads - wrong in both directions - because the liveness read trusted a `state/<id>.busy-state` record that never settles when an agent is hard-killed.
+[`bin/fm-crew-state.sh`](../bin/fm-crew-state.sh) now corroborates every busy verdict per lane - record-sourced and pulled alike - against a live agent process in the recorded worktree; this check is the fleet-wide backstop that notices the whole dead set on its own, with no firstmate turn and no one asking.
+
+It walks every `state/*.meta` whose recorded worktree still exists and whose endpoint is local, regardless of what the lane's busy-state record claims, and answers for all of them from one bounded read-only process-table read matched only against those recorded worktree paths - never a per-lane process scan - plus bounded local `git status` and commit reads inside each recorded worktree, and the shared landed-work test for a lane it would otherwise report.
+Both sides of that match are compared in their physical form, so a project reached through a symlinked path still matches the kernel's resolved cwd while an unrelated sibling directory whose name merely starts the same way does not.
+[`bin/fm-agent-proc-lib.sh`](../bin/fm-agent-proc-lib.sh) owns the rule, including why a pane's idle shell does not count as a live agent.
+It prints one line naming every dead lane, only when the dead set is non-empty; silence is the healthy answer and the common one.
+A lane is reported dead only on positive evidence - its worktree holds nothing but shells, or nothing at all - so a worktree holding a process the shared vocabulary cannot classify is left alone, and a scan that cannot be trusted is silent, because a false dead verdict is what launches a duplicate agent onto a live worktree.
+It also compares each lane's last status-log claim with the work its worktree still holds, but only for a terminal claim: a lane claiming `done` or `failed` while its worktree has uncommitted files, or commits that are provably not landed, is reported on its own line, because the claim and the worktree disagree.
+"Landed" is the same rule teardown applies, owned by [`bin/fm-landed-lib.sh`](../bin/fm-landed-lib.sh): reachable from a remote-tracking branch, a merged PR whose head contains the work, or content already present in the default branch, so a squash-merged-then-deleted branch and a local-only project merged into its local default branch are silent.
+A lane with a recorded `pr=` takes the full proof, while one with no `pr=` is decided by the content-in-default check alone, so a poll never makes a branch-name PR lookup; that library's header owns each proof.
+That test is bounded and runs only for a lane with unpushed commits and no uncommitted files; when it cannot prove landed or unlanded - no `gh`, no network, an unreadable repo, a git read or the landed test hitting its time bound, or the poll's budget - the lane is silent, because unprovable is never a finding.
+The dead-lane line is computed, printed, and recorded before any of these claim comparisons run, so an optional probe can never starve it.
+A `working` claim is not compared (work in progress is expected to hold work), and neither is a waiting claim (`parked`, `paused`, `blocked`) nor a lane with no claim at all - no status line yet, or a trailing decision-closing `resolved:` that `bin/fm-classify-lib.sh` deliberately keeps out of run-state - because none of those says the lane is finished with its worktree.
+
+Arm the check once per home with `bin/fm-fleet-integrity-check.sh arm`, which writes `state/fleet-integrity.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
+`FM_FLEET_INTEGRITY_INTERVAL` (default 300 seconds) sets the self-throttle, and `bin/fm-fleet-integrity-check.sh status` prints the last recorded verdict.
+`bin/fm-fleet-integrity-check.sh disarm` removes the shim, its trust binding, the record, and the stamp.
 
 ## Fleet watchdog (config/watchdog.env)
 

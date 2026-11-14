@@ -23,6 +23,13 @@ export FM_ROOT_OVERRIDE
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
+# A busy child only reads as working while a live agent process sits in its
+# recorded worktree (bin/fm-agent-proc-lib.sh), so a bounds fixture must place
+# one there exactly as the real fleet does.
+spawn_live_agent() {  # <dir> <worktree>
+  fm_spawn_live_agent_fixture "$1/agentbin" claude "$2"
+}
+
 # A fakebin that stubs the local tools the canonical snapshot may reach for, plus a
 # gh/gh-axi that RECORDS every call to $NET_LOG so a test can prove the default path
 # makes no network call. gh returns one fixture open PR keyed to the ship task.
@@ -133,6 +140,8 @@ EOF
     "mode=no-mistakes" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   record_claude_state "$home/state" ship-task busy
+  spawn_live_agent "$home" "$home/projects/ship-wt" >/dev/null \
+    || fail "could not spawn ship-task's live agent fixture"
   printf 'working: building the thing\n' > "$home/state/ship-task.status"
   fm_write_meta "$home/state/scout-x.meta" \
     "window=firstmate:fm-scout-x" \
@@ -684,6 +693,7 @@ test_secondmate_and_child_bounds_are_disclosed() {
       "window=firstmate:fm-$child" "worktree=$mate/projects/$child" "project=sample" \
       "harness=claude" "kind=ship" "mode=no-mistakes"
     record_claude_state "$mate/state" "$child" busy
+    spawn_live_agent "$home" "$mate/projects/$child" >/dev/null       || fail "could not spawn $child's live agent fixture"
     printf 'working [key=%s]: active child %s\n' "$child" "$i" > "$mate/state/$child.status"
     i=$((i + 1))
   done
@@ -1995,6 +2005,8 @@ seed_working_child() {  # <mate-home> <id> <doing> [repo]
     "window=firstmate:fm-$id" "worktree=$mate/projects/$id" "project=sample" \
     "harness=claude" "kind=ship" "mode=no-mistakes"
   record_claude_state "$mate/state" "$id" busy
+  spawn_live_agent "$mate" "$mate/projects/$id" >/dev/null \
+    || fail "could not spawn $id's live agent fixture"
   printf 'working: %s\n' "$doing" > "$mate/state/$id.status"
 }
 
@@ -2030,6 +2042,8 @@ EOF
         "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=sample" \
         "harness=claude" "kind=ship" "mode=no-mistakes"
       record_claude_state "$home/state" "$id" busy
+      spawn_live_agent "$home" "$home/projects/$id" >/dev/null \
+        || fail "could not spawn $id's live agent fixture"
       printf 'working: active held work\n' > "$home/state/$id.status"
     done
   done
@@ -2190,6 +2204,8 @@ EOF
     "window=firstmate:fm-hibit-worker" "worktree=$hibit/projects/worker" "project=hibit" \
     "harness=claude" "kind=ship" "mode=no-mistakes"
   record_claude_state "$hibit/state" hibit-worker busy
+  spawn_live_agent "$hibit" "$hibit/projects/worker" >/dev/null \
+    || fail "could not spawn hibit-worker's live agent fixture"
   printf 'working: finalizing progress\n' > "$hibit/state/hibit-worker.status"
 
   cat > "$wheel/data/backlog.md" <<'EOF'
@@ -2205,6 +2221,8 @@ EOF
     "window=firstmate:fm-wheel-worker" "worktree=$wheel/projects/worker" "project=wheelhouse" \
     "harness=claude" "kind=ship" "mode=no-mistakes"
   record_claude_state "$wheel/state" wheel-worker busy
+  spawn_live_agent "$wheel" "$wheel/projects/worker" >/dev/null \
+    || fail "could not spawn wheel-worker's live agent fixture"
   printf 'working: active validation\n' > "$wheel/state/wheel-worker.status"
 
   cat > "$sshhip/data/backlog.md" <<'EOF'
@@ -2235,6 +2253,8 @@ EOF
     "window=firstmate:fm-prep" "worktree=$ha/projects/prep" "project=home-assistant" \
     "harness=claude" "kind=ship" "mode=no-mistakes"
   record_claude_state "$ha/state" prep busy
+  spawn_live_agent "$ha" "$ha/projects/prep" >/dev/null \
+    || fail "could not spawn prep's live agent fixture"
   printf 'working: preparing canary\n' > "$ha/state/prep.status"
 
   fakebin=$(make_fakebin "$home")
@@ -2357,6 +2377,8 @@ EOF
     "window=firstmate:fm-unreadable-child" "worktree=$sshhip/projects/child" "project=sshhip" \
     "harness=claude" "kind=ship" "mode=no-mistakes"
   record_claude_state "$sshhip/state" unreadable-child busy
+  spawn_live_agent "$sshhip" "$sshhip/projects/child" >/dev/null \
+    || fail "could not spawn unreadable-child's live agent fixture"
   printf 'working: app store submission restored\n' > "$sshhip/state/unreadable-child.status"
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '

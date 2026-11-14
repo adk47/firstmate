@@ -23,6 +23,25 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 START="$ROOT/bin/fm-afk-start.sh"
 
+# Pin every tmux call in this file, and every bare tmux call the code under
+# test makes, to one throwaway socket. The runner's safety shim refuses a
+# default-socket call; this wrapper supplies the socket instead.
+TMUX_REAL=${FM_TEST_TMUX_REAL:-$(command -v tmux 2>/dev/null || true)}
+TMUX_WRAP_DIR=
+# shellcheck source=tests/tmux-test-safety.sh
+. "$ROOT/tests/tmux-test-safety.sh"
+if [ -n "$TMUX_REAL" ] && [ -x "$TMUX_REAL" ]; then
+  TMUX_WRAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-wrap.XXXXXX")
+  TMUX_SOCKET="$TMUX_WRAP_DIR/dedicated.sock"
+  if fm_test_tmux_wrapper_write "$TMUX_WRAP_DIR/tmux" "$TMUX_REAL" "$TMUX_SOCKET" >/dev/null; then
+    PATH="$TMUX_WRAP_DIR:$PATH"
+    export PATH
+  else
+    rm -rf "$TMUX_WRAP_DIR"
+    TMUX_WRAP_DIR=
+  fi
+fi
+
 FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -37,6 +56,7 @@ GLOBAL_CLEANUP() {
   for s in $TRACK_TMUX_SESSIONS; do
     tmux kill-session -t "$s" 2>/dev/null || true
   done
+  [ -n "$TMUX_WRAP_DIR" ] && rm -rf "$TMUX_WRAP_DIR"
 }
 trap GLOBAL_CLEANUP EXIT
 

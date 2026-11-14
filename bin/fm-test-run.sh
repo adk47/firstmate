@@ -115,6 +115,11 @@
 # that names it is selected as that SCRIPT, because the reference is per-script
 # evidence. Consumer bin/ scripts still resolve through the curated map, so
 # recorded family-level coupling still expands to the whole family.
+#
+# Re-entry sentinel: a test may invoke this runner (tests/fm-test-run.test.sh
+# does), but a run may never select a script already running in its own process
+# ancestry. FM_TEST_RUN_ANCESTORS carries that chain and the selection is
+# refused when it intersects, so a run cannot invoke itself.
 set -eu
 
 # Pin the umask the suite runs under. Several behavior tests assert a
@@ -259,7 +264,8 @@ family_for_basename() {
     fm-transition-lib.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-reap.test.sh|\
     ak47-budget.test.sh|ak47-census.test.sh|ak47-guards.test.sh|\
-    ak47-safe-delete.test.sh|ak47-tick.test.sh|ak47-weekly-review.test.sh)
+    ak47-safe-delete.test.sh|ak47-tick.test.sh|ak47-weekly-review.test.sh|\
+    fm-fleet-integrity-check.test.sh|fm-tmux-test-safety.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
@@ -619,6 +625,7 @@ tests/fm-documentation-audiences.test.sh 732
 tests/fm-drift-check.test.sh 4077
 tests/fm-extension-binding.test.sh 12639
 tests/fm-fable-runway.test.sh 25316
+tests/fm-fleet-integrity-check.test.sh 5000
 tests/fm-fleet-snapshot-impl.test.sh 121000
 tests/fm-fleet-snapshot-view.test.sh 8547
 tests/fm-fleet-stall-check.test.sh 25000
@@ -714,6 +721,7 @@ tests/fm-test-fixtures.test.sh 151
 tests/fm-test-isolation-proof.test.sh 2567
 tests/fm-test-reap.test.sh 12000
 tests/fm-tmux-agent-liveness.test.sh 11421
+tests/fm-tmux-test-safety.test.sh 800
 tests/fm-tool-update-check.test.sh 24858
 tests/fm-trace-context-lib.test.sh 289
 tests/fm-trace-context-spawn.test.sh 47355
@@ -893,6 +901,11 @@ run_coverage_guard() {
     return 1
   fi
   cat "$tmp/s1" "$tmp/s2" | LC_ALL=C sort -u >"$tmp/shards_union"
+  # Every comm below runs under LC_ALL=C too. comm checks its inputs' ordering
+  # with the AMBIENT collation, so a C-sorted file read under a UTF-8 locale
+  # (en_US.UTF-8 on a developer box) is reported as "not in sorted order" and
+  # the guard fails on a perfectly correct partition. CI runs under C.UTF-8 and
+  # never saw it.
   missing=$(LC_ALL=C comm -23 "$tmp/proven" "$tmp/shards_union" || true)
   extra=$(LC_ALL=C comm -13 "$tmp/proven" "$tmp/shards_union" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
@@ -1089,6 +1102,7 @@ all_repo_tests() {
 normalize_script_path() {
   local p=$1
   case "$p" in
+    "$ROOT"/*) printf '%s\n' "${p#"$ROOT"/}" ;;
     /*) printf '%s\n' "$p" ;;
     tests/*|./tests/*)
       p=${p#./}
@@ -1246,6 +1260,10 @@ families_for_changed_path() {
     bin/backends/cmux*|tests/cmux-test-safety.sh)
       printf '%s\n' cmux
       printf '%s\n' backend-dispatch
+      ;;
+    tests/tmux-test-safety.sh)
+      # The shared default-socket guard every tmux-invoking test routes through.
+      printf '%s\n' pure-contract-unit
       ;;
     bin/backends/orca*|bin/backends/tmux.sh)
       printf '%s\n' backend-dispatch
@@ -1822,7 +1840,7 @@ while [ "$#" -gt 0 ]; do
     --)
       shift
       while [ "$#" -gt 0 ]; do
-        SCRIPTS+=("$1")
+        add_script "$1"
         shift
       done
       ;;
@@ -1831,10 +1849,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     *)
       if [ "${MODE:-}" = "aggregate" ]; then
-        SCRIPTS+=("$1")
+        add_script "$1"
       elif [ -z "$MODE" ] || [ "$MODE" = scripts ]; then
         MODE=scripts
-        SCRIPTS+=("$1")
+        add_script "$1"
       else
         die "script paths cannot be combined with --$MODE"
       fi
@@ -1946,6 +1964,25 @@ if [ "$LIST_ONLY" -eq 1 ] || [ "$LIST_SCHEDULED" -eq 1 ]; then
     done
   fi
   exit 0
+fi
+
+# Re-entry sentinel. A test script may legitimately invoke this runner - that is
+# how tests/fm-test-run.test.sh exercises selection, admission, and the
+# scheduler - but a run must never select a script that is ALREADY running in
+# its own process ancestry, because that is a run invoking itself. On
+# 2026-11-05 a run was observed recursing three deep this way, each level
+# re-selecting the suite that contains the test that invokes the runner.
+# FM_TEST_RUN_ANCESTORS carries the chain of scripts already running, one
+# colon-separated entry per level, and run_script_bounded appends to it for
+# every child. Listing is exempt: it executes nothing.
+if [ -n "${FM_TEST_RUN_ANCESTORS:-}" ]; then
+  for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
+    case ":${FM_TEST_RUN_ANCESTORS}:" in
+      *":$s:"*)
+        die "re-entry refused: $s is already running in this run's ancestry, so this run would invoke itself (ancestry: ${FM_TEST_RUN_ANCESTORS#:})"
+        ;;
+    esac
+  done
 fi
 
 # An empty selection is a clean result, not a no-op that falls through. Exiting
@@ -2111,6 +2148,41 @@ cleanup_run() {
 
 trap cleanup_run EXIT
 
+# Every launched test gets a private tmux socket directory inside the run's
+# own temp root, exported as BOTH TMUX_TMPDIR and FM_TEST_TMUX_PRIVATE_TMPDIR.
+# tmux's default server then lives in that throwaway directory, so production
+# code a test sources cannot reach the fleet's server even when it calls tmux
+# without -L/-S. The pair is the guard's proof of isolation; losing either
+# value re-enables the refusal (fail closed).
+FM_TEST_TMUX_PRIVATE_TMPDIR="$RUN_TMP/tmux-socket"
+mkdir -p "$FM_TEST_TMUX_PRIVATE_TMPDIR"
+# An inherited TMUX would name the live fleet's socket and tmux prefers it over
+# TMUX_TMPDIR, so it must never reach a launched test.
+unset TMUX
+TMUX_TMPDIR=$FM_TEST_TMUX_PRIVATE_TMPDIR
+export TMUX_TMPDIR FM_TEST_TMUX_PRIVATE_TMPDIR
+
+# Every launched test also gets a PATH shim that refuses a tmux invocation which
+# would reach the default server. The shim is installed once per run and
+# forwards to the real binary when the test names its own socket or runs in the
+# private socket directory above.
+if [ -r "$ROOT/tests/tmux-test-safety.sh" ]; then
+  # shellcheck source=tests/tmux-test-safety.sh
+  . "$ROOT/tests/tmux-test-safety.sh"
+  REAL_TMUX=$(command -v tmux 2>/dev/null || true)
+  if [ -n "$REAL_TMUX" ] && [ -x "$REAL_TMUX" ]; then
+    FM_TEST_TMUX_SHIM_DIR="$RUN_TMP/tmux-shim"
+    if fm_test_tmux_guard_install "$FM_TEST_TMUX_SHIM_DIR" "$REAL_TMUX" >/dev/null; then
+      FM_TEST_TMUX_REAL=$REAL_TMUX
+      export FM_TEST_TMUX_SHIM_DIR FM_TEST_TMUX_REAL
+      PATH="$FM_TEST_TMUX_SHIM_DIR:$PATH"
+      export PATH
+    else
+      FM_TEST_TMUX_SHIM_DIR=
+    fi
+  fi
+fi
+
 RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
 TOTAL=0
 FAILED=0
@@ -2189,31 +2261,52 @@ record_script_result() {
 # because an unbounded suite is what silently outruns its caller's budget.
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
-  local rc
+  local rc child_ancestors refusal_log
   : "$id"
+  refusal_log="$RUN_TMP/tmux-refusal.$id"
+  rm -f "$refusal_log"
+  # The re-entry sentinel's chain (see the selection-time check above): every
+  # child inherits the scripts already running above it, so a nested run can
+  # refuse to select one of them.
+  child_ancestors="${FM_TEST_RUN_ANCESTORS:-}:$script"
   set +e
   if [ "$stream" -eq 1 ]; then
     if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
       # Expansion is intentionally deferred to the child bash passed to -c.
       # shellcheck disable=SC2016
-      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
+      FM_TEST_RUN_ANCESTORS="$child_ancestors" \
+        FM_TEST_TMUX_TEST_LABEL="$script" \
+        FM_TEST_TMUX_REFUSAL_LOG="$refusal_log" \
+        fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
         'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
       rc=$?
     else
-      bash "$script" 2>&1 | tee "$out"
+      FM_TEST_RUN_ANCESTORS="$child_ancestors" FM_TEST_TMUX_TEST_LABEL="$script" \
+        FM_TEST_TMUX_REFUSAL_LOG="$refusal_log" \
+        bash "$script" 2>&1 | tee "$out"
       rc=${PIPESTATUS[0]}
     fi
   elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
+    FM_TEST_RUN_ANCESTORS="$child_ancestors" FM_TEST_TMUX_TEST_LABEL="$script" \
+      FM_TEST_TMUX_REFUSAL_LOG="$refusal_log" \
+      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
     rc=$?
   else
-    bash "$script" >"$out" 2>&1
+    FM_TEST_RUN_ANCESTORS="$child_ancestors" FM_TEST_TMUX_TEST_LABEL="$script" \
+      FM_TEST_TMUX_REFUSAL_LOG="$refusal_log" \
+      bash "$script" >"$out" 2>&1
     rc=$?
   fi
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
     printf 'not ok - %s exceeded the per-script bound of %ss and was terminated\n' \
       "$script" "$PER_SCRIPT_TIMEOUT_SECS" >>"$out"
     [ "$stream" -eq 1 ] && tail -1 "$out"
+  fi
+  if [ -s "$refusal_log" ]; then
+    printf 'not ok - %s invoked tmux without naming its own socket; the safety guard refused it\n' \
+      "$script" >>"$out"
+    [ "$stream" -eq 1 ] && tail -1 "$out"
+    [ "$rc" -ne 0 ] || rc=1
   fi
   return "$rc"
 }
