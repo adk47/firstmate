@@ -51,17 +51,39 @@ Kill files: `/etc/hydra/credit-doc-intake.disabled`, `/etc/hydra/credit-verify.d
   (`candidate_request_ids`). An old document does not answer a later ask;
 - a claim note: any document from the account after the note.
 
-The value written is the document's own `received_at`. The marker writes no conversation id and no attachment
-count. A note with no account id is counted `unmeasured`, never "no answer". An unreadable proof store is exit 2
-and nothing is written.
+The value written is the document's own `received_at`. A note with no account id is counted `unmeasured`, never
+"no answer". An unreadable proof store is exit 2 and nothing is written.
+
+A tag carries what `verify_ledger.mark_tagged` writes, in one transaction (rule `pm-2`):
+
+- **the family**: the first note and every follow-up of it that has no tag, so no sibling keeps sending;
+- **the attachment count**: `proof_attachments` is the number of documents that answer the note;
+- **the rejected verdicts of every note the credits live under** (`verify_ledger.proof_families`). A note names
+  credits first asked about on other notes, and a credit's verdict is stored under its own note. Clearing the
+  first note alone left those credits rejected, and due for removal, after the customer sent the document.
+
+A note is tagged only by a document no review has seen. A review suppresses the tag for the credits it was
+recorded against (`verify_proof_reviews.request_id`, under that credit's own note); a review of another credit,
+or on another note, hides nothing. A claim note has no credit to compare, so its own family is the unit, and a
+review whose time cannot be read blocks the credit it belongs to. The same rule decides which rejected verdicts
+a tag clears: one recorded at or after the document is a review of it and stands.
+
+It does not write `conversation_id`. On a note that column is the thread the note was sent in, and an empty one
+means the note went by email: `nothing_needed_overlap` reads it to decide where a correction goes. The marker
+knows the document's conversation, which is another thread for a note sent by email (572 of the 585 notes marked
+on 2026-11-13 went by email). The document's conversation stays in `proof_intake`, reachable through
+`proof_marks.intake_id`.
 
 | command | effect |
 | --- | --- |
 | `proof_marker.py plan` | counts only, opens both stores read-only |
 | `proof_marker.py apply` | sets the tags in one transaction, prints the `run_id` |
-| `proof_marker.py revert --run-id RUN` | clears the tags that run set and nothing has changed since; that document never answers the note again, but a document filed after it can |
+| `proof_marker.py revert --run-id RUN` | undoes what that run set and nothing has changed since: the tags (the note's and its follow-ups'), the attachment count, the cleared verdicts. That document never answers the note again, but a document filed after it can |
+| `proof_marker.py reconcile` | counts what the marks an earlier rule wrote lack against this one; writes nothing |
+| `proof_marker.py reconcile --apply` | fills it in: the attachment count, the untagged follow-ups, the rejected verdicts older than the document. Sets no new tag; a verdict recorded after the document stands |
 
-Kill file: `/etc/hydra/proof-marker.disabled`. `proof_marks` is created by the marker, not by
+Kill file: `/etc/hydra/proof-marker.disabled` (stops `plan`, `apply` and `revert`; not `reconcile`, the repair a
+person runs while the marker is held). `proof_marks` is created by the marker, not by
 `verify_ledger.SCHEMA`: a table added there makes every read-only reader of the ledger refuse until a writer
 has migrated it.
 

@@ -1133,7 +1133,14 @@ Counts: `data/proof-processing-ovh-e1/tools/measure.py` on node-8.
   `proof_intake`** (a document dated after the note, filed against one of the note's requests; any document for
   a claim note). It never judges, sends or approves, every tag is a `proof_marks` row, and
   `revert --run-id` undoes a run. The Intercom tag sweep (`verify_notify.sweep_proofs`) never recorded a look in
-  production; do not wire a second writer.
+  production; do not wire a second writer. **A tag is three writes, not one, and `verify_ledger.mark_tagged` is
+  the reference**: the family (`id=root OR parent_row=root`), the attachment count, and the rejected verdicts of
+  every family `verify_ledger.proof_families` names (a credit's verdict lives under the note it was first asked
+  on). The first marker tagged one row and cleared one family; `test_it_leaves_the_ledger_as_mark_tagged_does`
+  now holds the two writers to the same ledger. A review suppresses the tag only for the credits it was recorded
+  against (`verify_proof_reviews.request_id`, under that credit's own note): a review of another credit, or on
+  another note, never leaves an answered note untagged. It leaves `conversation_id` alone: empty there means
+  "sent by email".
 - **A tag is not a decision.** No job turns a read document into a decision: the document class is
   `approved: false` in `policies/credit-approval-automation.json`, `doc_approvals` is empty and core's
   `credit_document_verdicts` has 0 rows. Report the stages separately (filed, read, answered, decided, told);

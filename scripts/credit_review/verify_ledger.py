@@ -2056,6 +2056,37 @@ def _note_of(db: sqlite3.Connection, request_id: str) -> int | None:
     return int(row["id"]) if row is not None and row["id"] is not None else None
 
 
+def note_index(db: sqlite3.Connection) -> dict[str, int]:
+    """`_note_of` for every request id at once: {request id: its note}, in one pass over the initial notes. For a
+    caller that asks about every credit of many rows (the proof marker), where one `_note_of` per id is a scan of
+    the table each. A test holds the two to the same answer."""
+    out: dict[str, int] = {}
+    for r in db.execute("SELECT id, request_ids_json FROM verify_messages WHERE kind='initial' AND parent_row IS NULL "
+                        "ORDER BY id"):
+        try:
+            ids = json.loads(r[1] or "[]")
+        except ValueError:
+            continue                      # json_each raises on these rows; no id can be read from them
+        for rid in ids if isinstance(ids, list) else []:
+            if isinstance(rid, str):      # json_each's value equals a text parameter only for a JSON string
+                out.setdefault(rid, int(r[0]))
+    return out
+
+
+def proof_families(db: sqlite3.Connection, root: int, request_ids_json: str | None,
+                   note_of: Callable[[str], int | None] | None = None) -> set[int]:
+    """The families a new document on a row re-opens: the row's own family and the note of EVERY credit the row
+    covers. A decline (and any later note) names credits first asked about on other notes, and a credit's rejected
+    verdict lives under its own note (`_note_of`), so the row's first note alone misses them (QA #1718 2). The ONE
+    place this set is built: `mark_tagged` and the proof marker both call it. `note_of` defaults to `_note_of`;
+    the marker passes `note_index(db).get`."""
+    find = note_of or (lambda rid: _note_of(db, rid))
+    fams = {int(root)}
+    for rid in json.loads(request_ids_json or "[]"):
+        fams.add(find(str(rid)) or int(root))
+    return fams
+
+
 def mark_tagged(db: sqlite3.Connection, *, message_id: str, conversation_id: str, attachments: int = 0,
                 now: datetime | None = None) -> None:
     """Tag a note (and, for a follow-up, its initial note and every sibling) as proof
@@ -2076,10 +2107,7 @@ def mark_tagged(db: sqlite3.Connection, *, message_id: str, conversation_id: str
             # the fresh review starts from nothing for EVERY credit this row covered: a decline can name
             # credits of several notes, so its rejected verdicts live under each credit's own family
             row = db.execute("SELECT request_ids_json FROM verify_messages WHERE message_id=?", (message_id,)).fetchone()
-            fams = {root}
-            for rid in json.loads((row["request_ids_json"] if row is not None else None) or "[]"):
-                fams.add(_note_of(db, rid) or root)
-            for fam in fams:
+            for fam in proof_families(db, root, row["request_ids_json"] if row is not None else None):
                 db.execute("DELETE FROM verify_proof_reviews WHERE family=? AND outcome='rejected'", (fam,))
         db.execute("COMMIT")
     except Exception:
