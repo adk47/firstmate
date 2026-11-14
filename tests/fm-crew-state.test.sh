@@ -155,7 +155,7 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
   local dir=$1 tb="$1/notimeoutbin" tool real
   mkdir -p "$tb"
   # ps and lsof are here because the busy-record corroboration
-  # (bin/fm-lane-liveness-lib.sh) needs them: without them the verdict is
+  # (bin/fm-agent-proc-lib.sh) needs them: without them the verdict is
   # correctly undeterminable, which is not what this case is about.
   for tool in bash git grep sed head cut tail dirname perl ps lsof; do
     real=$(command -v "$tool" || true)
@@ -187,7 +187,7 @@ arm_idle_record() {  # <state-dir> <id>
 # A live process whose cwd is <worktree> and whose process name classifies as
 # an agent (bin/backends/tmux.sh's shared vocabulary). A record-sourced busy
 # verdict is only evidence of what the agent last REPORTED, so fm-crew-state
-# corroborates it against exactly this (bin/fm-lane-liveness-lib.sh).
+# corroborates it against exactly this (bin/fm-agent-proc-lib.sh).
 # fm_test_cleanup reaps the fixture with the temp root.
 spawn_live_agent() {  # <case-dir> <worktree>
   fm_spawn_live_agent_fixture "$1/agentbin" pi "$2"
@@ -964,6 +964,8 @@ test_no_run_busy_pane() {
   # nonexistent file, which is the no-evidence case, so this uses its own.
   proc_row 4242 pi "$d/wt" pi >"$d/procs"
   local out; out=$(run_crew_state_with_procs "$d" feat-h)
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the busy corroboration must not leak process rows into the one-line contract, got: $out"
   assert_contains "$out" "state: working" "busy record + live agent -> working"
   assert_contains "$out" "source: pane" "busy record -> pane source"
   assert_contains "$out" "claude-hook" "the working verdict names its semantic source"

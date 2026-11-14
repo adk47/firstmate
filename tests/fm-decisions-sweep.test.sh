@@ -171,9 +171,9 @@ test_recent_or_live_task_is_never_touched() {
   log "$home" live-waiting "$OLD" 'needs-decision: pick one'
   live_agent "$home" live-waiting 4244
   # A harness the process table cannot name is never dead by absence.
-  task "$home" blind-recent "harness=gemini"
+  task "$home" blind-recent "harness=mystery"
   log "$home" blind-recent "$RECENT" 'blocked: stuck' 'done: shipped'
-  task "$home" blind-old "harness=gemini"
+  task "$home" blind-old "harness=mystery"
   log "$home" blind-old "$OLD" 'blocked: stuck' 'working: on it'
   # No task record and recently written: nothing proves it is abandoned.
   log "$home" orphan-recent "$RECENT" 'needs-decision: pick one' 'done: shipped'

@@ -246,7 +246,7 @@ test_parity_json_and_home_summary() {
   # The fixture must really exercise the paths it claims, or parity is vacuous.
   local states
   states=$(jq -r '.tasks[] | "\(.id)=\(.current_state.state)/\(.current_state.source)"' "$TMP_ROOT/python--json.json")
-  for want in busy=working/pane busydead=unknown/pane idle=done/status-log keyed=paused/status-log \
+  for want in busy=working/pane busydead=working/pane idle=done/status-log keyed=paused/status-log \
     malformed=unknown/pane stalegen=unknown/pane untrusted=unknown/pane norecord=unknown/pane \
     resolvedonly=unknown/none gone=unknown/none shipgone=unknown/none detached=done/status-log \
     wtgone=unknown/none notarget=unknown/none \

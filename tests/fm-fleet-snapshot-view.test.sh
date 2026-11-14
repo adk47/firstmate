@@ -70,7 +70,7 @@ record_claude_idle() {  # <state-dir> <id>
 }
 
 # A busy record is only evidence of a working lane while a live agent process sits in
-# the recorded worktree (bin/fm-lane-liveness-lib.sh), so a fixture that wants a
+# the recorded worktree (bin/fm-agent-proc-lib.sh), so a fixture that wants a
 # working verdict must place one there exactly as the real fleet does. Without it the
 # same record is a claim nothing corroborates and the lane reads unknown.
 LIVE_AGENTS=()

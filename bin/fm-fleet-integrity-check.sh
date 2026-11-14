@@ -25,10 +25,11 @@
 # busy-state record is a CLAIM, not a filter: a lane between turns, or one whose
 # record never settled, still has a worktree and can still be dead. A lane whose
 # endpoint is gone is the watchdog's business, not this check's.
-# For each in-flight lane, one bounded read-only `lsof -a -d cwd` scan answers
+# For each in-flight lane, one bounded read-only process-table read answers
 # whether a live process sits in that worktree and classifies as an agent -
-# bin/fm-lane-liveness-lib.sh owns that rule, including why a pane's idle shell
-# does not count. The scan is matched only against the recorded worktree paths;
+# bin/fm-agent-proc-lib.sh owns that rule (and the fleet-wide walk built on it),
+# including why a pane's idle shell does not count and why an unclassifiable
+# process is never death evidence. The table is read once for the whole fleet;
 # nothing here signals a process or writes anything but its own stamp and
 # record; the claim comparison adds only local `git status` reads inside each
 # recorded worktree, plus - for a lane it would otherwise report - the shared
@@ -58,16 +59,19 @@
 # but shells, or nothing at all - so a worktree holding a process the shared
 # vocabulary cannot classify is left alone rather than reported, because a false
 # dead verdict is what launches a duplicate agent onto a live worktree.
-# A scan that cannot be trusted (no lsof, or lsof failed) is silent for the same
-# reason: a broken probe is not evidence that the fleet is dead.
+# A scan that cannot be trusted (the process table could not be read) is silent
+# for the same reason: a broken probe is not evidence that the fleet is dead.
 #
 # SELF-THROTTLED. A stamp file keeps the scan off every watcher poll; the
 # default cadence is 300s and FM_FLEET_INTEGRITY_INTERVAL overrides it. The
-# required dead-lane line is computed from the one bounded lsof scan alone and
-# printed and recorded BEFORE any claim comparison, so an optional probe can
-# never starve it. The claim comparisons then spend at most half of the watcher's
-# FM_CHECK_TIMEOUT, every git read is bounded by bin/fm-timeout-lib.sh, and a
-# read that hits its bound leaves the lane silent rather than guessing.
+# required dead-lane line is computed from the one bounded process-table read
+# alone and printed and recorded BEFORE any claim comparison, so an optional
+# probe can never starve it. That read is bounded by bin/fm-timeout-lib.sh, and
+# the throttle stamp is written only after it succeeds, so a scan that cannot
+# finish is retried on the next poll instead of being suppressed for the whole
+# interval. The claim comparisons then spend at most half of the watcher's
+# FM_CHECK_TIMEOUT, every git read is bounded by the same owner, and a read that
+# hits its bound leaves the lane silent rather than guessing.
 set -u
 export LC_ALL=C
 
@@ -84,8 +88,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
-# shellcheck source=bin/fm-lane-liveness-lib.sh
-. "$SCRIPT_DIR/fm-lane-liveness-lib.sh"
+# shellcheck source=bin/fm-gemini-lib.sh
+. "$SCRIPT_DIR/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-agent-proc-lib.sh
+. "$SCRIPT_DIR/fm-agent-proc-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-landed-lib.sh
@@ -113,6 +119,9 @@ GIT_READ_CAP=$((CHECK_TIMEOUT / 4))
 POLL_BUDGET=$((CHECK_TIMEOUT / 2))
 [ "$POLL_BUDGET" -le 15 ] || POLL_BUDGET=15
 [ "$POLL_BUDGET" -ge 3 ] || POLL_BUDGET=3
+SCAN_CAP=$((CHECK_TIMEOUT / 2))
+[ "$SCAN_CAP" -le 15 ] || SCAN_CAP=15
+[ "$SCAN_CAP" -ge 1 ] || SCAN_CAP=1
 
 usage() {
   awk '
@@ -167,7 +176,7 @@ lane_claim() {  # <id>
 # A remote secondmate is skipped: its worktree path names a directory on another
 # host, so a local cwd scan proves nothing about it.
 lane_worktrees() {
-  local meta id wt remote claim pr
+  local meta id wt remote claim pr harness
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -178,7 +187,8 @@ lane_worktrees() {
     [ -n "$wt" ] && [ -d "$wt" ] || continue
     claim=$(lane_claim "$id")
     pr=$(fm_meta_get "$meta" pr)
-    printf '%s\t%s\t%s\t%s\n' "$id" "$wt" "$claim" "$pr"
+    harness=$(fm_meta_get "$meta" harness)
+    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$id" "$wt" "$claim" "$pr" "$harness"
   done
 }
 
@@ -222,8 +232,8 @@ lane_landed_verdict() {  # <worktree> <branch> <pr> <seconds>
 }
 
 action_check() {
-  local now stamp interval rows dead ids wt id claim pr branch line findings extra dirty unpushed work
-  local landed_rc deadline remaining seconds
+  local now stamp interval rows ids wt id claim pr harness branch line findings extra dirty unpushed work
+  local landed_rc deadline remaining seconds scan_table
   now=$(now_epoch)
   interval=$(interval_secs)
   if [ -f "$STAMP" ] && [ ! -L "$STAMP" ]; then
@@ -234,37 +244,41 @@ action_check() {
     [ $((now - stamp)) -ge "$interval" ] || return 0
   fi
   mkdir -p "$STATE" 2>/dev/null || return 0
-  printf '%s\n' "$now" > "$STAMP" 2>/dev/null || true
 
   rows=$(lane_worktrees) || return 0
   [ -n "$rows" ] || { rm -f -- "$RECORD" 2>/dev/null; return 0; }
 
-  local -a worktrees=()
-  while IFS=$'\t' read -r id wt claim pr; do
+  # One bounded process-table read for the whole fleet. A read that cannot be
+  # trusted is silent, and it does not write the stamp: a broken or slow probe
+  # must be retried on the next poll, never suppressed for the whole interval.
+  scan_table=$(mktemp "$STATE/.fleet-integrity.proc.XXXXXX" 2>/dev/null) || return 0
+  # shellcheck disable=SC2016
+  if ! fm_run_timed "$SCAN_CAP" bash -c '. "$1" || exit 2; fm_agent_proc_table > "$2"' \
+    fm-agent-proc "$SCRIPT_DIR/fm-agent-proc-lib.sh" "$scan_table"; then
+    rm -f -- "$scan_table" 2>/dev/null
+    return 0
+  fi
+  printf '%s\n' "$now" > "$STAMP" 2>/dev/null || true
+
+  # The required line first: it comes from the bounded table read alone and is
+  # printed and recorded before any optional claim comparison runs, so a slow
+  # landed test can never starve the intent's one dead-lane wake. A table that
+  # was read but holds no recognizable agent is death only when the lane's own
+  # harness is one the shared vocabulary can name.
+  ids=
+  while IFS=$'\x1f' read -r id wt claim pr harness; do
     [ -n "$wt" ] || continue
-    worktrees+=("$wt")
+    FM_AGENT_PROC_TABLE=$scan_table fm_agent_proc_worktree_verdict "$wt"
+    case $? in
+      0) ;;
+      1) fm_agent_proc_recognizes "$harness" || continue
+         ids="${ids:+$ids,}$id" ;;
+      *) ;;
+    esac
   done <<EOF
 $rows
 EOF
-  [ "${#worktrees[@]}" -gt 0 ] || { rm -f -- "$RECORD" 2>/dev/null; return 0; }
-
-  # One scan for the whole fleet. A scan that cannot be trusted is silent: a
-  # broken probe is not evidence that every lane is dead.
-  dead=$(fm_lane_dead_worktrees "${worktrees[@]}") || return 0
-
-  # The required line first: it comes from the bounded scan alone and is printed
-  # and recorded before any optional claim comparison runs, so a slow landed test
-  # can never starve the intent's one dead-lane wake.
-  ids=
-  if [ -n "$dead" ]; then
-    while IFS=$'\t' read -r id wt claim pr; do
-      [ -n "$wt" ] || continue
-      printf '%s\n' "$dead" | grep -Fqx -- "$wt" || continue
-      ids="${ids:+$ids,}$id"
-    done <<EOF
-$rows
-EOF
-  fi
+  rm -f -- "$scan_table" 2>/dev/null
   findings=
   extra=
   if [ -n "$ids" ]; then
@@ -276,7 +290,7 @@ EOF
   fi
 
   deadline=$(($(date +%s) + POLL_BUDGET))
-  while IFS=$'\t' read -r id wt claim pr; do
+  while IFS=$'\x1f' read -r id wt claim pr harness; do
     [ -n "$wt" ] || continue
     case "$claim" in
       done|failed) ;;

@@ -89,7 +89,7 @@ Decision-only events such as `resolved` never become current state or leak their
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
 The semantic branch reports working only on an exact busy verdict and names the source that produced it; an unknown verdict never becomes working, never permits the status-log fallback, and never becomes a silent idle.
 Any busy verdict is corroborated against a live process before it may read working, because both the stored `state/<id>.busy-state` record and a pull of the harness's own artifact survive a hard kill and on their own report a corpse as working - the 2026-11-05 failure, where the fleet lost roughly 27 lanes while three successive health reads counted 11, then 15, then 27 dead.
-[`bin/fm-lane-liveness-lib.sh`](../bin/fm-lane-liveness-lib.sh) owns that corroboration: a live process whose current working directory is the lane's recorded worktree and whose process classifies as an agent through the shared name-and-arguments vocabulary, from one bounded read-only scan.
+[`bin/fm-agent-proc-lib.sh`](../bin/fm-agent-proc-lib.sh) owns that corroboration: a live process whose current working directory is the lane's recorded worktree and whose process classifies as an agent through the shared name-and-arguments vocabulary, from one bounded read-only scan.
 A busy verdict with no such process reads unknown/stale, and an unreadable process table reads unknown.
 [`bin/fm-fleet-integrity-check.sh`](../bin/fm-fleet-integrity-check.sh) is the fleet-wide backstop over the same rule.
 For whole-fleet review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, local current crew state, supervision-owned endpoint evidence, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
@@ -180,7 +180,7 @@ Codex and standalone Kimi classify unknown behind explicit probes until a semant
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
 Within that classification, endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
-Readers apply one further process-level condition, owned by `bin/fm-lane-liveness-lib.sh`, before a busy verdict may read working, as described above where `bin/fm-crew-state.sh` reads busy state.
+Readers apply one further process-level condition, owned by `bin/fm-agent-proc-lib.sh`, before a busy verdict may read working, as described above where `bin/fm-crew-state.sh` reads busy state.
 `state/<id>.turn-ended` files remain wake notifications, not current state.
 A secondmate spawn arms the same busy-state contract but deliberately omits its harness turn-end notification, because a mate's meta lives in the parent's state directory and each touch there would wake the parent firstmate; the wake-stall rung reads the busy record instead.
 

@@ -24,7 +24,7 @@ export FM_ROOT_OVERRIDE
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 # A busy child only reads as working while a live agent process sits in its
-# recorded worktree (bin/fm-lane-liveness-lib.sh), so a bounds fixture must place
+# recorded worktree (bin/fm-agent-proc-lib.sh), so a bounds fixture must place
 # one there exactly as the real fleet does.
 spawn_live_agent() {  # <dir> <worktree>
   fm_spawn_live_agent_fixture "$1/agentbin" claude "$2"

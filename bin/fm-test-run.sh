@@ -265,7 +265,7 @@ family_for_basename() {
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-reap.test.sh|\
     ak47-budget.test.sh|ak47-census.test.sh|ak47-guards.test.sh|\
     ak47-safe-delete.test.sh|ak47-tick.test.sh|ak47-weekly-review.test.sh|\
-    fm-lane-liveness.test.sh|fm-fleet-integrity-check.test.sh|fm-tmux-test-safety.test.sh)
+    fm-fleet-integrity-check.test.sh|fm-tmux-test-safety.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
@@ -646,7 +646,6 @@ tests/fm-home-summary-refresh.test.sh 50699
 tests/fm-inactive-reconcile.test.sh 54465
 tests/fm-instrument-sweep.test.sh 13200
 tests/fm-kimi-harness.test.sh 18015
-tests/fm-lane-liveness.test.sh 4000
 tests/fm-lane-model-switch.test.sh 25902
 tests/fm-lint-workflows.test.sh 1459
 tests/fm-lock-reap.test.sh 18900

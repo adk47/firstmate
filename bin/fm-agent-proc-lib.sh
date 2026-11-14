@@ -123,24 +123,19 @@ fm_agent_proc_recognizes() {  # <harness>
   [ "$(fm_backend_tmux_classify_process_name "$1")" = agent ]
 }
 
-# fm_agent_proc_in_worktree <worktree>: print one "<pid> TAB <name>" line per
-# live agent process whose working directory is <worktree> or below it, or
-# whose arguments name <worktree> as a path. Both the recorded path and its
-# symlink-resolved form are matched, since the kernel reports resolved paths.
-#
-# Returns:
-#   0  at least one agent process was found (lines printed)
-#   1  the table was read and holds no agent for this worktree
-#   2  the table could not be read, or no worktree was given - never evidence
-#      that the agent is gone
-fm_agent_proc_in_worktree() {  # <worktree>
-  local wt=${1:-} phys table rows pid comm argv0 found=1
+# fm_agent_proc_worktree_rows <worktree> [table]: print one
+# "<pid> TAB <comm> TAB <argv0> TAB <args>" row per process whose working
+# directory is <worktree> or below it, or whose arguments name <worktree> as a
+# path. Both the recorded path and its symlink-resolved form are matched, since
+# the kernel reports resolved paths. Returns 0 with the rows (possibly none),
+# or 2 when the table could not be read or no worktree was given.
+fm_agent_proc_worktree_rows() {  # <worktree> [table]
+  local wt=${1:-} table=${2:-} phys
   [ -n "$wt" ] || return 2
   while [ "${wt%/}" != "$wt" ] && [ "$wt" != / ]; do wt=${wt%/}; done
   phys=$(cd "$wt" 2>/dev/null && pwd -P) || phys=$wt
-  table=$(fm_agent_proc_table) || return 2
-  fm_backend_source tmux || return 2
-  rows=$(printf '%s\n' "$table" | FM_AGENT_PROC_WT="$wt" FM_AGENT_PROC_PHYS="$phys" awk -F '\t' '
+  [ -n "$table" ] || table=$(fm_agent_proc_table) || return 2
+  printf '%s\n' "$table" | FM_AGENT_PROC_WT="$wt" FM_AGENT_PROC_PHYS="$phys" awk -F '\t' '
     function under(dir, root) {
       return root != "" && (dir == root || index(dir, root "/") == 1)
     }
@@ -168,7 +163,24 @@ fm_agent_proc_in_worktree() {  # <worktree>
         sub(/ .*/, "", argv0)
         printf "%s\t%s\t%s\t%s\n", $1, $2, argv0, $4
       }
-    }')
+    }'
+}
+
+# fm_agent_proc_in_worktree <worktree>: print one "<pid> TAB <name>" line per
+# live agent process whose working directory is <worktree> or below it, or
+# whose arguments name <worktree> as a path. Both the recorded path and its
+# symlink-resolved form are matched, since the kernel reports resolved paths.
+#
+# Returns:
+#   0  at least one agent process was found (lines printed)
+#   1  the table was read and holds no agent for this worktree
+#   2  the table could not be read, or no worktree was given - never evidence
+#      that the agent is gone
+fm_agent_proc_in_worktree() {  # <worktree>
+  local wt=${1:-} rows pid comm argv0 args found=1
+  [ -n "$wt" ] || return 2
+  rows=$(fm_agent_proc_worktree_rows "$wt") || return 2
+  fm_backend_source tmux || return 2
   [ -n "$rows" ] || return 1
   while IFS=$'\t' read -r pid comm argv0 args; do
     [ -n "$pid" ] || continue
@@ -182,6 +194,35 @@ fm_agent_proc_in_worktree() {  # <worktree>
 $rows
 EOF
   return "$found"
+}
+
+# fm_agent_proc_worktree_verdict <worktree>: the three-way answer for one
+# worktree, from the same table and vocabulary as fm_agent_proc_in_worktree.
+#
+# Returns:
+#   0  a live agent process is in the worktree
+#   1  provably no agent: the worktree holds only shells, or nothing at all
+#   2  undeterminable: the table could not be read, no worktree was given, or
+#      the worktree holds a process this vocabulary cannot classify - which
+#      might be the agent, so it is never evidence of death
+fm_agent_proc_worktree_verdict() {  # <worktree>
+  local rows pid comm argv0 args class not_shell=0
+  rows=$(fm_agent_proc_worktree_rows "${1:-}") || return 2
+  fm_backend_source tmux || return 2
+  [ -n "$rows" ] || return 1
+  while IFS=$'\t' read -r pid comm argv0 args; do
+    [ -n "$pid" ] || continue
+    [ "$pid" != "$$" ] || continue
+    class=$(fm_backend_tmux_classify_process_name "${comm:-$argv0}" "$argv0")
+    if [ "$class" = agent ] || fm_agent_proc_args_are_gemini "${args:-}"; then
+      return 0
+    fi
+    [ "$class" = shell ] || not_shell=1
+  done <<EOF
+$rows
+EOF
+  [ "$not_shell" = 0 ] || return 2
+  return 1
 }
 
 

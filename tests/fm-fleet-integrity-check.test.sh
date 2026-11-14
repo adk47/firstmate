@@ -17,6 +17,12 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# This file's lanes are real processes under the temp root, so the check must
+# read the real process table; tests/lib.sh's suite-wide unreadable-table seam
+# would turn every poll silent. The fixture paths are unique, so no host agent
+# can match a lane.
+unset FM_AGENT_PROC_TABLE
+
 CHECK="$ROOT/bin/fm-fleet-integrity-check.sh"
 assert_present "$CHECK" "bin/fm-fleet-integrity-check.sh is missing"
 [ -x "$CHECK" ] || fail "bin/fm-fleet-integrity-check.sh must be executable"
@@ -455,6 +461,105 @@ test_unprovable_landing_is_silent() {
   pass "a lane whose landing cannot be proven is not reported"
 }
 
+# --- the shared process-table owner supplies the verdicts -------------------
+
+test_lane_whose_record_is_symlinked_still_reads_live() {
+  local d out
+  d="$TMP_ROOT/symlinked-record"
+  mkdir -p "$d/real/wt"
+  ln -s "$d/real" "$d/link" || fail "could not create the symlinked component"
+  make_home "$d" "lane-sym:$d/link/wt"
+  spawn_named_process "$d/bin" pi "$d/real/wt" >/dev/null || fail "could not spawn lane-sym's agent"
+  sleep 0.2
+  out=$(run_check "$d")
+  [ -z "$out" ] || fail "a live agent whose physical cwd is the symlinked record's target must be silent, got: $out"
+  pass "a live agent in a symlinked-record worktree is not reported dead"
+}
+
+test_sibling_path_prefix_is_not_live() {
+  local d out
+  d="$TMP_ROOT/prefix-sibling"
+  mkdir -p "$d/fm-a" "$d/fm-ab"
+  make_home "$d" "lane-a:$d/fm-a"
+  spawn_named_process "$d/bin" pi "$d/fm-ab" >/dev/null || fail "could not spawn the sibling's agent"
+  sleep 0.2
+  out=$(run_check "$d")
+  assert_contains "$out" "lane-a" \
+    "a worktree whose path is only a string prefix of a live sibling must still be reported dead"
+  pass "a bare path prefix does not make a sibling worktree live"
+}
+
+test_unclassifiable_process_is_not_reported() {
+  local d out
+  d="$TMP_ROOT/unclassifiable"
+  mkdir -p "$d/wt"
+  make_home "$d" "lane-odd:$d/wt"
+  spawn_named_process "$d/bin" fm-not-a-harness "$d/wt" >/dev/null \
+    || fail "could not spawn the unclassifiable fixture"
+  sleep 0.2
+  out=$(run_check "$d")
+  [ -z "$out" ] || fail "a worktree holding only an unclassifiable process must be silent, got: $out"
+  pass "an unclassifiable process is never reported as a dead lane"
+}
+
+test_lane_whose_harness_vocabulary_cannot_name_is_not_reported() {
+  local d out
+  d="$TMP_ROOT/unnamed-harness"
+  mkdir -p "$d/wt"
+  make_home "$d" "lane-weird:$d/wt"
+  printf 'harness=not-a-known-harness\n' >>"$d/state/lane-weird.meta"
+  spawn_shell_in "$d/wt" >/dev/null || fail "could not spawn the lane's shell"
+  sleep 0.2
+  out=$(run_check "$d")
+  [ -z "$out" ] \
+    || fail "a lane whose harness the vocabulary cannot name is not provably dead, got: $out"
+  pass "a lane whose harness cannot be recognized is never reported dead"
+}
+
+test_unreadable_process_table_is_silent() {
+  local d out
+  d="$TMP_ROOT/unreadable-table"
+  mkdir -p "$d/wt"
+  make_home "$d" "lane-a:$d/wt"
+  spawn_shell_in "$d/wt" >/dev/null || fail "could not spawn the lane's shell"
+  out=$(FM_AGENT_PROC_TABLE=/nonexistent/fm-fleet-integrity-table \
+    FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" "$CHECK" check)
+  [ -z "$out" ] || fail "an unreadable process table is no evidence of death, got: $out"
+  [ "$(cat "$d/state/.fleet-integrity.last")" = 0 ] \
+    || fail "a poll that could not read the table must not write its throttle stamp"
+  pass "an unreadable process table is silent and does not consume the interval"
+}
+
+# A process-table read that hangs must be cut at the check's bound, leave the
+# stamp untouched, and be retried by the next poll.
+test_hung_process_table_is_bounded_and_retried() {
+  local d start elapsed out toolbin
+  d="$TMP_ROOT/hung-table"
+  mkdir -p "$d/wt"
+  make_home "$d" "lane-a:$d/wt"
+  spawn_shell_in "$d/wt" >/dev/null || fail "could not spawn the lane's shell"
+  toolbin="$d/toolbin"
+  mkdir -p "$toolbin"
+  printf '#!/bin/bash\nsleep 30\n' >"$toolbin/ps"
+  chmod +x "$toolbin/ps"
+  start=$(date +%s)
+  out=$(PATH="$toolbin:$PATH" FM_CHECK_TIMEOUT=4 run_check "$d")
+  elapsed=$(($(date +%s) - start))
+  [ "$elapsed" -lt 4 ] || fail "a hung table read must be bounded, took ${elapsed}s"
+  [ -z "$out" ] || fail "a hung table read is no evidence of death, got: $out"
+  [ "$(cat "$d/state/.fleet-integrity.last")" = 0 ] \
+    || fail "a poll that could not finish its scan must not write its throttle stamp"
+  out=$(run_check "$d")
+  assert_contains "$out" "lane-a" "the next poll must retry the scan and report the dead lane"
+  pass "a hung process-table read is bounded, silent, and retried on the next poll"
+}
+
+test_lane_whose_record_is_symlinked_still_reads_live
+test_sibling_path_prefix_is_not_live
+test_unclassifiable_process_is_not_reported
+test_lane_whose_harness_vocabulary_cannot_name_is_not_reported
+test_unreadable_process_table_is_silent
+test_hung_process_table_is_bounded_and_retried
 test_squash_merged_and_deleted_lane_is_silent
 test_local_only_merged_lane_is_silent
 test_genuinely_unlanded_lane_is_reported

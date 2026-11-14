@@ -848,7 +848,7 @@ if [ "$KIND" != secondmate ] && [ "$HAVE_TARGET" = 1 ]; then
       # bin/fm-agent-proc-lib.sh owns "is an agent running in this worktree":
       # 0 = a live agent, 1 = the table was read and holds none, 2 = the table
       # could not be read, which is never evidence that the agent is gone.
-      fm_agent_proc_in_worktree "$WT"
+      fm_agent_proc_in_worktree "$WT" >/dev/null
       case $? in
         0) emit working pane "harness busy ($BUSY_SOURCE)" ;;
         1)
