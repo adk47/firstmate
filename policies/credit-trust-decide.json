@@ -96,11 +96,11 @@
   "big_track_popularity": 60,
   "max_ask_users_per_day": 400,
   "score_approve": {
-    "_doc": "credit-review.py score-approve (cron credit-trust-score-approve-15m): the validator's approve verdict executed on held user_verification_needed rows with total risk < max_total_risk (captain 2026-10-20 ~11:30Z 'approve low risk credits'). Every other guard stays: validator conflict / reject rule / server guard / big or unattributable track / org role / deny lists / per-user daily cap. max_total_risk <= 30 and max_popularity <= 60 are enforced in code. Fable band-B ruling 2026-10-20 (data/credit-trust-system-fable-a1/ruling-score-approve-band-b-2026-10-20.md): admit_band_b stays false until core's T12 twin admitting validator-approved band B is LIVE; caps 20/user, 50/profile, 2,000 fleet per day (code-enforced maxima).",
+    "_doc": "credit-review.py score-approve (cron credit-trust-score-approve-15m): the validator's approve verdict executed on held user_verification_needed rows with total risk < max_total_risk (captain 2026-10-20 ~11:30Z 'approve low risk credits'). Every other guard stays: validator conflict / reject rule / server guard / big or unattributable track / org role / deny lists / per-user daily cap. max_total_risk <= 30 and max_popularity <= 60 are enforced in code. Fable band-B ruling 2026-10-20 (data/credit-trust-system-fable-a1/ruling-score-approve-band-b-2026-10-20.md): admit_band_b stays false until core's T12 twin admitting validator-approved band B is LIVE; caps 20/user, 50/profile, 2,000 fleet per day (code-enforced maxima). max_per_run 50 (the lane's ruling item (c) 'cap 50 per run', passed into the task brief as the required cap and confirmed by firstmate 2026-11-14: 50 is the number that bounds the live approve path once this job is armed, and it is inert until then because the cron row credit-trust-score-approve-15m is enabled: false; the code ceiling stays 100, so raising this number is a decision, pinned by test_credit_score_approve.py). An account the gate allows but does not band green (amber fraud watch, a released red, an unread band) is not approved: account_gate.watch_refusal.",
     "enabled": true,
     "max_total_risk": 30,
     "max_popularity": 60,
-    "max_per_run": 100,
+    "max_per_run": 50,
     "candidate_limit": 5000,
     "admit_band_b": true,
     "per_user_per_day": 20,

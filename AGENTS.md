@@ -695,6 +695,9 @@ dispatch and at the write boundary. Why: from 05-18 to 10-11 the batch approved
 validator-DECLINED credits through an inverted rule (`approve_owning_track == 100`
 means the shortcut did NOT fire). Approvals are audited read-only by
 `scripts/credit-review.py` (see `docs/credit-verification/ai-credit-reviewer.md`).
+**The account gate's `allow` is not "green"**: it allows an amber (fraud watch) account, so an approver
+that reads only `allowed` approves the watch. Read the band: `account_gate.watch_refusal` (score-approve
+approves a green allow only; an allow that names no band is unmeasured, never green).
 Caroline (edge) approves nothing: `capability-approvers.txt` lists no approver and
 `credits_verify` / `profiles_consolidate` / `profiles_claim_self` stay off. Deploy refuses a
 source that lists one and strips `MUSO_CAPABILITY_APPROVER` from edge.env

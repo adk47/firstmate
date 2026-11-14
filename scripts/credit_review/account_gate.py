@@ -24,6 +24,8 @@ from typing import Any, Callable
 GATE_CMD = os.environ.get("CREDIT_ACCOUNT_GATE_CMD", "python3 /opt/firstmate/fraud-lens/account_gate.py")
 TIMEOUT_S = int(os.environ.get("CREDIT_ACCOUNT_GATE_TIMEOUT_S", "60"))
 ALLOW, HOLD, UNKNOWN = "allow", "hold", "unknown"
+#: The one band an unattended approver may approve on (see `watch_refusal`).
+GREEN = "green"
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,38 @@ def check(user_id: Any, runner: Runner | None = None) -> GateResult:
     if p.returncode == 3 or body.get("decision") == HOLD:
         return GateResult(HOLD, reasons, body)
     return GateResult(UNKNOWN, reasons or (f"gate exit {p.returncode}",), body)
+
+
+def watch_refusal(g: GateResult) -> str | None:
+    """Why an ALLOW is still not an approval for an unattended approver, or None when the account is green.
+
+    The gate's `allow` only says the account is under Fable's level. Its `band` says more: an `amber`
+    account is on the fraud watch (`watch: true`) for a named reason - approvals despite a validator
+    decline, hundreds of rows in one day - and the gate still answers allow, because the watch was never
+    a hold. Score-approve approved such accounts: in the 2026-11-14 dry run 5 amber accounts held 28 of
+    the 221 rows it would have written, and only the analysis left them out. Captain 2026-11-14 armed the
+    job on the remaining 193, "all green at the account gate", so green is the rule:
+
+      * band `green` and no watch flag -> None (the caller may approve);
+      * band `amber`, or `watch` true  -> the account is on the fraud watch;
+      * any other band (a released `red` is an allow, and "released" is not "verified clean");
+      * no band at all                 -> the band was not measured, which is never read as green.
+
+    A result that is not an allow returns None: the caller has already refused it on `allowed`.
+    """
+    if not g.allowed:
+        return None
+    payload = g.payload if isinstance(g.payload, dict) else {}
+    band = payload.get("band")
+    said = f": {'; '.join(g.reasons)[:200]}" if g.reasons else ""
+    if not isinstance(band, str) or not band.strip():
+        return "account gate band unread (an allow that names no band is not a measured green)"
+    band = band.strip().lower()
+    if band == "amber" or (band == GREEN and payload.get("watch")):
+        return f"account on fraud watch (gate band {band}{said})"
+    if band != GREEN:
+        return f"account gate band {band} (allowed by the gate, not green{said})"
+    return None
 
 
 class Cached:

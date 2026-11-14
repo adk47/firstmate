@@ -1716,7 +1716,7 @@
       "id": "f5fc0ebe-8dc2-5414-8c75-5913ddedb278",
       "agentId": "operations",
       "name": "credit-trust-score-approve-15m",
-      "description": "Captain 2026-10-20 ~11:30Z 'approve low risk credits' (firstmate 110): credit-review.py score-approve --mode apply executes the validator's approve verdict on held user_verification_needed rows with total risk < 30, every other guard intact (scripts/credit_review/score_approve.py; registry credit-trust-score-approve). Risk 0 first, paid first, <= 100 per run, ledger before write, reversible per run. Runs at :10/:25/:40/:55 between decider runs. Kill switch /etc/hydra/credit-trust-score-approve.disabled. NO_REPLY when nothing was approved; one summary line otherwise; exit 1 on write errors.",
+      "description": "Captain 2026-10-20 ~11:30Z 'approve low risk credits' (firstmate 110): credit-review.py score-approve --mode apply executes the validator's approve verdict on held user_verification_needed rows with total risk < 30, every other guard intact, and only when the account gate bands the account GREEN - an amber fraud-watch account, a released red one and an unread band are held (account_gate.watch_refusal; scripts/credit_review/score_approve.py; registry credit-trust-score-approve). Risk 0 first, paid first, <= 50 per run (policies/credit-trust-decide.json score_approve.max_per_run), ledger before write, reversible per run. Runs at :10/:25/:40/:55 between decider runs. Kill switch /etc/hydra/credit-trust-score-approve.disabled. NO_REPLY when nothing was approved; one summary line otherwise; exit 1 on write errors.",
       "enabled": false,
       "createdAtMs": 1792103400000,
       "updatedAtMs": 1792103400000,

@@ -17,6 +17,10 @@ executor side. Only these rows, every other guard intact:
   * (4) burst / velocity holds refuse (they are review_* rules: conflict or at 100);
   * (5) no open proof request (the 566 stay on the proof path in phase 1);
   * no organization / label / publisher / studio role; not on the deny / fraud / hold lists;
+  * the shared account gate decides last, and only a GREEN allow approves (captain 2026-11-14): an
+    account the gate allows on the amber fraud watch, a released red one, and an allow that names no
+    band are not approved (``account_gate.watch_refusal``). The gate's allow alone approved 28 rows of
+    5 amber accounts in that day's dry run;
   * (8) caps by write time: 20 per user, 50 per profile, 2,000 fleet per UTC day, plus the
     decider's per-user approvals cap; at most ``max_per_run`` per run; paid first (paid > 24 h,
     paid < 24 h, free), then risk 0 first, then oldest;
@@ -765,6 +769,7 @@ class ScoreResult:
     candidates: int = 0
     reread: int = 0
     account_held: int = 0
+    watch_held: int = 0
     approved: int = 0
     would_approve: int = 0
     held: dict[str, int] = field(default_factory=dict)
@@ -797,6 +802,8 @@ class ScoreResult:
                    f"{decide.EDITORIAL_MID_POPULARITY} only)" if self.editorial_held else "")
                 + f"; {self.fanout_held} held by {FANOUT_PREFIX} (velocity-class)"
                 + (f"; {self.account_held} held by the account gate" if self.account_held else "")
+                + (f"; {self.watch_held} not approved: account not green at the gate (fraud watch)"
+                   if self.watch_held else "")
                 + (f"; approved by anchor_kind {dict(sorted(self.anchor_kinds.items()))}" if self.anchor_kinds else "")
                 + ("; READS INCOMPLETE (HTTP 429 or scan cap)" if self.read_exhausted else "")
                 + ("; AUDIT SAMPLE NOT FILED: PAUSED" if self.audit_failed else "")
@@ -963,6 +970,14 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
             if not g.allowed:
                 why = f"{g.why()}: no approval, proof ask"
                 res.account_held += 1
+            else:
+                # Captain 2026-11-14: an allow is not enough. Only a green account is approved here; an
+                # amber (fraud watch) one, a released red one and an unread band are not
+                # (account_gate.watch_refusal). Before this the watch excluded nobody from this job.
+                watch = account_gate_mod.watch_refusal(g)
+                if watch:
+                    why = f"{watch}: no score approval"
+                    res.watch_held += 1
         if why is None:
             d.evidence_kind = TRUSTED_EVIDENCE_KIND if kind == "trusted" else EVIDENCE_KIND
             res.anchor_kinds[kind] = res.anchor_kinds.get(kind, 0) + 1

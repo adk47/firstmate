@@ -35,10 +35,19 @@ def row(rid, *, uid=500, pid="p1", risk=0, approved=True, pop=20, roles=("Produc
 
 
 # Steward 019 / captain 2026-10-26: every approval calls the shared account gate first. These tests cover the
-# other rules, so the gate answers allow here; its own behaviour is pinned below and in test_credit_account_gate.py.
+# other rules, so the gate answers allow on a GREEN account here (an allow that names no band is not approved:
+# account_gate.watch_refusal); its own behaviour is pinned below and in test_credit_account_gate.py.
 from credit_review import account_gate as _gate  # noqa: E402
 from unittest import mock as _mock  # noqa: E402
-_ALLOW = _mock.patch.object(_gate, "check", lambda uid, runner=None: _gate.GateResult(_gate.ALLOW))
+
+
+def _allow(band="green", reasons=(), **extra):
+    """The gate's allow as node-8 prints it: the band and the watch flag ride in the payload."""
+    return _gate.GateResult(_gate.ALLOW, tuple(reasons), {"decision": "allow", "band": band,
+                                                           "watch": band == "amber", **extra})
+
+
+_ALLOW = _mock.patch.object(_gate, "check", lambda uid, runner=None: _allow())
 
 
 def setUpModule():
@@ -255,6 +264,18 @@ class ScoreApprove(unittest.TestCase):
         p.write_text(json.dumps({"score_approve": {"enabled": True, "max_per_run": 100}}))
         self.assertEqual(sa.ScorePolicy.load(p).max_per_run, 100)
 
+    def test_the_checked_in_policy_paces_a_run_at_50_and_the_pace_binds(self):
+        """The lane's ruling item (c), cap 50 per run (the task brief's required cap, confirmed by firstmate
+        2026-11-14): the job is armed at 50 a run, half the registered ceiling of 100, and the number bounds the
+        live approve path once the cron row leaves enabled: false. Raising the checked-in number is a decision, so
+        it is pinned here; the pace itself is the code's (row 51 waits)."""
+        sp = sa.ScorePolicy.load(ROOT / "policies" / "credit-trust-decide.json")
+        self.assertEqual(sp.max_per_run, 50)
+        rows = [row(f"c{i:02d}", uid=700 + i, pid=f"cp{i}") for i in range(53)]
+        res, w = self.go(rows, sp=sa.ScorePolicy(enabled=True, max_per_run=sp.max_per_run))
+        self.assertEqual((res.approved, len([i for c in w.calls for i in c[1]])), (50, 50))
+        self.assertEqual(res.held.get("per-run pace of 50 reached"), 3)
+
     def test_a_pause_stops_writes_and_audit_samples_are_filed(self):
         sa.PAUSE_FILE.write_text("audit precision 0.93 < 0.95 (audit-1)")
         res, w = self.go([row("p1x", pid="pz")])
@@ -358,7 +379,7 @@ class ScoreApprove(unittest.TestCase):
 
         def gate(uid):
             asked.append(uid)
-            return {901: _gate.GateResult(_gate.ALLOW), 902: _gate.GateResult(_gate.HOLD, ("count_90d 412 >= 250",)),
+            return {901: _allow(), 902: _gate.GateResult(_gate.HOLD, ("count_90d 412 >= 250",)),
                     903: _gate.GateResult(_gate.UNKNOWN, ("check could not run",))}[uid]
         res, w = self.go(rows, gate=gate)
         self.assertEqual([i for c in w.calls for i in c[1]], ["g1"])
@@ -368,6 +389,43 @@ class ScoreApprove(unittest.TestCase):
         self.assertEqual(res.account_held, 3)
         self.assertEqual(sorted(asked), [901, 902, 903], "one gate call per account per run")
         self.assertIn("3 held by the account gate", res.line())
+
+    def test_an_amber_fraud_watch_account_is_not_approved_and_a_green_one_still_is(self):
+        """Captain 2026-11-14. The gate ALLOWS an amber account (the watch was never a hold), so until this
+        rule the job approved it: 28 rows of 5 amber accounts in the dry run. Same row shape on both accounts;
+        the band is the only difference."""
+        rows = [row("amber1", uid=911, pid="pa"), row("amber2", uid=911, pid="pa2"), row("green1", uid=912, pid="pg")]
+        gate = lambda uid: {911: _allow("amber", ("AMBER 37 approvals despite decline in 90d",)),
+                            912: _allow("green", ("no account-level signal; under every level",))}[uid]
+        res, w = self.go(rows, gate=gate)
+        self.assertEqual([i for c in w.calls for i in c[1]], ["green1"], "only the green account's row is written")
+        d = self.decisions()
+        self.assertEqual(d["green1"]["decision"], "approve")
+        for rid in ("amber1", "amber2"):
+            self.assertEqual(d[rid]["decision"], "hold")
+            self.assertIn("account on fraud watch (gate band amber: AMBER 37 approvals despite decline in 90d): "
+                          "no score approval", d[rid]["reason"])
+        self.assertEqual((res.approved, res.watch_held, res.account_held), (1, 2, 0))
+        self.assertEqual(res.held, {"account on fraud watch": 2})
+        self.assertIn("2 not approved: account not green at the gate (fraud watch)", res.line())
+
+    def test_the_amber_rule_holds_in_shadow_too(self):
+        """Dry run and apply are one code path: a shadow run must not count an amber row as a would-approve."""
+        rows = [row("amber1", uid=911, pid="pa"), row("green1", uid=912, pid="pg")]
+        gate = lambda uid: _allow("amber" if uid == 911 else "green")
+        res, w = self.go(rows, mode="shadow", gate=gate)
+        self.assertEqual((res.would_approve, res.watch_held, w.calls), (1, 1, []))
+
+    def test_an_allow_that_is_red_or_names_no_band_is_not_approved(self):
+        rows = [row("red1", uid=921, pid="pr"), row("none1", uid=922, pid="pn"), row("green1", uid=923, pid="pg")]
+        gate = lambda uid: {921: _allow("red", ("RELEASED (not verified clean): manual hold",)),
+                            922: _gate.GateResult(_gate.ALLOW), 923: _allow()}[uid]
+        res, w = self.go(rows, gate=gate)
+        self.assertEqual([i for c in w.calls for i in c[1]], ["green1"])
+        d = self.decisions()
+        self.assertIn("account gate band red (allowed by the gate, not green", d["red1"]["reason"])
+        self.assertIn("account gate band unread", d["none1"]["reason"])
+        self.assertEqual(res.watch_held, 2)
 
     def test_unverified_rows_are_in_scope_and_written_from_their_own_status(self):
         rows = [row("u", status=decide.UNVERIFIED), row("v", pid="p2")]
