@@ -497,6 +497,7 @@ cw_budget_start() {
   CW_FORGE_START=$(cw_now)
   CW_POD_FACTS_CACHE=''
   CW_WORKLOADS_CACHE=''
+  CW_SELECTOR_CACHE=''
   [ -z "$CW_POOL_BAD_HOSTS_FILE" ] || : > "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
 }
 cw_within_budget() { [ $(( $(cw_now) - CW_BUDGET_START )) -lt "$SAMPLE_DEADLINE_SECONDS" ]; }
@@ -988,7 +989,7 @@ cw_derive_targets() {  # <url> <provider> <owner> <repo> <number> <repo-name>
   [ -n "$files" ] || return 1
   manifests=$(printf '%s\n' "$files" | grep -E '^k8s/prod/[^/]+/[^/]+\.ya?ml$' || true)
   if [ -z "$manifests" ]; then
-    cw_app_targets "$repo_name"
+    cw_app_targets "$repo_name" "$files"
     return
   fi
   ref=$(cw_forge_head_ref "$url" 2>/dev/null || true)
@@ -1018,17 +1019,88 @@ cw_derive_targets() {  # <url> <provider> <owner> <repo> <number> <repo-name>
 $manifests
 PATHS
   [ "$any" -eq 1 ] && return 0
-  cw_app_targets "$repo_name"
+  cw_app_targets "$repo_name" "$files"
+}
+
+# The service a repository-map spec names: the Deployment or image name it
+# resolves to, which is also the directory a monorepo keeps that service in.
+cw_spec_service() {  # <spec>
+  local spec=$1
+  case "$spec" in
+    sentry:*|run:*) return 0 ;;
+    image:*) printf '%s\n' "${spec#image:}" ;;
+    */*) printf '%s\n' "${spec#*/}" ;;
+    *) printf '%s\n' "$spec" ;;
+  esac
+}
+
+# True when the merged diff touches a path inside <service>'s own directory: the
+# same path-to-service placement cw_place_changed_lines makes for a manifest's
+# Deployment documents. A path outside every service directory (scripts/, docs/,
+# a root file) belongs to no Deployment.
+cw_diff_touches_service() {  # <files> <service>
+  printf '%s\n' "$1" | awk -v s="$2" '
+    { p = $0; sub(/^\.\//, "", p); n = split(p, part, "/")
+      if (n >= 2 && part[1] == s) found = 1 }
+    END { exit(found ? 0 : 1) }'
 }
 
 # An application repository's targets: its image family from the live cluster,
-# its mapped Sentry project, and its mapped deploy workflow. Falls back to the
-# local H-DevOps checkout's Deployment names when the inventory resolves no
-# Deployment for the repository, so a repository whose image name is unknown is
-# still watched rather than silently unwatched.
-cw_app_targets() {  # <repo>
-  local repo=$1 out targets
-  out=$(cw_repo_targets "$repo" 2>/dev/null || true)
+# its mapped Sentry project, and its mapped deploy workflow. A repository whose
+# map names more than one service is a monorepo, so only the services the merged
+# diff actually touches are cluster targets: a change under scripts/ deploys
+# nothing and says so, instead of reporting an unproven rollout of every service
+# in the map. A repository whose map names one service is that service, so any
+# diff in it is in scope. The Sentry project and the deploy workflow are always
+# kept, because those reads never touch the cluster. Falls back to the local
+# H-DevOps checkout's Deployment names when the inventory resolves no Deployment
+# for an in-scope service, so a repository whose image name is unknown is still
+# watched rather than silently unwatched.
+cw_app_targets() {  # <repo> <files>
+  local repo=$1 files=$2 specs spec service services='' scoped='' out targets
+  local touched=0
+  specs=$(cw_repo_specs "$repo")
+  if [ -z "$specs" ]; then
+    # No map entry names this repository, so it is its own single service and the
+    # local H-DevOps checkout's Deployment names are the last resort.
+    cw_service_targets "$repo" || true
+    return 0
+  fi
+  for spec in $specs; do
+    case "$spec" in sentry:*|run:*) continue ;; esac
+    service=$(cw_spec_service "$spec")
+    [ -n "$service" ] || continue
+    case " $services " in *" $service "*) ;; *) services="$services $service" ;; esac
+  done
+  # One service: the whole repository is that service, so every spec is in
+  # scope. More than one: each cluster spec is its own service and the diff must
+  # touch it.
+  if [ "$(printf '%s' "$services" | awk '{ print NF }')" -le 1 ]; then
+    scoped=$specs
+    touched=1
+  else
+    for spec in $specs; do
+      case "$spec" in
+        sentry:*|run:*) scoped="$scoped $spec" ;;
+        *)
+          if cw_diff_touches_service "$files" "$(cw_spec_service "$spec")"; then
+            scoped="$scoped $spec"
+            touched=1
+          fi
+          ;;
+      esac
+    done
+  fi
+  out=''
+  for spec in $scoped; do
+    out="$out$(cw_spec_targets "$spec")
+"
+  done
+  if [ "$touched" -eq 0 ]; then
+    printf 'note\tthe change deploys nothing: no Deployment path is touched by the diff\n'
+    printf '%s\n' "$out" | grep -v '^target	' || true
+    return 0
+  fi
   targets=$(printf '%s\n' "$out" | grep -c '^target	' || true)
   if [ "$targets" -eq 0 ] && ! printf '%s\n' "$out" | grep -q '^run	'; then
     # The image inventory resolved no Deployment. Fall back to the checkout's own
@@ -1342,6 +1414,42 @@ cw_report_beta_failure() {  # <watch-id>
     || notice "change-watch: could not steer $task about the beta failure for $url"
 }
 
+# The label selector a Deployment's own pods carry, as a comma-joined "k=v"
+# list sorted by key. A Deployment's spec.selector.matchLabels is the only
+# authoritative answer: assuming `app=<name>` matched nothing on every
+# Deployment labelled app.kubernetes.io/name (49 of the 266 Deployments in
+# production, including the three services that deliver every customer
+# notification), and the empty log read that followed looked exactly like an
+# unmeasured rollout. Every key of the selector is used, never a subset.
+# `app=<deploy>` is the fallback only when the selector cannot be read at all.
+CW_SELECTOR_CACHE=''
+cw_deploy_selector() {  # <ns> <deploy>
+  local ns=$1 deploy=$2 key out sel
+  key="$ns/$deploy"
+  while IFS=$'\t' read -r k v; do
+    [ "$k" = "$key" ] || continue
+    printf '%s\n' "$v"
+    return 0
+  done <<CACHE
+$CW_SELECTOR_CACHE
+CACHE
+  out=''
+  # A stubbed series directory stands in for every cluster read, so there is no
+  # Deployment to ask.
+  if [ -z "${FM_CW_CLUSTER_DIR:-}" ] && command -v kubectl >/dev/null 2>&1; then
+    # shellcheck disable=SC2016  # a Go template, not a shell expansion
+    out=$(cw_kubectl -n "$ns" get deployment "$deploy" \
+      -o jsonpath='{range $k,$v := .spec.selector.matchLabels}{$k}={$v}{"\n"}{end}' 2>/dev/null) || out=''
+  fi
+  sel=$(printf '%s\n' "$out" \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' \
+    | sort | paste -sd ',' -)
+  [ -n "$sel" ] || sel="app=$deploy"
+  CW_SELECTOR_CACHE="$CW_SELECTOR_CACHE$key\t$sel
+"
+  printf '%s\n' "$sel"
+}
+
 # LIVE QUERY (cluster) - 5xx responses per minute for one Deployment's pods, from
 # the app's own access log over the window, kept only when the HTTP/1.1 line
 # count proves the probe executed. Each container's read is capped at
@@ -1350,7 +1458,7 @@ cw_report_beta_failure() {  # <watch-id>
 cw_live_http_5xx_per_min() {  # <ns> <deploy> <window-seconds>
   local ns=$1 deploy=$2 secs=$3 out
   out=$(cw_kubectl -n "$ns" logs --tail="$LOG_TAIL_LINES" --since="${secs}s" --max-log-requests=10 \
-    --prefix --timestamps -l "app=$deploy" 2>/dev/null | python3 -c '
+    --prefix --timestamps -l "$(cw_deploy_selector "$ns" "$deploy")" 2>/dev/null | python3 -c '
 import datetime, re, sys
 window = float(sys.argv[1])
 cap = int(sys.argv[2])
@@ -1431,7 +1539,7 @@ cw_pod_facts() {  # <ns> <deploy>
 $CW_POD_FACTS_CACHE
 CACHE
   command -v kubectl >/dev/null 2>&1 || { cw_pod_facts_failed "$key"; return 1; }
-  cached=$(cw_kubectl -n "$ns" get pods -l "app=$deploy" -o json 2>/dev/null | python3 -c '
+  cached=$(cw_kubectl -n "$ns" get pods -l "$(cw_deploy_selector "$ns" "$deploy")" -o json 2>/dev/null | python3 -c '
 import datetime, json, sys
 try:
     data = json.load(sys.stdin)
@@ -1498,6 +1606,19 @@ cw_prime_pod_facts() {  # <watch-id>
     [ -n "${ns:-}" ] || continue
     cw_within_budget || return 0
     cw_pod_facts "$ns" "$deploy" >/dev/null 2>&1 || true
+  done < "$(cw_targets_path "$id")"
+}
+
+# Read every target's own label selector once per sample, in this process, so
+# each metric's subshell inherits it instead of spending one cluster read per
+# metric on the same Deployment.
+cw_prime_selectors() {  # <watch-id>
+  local id=$1 ns deploy
+  [ -f "$(cw_targets_path "$id")" ] || return 0
+  while IFS=$'\t' read -r ns deploy; do
+    [ -n "${ns:-}" ] || continue
+    cw_within_budget || return 0
+    cw_deploy_selector "$ns" "$deploy" >/dev/null 2>&1 || true
   done < "$(cw_targets_path "$id")"
 }
 
@@ -1589,7 +1710,7 @@ cw_live_rss_ratio() {  # <ns> <deploy> <window-seconds>
   local ns=$1 deploy=$2 limits usage
   limits=$(cw_pod_fact "$1" "$2" 4) || return 1
   [ -n "$limits" ] || return 1
-  usage=$(cw_kubectl -n "$ns" top pods -l "app=$deploy" --containers --no-headers 2>/dev/null) || return 1
+  usage=$(cw_kubectl -n "$ns" top pods -l "$(cw_deploy_selector "$ns" "$deploy")" --containers --no-headers 2>/dev/null) || return 1
   [ -n "$usage" ] || return 1
   printf '%s\n' "$limits" | tr ';' '\n' | CW_USAGE="$usage" awk -F',' '
     function bytes(u,    two, one) {
@@ -2197,6 +2318,7 @@ cw_capture_baseline() {  # <watch-id> <baseline-epoch>
   cw_resolve_pools "$id"
   [ -z "$cluster" ] || cw_record_reason "$id" "baseline" "cluster read failed: $cluster"
   [ -n "$cluster" ] || cw_prime_pod_facts "$id"
+  [ -n "$cluster" ] || cw_prime_selectors "$id"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     metric=$(cw_key_metric "$key")
@@ -2298,6 +2420,7 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
   # completed unmeasured while its record still looked like a normal watch.
   cluster=$(cw_cluster_probe || true)
   [ -n "$cluster" ] || cw_prime_pod_facts "$id"
+  [ -n "$cluster" ] || cw_prime_selectors "$id"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     metric=$(cw_key_metric "$key")

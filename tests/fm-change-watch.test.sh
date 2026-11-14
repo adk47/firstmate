@@ -1156,9 +1156,12 @@ CW_CLUSTER_DIR='' PATH="$HOME_MC/bin:$PATH" FM_CW_SHIM_LOG="$HOME_MC/shim.log" \
   || fail "a multi-container or digest-pinned Deployment was not matched: $(cat "$HOME_MC/state/change-watch/mc1$CORE_ID_SUFFIX/targets" 2>/dev/null)"
 pass "a Deployment with several containers or a digest-pinned image still matches its image family"
 
-# A repository whose Deployment names differ from its image name is mapped.
+# A repository whose Deployment names differ from its image name is mapped. The
+# diff touches all three service directories, so all three are in scope.
 HOME_M2=$(cluster_world m2)
 seed_app_pr "$HOME_M2"
+printf 'notify-gateway/src/send.ts\nsend-gateway/src/send.ts\npreferences/src/read.ts\n' \
+  > "$HOME_M2/forge/files.txt"
 {
   printf 'messaging\tnotify-gateway\t2\tlocalhost:30500/muso/notify-gateway:prod-1\n'
   printf 'messaging\tsend-gateway\t2\tlocalhost:30500/muso/send-gateway:prod-1\n'
@@ -2094,3 +2097,169 @@ BETA_B7="$HOME_B7/state/change-watch/b7-82/beta"
 grep -q 'no beta baseline was readable' "$BETA_B7" \
   || fail "the record did not state why the metric could not be scored"
 pass "the record states why a metric with no beta baseline could not be scored"
+
+# --- a Deployment is measured by its own selector ------------------------------
+# The watch used to ask the cluster for pods labelled app=<name>. A Deployment
+# labelled app.kubernetes.io/name=<name> matched nothing, the log read came back
+# empty, and the watch reported an unmeasured rollout - a monitoring hole that
+# looked exactly like a nuisance notice. 49 of the 266 Deployments in production
+# select on app.kubernetes.io/name, so the selector is read from the Deployment
+# itself. The shim below answers only the selector it is told to expect, so the
+# assumed app=<name> read returns nothing: this case fails before the fix and
+# passes after it.
+
+# selector_world <name> <selector> prints a home whose kubectl answers the
+# Deployment's own selector read and only the pods that carry <selector>.
+selector_world() {
+  local home
+  home=$(new_world "$1")
+  mkdir -p "$home/bin" "$home/config" "$home/sentry"
+  printf '%s\n' "$2" > "$home/selector"
+  cat > "$home/bin/kubectl" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\t%s\n' "${KUBECONFIG:-}" "$*" >> "$FM_CW_SHIM_LOG"
+sel=''
+case " $* " in
+  *" -l "*) sel=$(printf '%s' "$*" | sed -n 's/.* -l \([^ ]*\).*/\1/p') ;;
+esac
+case " $* " in
+  *" --raw=/version "*) printf '{"gitVersion":"v1.31.0"}\n' ;;
+  *" get deploy -A "*) cat "$FM_CW_SHIM_WORKLOADS" ;;
+  *" get deployment "*) cat "$FM_CW_SHIM_SELECTOR_FILE" ;;
+  *" get pods "*)
+    [ "$sel" = "$(cat "$FM_CW_SHIM_SELECTOR_FILE")" ] || { printf '{"items":[]}\n'; exit 0; }
+    printf '{"items":[{"metadata":{"name":"demo-1","labels":{"pod-template-hash":"%s"}},"spec":{"containers":[{"name":"c","image":"%s","resources":{"limits":{"memory":"512Mi"}}}]},"status":{"containerStatuses":[{"name":"c","restartCount":0,"lastState":{}}]}}]}\n' \
+      "${FM_CW_SHIM_HASH:-h1}" "${FM_CW_SHIM_IMAGE:-}"
+    ;;
+  *" top pods "*)
+    [ "$sel" = "$(cat "$FM_CW_SHIM_SELECTOR_FILE")" ] || exit 1
+    printf 'demo-1   c   100m   128Mi\n'
+    ;;
+  *" logs "*)
+    [ "$sel" = "$(cat "$FM_CW_SHIM_SELECTOR_FILE")" ] || exit 0
+    awk 'BEGIN {
+      for (i = 0; i < 200; i++) {
+        s = int(i * 120 / 199)
+        printf "[pod/demo-1/c] 2026-09-22T06:%02d:%02d.000000000Z 10.0.0.1 - \"GET /home HTTP/1.1\" %d 12\n", int(s / 60), s % 60, (i % 20 == 0 ? 502 : 200)
+      }
+    }'
+    ;;
+  *) exit 1 ;;
+esac
+SHIM
+  chmod +x "$home/bin/kubectl"
+  printf 'demo-service image:demo-service\n' > "$home/config/change-watch-repos"
+  printf 'muso-prod\tdemo\t2\tlocalhost:30500/muso/demo-service:old\n' > "$home/workloads"
+  printf 'src/server.ts\n' > "$home/forge/files.txt"
+  printf '%s\n' 1790000000 > "$home/forge/merge-epoch"
+  printf '%s\n' deadbeef > "$home/forge/head-ref"
+  : > "$home/forge/diff.txt"
+  printf '%s\n' "$home"
+}
+
+# run_selector_cw <home> <now> <args...> runs the watch against the shim.
+run_selector_cw() {
+  local home=$1 now=$2
+  shift 2
+  env FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CW_NOW="$now" \
+    FM_CW_FORGE_DIR="$home/forge" FM_CW_CLUSTER_DIR='' \
+    FM_CW_CONFIG_DIR="$home/config" FM_CW_SENTRY_DIR="$home/sentry" \
+    FM_CW_SHIM_LOG="$home/shim.log" FM_CW_SHIM_WORKLOADS="$home/workloads" \
+    FM_CW_SHIM_SELECTOR_FILE="$home/selector" \
+    FM_CW_ARM_CMD="$home/arm.sh" FM_CW_ARM_LOG="$home/arm.log" \
+    FM_CW_SEND_CMD="$home/send.sh" FM_CW_SEND_LOG="$home/send.log" \
+    FM_CW_NO_WIKI=1 FM_CW_SLEEP_CMD=true PATH="$home/bin:$PATH" \
+    "$CW" "$@"
+}
+
+HOME_SEL=$(selector_world sel 'app.kubernetes.io/name=demo')
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:old' FM_CW_SHIM_HASH=h1 \
+  run_selector_cw "$HOME_SEL" 1790000000 register sel1 \
+  'https://github.com/Muso-AI/demo-service/pull/7' >/dev/null || fail "selector register failed"
+[ "$(cat "$HOME_SEL/state/change-watch/sel1-7/targets")" = "$(printf 'muso-prod\tdemo')" ] \
+  || fail "the selector fixture did not resolve its Deployment"
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:new' FM_CW_SHIM_HASH=h2 \
+  run_selector_cw "$HOME_SEL" 1790000300 sample sel1-7 300 >/dev/null || fail "selector sample failed"
+SAMPLES_SEL="$HOME_SEL/state/change-watch/sel1-7/samples.log"
+[ "$(awk -F'\t' '$3 == "http_5xx_per_min@muso-prod/demo" { print $4 }' "$SAMPLES_SEL")" = "2.0000" ] \
+  || fail "a Deployment labelled app.kubernetes.io/name was not measured: $(cat "$SAMPLES_SEL")"
+grep -q -- '-l app.kubernetes.io/name=demo' "$HOME_SEL/shim.log" \
+  || fail "the watch did not read the Deployment's own selector: $(cat "$HOME_SEL/shim.log")"
+grep -q -- '-l app=demo' "$HOME_SEL/shim.log" \
+  && fail "the watch still assumed app=<name> for a modern-labelled Deployment"
+pass "a Deployment is measured by its own app.kubernetes.io/name selector"
+
+# The ordinary app=<name> Deployment still measures, so the fallback and the
+# common case did not regress.
+HOME_SEL2=$(selector_world sel2 'app=demo')
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:old' FM_CW_SHIM_HASH=h1 \
+  run_selector_cw "$HOME_SEL2" 1790000000 register sel2 \
+  'https://github.com/Muso-AI/demo-service/pull/8' >/dev/null || fail "app-label register failed"
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:new' FM_CW_SHIM_HASH=h2 \
+  run_selector_cw "$HOME_SEL2" 1790000300 sample sel2-8 300 >/dev/null || fail "app-label sample failed"
+SAMPLES_SEL2="$HOME_SEL2/state/change-watch/sel2-8/samples.log"
+[ "$(awk -F'\t' '$3 == "http_5xx_per_min@muso-prod/demo" { print $4 }' "$SAMPLES_SEL2")" = "2.0000" ] \
+  || fail "an app-labelled Deployment stopped measuring: $(cat "$SAMPLES_SEL2")"
+grep -q -- '-l app=demo' "$HOME_SEL2/shim.log" \
+  || fail "an app-labelled Deployment was not read by its own selector: $(cat "$HOME_SEL2/shim.log")"
+pass "an app-labelled Deployment still measures through its own selector"
+
+# --- an application repository is scoped to what its diff can affect -----------
+# muso-messaging holds notify-gateway, preferences, send-gateway and the email
+# templates. A change under scripts/ touches none of them, so it deploys nothing
+# and must say so instead of reporting an unproven rollout of all three.
+
+HOME_MS=$(new_world ms)
+printf 'scripts/only/winback.py\n' > "$HOME_MS/forge/files.txt"
+printf '%s\n' 1790000000 > "$HOME_MS/forge/merge-epoch"
+printf '%s\n' deadbeef > "$HOME_MS/forge/head-ref"
+: > "$HOME_MS/forge/diff.txt"
+out=$(run_cw "$HOME_MS" 1790000000 register ms1 \
+  'https://github.com/Muso-AI/muso-messaging/pull/90') || fail "scripts-only register failed"
+case "$out" in
+  *"no deployable service touched"*"the change deploys nothing"*"nothing registered"*) ;;
+  *) fail "a change that deploys nothing was not reported as such: $out" ;;
+esac
+[ -e "$HOME_MS/state/change-watch/ms1-90" ] \
+  && fail "a change that deploys nothing created a watch record"
+pass "a monorepo change under scripts/ deploys nothing and says so"
+
+# The Sentry project and the deploy workflow are kept regardless: those reads
+# never touch the cluster, so the watch still registers and completes clean.
+HOME_MS2=$(cluster_world ms2)
+printf 'muso-messaging messaging/notify-gateway messaging/send-gateway messaging/preferences sentry:messaging\n' \
+  > "$HOME_MS2/config/change-watch-repos"
+printf 'scripts/only/winback.py\n' > "$HOME_MS2/forge/files.txt"
+printf '%s\n' 1790000000 > "$HOME_MS2/forge/merge-epoch"
+printf '%s\n' deadbeef > "$HOME_MS2/forge/head-ref"
+: > "$HOME_MS2/forge/diff.txt"
+printf '[]\n' > "$HOME_MS2/sentry/issues-messaging.json"
+out=$(CW_CLUSTER_DIR='' PATH="$HOME_MS2/bin:$PATH" FM_CW_SHIM_LOG="$HOME_MS2/shim.log" \
+  FM_CW_SHIM_WORKLOADS='' FM_CW_CONFIG_DIR="$HOME_MS2/config" \
+  FM_CW_SENTRY_DIR="$HOME_MS2/sentry" \
+  run_cw "$HOME_MS2" 1790000000 register ms2 \
+  'https://github.com/Muso-AI/muso-messaging/pull/91') \
+  || fail "sentry-only register failed: $out"
+[ -e "$HOME_MS2/state/change-watch/ms2-91/targets" ] \
+  && fail "a change that deploys nothing still registered cluster targets"
+[ "$(cat "$HOME_MS2/state/change-watch/ms2-91/sentry")" = "messaging" ] \
+  || fail "the Sentry project was dropped with the cluster targets"
+CW_CLUSTER_DIR='' PATH="$HOME_MS2/bin:$PATH" FM_CW_SHIM_LOG="$HOME_MS2/shim.log" \
+  FM_CW_SHIM_WORKLOADS='' FM_CW_CONFIG_DIR="$HOME_MS2/config" \
+  FM_CW_SENTRY_DIR="$HOME_MS2/sentry" \
+  run_cw "$HOME_MS2" 1790044000 drive ms2-91 >/dev/null || fail "sentry-only drive failed"
+[ "$(run_cw "$HOME_MS2" 1790044000 verdict ms2-91)" = "change-watch clean" ] \
+  || fail "a change that deploys nothing did not complete clean: $(run_cw "$HOME_MS2" 1790044000 verdict ms2-91)"
+pass "a change that deploys nothing completes clean on its Sentry project alone"
+
+# A diff that touches one service directory watches exactly that Deployment.
+HOME_MS3=$(new_world ms3)
+printf 'notify-gateway/src/send.ts\n' > "$HOME_MS3/forge/files.txt"
+printf '%s\n' 1790000000 > "$HOME_MS3/forge/merge-epoch"
+printf '%s\n' deadbeef > "$HOME_MS3/forge/head-ref"
+: > "$HOME_MS3/forge/diff.txt"
+out=$(run_cw "$HOME_MS3" 1790000000 register ms3 \
+  'https://github.com/Muso-AI/muso-messaging/pull/92') || fail "scoped register failed: $out"
+[ "$(cat "$HOME_MS3/state/change-watch/ms3-92/targets")" = "$(printf 'messaging\tnotify-gateway')" ] \
+  || fail "a one-service diff did not scope to that one Deployment: $(cat "$HOME_MS3/state/change-watch/ms3-92/targets" 2>/dev/null)"
+pass "a monorepo diff is scoped to the one service it touches"
