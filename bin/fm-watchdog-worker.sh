@@ -49,7 +49,23 @@
 # another minute. The relaunch itself is `bin/fm-control.sh <id> relaunch
 # --note <text>` - the transaction the captain would run by hand - so the
 # endpoint, worktree, harness, model, and uncommitted work are preserved and the
-# note is the replacement agent's only carry-over context.
+# note is the replacement agent's only carry-over context. The one exception is
+# an Orca terminal Orca no longer has (`missing`), where that in-place relaunch
+# is unproven and `bin/fm-spawn.sh <id> --relaunch` is the proven transaction:
+# it launches the replacement into a new terminal in the task's own recorded
+# Orca worktree and the note is delivered as one durable steer.
+#
+# A REFUSED RELAUNCH IS NOT A RETRY. Some relaunches cannot succeed no matter
+# how often they run: the backend has no proven in-place relaunch, the endpoint
+# still hosts an agent, or the task's record cannot describe the replacement.
+# Such a refusal is recorded once and escalated to firstmate once, naming the
+# exact reason, and it spends NO relaunch budget, because a budget exists to cap
+# retries and there is nothing to retry. Measured 2026-11-14: ten Orca lanes
+# whose terminals an operator had closed were each "relaunched" three times an
+# hour, every attempt refused, and every lane then paged as out of budget. A
+# refused lane is re-attempted only after FM_WATCHDOG_REFUSAL_RETRY_SECS, long
+# enough for whatever refused it to be fixed. A timeout or a transient spawn
+# error is not a refusal and may simply be retried.
 #
 # THE STALL LADDER. A live worker whose pane keeps one SHAPE for
 # no_progress_secs while it reads busy is stalled. Shape means printable ASCII
@@ -118,7 +134,8 @@
 # object per rolling hour and capped (3, 3, 2, and 1 by default), so a crash
 # loop or a genuinely broken object cannot burn the fleet; spending a relaunch,
 # restart, or idle-steer cap escalates to firstmate as one check wake per hour
-# instead of retrying forever.
+# instead of retrying forever. A refused relaunch spends no cap at all, because
+# there is nothing to cap: it is escalated on the first refusal.
 #
 # THE CHAIR. Only the boot pass and the failed-unit pass touch the chair, and
 # both go through the chair's own systemd unit, which refuses a second chair by
@@ -162,6 +179,7 @@
 #   FM_WATCHDOG_CHAIR_SESSION (chair)       FM_WATCHDOG_CHAIR_TARGET (auto)
 #   FM_WATCHDOG_CAPTURE_LINES (24)         FM_WATCHDOG_READ_TIMEOUT_SECS (10)
 #   FM_WATCHDOG_RELAUNCH_TIMEOUT_SECS (240)
+#   FM_WATCHDOG_REFUSAL_RETRY_SECS (21600)
 #   FM_WATCHDOG_BOOT_BUDGET_SECS (1500)
 #   FM_WATCHDOG_INBOX_RING_SECS (1200)     FM_WATCHDOG_INBOX_INTERRUPT_SECS (2700)
 #   FM_WATCHDOG_INBOX_RELAUNCH_SECS (5400)
@@ -175,7 +193,7 @@
 #
 # TEST SEAMS: FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, FM_WATCHDOG_NOW (frozen
 # clock), FM_WATCHDOG_BOOT_ID (a literal `off` disables the boot pass),
-# FM_WATCHDOG_CONTROL_BIN, FM_WATCHDOG_SEND_BIN,
+# FM_WATCHDOG_CONTROL_BIN, FM_WATCHDOG_SPAWN_BIN, FM_WATCHDOG_SEND_BIN,
 # FM_WATCHDOG_CREW_STATE_BIN, FM_WATCHDOG_SYSTEMCTL_BIN, FM_WATCHDOG_AGENT_STATE_DIR
 # (<dir>/<id>.state instead of a live endpoint read), and FM_WATCHDOG_CAPTURE_DIR
 # (<dir>/<id>.cap pane text and <dir>/<id>.busy verdict instead of a live
@@ -215,6 +233,7 @@ SCHEMA=1
 HOUR=3600
 
 DRY_RUN=0
+RELAUNCH_REFUSAL=''
 BACKLOG_JSON='{}'
 INBOX_RING_SECS=1200
 INBOX_INTERRUPT_SECS=2700
@@ -228,6 +247,7 @@ BACKLOG_ENABLED=on
 BACKLOG_BIN=''
 BACKLOG_LIST_MAX=25
 CONTROL_BIN=${FM_WATCHDOG_CONTROL_BIN:-$SCRIPT_DIR/fm-control.sh}
+SPAWN_BIN=${FM_WATCHDOG_SPAWN_BIN:-$SCRIPT_DIR/fm-spawn.sh}
 LANE_SWITCH_BIN=${FM_WATCHDOG_LANE_SWITCH_BIN:-$SCRIPT_DIR/fm-lane-model-switch.sh}
 SEND_BIN=${FM_WATCHDOG_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}
 CREW_STATE_BIN=${FM_WATCHDOG_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}
@@ -393,7 +413,7 @@ record_load() {
 # keeps empty fields intact; a tab would not, because IFS whitespace collapses.
 # Field order is the one task_load reads and the one the header documents:
 #   sig since stage stage_at rings relaunches steers woke
-#   istage istage_at ibase strikes
+#   istage istage_at ibase strikes refusal refusal_at
 task_entry() {  # <id>
   jq -r --arg id "$1" '.[$id] // {} |
     [ (.sig // ""), (.since // 0), (.stage // 0), (.stage_at // 0),
@@ -401,18 +421,18 @@ task_entry() {  # <id>
       ((.steers // []) | join(",")),
       (if (.woke // false) then "true" else "false" end),
       (.istage // 0), (.istage_at // 0), (.ibase // ""),
-      ((.strikes // []) | join(",")) ]
+      ((.strikes // []) | join(",")), (.refusal // ""), (.refusal_at // 0) ]
     | map(tostring) | join("\u001f")' "$WORK/tasks.json" 2>/dev/null
 }
 
 # task_load <id>: read one task's row into the CALLER's locals. Bash's dynamic
-# scoping is what makes this legal: the caller declares the thirteen variables,
+# scoping is what makes this legal: the caller declares the fifteen variables,
 # this assigns them, and both passes that touch a lane (the inbox ladder and
 # the task pass) therefore preserve every field they do not own instead of
 # clobbering each other's.
 task_load() {  # <id>
   IFS=$'\x1f' read -r sig since stage stage_at rings relaunches steers woke \
-    istage istage_at ibase strikes <<EOF
+    istage istage_at ibase strikes refusal refusal_at <<EOF
 $(task_entry "$1")
 EOF
   case "$since" in ''|*[!0-9]*) since=0 ;; esac
@@ -420,12 +440,13 @@ EOF
   case "$stage_at" in ''|*[!0-9]*) stage_at=0 ;; esac
   case "$istage" in ''|*[!0-9]*) istage=0 ;; esac
   case "$istage_at" in ''|*[!0-9]*) istage_at=0 ;; esac
+  case "$refusal_at" in ''|*[!0-9]*) refusal_at=0 ;; esac
   case "$woke" in true) ;; *) woke=false ;; esac
 }
 
 # task_store <id>: persist the caller's current loop values. One write path for
 # every rung, so adding a field can never leave one branch storing the old
-# shape. Reads the same thirteen locals task_load fills.
+# shape. Reads the same fifteen locals task_load fills.
 task_store() {  # <id>
   [ "$DRY_RUN" = 1 ] && return 0
   jq -n \
@@ -438,9 +459,11 @@ task_store() {  # <id>
     --argjson istage "${istage:-0}" --argjson istage_at "${istage_at:-0}" \
     --arg ibase "${ibase-}" \
     --argjson strikes "$(csv_to_json "${strikes-}")" \
+    --arg refusal "${refusal-}" --argjson refusal_at "${refusal_at:-0}" \
     '{ key: $id, value: { sig: $sig, since: $since, stage: $stage, stage_at: $stage_at,
        rings: $rings, relaunches: $relaunches, steers: $steers, woke: $woke,
-       istage: $istage, istage_at: $istage_at, ibase: $ibase, strikes: $strikes } }' \
+       istage: $istage, istage_at: $istage_at, ibase: $ibase, strikes: $strikes,
+       refusal: $refusal, refusal_at: $refusal_at } }' \
     > "$WORK/entry.$1.json" 2>/dev/null || true
 }
 
@@ -452,7 +475,7 @@ task_reset() {  # <id> <relaunches>
   jq -n --arg id "$1" --argjson relaunches "$(csv_to_json "$2")" \
     '{ key: $id, value: { sig: "", since: 0, stage: 0, stage_at: 0, rings: [],
        relaunches: $relaunches, steers: [], woke: false, istage: 0, istage_at: 0,
-       ibase: "", strikes: [] } }' \
+       ibase: "", strikes: [], refusal: "", refusal_at: 0 } }' \
     > "$WORK/entry.$1.json" 2>/dev/null || true
 }
 
@@ -519,9 +542,40 @@ task_agent_state() {  # <id> <meta>
   printf 'unreadable'
 }
 
-# task_relaunch <id> <reason> <note>: the one relaunch transaction.
+# relaunch_refusal <output>: the exact reason a relaunch was refused, or
+# nothing when the failure may simply be retried. A refusal is a property of the
+# backend and the endpoint - an unproven in-place relaunch, an endpoint that
+# still hosts an agent, a record that cannot describe the replacement - so no
+# number of retries can turn it into a launch, while a timeout or a transient
+# spawn error can succeed on the next pass.
+# delivery_id <seed> <epoch>: a stable 16 lowercase hex delivery id, because
+# bin/fm-send.sh refuses any other shape for an explicit fire-and-forget record.
+delivery_id() {  # <seed> <epoch>
+  local seed="$1-$2"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$seed" | sha256sum | cut -c1-16
+  else
+    printf '%s' "$seed" | shasum -a 256 | cut -c1-16
+  fi
+}
+
+relaunch_refusal() {  # <output>
+  local out=$1 msg
+  printf '%s\n' "$out" | grep -qE \
+    'in-place relaunch is not proven end to end|has no proven in-place relaunch|no recovery-grade agent-state classifier|Orca relaunch only replaces a terminal|a relaunch requires a positively agent-free endpoint|has no recorded orca_worktree_id|refusing to relaunch' \
+    || return 1
+  msg=$(printf '%s\n' "$out" | grep -m1 -F 'error:' || true)
+  [ -n "$msg" ] || msg=$(first_line "$out")
+  printf '%s' "$(printf '%s' "$msg" | tr -d '\x1f' | cut -c1-300)"
+}
+
+# task_relaunch <id> <reason> <note> [model]: the one relaunch transaction.
+# Returns 0 when a replacement agent was launched, 2 when the backend refused
+# the relaunch structurally (RELAUNCH_REFUSAL holds the exact reason), and 1 for
+# a failure that may be retried.
 task_relaunch() {  # <id> <reason> <note> [model]
-  local id=$1 reason=$2 note=$3 model=${4-} out rc
+  local id=$1 reason=$2 note=$3 model=${4-} backend state out rc refusal
+  RELAUNCH_REFUSAL=''
   if [ "$DRY_RUN" = 1 ]; then
     printf 'watchdog: would relaunch %s after %s%s\n' "$id" "$reason" \
       "$([ -n "$model" ] && printf ' on %s' "$model")"
@@ -529,15 +583,82 @@ task_relaunch() {  # <id> <reason> <note> [model]
   fi
   local -a model_args=()
   [ -z "$model" ] || model_args=(--model "$model")
-  out=$(fm_run_timed "$RELAUNCH_TIMEOUT_SECS" "$CONTROL_BIN" "$id" relaunch \
-    ${model_args[@]+"${model_args[@]}"} --note "$note" 2>&1)
-  rc=$?
-  if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^relaunched '; then
-    printf 'watchdog: relaunched %s after %s\n' "$id" "$reason"
-    return 0
+  backend=$(fm_backend_of_meta "$STATE/$id.meta" 2>/dev/null || true)
+  if [ "$backend" = orca ]; then
+    state=$(task_agent_state "$id" "$STATE/$id.meta")
+  else
+    state=''
+  fi
+  # Orca's in-place relaunch is unproven (bin/fm-control-lib.sh owns that
+  # table), but a terminal Orca itself reports gone provably hosts no agent, so
+  # the proven transaction there is bin/fm-spawn.sh --relaunch: it launches the
+  # replacement into a NEW terminal in the task's own recorded Orca worktree.
+  # Every other Orca endpoint still goes through fm-control, whose refusal is
+  # then recorded and escalated instead of retried.
+  if [ "$backend" = orca ] && [ "$state" = missing ]; then
+    out=$(fm_run_timed "$RELAUNCH_TIMEOUT_SECS" "$SPAWN_BIN" "$id" --relaunch \
+      ${model_args[@]+"${model_args[@]}"} 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      printf 'watchdog: relaunched %s after %s\n' "$id" "$reason"
+      # A spawn carries no launch note, so the carry-over context the note
+      # exists for arrives as one durable record the new agent acknowledges.
+      "$SEND_BIN" "$id" --fire-and-forget "$(delivery_id "relaunch-$id" "$(now_epoch)")" "$note" \
+        >/dev/null 2>&1 || true
+      return 0
+    fi
+  else
+    out=$(fm_run_timed "$RELAUNCH_TIMEOUT_SECS" "$CONTROL_BIN" "$id" relaunch \
+      ${model_args[@]+"${model_args[@]}"} --note "$note" 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^relaunched '; then
+      printf 'watchdog: relaunched %s after %s\n' "$id" "$reason"
+      return 0
+    fi
+  fi
+  if refusal=$(relaunch_refusal "$out"); then
+    RELAUNCH_REFUSAL=$refusal
+    printf 'watchdog: relaunch refused %s after %s: %s\n' "$id" "$reason" "$refusal"
+    return 2
   fi
   printf 'watchdog: relaunch failed %s after %s: %s\n' "$id" "$reason" "$(first_line "$out")"
   return 1
+}
+
+# task_relaunch_refused <id> <state>: the one place a structural refusal is
+# recorded and escalated. Assigns the CALLER's refusal/refusal_at/woke locals
+# (the same dynamic scoping task_load uses), stores the entry, and names the
+# exact reason to firstmate once per episode.
+task_relaunch_refused() {  # <id> <state>
+  local id=$1 state=$2 reason=$RELAUNCH_REFUSAL
+  refusal=$reason
+  refusal_at=$(now_epoch)
+  printf 'watchdog: %s cannot be relaunched on its endpoint (%s); not spending its relaunch budget, asking firstmate\n' \
+    "$id" "$reason"
+  if [ "$woke" != true ]; then
+    wake_firstmate "watchdog-refused-$id" \
+      "check: watchdog cannot relaunch $id (endpoint $state): $reason. No relaunch budget was spent and it will not retry for $((REFUSAL_RETRY_SECS / 3600))h; the endpoint needs a hand"
+    woke=true
+  fi
+  task_store "$id"
+}
+
+# task_refusal_gate <id> <state>: true while a refusal already recorded for this
+# lane is still inside its retry window, after escalating it once to firstmate.
+# Reads and updates the CALLER's refusal/refusal_at/woke locals, so every rung
+# in every pass honours the same window instead of re-earning the same refusal.
+task_refusal_gate() {  # <id> <state>
+  local id=$1 state=$2
+  [ -n "${refusal-}" ] || return 1
+  [ $(( $(now_epoch) - refusal_at )) -lt "$REFUSAL_RETRY_SECS" ] || return 1
+  if [ "$woke" != true ]; then
+    printf 'watchdog: %s still cannot be relaunched (%s); asking firstmate\n' "$id" "$refusal"
+    wake_firstmate "watchdog-refused-$id" \
+      "check: watchdog cannot relaunch $id (endpoint $state): $refusal. No relaunch budget was spent and it will not retry for $((REFUSAL_RETRY_SECS / 3600))h; the endpoint needs a hand"
+    woke=true
+  fi
+  task_store "$id"
+  return 0
 }
 
 liveness_note() {  # <id> <endpoint-state>
@@ -614,7 +735,7 @@ task_conn_continue() {  # <id> <minutes>
 # here - and a refused repoint still gets the plain relaunch, because restoring
 # the lane matters more than the model it comes back on.
 task_conn_relaunch() {  # <id> <kind> <minutes> <strikes>
-  local id=$1 kind=$2 minutes=$3 strikes=$4 model='' note out rc
+  local id=$1 kind=$2 minutes=$3 strikes=$4 model='' note out rc lane_harness
   note="The watchdog replaced your agent after $strikes connection errors, each with no new output for $minutes minutes. Your worktree, commits, and status log are intact. Re-orient from them and continue the task from where the transport failed; do not repeat completed steps."
   if [ -n "$FALLBACK_MODEL" ]; then
     case " $FALLBACK_KINDS " in
@@ -651,12 +772,14 @@ task_conn_relaunch() {  # <id> <kind> <minutes> <strikes>
       model=''
     fi
   fi
-  if task_relaunch "$id" "$strikes connection errors with no new output for $minutes minutes" "$note" "$model"; then
+  rc=0
+  task_relaunch "$id" "$strikes connection errors with no new output for $minutes minutes" "$note" "$model" || rc=$?
+  if [ "$rc" -eq 0 ]; then
     wake_firstmate "watchdog-conn-$id" \
       "check: watchdog relaunched $id on ${model:-its own model} after $strikes connection errors with no progress for $minutes minutes; if it stalls again the lane needs a hand"
     return 0
   fi
-  return 1
+  return "$rc"
 }
 
 # load_held_ids: read the captain-held set once per pass. A task held for the
@@ -725,7 +848,8 @@ chair_ensure() {
 # boot_pass <boot>: relaunch every ordinary task whose endpoint is gone, start
 # the chair LAST, and queue one check wake describing the result.
 boot_pass() {  # <boot>
-  local boot=$1 id meta kind state ok=0 tried=0 deadline chair result
+  local boot=$1 id meta kind state ok=0 tried=0 deadline chair result rc
+  local refusal='' refusal_at=0 woke=false
   deadline=$(( $(now_epoch) + BOOT_BUDGET_SECS ))
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -745,14 +869,23 @@ boot_pass() {  # <boot>
       dead|missing) ;;
       *) continue ;;
     esac
-    if task_relaunch "$id" "host reboot (endpoint $state)" \
-      "The host rebooted and every worker process and terminal session died; your worktree and commits are intact. Re-orient from your status log, your steering inbox (state/$id.inbox/), and your worktree, then resume exactly where you left off. Anything you had under /tmp is gone; re-create it if needed. Do not repeat any send, merge, or prod write your status log shows already done."; then
+    rc=0
+    task_relaunch "$id" "host reboot (endpoint $state)" \
+      "The host rebooted and every worker process and terminal session died; your worktree and commits are intact. Re-orient from your status log, your steering inbox (state/$id.inbox/), and your worktree, then resume exactly where you left off. Anything you had under /tmp is gone; re-create it if needed. Do not repeat any send, merge, or prod write your status log shows already done." \
+      || rc=$?
+    if [ "$rc" -eq 2 ]; then
+      # A reboot cannot clear a structural refusal either. Record it so the task
+      # pass honours the same retry window instead of re-earning the refusal.
+      refusal=''
+      woke=false
+      task_relaunch_refused "$id" "$state"
+    elif [ "$rc" -eq 0 ]; then
       ok=$((ok + 1))
     fi
     # A fresh agent takes a moment to make its endpoint answer, so this pass
     # must not read the endpoint it just relaunched and relaunch it again.
     : > "$WORK/touched.$id"
-    task_reset "$id" "$(now_epoch)"
+    [ "$rc" -eq 2 ] || task_reset "$id" "$(now_epoch)"
   done
   chair=$(chair_ensure)
   result="relaunched $ok of $tried task(s), chair $chair"
@@ -867,8 +1000,8 @@ conn_error_shape() {  # <text>
 task_pass() {
   local meta id kind window now backend target harness state text busy prev_sig
   local since stage stage_at rings relaunches steers woke status_mtime changed stage_age
-  local sig='' istage istage_at ibase strikes
-  local ring_count relaunch_count steer_count minutes conn_err strike_count
+  local sig='' istage istage_at ibase strikes refusal refusal_at
+  local ring_count relaunch_count steer_count minutes conn_err strike_count rc
   now=$(now_epoch)
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -914,9 +1047,19 @@ task_pass() {
           printf '%s\t%s\tn/a\t-\t%d\t%d\twould relaunch (endpoint %s)\n' \
             "$id" "$state" "$(quiet_minutes_of "$id" "$now")" "$(inbox_minutes_of "$id")" "$state"
         fi
+        # A refusal this endpoint already earned is a fact about the backend and
+        # the terminal, not about this pass: re-attempting it launches nothing,
+        # burns no budget, and reaches the same conclusion, so it is retried only
+        # after the retry window, which is long enough for a fix to land.
+        task_refusal_gate "$id" "$state" && continue
         relaunch_count=$(csv_recent "$relaunches" "$now" "$HOUR")
         if [ "$relaunch_count" -lt "$RELAUNCH_PER_HOUR" ]; then
-          task_relaunch "$id" "endpoint $state" "$(liveness_note "$id" "$state")" || true
+          rc=0
+          task_relaunch "$id" "endpoint $state" "$(liveness_note "$id" "$state")" || rc=$?
+          if [ "$rc" -eq 2 ]; then
+            task_relaunch_refused "$id" "$state"
+            continue
+          fi
           relaunches=$(csv_append "$relaunches" "$now")
           task_reset "$id" "$relaunches"
           continue
@@ -1002,7 +1145,16 @@ task_pass() {
         # cannot succeed is a request for a hand, not a retry loop.
         relaunch_count=$(csv_recent "$relaunches" "$now" "$HOUR")
         if [ "$relaunch_count" -lt "$RELAUNCH_PER_HOUR" ]; then
-          task_conn_relaunch "$id" "$kind" "$((changed / 60))" "$strike_count" || true
+          if task_refusal_gate "$id" "$state"; then
+            task_store "$id"
+            continue
+          fi
+          rc=0
+          task_conn_relaunch "$id" "$kind" "$((changed / 60))" "$strike_count" || rc=$?
+          if [ "$rc" -eq 2 ]; then
+            task_relaunch_refused "$id" "$state"
+            continue
+          fi
           strikes=$(csv_append "$strikes" "$now")
           relaunches=$(csv_append "$relaunches" "$now")
         elif [ "$woke" != true ]; then
@@ -1042,7 +1194,15 @@ task_pass() {
         1)
           relaunch_count=$(csv_recent "$relaunches" "$now" "$HOUR")
           if [ "$relaunch_count" -lt "$RELAUNCH_PER_HOUR" ]; then
-            task_relaunch "$id" "no pane progress for $minutes minutes" "$(stall_note "$minutes")" || true
+            if task_refusal_gate "$id" "$state"; then
+              continue
+            fi
+            rc=0
+            task_relaunch "$id" "no pane progress for $minutes minutes" "$(stall_note "$minutes")" || rc=$?
+            if [ "$rc" -eq 2 ]; then
+              task_relaunch_refused "$id" "$state"
+              continue
+            fi
             relaunches=$(csv_append "$relaunches" "$now")
             stage=2
             stage_at=$now
@@ -1051,7 +1211,15 @@ task_pass() {
         2)
           relaunch_count=$(csv_recent "$relaunches" "$now" "$HOUR")
           if [ "$relaunch_count" -lt "$RELAUNCH_PER_HOUR" ]; then
-            task_relaunch "$id" "still no progress after a stall relaunch; reassigning" "$(reassign_note)" || true
+            if task_refusal_gate "$id" "$state"; then
+              continue
+            fi
+            rc=0
+            task_relaunch "$id" "still no progress after a stall relaunch; reassigning" "$(reassign_note)" || rc=$?
+            if [ "$rc" -eq 2 ]; then
+              task_relaunch_refused "$id" "$state"
+              continue
+            fi
             relaunches=$(csv_append "$relaunches" "$now")
             stage=3
             stage_at=$now
@@ -1232,6 +1400,7 @@ task_drain_relaunch() {  # <id> <why>
 inbox_pass() {
   local meta id kind backend target state oldest base age
   local sig since stage stage_at rings relaunches steers woke istage istage_at ibase strikes
+  local refusal refusal_at rc
   local mins
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -1263,7 +1432,26 @@ inbox_pass() {
     fi
     mins=$((age / 60))
     if [ "$age" -ge "$INBOX_RELAUNCH_SECS" ] && [ "$istage" -lt 3 ]; then
-      task_drain_relaunch "$id" "$mins minutes" || true
+      if task_refusal_gate "$id" "$state"; then
+        continue
+      fi
+      rc=0
+      task_drain_relaunch "$id" "$mins minutes" || rc=$?
+      if [ "$rc" -eq 2 ]; then
+        # A refusal is not a rung: the lane is unreplaceable here, so the ladder
+        # stops climbing and firstmate gets the exact reason instead.
+        refusal=$RELAUNCH_REFUSAL
+        refusal_at=$(now_epoch)
+        printf 'watchdog: %s cannot be relaunched on its endpoint (alive): %s; asking firstmate\n' \
+          "$id" "$RELAUNCH_REFUSAL"
+        if [ "$woke" != true ]; then
+          wake_firstmate "watchdog-refused-$id" \
+            "check: watchdog cannot relaunch $id (endpoint alive): $RELAUNCH_REFUSAL. No relaunch budget was spent and it will not retry for $((REFUSAL_RETRY_SECS / 3600))h; its steering inbox stays unread and the lane needs a hand"
+          woke=true
+        fi
+        task_store "$id"
+        continue
+      fi
       istage=3
       istage_at=$(now_epoch)
       if [ "$DRY_RUN" != 1 ]; then
@@ -1430,6 +1618,9 @@ main() {
   CAPTURE_LINES=$(conf_int FM_WATCHDOG_CAPTURE_LINES 24)
   READ_TIMEOUT_SECS=$(conf_int FM_WATCHDOG_READ_TIMEOUT_SECS 10)
   RELAUNCH_TIMEOUT_SECS=$(conf_int FM_WATCHDOG_RELAUNCH_TIMEOUT_SECS 240)
+  # A refused relaunch is re-attempted only after this window, long enough for
+  # whatever refused it (a backend capability gap, a repaired record) to change.
+  REFUSAL_RETRY_SECS=$(conf_int FM_WATCHDOG_REFUSAL_RETRY_SECS 21600)
   BOOT_BUDGET_SECS=$(conf_int FM_WATCHDOG_BOOT_BUDGET_SECS 1500)
   INBOX_RING_SECS=$(conf_int FM_WATCHDOG_INBOX_RING_SECS 1200)
   INBOX_INTERRUPT_SECS=$(conf_int FM_WATCHDOG_INBOX_INTERRUPT_SECS 2700)

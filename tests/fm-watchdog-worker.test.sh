@@ -45,6 +45,9 @@ make_home() {  # <name>
 # <home>/calls so a test can assert both what ran and in what order.
 fake_tools() {  # <home>
   local home=$1
+  # Every test starts from the working control stand-in; a test that needs a
+  # refusing backend names its own afterwards.
+  CONTROL_OVERRIDE=''
   cat > "$home/fakebin/fake-control" <<SH
 #!/usr/bin/env bash
 printf 'control %s\n' "\$*" >> "$home/calls"
@@ -54,6 +57,24 @@ SH
 #!/usr/bin/env bash
 printf 'send %s\n' "\$1" >> "$home/calls"
 printf '%s\n' "\$*" >> "$home/steers"
+SH
+  # A relaunch transaction the backend refuses structurally, exactly as
+  # bin/fm-control.sh refuses an Orca in-place relaunch.
+  cat > "$home/fakebin/fake-control-refuses" <<SH
+#!/usr/bin/env bash
+printf 'control %s\n' "\$*" >> "$home/calls"
+if [ -f "$home/units/control-transient" ]; then
+  printf 'error: could not reach the endpoint (timed out)\n' >&2
+  exit 1
+fi
+printf 'error: task %s runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'\''exit'\'' and respawn the task instead\n' "\$1" >&2
+exit 1
+SH
+  # bin/fm-spawn.sh --relaunch stand-in: the Orca replacement path.
+  cat > "$home/fakebin/fake-spawn" <<SH
+#!/usr/bin/env bash
+printf 'spawn %s\n' "\$*" >> "$home/calls"
+printf 'relaunched true task=%s\n' "\$1"
 SH
   cat > "$home/fakebin/fake-lane-switch" <<SH
 #!/usr/bin/env bash
@@ -91,12 +112,18 @@ SH
   chmod +x "$home/fakebin"/*
 }
 
-# worker <home> <id> <state> [kind]: one recorded task and its endpoint state.
-worker() {  # <home> <id> <state> [kind] [harness]
-  local home=$1 id=$2 state=$3 kind=${4:-ship} harness=${5:-pi}
+# worker <home> <id> <state> [kind] [harness] [backend]: one recorded task and
+# its endpoint state.
+worker() {  # <home> <id> <state> [kind] [harness] [backend]
+  local home=$1 id=$2 state=$3 kind=${4:-ship} harness=${5:-pi} backend=${6-}
+  local -a backend_fields=()
+  if [ -n "$backend" ]; then
+    backend_fields=("backend=$backend" "terminal=term-$id" "orca_worktree_id=wt-$id")
+  fi
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:$id" "endpoint_task_id=$id" "worktree=$home/wt-$id" \
-    "project=p" "harness=$harness" "kind=$kind" "mode=no-mistakes" "yolo=off"
+    "project=p" "harness=$harness" "kind=$kind" "mode=no-mistakes" "yolo=off" \
+    ${backend_fields[@]+"${backend_fields[@]}"}
   printf '%s\n' "$state" > "$home/fix/$id.state"
 }
 
@@ -119,7 +146,8 @@ tick() {  # <home> <now> [env...]
   env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_CONFIG_OVERRIDE="$home/config" FM_WATCHDOG_NOW="$now" \
     FM_WATCHDOG_BOOT_ID="${BOOT:-off}" \
-    FM_WATCHDOG_CONTROL_BIN="$home/fakebin/fake-control" \
+    FM_WATCHDOG_CONTROL_BIN="${CONTROL_OVERRIDE:-$home/fakebin/fake-control}" \
+    FM_WATCHDOG_SPAWN_BIN="$home/fakebin/fake-spawn" \
     FM_WATCHDOG_SEND_BIN="$home/fakebin/fake-send" \
     FM_WATCHDOG_CREW_STATE_BIN="$home/fakebin/fake-crew-state" \
     FM_WATCHDOG_SYSTEMCTL_BIN="$home/fakebin/systemctl" \
@@ -679,6 +707,83 @@ test_a_dry_run_plan_matches_the_connection_relaunch_model() {
   pass "the dry-run plan agrees with the connection relaunch's fallback-kind rule"
 }
 
+test_a_refused_relaunch_spends_no_budget_and_escalates_once() {
+  local home now out i refused=''
+  home=$(make_home refused); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  for i in 0 1 2 3 4 5; do
+    out=$(tick "$home" "$((now + i * 60))")
+    [ "$i" = 0 ] && refused=$out
+  done
+  assert_contains "$refused" "in-place relaunch is not proven end to end" \
+    "the refusal was not reported with the backend's own reason"
+  assert_eq "$(counter "$home" '^control .* relaunch')" "1" \
+    "a structurally refused relaunch was retried instead of recorded once"
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "1" \
+    "a refused relaunch did not escalate exactly once"
+  assert_eq "$(wakes "$home" | grep -c 'hourly relaunch budget')" "0" \
+    "a refused relaunch was charged against the hourly budget"
+  pass "a relaunch the backend cannot perform is recorded once, escalated once, and spends no budget"
+}
+
+test_a_refused_relaunch_is_retried_only_after_its_window() {
+  local home now
+  home=$(make_home refused-window); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 600))" >/dev/null
+  assert_eq "$(counter "$home" '^control .* relaunch')" "1" \
+    "a recorded refusal was retried inside its window"
+  tick "$home" "$((now + 21600 + 60))" >/dev/null
+  assert_eq "$(counter "$home" '^control .* relaunch')" "2" \
+    "a refusal was never retried again, so a fixed backend wait would be lost"
+  pass "a recorded refusal is retried only once its retry window closes"
+}
+
+test_a_transient_relaunch_failure_is_not_a_refusal() {
+  local home now i
+  home=$(make_home transient); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  for i in 0 1 2 3 4 5; do
+    tick "$home" "$((now + i * 60))" >/dev/null
+  done
+  assert_eq "$(counter "$home" '^control .* relaunch')" "3" \
+    "a transient relaunch failure was not retried on the ordinary budget"
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "0" \
+    "a transient launch failure was escalated as a structural refusal"
+  pass "a timeout is retried on the ordinary budget, never treated as a structural refusal"
+}
+
+test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn() {
+  local home now out
+  home=$(make_home orca-missing); fake_tools "$home"
+  worker "$home" w1 missing ship pi orca
+  now=$(start_clock)
+  out=$(tick "$home" "$now")
+  assert_contains "$out" "watchdog: relaunched w1 after endpoint missing" \
+    "a gone Orca terminal was not replaced"
+  assert_eq "$(counter "$home" '^spawn w1 --relaunch')" "1" \
+    "the Orca replacement did not go through fm-spawn --relaunch"
+  assert_eq "$(counter "$home" '^control .* relaunch')" "0" \
+    "a gone Orca terminal was still handed to fm-control's unproven in-place relaunch"
+  [ -s "$home/steers" ] || fail "the replacement agent got no carry-over note"
+  grep -q 'worktree and commits are intact' "$home/steers" \
+    || fail "the carry-over note did not tell the new agent what survived: $(cat "$home/steers")"
+  [ -z "$(wakes "$home")" ] || fail "a successful Orca replacement still woke firstmate: $(wakes "$home")"
+  pass "an Orca terminal Orca itself reports gone is replaced by fm-spawn --relaunch and carries its note"
+}
+
+test_a_refused_relaunch_spends_no_budget_and_escalates_once
+test_a_refused_relaunch_is_retried_only_after_its_window
+test_a_transient_relaunch_failure_is_not_a_refusal
+test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake
 test_an_unread_steer_is_interrupted_then_relaunched_once_each
 test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model
