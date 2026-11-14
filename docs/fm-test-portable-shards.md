@@ -74,9 +74,9 @@ The last full refresh of the hints retained the slowest measurements from the `f
 A later refresh on 2026-11-05 raised every hint whose measured `duration_ms` in run [41977644651](https://github.com/adk47/firstmate/actions/runs/41977644651) exceeded it, keeping the retained maximum rather than replacing it with a single run's figure.
 That refresh was forced by real drift: `tests/fm-watch-triage.test.sh` had grown from 262626 ms to 663532 ms and `tests/fm-session-start.test.sh` from 156952 ms to 280157 ms, so shard 1 carried about 20 minutes of real work against a 20-minute cap and was cancelled while still running.
 Scripts added since then carry the slowest of several runs measured through `bin/fm-test-run.sh` on the branch that added them until the next artifact refresh replaces those local figures.
-The 153 current hints total 5589554 ms of conservative balance weight.
+The 156 current hints total 5631554 ms of conservative balance weight.
 Taking the slowest of several runs rather than a single run keeps the balance honest on a slow runner: individual scripts varied by up to 20% between those three runs.
-A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default; the current 170-script lane has seventeen such scripts, adding 459000 ms of default weight to the partition.
+A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default; the current 183-script lane has twenty-seven such scripts, adding 729000 ms of default weight to the partition.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
 Balance is still worth keeping current, because enough unmeasured scripts let one shard carry more than twice another shard's real work and reach the job cap while another runner sits idle.
 That is not hypothetical: by 2026-09-01 the lane had grown from 116 to 139 scripts and from ~42 to ~63 minutes, 17 scripts were still unmeasured, and several hints were low by 2-5x, so shard 3 of 4 ran 17-20 minutes against its 20-minute cap while shard 1 ran 11.5 minutes and run [33574154856](https://github.com/kunchenguid/firstmate/actions/runs/33574154856) timed out seconds after a passing test.

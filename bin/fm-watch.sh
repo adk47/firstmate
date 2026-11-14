@@ -223,6 +223,11 @@ POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
+# Seconds between thread-subscription lane scans (bin/fm-thread-deliver.sh). The
+# scan is a size check per status file plus, only when a task's log grew, one
+# parse of the new span, so a 30s cadence costs almost nothing; 0 disables it.
+THREAD_SCAN_INTERVAL=${FM_THREAD_SCAN_INTERVAL:-30}
+case "$THREAD_SCAN_INTERVAL" in ''|*[!0-9]*) THREAD_SCAN_INTERVAL=30 ;; esac
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 CHECK_SLOW_LOG_SECS=${FM_CHECK_SLOW_LOG_SECS:-10}  # a check at least this slow is triage-logged
 # Mac-load guard (G16). Every local job this watcher launches - each slow check
@@ -2319,6 +2324,29 @@ while :; do
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
+  fi
+
+  # Thread subscriptions: a "need firstmate: steer <lane>: ..." line a worker
+  # writes into its own status log is delivered straight to that lane's own
+  # inbox by code, so relaying it never costs a firstmate turn and firstmate
+  # hears about it only when the lane is gone (bin/fm-thread-deliver.sh owns the
+  # line grammar, the per-task cursor, and that dead-lane copy). Mechanical and
+  # silent, like the scan above. Interval-gated because a steer that could not be
+  # settled - an inconclusive endpoint verdict, a backend blip - is simply
+  # retried under the same idempotent delivery id on a later poll, and a failed
+  # scan is triage-logged rather than woken: the status line stays on disk, so
+  # nothing is lost by waiting.
+  if [ "$THREAD_SCAN_INTERVAL" -gt 0 ] \
+    && [ "$(age_of "$STATE/.last-thread-scan")" -ge "$THREAD_SCAN_INTERVAL" ]; then
+    touch "$STATE/.last-thread-scan" 2>/dev/null || true
+    # Bounded exactly like a slow check, because a delivery to a remote lane
+    # goes through the same transport and must never stall the poll loop; an
+    # interrupted scan leaves its line unsettled, so the next scan retries it.
+    if ! thread_scan_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_ROOT_OVERRIDE="$FM_ROOT" \
+      run_check_process "$SCRIPT_DIR/fm-thread-deliver.sh" lane-scan 2>&1); then
+      triage_log "thread scan: $(printf '%s' "${thread_scan_out:-failed}" | tr '\n' ' ')"
+    fi
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).

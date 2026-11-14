@@ -3757,6 +3757,14 @@ rm -f "$STATE/$ID.turn-ended" \
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
 rm -rf "$STATE/$ID.inbox"
+# Thread subscriptions (bin/fm-thread-deliver.sh) are runtime routing state for
+# the same retired task: its rows in every state/threads/<thread>.subs would
+# otherwise keep sending thread events to an inbox that no longer exists, and
+# its lane cursor would be read forever. Retire is idempotent and never fails
+# the cleanup, because a subscription that could not be dropped is a stale
+# recipient, not unlanded work.
+"$SCRIPT_DIR/fm-thread-deliver.sh" retire "$ID" >/dev/null 2>&1 || \
+  echo "note: $ID's thread subscriptions could not be retired" >&2
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held

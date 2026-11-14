@@ -362,7 +362,7 @@ family_for_basename() {
     fm-project-origin.test.sh|fm-public-followup.test.sh|fm-quota-choose.test.sh|\
     fm-remote-entrypoint.test.sh|fm-remote-secondmate-parent-binding.test.sh|\
     fm-send-remote-delivery.test.sh|fm-spawn-pool-base-freshen.test.sh|\
-    fm-test-fixture-cleanup.test.sh|fm-test-fixtures.test.sh|\
+    fm-test-fixture-cleanup.test.sh|fm-test-fixtures.test.sh|fm-thread-deliver.test.sh|\
     fm-voice-relay.test.sh|fm-wake-drain-open-decisions-cursor.test.sh|\
     fm-wake-drain-open-decisions.test.sh|fm-wake-drain-outcome-backstop.test.sh)
       printf '%s\n' standalone
@@ -713,6 +713,7 @@ tests/fm-test-fixture-cleanup.test.sh 915
 tests/fm-test-fixtures.test.sh 151
 tests/fm-test-isolation-proof.test.sh 2567
 tests/fm-test-reap.test.sh 12000
+tests/fm-thread-deliver.test.sh 2600
 tests/fm-tmux-agent-liveness.test.sh 11421
 tests/fm-tool-update-check.test.sh 24858
 tests/fm-trace-context-lib.test.sh 289
