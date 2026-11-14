@@ -143,11 +143,14 @@
 # the pre-change code. The stage therefore records the target's pre-merge pod
 # fingerprint, captures its baseline from that pre-change state, waits for the
 # merged sha to reach the target, and only then reads. The wait is bounded by
-# FM_CW_BETA_WAIT_ATTEMPTS x FM_CW_BETA_POLL_SECONDS because registration runs on
-# the merge path; a rollout that has not landed inside that bound is stated as
-# unmeasured rather than read as a pass, and so is a target whose pre-merge pod
-# fingerprint could not be read at registration, because an unproven landing is
-# never treated as landed.
+# FM_CW_BETA_WAIT_ATTEMPTS x FM_CW_BETA_POLL_SECONDS, at most 60 seconds because
+# registration runs both on the merge path and synchronously inside the watcher's
+# merged-poll landing path after that cycle's beat: a longer wait would leave the
+# watcher beacon stale past the guard grace and print a false WATCHER DOWN. A
+# rollout that has not landed inside that bound is stated as unmeasured rather
+# than read as a pass, and so is a target whose pre-merge pod fingerprint could
+# not be read at registration, because an unproven landing is never treated as
+# landed.
 #
 # The readings go through the same metric reader a sample uses, scored against
 # that beta baseline rather than an absolute bar, because an absolute bar on a dev
@@ -309,8 +312,9 @@
 #                          "<stage><TAB><metric><TAB><target>" to, where stage
 #                          is beta or prod: the read order is asserted from it
 #   FM_CW_BETA_WAIT_ATTEMPTS  fingerprint reads to wait for the beta rollout
-#                          to land before reading beta (default 20)
-#   FM_CW_BETA_POLL_SECONDS   pause between those reads (default 15)
+#                          to land before reading beta (default 4)
+#   FM_CW_BETA_POLL_SECONDS   pause between those reads (default 15); the
+#                          product is clamped to 60 seconds
 #   FM_CW_NO_WIKI          set to 1 to skip the wiki note with a printed notice
 set -u
 
@@ -335,11 +339,21 @@ RUN_METRICS="deploy_run"
 # metric stays with the production watch, which resolves a pool per production
 # target.
 BETA_METRICS="restarts oomkilled rss_ratio http_5xx_per_min p95_ms"
-# The rollout wait is bounded because registration runs on the merge path. Twenty
-# reads fifteen seconds apart is five minutes: long enough for a normal rollout,
-# short enough that a stuck deploy does not hold the merge hook open.
-BETA_WAIT_ATTEMPTS=${FM_CW_BETA_WAIT_ATTEMPTS:-20}
+# The rollout wait is bounded because registration runs on the merge path and,
+# when the watcher's merged-poll landing path registers in process, after that
+# cycle's beat: a wait longer than the guard grace would leave the watcher beacon
+# stale and print a false WATCHER DOWN. So the whole wait stays inside a minute
+# and a configured product above that is clamped rather than trusted.
+BETA_WAIT_ATTEMPTS=${FM_CW_BETA_WAIT_ATTEMPTS:-4}
 BETA_POLL_SECONDS=${FM_CW_BETA_POLL_SECONDS:-15}
+BETA_WAIT_CEILING_SECONDS=60
+if [ "$BETA_POLL_SECONDS" -gt 0 ] 2>/dev/null && [ "$BETA_WAIT_ATTEMPTS" -gt 0 ] 2>/dev/null; then
+  [ "$BETA_POLL_SECONDS" -le "$BETA_WAIT_CEILING_SECONDS" ] \
+    || BETA_POLL_SECONDS=$BETA_WAIT_CEILING_SECONDS
+  BETA_WAIT_MAX=$((BETA_WAIT_CEILING_SECONDS / BETA_POLL_SECONDS))
+  [ "$BETA_WAIT_MAX" -ge 1 ] || BETA_WAIT_MAX=1
+  [ "$BETA_WAIT_ATTEMPTS" -le "$BETA_WAIT_MAX" ] || BETA_WAIT_ATTEMPTS=$BETA_WAIT_MAX
+fi
 # The built-in beta map: the pre-production copy of each service that has one.
 CW_BETA_BUILTIN='web-credits-next muso-dev/credits-gate'
 BASELINE_WINDOW_SECONDS=3600

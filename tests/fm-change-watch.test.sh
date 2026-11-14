@@ -1907,6 +1907,22 @@ esac
 pass "an unlanded beta rollout scores nothing"
 [ -s "$HOME_B5/arm.log" ] || fail "an unlanded beta rollout stopped the production watch from arming"
 pass "an unlanded beta rollout still arms the production watch"
+# The wait can never outlive the watcher beacon grace, so a configured bound
+# above a minute is clamped: register also runs in process inside the watcher.
+out=$(BETA_ATTEMPTS=400 run_beta "$HOME_B5" 1790000000 register b5 \
+  'https://github.com/Muso-AI/web-credits-next/pull/85') || fail "clamped-wait register failed"
+case "$out" in
+  *"awaiting the deploy:"*"after 4 attempt(s)"*)
+    pass "a beta wait configured above a minute is clamped to the four-attempt bound" ;;
+  *) fail "the beta wait was not clamped to a minute: $out" ;;
+esac
+out=$(FM_CW_BETA_POLL_SECONDS=600 BETA_ATTEMPTS=10 run_beta "$HOME_B5" 1790000000 register b5 \
+  'https://github.com/Muso-AI/web-credits-next/pull/86') || fail "clamped-poll register failed"
+case "$out" in
+  *"awaiting the deploy:"*"after 1 attempt(s)"*)
+    pass "a beta poll longer than the ceiling is clamped so the whole wait stays inside it" ;;
+  *) fail "a long beta poll escaped the wait ceiling: $out" ;;
+esac
 # A beta fingerprint that could not be read is no proof the merged sha landed,
 # so the stage states an unmeasured beta instead of reading the pre-change pods.
 HOME_B9=$(seed_beta_world b9)
