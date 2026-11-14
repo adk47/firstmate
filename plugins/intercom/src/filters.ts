@@ -1,6 +1,7 @@
 import type {
   IntercomWebhookPayload,
   IntercomConversation,
+  IntercomConversationPart,
   IntercomPartAttachment,
   ClassifiedEvent,
   AssigneeType,
@@ -357,6 +358,33 @@ export function surfaceLinkTargets(html: string): string {
       return shortened ? ` ${url} ` : `${text} (${url})`;
     },
   );
+}
+
+/**
+ * The drain's hand-back marker (scripts/intercom-backlog/drain.py HANDBACK_MARKER). One string in each
+ * language, and no test compares the two copies: change both, or a hand-back note stops being read.
+ */
+export const HANDBACK_MARKER = "hydra-handback:";
+
+/**
+ * The reason code a hand-back note carries, or "" when this part is not one.
+ *
+ * The note must be authored by this workspace's bot admin: a note a person writes that happens to quote
+ * the marker never hands the thread back. `scripts/intercom-ops-write.sh note` puts its own
+ * "Note to <audience> ..." header line above the body it is given, so the marker starts a LINE of the
+ * stored body rather than the body itself.
+ */
+export function handbackNoteReason(part: IntercomConversationPart | undefined, botAdminId: string): string {
+  if (!part || part.part_type !== "note") return "";
+  if (part.author?.type !== "admin" || String(part.author?.id ?? "") !== botAdminId) return "";
+  const lines = String(part.body ?? "")
+    .replace(/<[^>]*>/g, "\n")
+    .split("\n")
+    .map((line) => line.trim());
+  const marker = lines.find((line) => line.startsWith(HANDBACK_MARKER));
+  if (!marker) return "";
+  const reason = /reason=([A-Za-z0-9_.-]+)/.exec(marker);
+  return reason ? reason[1] : "";
 }
 
 export function classifyEvent(

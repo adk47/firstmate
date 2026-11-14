@@ -338,10 +338,18 @@ def conv_key(conversation_id):
     return f"conv-{conversation_id}"
 
 
-def user_key_of(row, account_email):
+CONTACT_KEY_PREFIX = "intercom-contact:"   # a prefix no email can equal
+
+
+def user_key_of(row, account_email, contact_id=""):
     """The ledger's user_key: the account email (what every campaign keys on), else the
-    conversation contact's email; lower-cased. '' = cannot be ledgered = never sent."""
-    return (account_email or row.get("email") or "").strip().lower()
+    conversation contact's email, else the Intercom contact id under CONTACT_KEY_PREFIX, so a
+    customer with no email at all is still answered and still capped. '' = no key = never sent."""
+    key = (account_email or row.get("email") or "").strip().lower()
+    if key:
+        return key
+    contact = str(contact_id or row.get("contact_id") or "").strip()
+    return CONTACT_KEY_PREFIX + contact if contact else ""
 
 
 def ledger_ro(path):
@@ -368,11 +376,11 @@ def ledger_claim(db, conversation_id, user_key, user_id, day, contact_id="", app
         contact_id=contact_id, campaign=CAMPAIGN, user_id=user_id)
 
 
-def ledger_finalize(db, message_row, conversation_id, rc, stdout, stderr, body):
-    """POSTED comment -> sent (with the part id). rc 4 means the post MAY have landed
+def ledger_finalize(db, message_row, conversation_id, rc, stdout, stderr, body, part_type="comment"):
+    """POSTED <part_type> -> sent (with the part id). rc 4 means the post MAY have landed
     (intercom-ops-write.sh: logged, response unverified): it stays 'attempted', which still
     holds the user's day, so nothing re-sends. Any other failure -> rejected (frees the day)."""
-    m = re.match(r"POSTED comment conversation=\d+ part=(\S+)", stdout or "")
+    m = re.match(rf"POSTED {part_type} conversation=\d+ part=(\S+)", stdout or "")
     sha = hashlib.sha256(body.encode()).hexdigest()
     if rc == 0 and m:
         verify_ledger.finalize(db, message_row=message_row, status="sent", message_id=m.group(1),

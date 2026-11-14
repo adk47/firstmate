@@ -2047,6 +2047,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_backlog_send tests.test_intercom_backlog_tail tests.test_intercom_backlog_qa1030
+      - name: Run intercom-backlog drain tests
+        # scripts/intercom-backlog/drain.py answers the customer-last backlog with fixed lines. These prove
+        # which thread gets which line, that an open request is never answered by it, that nothing posts
+        # without a signed copy approval, and that a close follows only this run's own posted note.
+        # Every read and write is a fake; the shared message ledger is the real one, in memory.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_intercom_backlog_drain
       - name: Run paperclip-intake tests
         # scripts/paperclip-intake.py is how agents file Paperclip cards: the
         # fingerprint port (hydra#1002), exact-token dedupe, the zero-token

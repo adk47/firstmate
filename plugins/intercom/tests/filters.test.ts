@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { classifyEvent, customerSpokeLast, surfaceLinkTargets, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, extractImageAttachments, extractDocumentAttachments, IMAGE_MIME_ALLOWLIST, CANDIDATE_IMAGE_MIME_ALLOWLIST } from "../src/filters.js";
-import type { IntercomWebhookPayload, IntercomPartAttachment } from "../src/types.js";
+import { classifyEvent, customerSpokeLast, surfaceLinkTargets, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, extractImageAttachments, extractDocumentAttachments, handbackNoteReason, HANDBACK_MARKER, IMAGE_MIME_ALLOWLIST, CANDIDATE_IMAGE_MIME_ALLOWLIST } from "../src/filters.js";
+import type { IntercomConversationPart, IntercomWebhookPayload, IntercomPartAttachment } from "../src/types.js";
 import userCreated from "./fixtures/conversation-user-created.json";
 import userReplied from "./fixtures/conversation-user-replied.json";
 import adminReplied from "./fixtures/conversation-admin-replied.json";
@@ -1022,5 +1022,42 @@ describe("customerSpokeLast", () => {
   it("falls back to who wrote the opening message when there are no parts", () => {
     expect(customerSpokeLast(conversation([]))).toBe(true);
     expect(customerSpokeLast(conversation([], { type: "admin", id: "5465657" }))).toBe(false);
+  });
+});
+
+describe("handbackNoteReason", () => {
+  const BOT = "bot_1";
+  const note = (over: Partial<IntercomConversationPart> = {}): IntercomConversationPart => ({
+    type: "conversation_part",
+    id: "p_note",
+    part_type: "note",
+    created_at: 1711234800,
+    author: { type: "admin", id: BOT },
+    body: `<p>Note to team (internal Ops note, not visible to the customer).</p><p>${HANDBACK_MARKER} reason=specific_ask class=specific ask</p>`,
+    ...over,
+  });
+
+  it("reads the marker and its reason code from the bot's own note, under the wrapper header", () => {
+    expect(handbackNoteReason(note(), BOT)).toBe("specific_ask");
+  });
+
+  it("reads an owner campaign as the class", () => {
+    const body = `<p>${HANDBACK_MARKER} reason=owner_recent class=proof-need-ask</p>`;
+    expect(handbackNoteReason(note({ body }), BOT)).toBe("owner_recent");
+  });
+
+  it("is never a note by another admin, a comment, or a body without the marker", () => {
+    expect(handbackNoteReason(note({ author: { type: "admin", id: "admin_99" } }), BOT)).toBe("");
+    expect(handbackNoteReason(note({ part_type: "comment" }), BOT)).toBe("");
+    expect(handbackNoteReason(note({ body: "<p>Please look at this tomorrow</p>" }), BOT)).toBe("");
+    expect(handbackNoteReason(undefined, BOT)).toBe("");
+  });
+
+  it("requires the marker to start a line of the note, not merely appear inside one", () => {
+    expect(handbackNoteReason(note({ body: `<p>see ${HANDBACK_MARKER} reason=specific_ask</p>` }), BOT)).toBe("");
+  });
+
+  it("refuses a marker with no reason code", () => {
+    expect(handbackNoteReason(note({ body: `<p>${HANDBACK_MARKER}</p>` }), BOT)).toBe("");
   });
 });

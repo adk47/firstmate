@@ -10,7 +10,7 @@ import type {
   DocumentAttachmentRef,
 } from "./types.js";
 import { RateLimitError } from "./outbound.js";
-import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, customerSpokeLast } from "./filters.js";
+import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, customerSpokeLast, handbackNoteReason } from "./filters.js";
 import { checkEscalation, assessRisk, type AssessRiskDeps } from "./escalation.js";
 import { restrictionFor } from "./restricted-accounts.js";
 import { escalationGoesToQueue, humanHold } from "./assignment-policy.js";
@@ -35,6 +35,7 @@ import {
   handleLifecycleChange,
   handleImplicitReopen,
   canAgentReply,
+  createInitialSessionState,
 } from "./handoff.js";
 
 // Module-level set of conversation ids we've already warned about for the
@@ -298,6 +299,64 @@ export interface HandlerOptions {
   runJevShadow?: (version: string, input: JevTurnInput) => Promise<JevTurnOutcome>;
 }
 
+/**
+ * A thread the backlog drain handed back by internal note (scripts/intercom-backlog/drain.py).
+ *
+ * An assignment cannot be the trigger: the edge has no session for these threads and ignores an
+ * assignment without one, and a note does not reopen a thread. So the note is read live and, only when
+ * it is this bot's own hand-back note on an open thread assigned to her whose customer is still waiting
+ * on their last message, the ordinary customer-message path runs on the live conversation.
+ */
+async function handbackByNote(
+  payload: IntercomWebhookPayload,
+  conversationId: string,
+  botAdminId: string,
+  state: IntercomSessionState | null,
+  client: IntercomClient,
+  options?: HandlerOptions,
+): Promise<{ result: HandlerAction; state: IntercomSessionState | null } | null> {
+  let live: IntercomConversation;
+  try {
+    live = await client.getConversation({ conversationId });
+  } catch (err) {
+    console.warn(
+      `[intercom:handler] hand-back note conv=${conversationId} could not be read, so its waiting customer is not answered until they write again: ${err}`,
+    );
+    return null;
+  }
+  if (live.state !== "open") return null;
+  const parts = live.conversation_parts?.conversation_parts ?? [];
+  const newestNote = [...parts].reverse().find((part) => part?.part_type === "note");
+  const reason = handbackNoteReason(newestNote, botAdminId);
+  if (!reason) return null;
+  if (!customerSpokeLast(live)) return null;
+  const adminAssigneeId =
+    live.admin_assignee_id != null
+      ? String(live.admin_assignee_id)
+      : live.assignee?.type === "admin"
+        ? live.assignee.id
+        : null;
+  if (adminAssigneeId !== botAdminId) return null;
+  const next = state ?? createInitialSessionState(conversationId, "");
+  handleAssignment(next, botAdminId, "admin", botAdminId);
+  const answer = await handleWebhookEvent(
+    {
+      ...payload,
+      id: `handback:${newestNote?.id ?? conversationId}`,
+      topic: "conversation.user.replied",
+      data: { ...payload.data, item: live },
+    },
+    next,
+    botAdminId,
+    client,
+    options,
+  );
+  if (answer.result.action === "dispatch_to_agent") {
+    console.info(`[intercom:handler] hand-back by note conv=${conversationId} reason=${reason}`);
+  }
+  return answer;
+}
+
 export async function handleWebhookEvent(
   payload: IntercomWebhookPayload,
   state: IntercomSessionState | null,
@@ -352,6 +411,13 @@ export async function handleWebhookEvent(
       return { result: { action: "duplicate", eventId }, state };
     }
     trackEventId(eventId, state.processedEventIds);
+  }
+
+  // A hand-back note the drain posted as Caroline. Read live, so a redelivered webhook was already turned
+  // into `duplicate` above, and a thread she has since answered dispatches nothing here.
+  if (classified.kind === "noted" && client) {
+    const handedBack = await handbackByNote(payload, classified.conversationId, botAdminId, state, client, options);
+    if (handedBack) return handedBack;
   }
 
   switch (classified.kind) {

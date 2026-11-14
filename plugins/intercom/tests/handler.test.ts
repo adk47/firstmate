@@ -61,8 +61,9 @@ vi.mock("node:child_process", async (importOriginal) => {
 import { handleWebhookEvent } from "../src/handler.js";
 import { createInitialSessionState } from "../src/handoff.js";
 import { MockIntercomClient } from "../src/outbound.js";
+import { HANDBACK_MARKER } from "../src/filters.js";
 import { createJevBackedJudge, createJevTurnRunner, renderJevBlock, type JevActionsConfig, type JevBands, type JevTurnOutcome, type JevTurnResult } from "../src/jev-router.js";
-import type { IntercomWebhookPayload, IntercomConversation, IntercomSessionState } from "../src/types.js";
+import type { IntercomWebhookPayload, IntercomConversation, IntercomConversationPart, IntercomSessionState } from "../src/types.js";
 import userCreated from "./fixtures/conversation-user-created.json";
 import adminReplied from "./fixtures/conversation-admin-replied.json";
 import assigned from "./fixtures/conversation-assigned.json";
@@ -2248,3 +2249,152 @@ describe("handler — Jev pre-turn router", () => {
     expect(runJevShadow).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("hand-back by note", () => {
+  const NOTE_HEADER =
+    "Note to team (internal Ops note, not visible to the customer). Requested in Slack by Aaron.";
+  const MARKER_NOTE = `<p>${NOTE_HEADER}</p><p>${HANDBACK_MARKER} reason=specific_ask class=specific ask</p>`;
+
+  const live = (over: Partial<IntercomConversation> = {}): IntercomConversation =>
+    ({
+      type: "conversation",
+      id: "conv_123",
+      title: null,
+      created_at: 1711234567,
+      updated_at: 1711234567,
+      open: true,
+      state: "open",
+      assignee: { type: "admin", id: BOT_ADMIN_ID },
+      source: { body: "where is my credit request", author: { type: "user", id: "user_abc" } },
+      conversation_parts: { conversation_parts: [] },
+      ...over,
+    }) as IntercomConversation;
+
+  const customerSaid = (id = "user_abc"): IntercomConversationPart => ({
+    type: "conversation_part", id: "p_customer", body: "<p>Any update?</p>", part_type: "comment",
+    created_at: 1711234700, author: { type: "user", id },
+  });
+  const noteBy = (over: Partial<IntercomConversationPart> = {}): IntercomConversationPart => ({
+    type: "conversation_part", id: "p_note", body: MARKER_NOTE, part_type: "note",
+    created_at: 1711234800, author: { type: "admin", id: BOT_ADMIN_ID }, ...over,
+  });
+  const said = (id: string): IntercomConversationPart => ({
+    type: "conversation_part", id: "p_bot", body: "<p>Here is the update</p>", part_type: "comment",
+    created_at: 1711234900, author: { type: "admin", id },
+  });
+  const noted = (id = "evt_note") =>
+    ({ ...userCreated, id, topic: "conversation.admin.noted" }) as unknown as IntercomWebhookPayload;
+  const clientReturning = (conversation: IntercomConversation) => {
+    const client = new MockIntercomClient();
+    client.getConversation = vi.fn(async () => conversation);
+    return client;
+  };
+  const withParts = (...parts: IntercomConversationPart[]) =>
+    live({ conversation_parts: { conversation_parts: parts } });
+
+  it("answers a customer-last thread Caroline was handed by note", async () => {
+    const client = clientReturning(withParts(customerSaid(), noteBy()));
+    const state = createInitialSessionState("conv_123", "ws_1");
+    const { result, state: updated } = await handleWebhookEvent(noted(), state, BOT_ADMIN_ID, client);
+    expect(result.action).toBe("dispatch_to_agent");
+    if (result.action === "dispatch_to_agent") {
+      // The live part is read exactly as Intercom stores it (HTML and all), the same body every
+      // other customer-message dispatch carries; only the trigger came from the note.
+      expect(result.body).toContain("Any update?");
+      expect(result.authorId).toBe("user_abc");
+    }
+    expect(updated?.handoffMode).toBe("agent_active");
+  });
+
+  it("answers it when there is no session yet", async () => {
+    const client = clientReturning(withParts(customerSaid(), noteBy()));
+    const { result, state } = await handleWebhookEvent(noted(), null, BOT_ADMIN_ID, client);
+    expect(result.action).toBe("dispatch_to_agent");
+    expect(state?.conversationId).toBe("conv_123");
+  });
+
+  it("ignores a note another admin wrote that quotes the marker", async () => {
+    const client = clientReturning(withParts(customerSaid(), noteBy({ author: { type: "admin", id: "admin_99" } })));
+    const { result } = await handleWebhookEvent(noted(), createInitialSessionState("conv_123", "ws_1"), BOT_ADMIN_ID, client);
+    expect(result.action).toBe("ignored");
+  });
+
+  it("does not treat marker text in a customer's message as a hand-back note", async () => {
+    const client = clientReturning(
+      withParts(customerSaid(), noteBy({ body: "<p>Internal note</p>" }),
+        customerSaidWithBody(`<p>${HANDBACK_MARKER} reason=specific_ask class=specific ask</p>`)),
+    );
+    const { result } = await handleWebhookEvent(noted(), createInitialSessionState("conv_123", "ws_1"), BOT_ADMIN_ID, client);
+    expect(result.action).toBe("ignored");
+  });
+
+  it("ignores an ordinary internal note", async () => {
+    const client = clientReturning(withParts(customerSaid(), noteBy({ body: "<p>Please look at this tomorrow</p>" })));
+    const { result } = await handleWebhookEvent(noted(), createInitialSessionState("conv_123", "ws_1"), BOT_ADMIN_ID, client);
+    expect(result.action).toBe("ignored");
+  });
+
+  it("ignores a hand-back note on a thread Caroline has since answered", async () => {
+    const client = clientReturning(withParts(customerSaid(), noteBy(), said(BOT_ADMIN_ID)));
+    const { result } = await handleWebhookEvent(noted(), createInitialSessionState("conv_123", "ws_1"), BOT_ADMIN_ID, client);
+    expect(result.action).toBe("ignored");
+  });
+
+  it("ignores a hand-back note on a closed thread", async () => {
+    const closedThread = {
+      ...withParts(customerSaid(), noteBy()),
+      state: "closed",
+      open: false,
+    } as IntercomConversation;
+    const client = clientReturning(closedThread);
+    const { result } = await handleWebhookEvent(noted(), createInitialSessionState("conv_123", "ws_1"), BOT_ADMIN_ID, client);
+    expect(result.action).toBe("ignored");
+  });
+
+  it("ignores a hand-back note on a thread a person holds", async () => {
+    const client = clientReturning(live({
+      assignee: { type: "admin", id: "admin_99" },
+      conversation_parts: { conversation_parts: [customerSaid(), noteBy()] },
+    }));
+    const { result } = await handleWebhookEvent(noted(), createInitialSessionState("conv_123", "ws_1"), BOT_ADMIN_ID, client);
+    expect(result.action).toBe("ignored");
+  });
+
+  it("holds a restricted contact instead of dispatching", async () => {
+    const client = clientReturning(withParts(customerSaid("63bf0173c00101f1a4a458ec"), noteBy()));
+    const { result } = await handleWebhookEvent(noted(), createInitialSessionState("conv_123", "ws_1"), BOT_ADMIN_ID, client);
+    expect(result.action).toBe("restricted_hold");
+  });
+
+  it("dispatches nothing on a redelivered note webhook", async () => {
+    const client = clientReturning(withParts(customerSaid(), noteBy()));
+    const state = createInitialSessionState("conv_123", "ws_1");
+    const first = await handleWebhookEvent(noted(), state, BOT_ADMIN_ID, client);
+    const readsAfterFirst = (client.getConversation as ReturnType<typeof vi.fn>).mock.calls.length;
+    const second = await handleWebhookEvent(noted(), state, BOT_ADMIN_ID, client);
+    expect(first.result.action).toBe("dispatch_to_agent");
+    expect(second.result.action).toBe("duplicate");
+    // The redelivery is answered from the tracked event id: it reads nothing and dispatches nothing.
+    expect((client.getConversation as ReturnType<typeof vi.fn>).mock.calls.length).toBe(readsAfterFirst);
+    expect(readsAfterFirst).toBeGreaterThan(0);
+  });
+
+  it("dispatches nothing when the live read fails, and names the conversation", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const client = new MockIntercomClient();
+    client.getConversation = vi.fn(async () => {
+      throw new Error("503");
+    });
+    const { result } = await handleWebhookEvent(noted(), createInitialSessionState("conv_123", "ws_1"), BOT_ADMIN_ID, client);
+    expect(result.action).toBe("ignored");
+    expect(warn.mock.calls.map((call) => String(call[0])).join("\n")).toContain("conv_123");
+    warn.mockRestore();
+  });
+});
+
+function customerSaidWithBody(body: string): IntercomConversationPart {
+  return {
+    type: "conversation_part", id: "p_customer_marker", body, part_type: "comment",
+    created_at: 1711234750, author: { type: "user", id: "user_abc" },
+  };
+}

@@ -921,6 +921,16 @@ conversation is decided in ONE module, `plugins/intercom/src/assignment-policy.t
   person has not answered, except the classes Caroline cannot answer herself
   (`left_restricted`, `left_escalation_unread`) and every escalation for one of the seven reasons
   outside her authority (`left_explicit_escalation`).
+- The sentinel's `intercom_customer_last` counts a thread Caroline answered as the workspace bot as
+  unanswered (865 of 1,669 on 2026-11-13). What is owed is read from the parts by
+  `scripts/intercom-backlog/drain.py`, which answers it with fixed, gate-approved lines; an account with
+  an open request is never messaged by it, a thread with an open promise gets a line only when that line
+  is the promised update (`PROMISE_MET_BY`), and a customer-last thread no fixed line can answer is handed
+  to Caroline's live turn by ONE internal note per thread — an attempt, not a delivery: the thread is the
+  record, and a hand-back with no reply after the note shows as `handback_unconfirmed` on every plan and
+  run (24 h window) and is never re-posted. A thread a bot or nobody holds is assigned to Caroline first,
+  from the monitor's ONE `non_human_admin_ids`/`staffed_team_ids` rule, never a second list:
+  `docs/support/backlog-drain.md`.
 
 ## Outbound customer copy passes a signed reviewer gate
 

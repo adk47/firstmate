@@ -235,7 +235,7 @@ POST /intercom/webhook
 | `conversation.admin.closed` | Mark lifecycle closed, suppress agent | No |
 | `conversation.admin.snoozed` | Mark lifecycle snoozed, suppress agent | No |
 | `conversation.admin.opened` | Resume session, restore handling mode | Conditional |
-| `conversation.admin.noted` | Internal note → ignore entirely | No |
+| `conversation.admin.noted` | Internal note → ignore entirely, EXCEPT the backlog drain's hand-back: the newest note on the thread authored by the workspace bot admin whose stored body carries a line starting with `HANDBACK_MARKER` (`docs/support/backlog-drain.md` §"The hand-back") | No |
 
 ### Self-Reply Filtering
 
