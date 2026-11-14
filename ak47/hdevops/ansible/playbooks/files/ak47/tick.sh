@@ -17,7 +17,8 @@
 #   orphan-task-scratch   /tmp/fm-<id> with no state/<id>.meta,        quarantine    armed
 #                         idle > orphan_min, no open handle
 #   quarantine-expire     quarantine entry older than                 delete        armed
-#                         quarantine_days
+#                         quarantine_days, at most
+#                         quarantine_expire_max per run
 #   dead-pane             a tmux pane whose process is gone            report only   report
 #   swap-pressure         swap >= 70% and RAM available >= 20 GB       report only   report
 #   fat-process           one pid > fat_process_gb for fat_process_min  report/arm    renice 19,
@@ -73,6 +74,10 @@ MKTEMP_MIN=$(ak47_conf tmp_mktemp_min 1440)
 PRODUCER_MIN=$(ak47_conf tmp_producer_min 1440)
 ORPHAN_MIN=$(ak47_conf orphan_min 10080)
 QUAR_DAYS=$(ak47_conf quarantine_days 7)
+# How many expired quarantine entries one tick may delete. The delete path is
+# filesystem-bound, so a fixed bound keeps a five-minute tick five minutes long;
+# whatever is left waits for the next run, and the line says how much is left.
+QUAR_MAX=$(ak47_conf quarantine_expire_max 200)
 MAX_ENTRIES=$(ak47_conf tmp_max_entries 5000)
 MAX_MOVES=$(ak47_conf tmp_max_moves 2000)
 SWAP_ARMED=$(ak47_conf_bool swap_pressure 0)
@@ -191,6 +196,15 @@ before=$(wc -l <"$SNAP" 2>/dev/null || echo 0)
 # here is never touched, so the tick cannot pull a directory out from under a
 # running test.
 ak47_busy_tmp_names >"$BUSY" 2>/dev/null || true
+
+# One /proc pass for the delete path as well. lsof +D is recursive and O(files):
+# a quarantine directory big enough to be worth deleting is exactly the size at
+# which that scan outlives TimeoutStartSec, so the tick spent every run proving
+# something it never got to act on. The set is built once here and reused for
+# every candidate; without it, safe-delete falls back to lsof.
+AK47_INUSE_SET=$AK47_STATE/inuse.set
+ak47_inuse_scan "$AK47_INUSE_SET" || AK47_INUSE_SET=
+export AK47_INUSE_SET
 # Loaded into an associative array once: a grep fork per candidate is 5,000
 # processes per run for a set that never changes mid-run.
 declare -A BUSY_SET=()
@@ -276,6 +290,7 @@ done <"$CLASSED"
 # mtime, so an old leak would otherwise be deleted on the first tick after it was
 # quarantined instead of getting its full revert window.
 quar_cutoff=$(date -u -d "$QUAR_DAYS days ago" +%Y%m%d 2>/dev/null) || quar_cutoff=
+quar_moved=0; quar_pending=0
 while IFS= read -r d; do
   [ -n "$d" ] || continue
   quar_day=${d##*/}
@@ -286,22 +301,28 @@ while IFS= read -r d; do
   [ -n "$quar_cutoff" ] && [ "$quar_day" -lt "$quar_cutoff" ] || continue
   while IFS= read -r name; do
     [ -n "$name" ] || continue
+    if [ "$quar_moved" -ge "$QUAR_MAX" ]; then
+      quar_pending=$((quar_pending + 1))
+      continue
+    fi
     path="$d/$name"
     if [ "$APPLY" -eq 0 ]; then
       class_dry[quarantine-expire]=$(( ${class_dry[quarantine-expire]:-0} + 1 ))
       [ "${class_dry[quarantine-expire]}" -le 5 ] && \
         act "DRY-RUN would delete expired-quarantine $path revert='none: quarantine window closed'"
-      deleted=$((deleted + 1)); continue
+      deleted=$((deleted + 1)); quar_moved=$((quar_moved + 1)); continue
     fi
     if kib=$(ak47_safe_delete "$path"); then
       act "delete class=quarantine-expire $path kib=${kib:-0} revert='none: quarantine window closed'"
-      deleted=$((deleted + 1))
+      deleted=$((deleted + 1)); quar_moved=$((quar_moved + 1))
     else
       act "WARN could-not-delete class=quarantine-expire $path reason='${AK47_SD_ERROR}'"
-      failures=$((failures + 1))
+      failures=$((failures + 1)); quar_moved=$((quar_moved + 1))
     fi
   done < <(find "$d" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null)
 done < <(find "$QUAR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+[ "$quar_pending" -gt 0 ] && \
+  act "deferred class=quarantine-expire pending=$quar_pending reason='per-run bound quarantine_expire_max=$QUAR_MAX; the next tick continues where this one stopped'"
 
 # ---- report-only classes -------------------------------------------------------
 report_only() {
@@ -473,7 +494,7 @@ for c in tmp-mktemp tmp-producer orphan-task-scratch quarantine-expire; do
 done
 
 # One line, every run. Silence is provable because this line is always here.
-line="tick mode=$([ "$APPLY" -eq 1 ] && echo apply || echo dry-run) tmp_before=$before tmp_after=$after moved=$moved deleted=$deleted busy=$skipped_busy protected=$skipped_protected failures=$failures actions=$actions loop_gap=${loop_gap}s classes=${byclass:-none} breaches=${breaches:-none} top=$top"
+line="tick mode=$([ "$APPLY" -eq 1 ] && echo apply || echo dry-run) tmp_before=$before tmp_after=$after moved=$moved deleted=$deleted busy=$skipped_busy protected=$skipped_protected failures=$failures actions=$actions loop_gap=${loop_gap}s classes=${byclass:-none} expire_pending=$quar_pending breaches=${breaches:-none} top=$top"
 ak47_log "$DEVOPS_LOG" "$line"
 
 # Findings the table cannot settle: durable, rate-limited, and delivered to the

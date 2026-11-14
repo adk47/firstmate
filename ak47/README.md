@@ -132,6 +132,18 @@ stale picture drive the sweep. The rule this leaves behind: **a budget metric
 whose sample is unbounded must return a number or say it could not measure** —
 never block, and never invent.
 
+The delete path had the same shape and the same cure. `safe-delete.sh` used
+`lsof -t +D` to prove nothing held a quarantined entry; that scan is recursive,
+so a quarantine directory worth deleting was exactly the size at which it ran
+past the unit's start timeout. The tick now builds **one** in-use set per run
+(`ak47_inuse_scan`: a single pass over every process's cwd, root, exe and open
+files, ~0.5 s on this box) and tests each candidate against it in constant time.
+An incomplete set — one without its completion marker — answers `2` (*could not
+tell*), never `1` (*free*), so the failure mode of the optimisation is a refusal
+rather than a deletion. Expiry is also bounded per run by
+`quarantine_expire_max`, and the tick line carries `expire_pending=` so a
+deferred backlog is visible instead of looking like a stuck loop.
+
 ## 4. The guards
 
 ```
@@ -347,6 +359,7 @@ default. Absent keys take the default in the right-hand column.
 | `quarantine_days` | 7 | days a quarantined entry is kept before it is deleted for good |
 | `tmp_max_entries` | 5000 | stop working once `/tmp` is back under this many entries |
 | `tmp_max_moves` | 2000 | the most entries one run may move |
+| `quarantine_expire_max` | 200 | the most expired entries one run may delete; the rest wait, and the line says how many |
 | `swap_pressure` | 0 | arm the swap-pressure class: reclaim swap when RAM is free |
 | `fat_process` | 0 | arm the fat-process class: renice, `SIGTERM`, then `SIGKILL` after 5 min |
 | `fat_process_gb` | 3 | the RSS a process must hold to count as fat |
@@ -366,7 +379,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-89 tests across six files: the budget, the census, the guards, the guarded
+94 tests across six files: the budget, the census, the guards, the guarded
 delete, the tick, and the weekly review. They are hermetic — no tmux, no
 network, no live fleet state — and registered as `pure-contract-unit` in
 `bin/fm-test-run.sh`.

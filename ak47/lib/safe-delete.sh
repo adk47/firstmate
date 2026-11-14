@@ -30,6 +30,9 @@
 #   AK47_MOUNTS_FILE        default /proc/self/mounts
 #   AK47_QUARANTINE_PREFIX  default .ak47-quarantine.
 #   AK47_HANDLE_CHECK       function used for the post-rename scan
+#   AK47_INUSE_SET          file of held paths (ak47_inuse_scan); when set, the
+#                           handle check reads it instead of running lsof +D
+#   AK47_DU_BUDGET          seconds a du measurement may take (default 90)
 # Out-vars: AK47_SD_ERROR (last refusal reason), AK47_SD_QPATH (quarantine name).
 
 AK47_SD_ERROR=""
@@ -109,11 +112,83 @@ ak47_mount_hazard() {
     END { exit found ? 0 : 1 }' "$mounts"
 }
 
+# ak47_inuse_scan <outfile> - write one line per path a live process holds.
+#
+# lsof -t +D is recursive and O(files): on 2026-11-14 a quarantine directory of
+# 800,000 files made every tick outlast TimeoutStartSec, so the loop that exists
+# to clean up could not even finish a run. One /proc scan answers every path in
+# the same pass, and costs the same whether the tree has ten files or a million.
+#
+# The last line is a completion marker. A set with no marker is not a set: a
+# scan that died halfway must never look like proof that nothing is held.
+ak47_inuse_scan() {
+  local out tmp
+  out=${1:?outfile}
+  tmp="$out.$$"
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$tmp" <<'PY' || return 1
+import os, sys
+out = sys.argv[1]
+lines = []
+for pid in os.listdir('/proc'):
+    if not pid.isdigit():
+        continue
+    for link in ('cwd', 'root', 'exe'):
+        try:
+            p = os.readlink(f'/proc/{pid}/{link}')
+        except OSError:
+            continue
+        lines.append(p)
+    try:
+        fds = os.listdir(f'/proc/{pid}/fd')
+    except OSError:
+        continue
+    for fd in fds:
+        try:
+            p = os.readlink(f'/proc/{pid}/fd/{fd}')
+        except OSError:
+            continue
+        if p.endswith(' (deleted)'):
+            p = p[: -len(' (deleted)')]
+        lines.append(p)
+with open(out + '.tmp', 'w') as fh:
+    for p in lines:
+        if p.startswith('/'):
+            fh.write(p + '\n')
+    fh.write('ak47-inuse-complete\n')
+os.replace(out + '.tmp', out)
+PY
+  mv -f "$tmp" "$out" 2>/dev/null || true
+}
+
 # ak47_has_open_handles <path> - 0 held, 1 free, 2 could not tell.
-# lsof -t prints a PID for every process holding anything open under the path.
-# rc 1 with empty stderr is lsof's "no matches"; anything else fails closed.
+#
+# With AK47_INUSE_SET set (the tick builds it once per run), the answer comes
+# from that set: a path is held when any process's cwd, root, exe or open file is
+# the path itself or lives inside it. Without it, lsof is used - which is correct
+# and unusably slow on a large tree, so production always sets the set.
 ak47_has_open_handles() {
   local out err rc=0 errf
+  if [ -n "${AK47_INUSE_SET:-}" ]; then
+    [ -r "$AK47_INUSE_SET" ] || return 2
+    tail -n 1 "$AK47_INUSE_SET" 2>/dev/null | grep -qx 'ak47-inuse-complete' || return 2
+    local id
+    id=$(ak47_path_identity "$1") || return 2
+    AK47_IH_P=$id awk '
+      /^ak47-inuse-complete$/ { done = 1 }
+      {
+        p = $0
+        if (p == ENVIRON["AK47_IH_P"]) { hit = 1 }
+        if (index(p, ENVIRON["AK47_IH_P"] "/") == 1) { hit = 1 }
+      }
+      END { exit hit ? 0 : 1 }' "$AK47_INUSE_SET"
+    rc=$?
+    case "$rc" in
+      0) return 0 ;;
+      1) return 1 ;;
+      *) return 2 ;;
+    esac
+  fi
   command -v lsof >/dev/null 2>&1 || return 2
   errf=$(mktemp) || return 2
   if [ -d "$1" ]; then
@@ -154,7 +229,7 @@ ak47_safe_delete() {
     0) AK47_SD_ERROR="open handles"; return 1 ;;
     2) AK47_SD_ERROR="could not prove no open handles"; return 1 ;;
   esac
-  kib=$(du -sk -- "$id" 2>/dev/null | awk '{print $1}') || kib=0
+  kib=$(timeout "${AK47_DU_BUDGET:-90}" du -sk -- "$id" 2>/dev/null | awk '{print $1}') || kib=0
   qdir=$(dirname "$id")
   qpath="$qdir/${AK47_QUARANTINE_PREFIX:-.ak47-quarantine.}$(basename "$id").$$"
   if ! mv -f -- "$id" "$qpath" 2>/dev/null; then

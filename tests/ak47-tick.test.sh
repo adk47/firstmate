@@ -61,6 +61,41 @@ reset_tree() {
   write_config
 }
 
+
+# --- expiry must be bounded and must not shell out per directory ------------------
+# 2026-11-14: an expired quarantine dir large enough to matter made `lsof +D` run
+# past the unit's start timeout, so nothing was ever deleted and the loop logged
+# nothing. Both properties are asserted here.
+
+test_expiry_is_bounded_per_run_and_says_what_is_left() {
+  reset_tree
+  printf 'quarantine_expire_max=3\n' >>"$AK47_CONFIG/devops.conf"
+  local day=$AK47_STATE/quarantine/20200101 i
+  mkdir -p "$day"
+  for i in 1 2 3 4 5; do mkdir -p "$day/entry-$i"; printf 'x\n' >"$day/entry-$i/f"; done
+  "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero"
+  local left; left=$(find "$day" -mindepth 1 -maxdepth 1 | wc -l)
+  [ "$left" -eq 2 ] || fail "the per-run bound did not apply: $left of 5 entries remain, expected 2"
+  tail -n 1 "$AK47_STATE/devops.log" | grep -q 'expire_pending=2' \
+    || fail "the tick line does not say how many expired entries it deferred"
+  pass "expiry deletes at most quarantine_expire_max per run and reports the remainder"
+}
+
+test_expiry_does_not_run_lsof_per_entry() {
+  reset_tree
+  # A hostile lsof: if the tick consults it per quarantine entry, this exits
+  # non-zero with an error, which safe-delete reads as "could not tell" and the
+  # delete is refused. With the in-use set in place lsof is never called.
+  local stub=$SANDBOX/lsofstub day=$AK47_STATE/quarantine/20200101
+  mkdir -p "$stub" "$day/entry-1"
+  printf '#!/bin/sh\necho "lsof should not be called for a quarantine entry" >&2\nexit 2\n' >"$stub/lsof"
+  chmod +x "$stub/lsof"
+  printf 'x\n' >"$day/entry-1/f"
+  PATH="$stub:$PATH" "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero"
+  [ -e "$day/entry-1" ] && fail "the expired entry survived: the tick fell back to a per-entry lsof scan"
+  pass "the tick deletes an expired entry without running lsof on it"
+}
+
 # --- the refusals ---------------------------------------------------------------
 
 
@@ -517,3 +552,5 @@ test_delivery_commits_the_key_so_the_next_tick_is_quiet
 test_reports_a_dry_run_that_outlived_its_24_hours
 test_a_size_walk_that_overruns_does_not_hang_the_tick
 test_an_unmeasurable_tree_is_a_finding_not_silence
+test_expiry_is_bounded_per_run_and_says_what_is_left
+test_expiry_does_not_run_lsof_per_entry
