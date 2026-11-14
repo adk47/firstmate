@@ -41,7 +41,9 @@ rewrite work list. **Moving a campaign to enforce is a one-line PR** that adds i
 `_enforce_why`, and cites that report. One campaign at a time.
 
 Shipped table: `decline` is enforced (the reviewer approved all 4 rendered denial bodies, and `DECLINE_CORE_ROUTE_OFF=0`
-means it carries no live traffic); `verify-live` / `windowed` is retired (it states a removal deadline; the reviewer
+means it carries no live traffic); `credit-approved-elsewhere` is enforced from its first byte (no reviewer has read the
+line, and the sender locks it with `APPROVED_ELSEWHERE_COPY_APPROVED=0`, so enforcing it stops no message that is sent
+today); `verify-live` / `windowed` is retired (it states a removal deadline; the reviewer
 refused it, and the sender already locks it with `LIVE_WINDOWED_COPY_APPROVED=0`); everything else is observed.
 
 ## How it works

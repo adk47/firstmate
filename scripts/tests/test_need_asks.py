@@ -196,6 +196,76 @@ class NeedAsksTest(unittest.TestCase):
         self.assertNotIn("4", {u["user_id"] for u in self.build()["users"]})
 
 
+    def test_a_read_that_failed_on_our_side_is_never_sent_to_the_customer(self):
+        # an `unknown` read means doc-verify could not answer (provider down, cap, no key): our failure, and the
+        # retry layer re-reads the same file. Asking would tell the user their document is hard to read - false,
+        # and it asks them to redo work we are already doing - so no ask may leave on an `unknown` row.
+        db = sqlite3.connect(self.dv)
+        db.execute("INSERT INTO dv_outcomes (at, proof_id, request_id, user_id, outcome, need) VALUES (?,?,?,?,?,?)",
+                   ("2026-10-20T00:00:00Z", SHA_A, "r10", 9, "unknown", ""))
+        db.commit(); db.close()
+        db = sqlite3.connect(self.proof)
+        db.execute("INSERT INTO proof_intake (user_id, file_sha256, received_at, mime, conversation_id, intake_id) "
+                   "VALUES (9,?,?,?,?,?)", (SHA_A, "2026-10-18T09:30:00Z", "image/jpeg", "777", "9:a"))
+        db.commit(); db.close()
+        self.pending[9] = ["r10"]
+        self.assertEqual(self.build()["counts"]["skip_reader_failed"], 1)
+        lst = self.d / "list.json"
+        lst.write_text(json.dumps(self.build()))
+        rep, gate = self.send_(lst, segment="free")
+        sent = {c[1]["user"]["id"]: c[1]["need"] for c in gate.calls}
+        self.assertNotIn("9", sent)
+
+    def unlisted(self, outcome, need):
+        # one more document, for user 9, whose latest doc-verify row is (outcome, need): the counts before it, and
+        # the build with it
+        before = self.build()["counts"]
+        db = sqlite3.connect(self.dv)
+        db.execute("INSERT INTO dv_outcomes (at, proof_id, request_id, user_id, outcome, need) VALUES (?,?,?,?,?,?)",
+                   ("2026-10-20T00:00:00Z", SHA_A, "r10", 9, outcome, need))
+        db.commit(); db.close()
+        db = sqlite3.connect(self.proof)
+        db.execute("INSERT INTO proof_intake (user_id, file_sha256, received_at, mime, conversation_id, intake_id) "
+                   "VALUES (9,?,?,?,?,?)", (SHA_A, "2026-10-18T09:30:00Z", "image/jpeg", "777", "9:a"))
+        db.commit(); db.close()
+        self.pending[9] = ["r10"]
+        return before, self.build()
+
+    def test_an_unverifiable_read_that_names_no_need_is_counted_under_its_own_name_and_not_asked(self):
+        before, res = self.unlisted("unverifiable", "")
+        self.assertEqual(res["counts"]["skip_unverifiable_no_need"], before.get("skip_unverifiable_no_need", 0) + 1)
+        self.assertEqual(res["counts"].get("skip_reader_failed", 0), before.get("skip_reader_failed", 0))
+        self.assertNotIn("9", {u["user_id"] for u in res["users"]})
+
+    def test_a_read_with_another_outcome_is_counted_and_not_asked(self):
+        before, res = self.unlisted("verified", "readable_document")
+        self.assertEqual(res["counts"]["skip_not_unverifiable"], before.get("skip_not_unverifiable", 0) + 1)
+        self.assertEqual(res["counts"].get("skip_reader_failed", 0), before.get("skip_reader_failed", 0))
+        self.assertNotIn("9", {u["user_id"] for u in res["users"]})
+
+    def test_the_send_never_asks_for_a_document_on_a_request_the_approved_elsewhere_line_went_out_for(self):
+        # every entry point passes the send: a list built WITHOUT --blocked-stamps still cannot ask twice, because
+        # the send reads the ledger row the approved-elsewhere send wrote
+        from credit_review import verify_ledger
+        self.pending[1] = ["r1"]
+        db = sqlite3.connect(self.proof)          # only document A on file, so its ask is not held by a newer intake
+        db.execute("DELETE FROM proof_intake WHERE user_id=1 AND file_sha256=?", (SHA_B,)); db.commit(); db.close()
+        lst = self.d / "list.json"
+        lst.write_text(json.dumps(self.build()))
+        _rep, gate = self.send_(lst)
+        self.assertEqual([[c["request_id"] for c in call[1]["credits"]] for call in gate.calls], [["r1"]])
+        vdb = verify_ledger.connect(str(self.d / "ledger.sqlite3"))
+        c = verify_ledger.claim(vdb, campaign=na.ELSEWHERE_CAMPAIGN, user_key="u1@x.com", day="2026-10-20",
+                                request_ids=["r1"], message_type="email", approved_by="U7RP6HKUZ", approval_ref="ref",
+                                user_id="1")
+        self.assertEqual(c["result"], "claimed")
+        verify_ledger.finalize(vdb, message_row=c["message_row"], status="sent", message_id="m1")
+        vdb.close()
+        rep, gate = self.send_(lst)
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.halted, "")
+        self.assertEqual([f["user"] for f in rep.filtered], ["1"])
+
     def send_(self, lst, **kw):
         gate = FakeGate()
         rep = na.send(list_path=str(lst), segment=kw.pop("segment", "paid"), query=self.q, runner=gate, preview_dir=str(self.d),
@@ -1311,6 +1381,531 @@ class DrainReconciliationTest(NeedAsksTest):
             rc = na._main(["build", "--out", str(out), "--from-drain", plan])
         self.assertEqual(rc, 0)
         self.assertEqual(b.call_args.kwargs.get("from_drain"), plan)
+
+
+class ApprovedForAnotherUserTest(unittest.TestCase):
+    """The conflict rule's credit_approved_for_another_user decisions, read from the stamp on the core row
+    (metadata.precedent_blocked): a stamped request reaches the `credit-approved-elsewhere` line or is a backlog row
+    with a signal - never silence, and never an ask nothing delivers."""
+
+    RID = "11111111-1111-4111-8111-111111111111"
+    RID2 = "22222222-2222-4222-8222-222222222222"
+    RID3 = "33333333-3333-4333-8333-333333333333"
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.dv = str(self.d / "dv.sqlite")
+        db = sqlite3.connect(self.dv)
+        db.execute("CREATE TABLE dv_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, proof_id TEXT, "
+                   "request_id TEXT, user_id INTEGER, outcome TEXT, need TEXT)")
+        db.commit(); db.close()
+        self.proof = str(self.d / "proof.sqlite")
+        db = sqlite3.connect(self.proof)
+        db.execute("CREATE TABLE proof_intake (user_id INTEGER, file_sha256 TEXT, received_at TEXT, mime TEXT, "
+                   "conversation_id TEXT, intake_id TEXT, matched_by TEXT)")
+        db.commit(); db.close()
+        self.paying = str(self.d / "paying.json")
+        Path(self.paying).write_text(json.dumps({"ids": [7]}))
+        self.asked = []
+
+    def stamp(self, **over):
+        base = {"reason": "credit_approved_for_another_user", "roles": ["Engineer", "Mixing"],
+                "approved_request_ids": ["theirs-1", "theirs-2"], "line_sent": False}
+        return {**base, **over}
+
+    def core(self, *rows):
+        """A replica that answers the stamp query with these (request id, user id, stamp) rows and nothing else."""
+        def query(sql):
+            self.asked.append(sql)
+            if sql != na.STAMPS_SQL:
+                raise AssertionError("a stamped row needs no other replica read at build")
+            return [[rid, str(uid), st if isinstance(st, str) else json.dumps(st)] for rid, uid, st in rows]
+        return query
+
+    def build(self, *rows, **kw):
+        return na.build(dv_store=self.dv, proof_store=self.proof, paying_path=self.paying, query=self.core(*rows),
+                        now=datetime(2026, 11, 14, tzinfo=timezone.utc), stamps=True, ledger_path=self.ledger(), **kw)
+
+    def tell(self, rid, how="sent", user="jane@example.com"):
+        """The verify-ledger row the gate writes for the approved-elsewhere line on this request, through the
+        ledger's own writers: claimed before the POST (`attempted`), then `sent`. `held` is a claim the copy gate
+        gave back, which is not a send."""
+        from credit_review import verify_ledger
+        db = verify_ledger.connect(self.ledger())
+        try:
+            c = verify_ledger.claim(db, campaign=na.ELSEWHERE_CAMPAIGN, user_key=user, day="2026-11-13",
+                                    request_ids=[rid], message_type="email", approved_by="U7RP6HKUZ",
+                                    approval_ref="ref", user_id="7")
+            self.assertEqual(c["result"], "claimed")
+            if how == "sent":
+                verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="m1")
+            elif how == "held":
+                verify_ledger.hold_copy_review(db, message_row=c["message_row"],
+                                               reason="copy_review_hold: copy_review_pending")
+        finally:
+            db.close()
+
+    def test_the_stamp_is_the_one_source_and_it_is_read_from_the_core_row(self):
+        self.build((self.RID, 7, self.stamp()))
+        self.assertEqual(self.asked, [na.STAMPS_SQL])
+
+    def test_each_backlog_why_has_its_own_counter_and_the_total_is_one_number(self):
+        rows = [{"id": self.RID, "uid": "7", "stamp": self.stamp(roles=None)},
+                {"id": self.RID2, "uid": "x", "stamp": self.stamp()},
+                {"id": self.RID3, "uid": "7", "stamp": self.stamp(reason="something_else")},
+                {"id": "44444444-4444-4444-8444-444444444444", "uid": "7", "stamp": None}]
+        elsewhere, backlog, counts = na.stamped(rows)
+        self.assertEqual(elsewhere, [])
+        self.assertEqual(len(backlog), 4)
+        self.assertEqual(counts["backlog_no_send_route"], 4)
+        self.assertEqual(counts["backlog_approved_for_another_user"], 2)
+        self.assertEqual(counts["backlog_roles_unread"], 1)
+        self.assertEqual(counts["backlog_no_user"], 1)
+        self.assertEqual(counts["backlog_other_reason"], 1)
+        self.assertEqual(counts["backlog_stamp_unread"], 1)
+
+    def test_a_stamped_request_is_never_also_the_document_ask(self):
+        db = sqlite3.connect(self.dv)
+        db.execute("INSERT INTO dv_outcomes (at, proof_id, request_id, user_id, outcome, need) VALUES (?,?,?,?,?,?)",
+                   ("2026-11-01T00:00:00Z", "a" * 64, self.RID, 7, "unverifiable", "readable_document"))
+        db.commit(); db.close()
+        db = sqlite3.connect(self.proof)
+        db.execute("INSERT INTO proof_intake (user_id, file_sha256, received_at, mime, conversation_id, intake_id, matched_by) "
+                   "VALUES (7,?,?,?,?,?,?)", ("a" * 64, "2026-11-01T00:00:00Z", "image/jpeg", "777", "7:a", "professional_id"))
+        db.commit(); db.close()
+        res = self.build((self.RID, 7, self.stamp()))
+        self.assertEqual(res["users"], [])
+        self.assertEqual([e["request_id"] for e in res["elsewhere"]], [self.RID])
+        self.assertEqual(res["counts"]["skip_decided_by_conflict_rule"], 1)
+
+    def document_on_file(self, rid):
+        """An unverifiable document with a sendable need on this request: what the document ask is built from."""
+        db = sqlite3.connect(self.dv)
+        db.execute("INSERT INTO dv_outcomes (at, proof_id, request_id, user_id, outcome, need) VALUES (?,?,?,?,?,?)",
+                   ("2026-11-01T00:00:00Z", "a" * 64, rid, 7, "unverifiable", "readable_document"))
+        db.commit(); db.close()
+        db = sqlite3.connect(self.proof)
+        db.execute("INSERT INTO proof_intake (user_id, file_sha256, received_at, mime, conversation_id, intake_id, matched_by) "
+                   "VALUES (7,?,?,?,?,?,?)", ("a" * 64, "2026-11-01T00:00:00Z", "image/jpeg", "777", "7:a", "professional_id"))
+        db.commit(); db.close()
+
+    def open_core(self, *rows):
+        """A replica where self.RID is an open request of user 7, answering the stamp read with these rows and every
+        other read the document ask makes: so a request the build fails to keep off the document ask IS listed."""
+        def query(sql):
+            if sql == na.STAMPS_SQL:
+                return [[rid, str(uid), json.dumps(st)] for rid, uid, st in rows]
+            if "FROM postgresql_core.public.users" in sql:
+                return [["7", "u7@x.com", "Jane", "", ""]]
+            if sql == na.owing_proof.STATUS_GUARD_SQL:
+                return [[s] for s in ("approved", "rejected", "unverified", "user_verification_needed")]
+            if sql.startswith(na.FACTS_SQL):
+                return [["7", self.RID, "user_verification_needed", "false"]]
+            return [[self.RID, "7", "p1", "t1", "Song A", '[{"name": "Big Star"}]', "{Mixing}", "40", "{}", "{}"]]
+        return query
+
+    def build_open(self, *rows, **kw):
+        return na.build(dv_store=self.dv, proof_store=self.proof, paying_path=self.paying, query=self.open_core(*rows),
+                        now=datetime(2026, 11, 14, tzinfo=timezone.utc), stamps=True, ledger_path=self.ledger(), **kw)
+
+    def document_asks(self, res):
+        return [a["request_id"] for u in res["users"] for a in u["asks"]]
+
+    def test_with_no_stamp_that_document_is_the_document_ask(self):
+        # the control for the three cases below: this fixture IS asked when the conflict rule has not decided it
+        self.document_on_file(self.RID)
+        res = self.build_open()
+        self.assertEqual(self.document_asks(res), [self.RID])
+        self.assertEqual(res["counts"].get("skip_decided_by_conflict_rule", 0), 0)
+
+    def test_a_request_the_ledger_says_was_sent_the_line_is_absent_and_one_with_no_row_is_present(self):
+        # QA review of hydra#1974: a told request was in neither list, and the document ask was suppressed only for
+        # ids IN those lists. "Told" is the ledger's sent row for the request, the row the gate writes when it sends
+        self.document_on_file(self.RID)
+        self.tell(self.RID)
+        res = self.build_open((self.RID, 7, self.stamp()), (self.RID2, 7, self.stamp()))
+        self.assertEqual([e["request_id"] for e in res["elsewhere"]], [self.RID2])
+        self.assertEqual(res["users"], [])
+        self.assertEqual(res["backlog"], [])
+        self.assertEqual(res["waits"], [])
+        self.assertEqual(res["counts"]["stamp_line_already_sent"], 1)
+        self.assertEqual(res["counts"]["skip_told_approved_elsewhere"], 1)
+
+    def test_a_second_build_over_the_same_ledger_answers_the_same(self):
+        self.document_on_file(self.RID)
+        self.tell(self.RID)
+        first = self.build_open((self.RID, 7, self.stamp()))
+        second = self.build_open((self.RID, 7, self.stamp()))
+        self.assertEqual(first["elsewhere"], [])
+        self.assertEqual(second["elsewhere"], [])
+        self.assertEqual(first["users"], [])
+        self.assertEqual(second["users"], [])
+
+    def test_a_claim_whose_post_may_have_landed_counts_as_told(self):
+        # `attempted`: the gate claimed the request and the POST was never confirmed. It may have reached the customer
+        self.document_on_file(self.RID)
+        self.tell(self.RID, how="attempted")
+        res = self.build_open((self.RID, 7, self.stamp()))
+        self.assertEqual(res["elsewhere"], [])
+        self.assertEqual(res["users"], [])
+        self.assertEqual(res["counts"]["stamp_line_already_sent"], 1)
+
+    def test_a_claim_the_copy_gate_gave_back_is_not_a_send_and_the_request_is_still_listed(self):
+        self.tell(self.RID, how="held")
+        res = self.build_open((self.RID, 7, self.stamp()))
+        self.assertEqual([e["request_id"] for e in res["elsewhere"]], [self.RID])
+        self.assertEqual(res["counts"].get("stamp_line_already_sent", 0), 0)
+
+    def test_a_request_told_the_line_whose_stamp_is_gone_is_still_never_the_document_ask(self):
+        # exclusive on the ledger row, not on the stamp still being there: no stamp at all, and the document is askable
+        self.document_on_file(self.RID)
+        self.tell(self.RID)
+        res = self.build_open()
+        self.assertEqual(res["users"], [])
+        self.assertEqual(res["elsewhere"], [])
+        self.assertEqual(res["counts"]["skip_told_approved_elsewhere"], 1)
+
+    def test_a_stamp_that_says_told_with_no_ledger_row_is_backlog_and_never_either_message(self):
+        # the stamp's own flag is not the answer. Two records disagree: no second line on a guess, no document ask,
+        # and a backlog row that says why instead of silence
+        self.document_on_file(self.RID)
+        res = self.build_open((self.RID, 7, self.stamp(line_sent=True)))
+        self.assertEqual(res["users"], [])
+        self.assertEqual(res["elsewhere"], [])
+        self.assertEqual([(b["request_id"], b["why"]) for b in res["backlog"]], [(self.RID, "told_flag_no_ledger_row")])
+        self.assertEqual(res["counts"].get("stamp_line_already_sent", 0), 0)
+        self.assertEqual(res["counts"]["skip_decided_by_conflict_rule"], 1)
+
+    def test_a_ledger_that_cannot_be_read_stops_the_build_instead_of_reading_as_nobody_told(self):
+        Path(self.ledger()).write_text("not a sqlite file")
+        with self.assertRaises(na.NeedError):
+            self.build_open((self.RID, 7, self.stamp()))
+
+    def test_a_build_without_the_stamp_flag_reads_no_ledger(self):
+        Path(self.ledger()).write_text("not a sqlite file")
+        self.document_on_file(self.RID)
+        res = na.build(dv_store=self.dv, proof_store=self.proof, paying_path=self.paying, query=self.open_core(),
+                       now=datetime(2026, 11, 14, tzinfo=timezone.utc), ledger_path=self.ledger())
+        self.assertEqual(self.document_asks(res), [self.RID])
+
+    def test_a_request_not_yet_told_is_listed_for_the_line_and_never_the_document_ask(self):
+        self.document_on_file(self.RID)
+        res = self.build_open((self.RID, 7, self.stamp(line_sent=False)))
+        self.assertEqual([e["request_id"] for e in res["elsewhere"]], [self.RID])
+        self.assertEqual(res["users"], [])
+        self.assertEqual(res["counts"]["skip_decided_by_conflict_rule"], 1)
+
+    def test_a_stamp_the_line_cannot_carry_still_keeps_the_request_off_the_document_ask(self):
+        self.document_on_file(self.RID)
+        res = self.build_open((self.RID, 7, self.stamp(roles=None)))
+        self.assertEqual([b["request_id"] for b in res["backlog"]], [self.RID])
+        self.assertEqual(res["users"], [])
+
+    def test_a_drain_ask_for_a_request_already_told_the_line_is_not_a_wait_row(self):
+        plan = str(self.d / "plan.jsonl")
+        Path(plan).write_text(json.dumps({"outcome": "ask", "user_id": 7, "request_id": self.RID}) + "\n")
+        self.tell(self.RID)
+        res = self.build_open((self.RID, 7, self.stamp()), from_drain=plan)
+        self.assertEqual(res["waits"], [])
+        self.assertEqual(res["users"], [])
+        self.assertEqual(res["counts"]["drain_ask_told_approved_elsewhere"], 1)
+
+    def test_the_send_re_read_asks_the_status_set_the_stamp_read_asked(self):
+        seen = []
+
+        def query(sql):
+            seen.append(sql)
+            if "FROM postgresql_core.public.users" in sql:
+                return [[7, "u7@x.com", "Jane", "", ""]]
+            if "FROM postgresql_core.public.credit_requests" not in sql:
+                raise AssertionError(f"unexpected replica read: {sql}")
+            if "'processing'" in sql:      # the replica answers the statuses the query asks for
+                return [[self.RID, 7, "p1", "t1", "Song A", '[{"name": "Big Star"}]', "{Engineer}", "40",
+                         "{}", "{}", "2026-11-01 00:00:00"]]
+            return []
+        got = na.elsewhere_payloads([{"user_id": "7", "request_id": self.RID, "roles": ["Engineer"]}], query)
+        self.assertEqual(len(got), 1)
+        self.assertEqual([c["request_id"] for c in got[0]["credits"]], [self.RID])
+        self.assertEqual([c["role"] for c in got[0]["credits"]], ["Engineer"])
+        self.assertEqual(len(seen), 2)
+
+    def test_a_stamped_request_reaches_the_line_and_never_the_document_ask(self):
+        res = self.build((self.RID, 7, self.stamp()))
+        self.assertEqual(len(res["elsewhere"]), 1)
+        got = res["elsewhere"][0]
+        self.assertEqual(got["request_id"], self.RID)
+        self.assertEqual(got["user_id"], "7")
+        self.assertEqual(got["need"], "credit_approved_for_another_user")
+        self.assertEqual(got["route"], "credit-approved-elsewhere")
+        self.assertEqual(got["roles"], ["Engineer", "Mixing"])
+        self.assertEqual(got["approved_request_ids"], ["theirs-1", "theirs-2"])
+        self.assertIs(got["line_sent"], False)
+        self.assertIs(got["paid"], True)
+        self.assertEqual(res["backlog"], [])
+        self.assertEqual(res["users"], [])
+        self.assertEqual(res["waits"], [])
+        self.assertEqual(res["counts"]["stamped"], 1)
+        self.assertEqual(res["counts"]["elsewhere_listed"], 1)
+
+    def test_the_line_has_its_own_campaign_and_the_document_ask_keeps_its_own(self):
+        self.assertEqual(na.route_of("credit_approved_for_another_user"), "credit-approved-elsewhere")
+        self.assertEqual(na.route_of("readable_document"), "proof-need-ask")
+        self.assertIsNone(na.route_of("issuer_email_from_official_domain"))
+
+    def test_no_stamp_is_a_measured_zero_and_nobody_is_listed(self):
+        res = self.build()
+        self.assertEqual(res["elsewhere"], [])
+        self.assertEqual(res["backlog"], [])
+        self.assertIs(res["blocked_stamps_read"], True)
+        self.assertNotIn("stamped", res["counts"])
+
+    def test_a_build_that_was_not_asked_reads_no_stamp_and_says_so(self):
+        def no_query(_sql):
+            raise AssertionError("no replica read without stamps=True")
+        res = na.build(dv_store=self.dv, proof_store=self.proof, paying_path=self.paying, query=no_query,
+                       now=datetime(2026, 11, 14, tzinfo=timezone.utc))
+        self.assertEqual(res["elsewhere"], [])
+        self.assertIs(res["blocked_stamps_read"], False)
+
+    def test_unreadable_roles_are_null_and_backlog_never_a_guess(self):
+        for bad in (None, [], "Mixing", ["Mixing", None], ["Mixing", " "], {"Mixing": 1}):
+            with self.subTest(roles=bad):
+                res = self.build((self.RID, 7, self.stamp(roles=bad)))
+                self.assertEqual(res["elsewhere"], [])
+                self.assertIsNone(res["backlog"][0]["roles"])
+                self.assertEqual(res["backlog"][0]["reason"], "backlog:no_send_route")
+                self.assertEqual(res["backlog"][0]["why"], "roles_unread")
+                self.assertEqual(res["counts"]["backlog_roles_unread"], 1)
+
+    def test_a_missing_roles_field_is_null(self):
+        st = self.stamp()
+        del st["roles"]
+        res = self.build((self.RID, 7, st))
+        self.assertIsNone(res["backlog"][0]["roles"])
+        self.assertEqual(res["backlog"][0]["why"], "roles_unread")
+
+    def test_a_stamp_that_is_not_an_object_is_backlog_with_null_roles(self):
+        for bad in ("true", "[1]", "{not json", '"credit_approved_for_another_user"'):
+            with self.subTest(stamp=bad):
+                res = self.build((self.RID, 7, bad))
+                self.assertEqual(res["elsewhere"], [])
+                self.assertEqual(res["backlog"][0]["why"], "stamp_unread")
+                self.assertIsNone(res["backlog"][0]["decision"])
+                self.assertIsNone(res["backlog"][0]["roles"])
+
+    def test_a_stamp_that_names_no_reason_is_eligible_when_its_roles_are_readable(self):
+        st = self.stamp()
+        del st["reason"]
+        for reason_field in ({}, {"reason": None}, {"reason": " "}):
+            with self.subTest(reason=reason_field):
+                res = self.build((self.RID, 7, {**st, **reason_field}))
+                self.assertEqual(res["backlog"], [])
+                got = res["elsewhere"][0]
+                self.assertEqual(got["roles"], ["Engineer", "Mixing"])
+                self.assertEqual(got["approved_request_ids"], ["theirs-1", "theirs-2"])
+                self.assertIs(got["reason_in_stamp"], False)
+
+    def test_a_stamp_that_names_no_reason_and_no_readable_roles_is_backlog_roles_unread(self):
+        res = self.build((self.RID, 7, {"approved_request_ids": ["theirs-1"]}))
+        self.assertEqual(res["elsewhere"], [])
+        self.assertEqual(res["backlog"][0]["why"], "roles_unread")
+        self.assertEqual(res["backlog"][0]["approved_request_ids"], ["theirs-1"])
+
+    def test_a_stamp_that_names_another_reason_is_backlog_never_this_line(self):
+        res = self.build((self.RID, 7, self.stamp(reason="something_else")))
+        self.assertEqual(res["elsewhere"], [])
+        self.assertEqual(res["backlog"][0]["why"], "other_reason")
+        self.assertEqual(res["backlog"][0]["decision"], "something_else")
+        self.assertIsNone(res["backlog"][0]["roles"])
+
+    def test_a_stamped_request_with_no_account_is_backlog(self):
+        res = self.build((self.RID, "", self.stamp()))
+        self.assertEqual(res["elsewhere"], [])
+        self.assertEqual(res["backlog"][0]["why"], "no_user")
+        self.assertIsNone(res["backlog"][0]["user_id"])
+
+    def test_an_already_told_row_is_counted_not_listed(self):
+        self.tell(self.RID2)
+        res = self.build((self.RID2, 7, self.stamp()))
+        self.assertEqual(res["elsewhere"], [])
+        self.assertEqual(res["backlog"], [])
+        self.assertEqual(res["counts"]["stamp_line_already_sent"], 1)
+
+    def test_a_drain_ask_the_conflict_rule_decided_is_one_row_not_also_a_wait(self):
+        plan = str(self.d / "plan.jsonl")
+        Path(plan).write_text("".join(json.dumps({"outcome": "ask", "user_id": 7, "request_id": r}) + "\n"
+                                      for r in (self.RID, self.RID2, self.RID3)))
+        res = self.build((self.RID, 7, self.stamp()), (self.RID2, 7, self.stamp(roles=None)), from_drain=plan)
+        self.assertEqual([e["request_id"] for e in res["elsewhere"]], [self.RID])
+        self.assertEqual([b["request_id"] for b in res["backlog"]], [self.RID2])
+        self.assertEqual([w["request_id"] for w in res["waits"]], [self.RID3])
+        self.assertEqual(res["counts"]["drain_ask_decided_by_conflict_rule"], 2)
+
+    def test_an_unreadable_stamp_read_stops_the_build_instead_of_reading_as_nobody_owed(self):
+        def down(_sql):
+            raise RuntimeError("replica down")
+        with self.assertRaises(na.NeedError):
+            na.build(dv_store=self.dv, proof_store=self.proof, paying_path=self.paying, query=down, stamps=True)
+        for bad in ([["not-a-uuid", "7", "{}"]], [[self.RID, "7"]]):
+            with self.subTest(rows=bad), self.assertRaises(na.NeedError):
+                na.build(dv_store=self.dv, proof_store=self.proof, paying_path=self.paying, query=lambda _s: bad,
+                         stamps=True)
+
+    def run_cli(self, *rows):
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        real, query = na.build, self.core(*rows)
+
+        def build(**kw):
+            return real(dv_store=self.dv, proof_store=self.proof, paying_path=self.paying, query=query,
+                        ledger_path=self.ledger(), **kw)
+        with unittest.mock.patch.object(na, "build", build), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            rc = na._main(["build", "--out", str(self.d / "list.json"), "--blocked-stamps"])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_the_cli_signals_on_stderr_and_keeps_stdout_one_json_line(self):
+        rc, out, err = self.run_cli((self.RID, 7, self.stamp()), (self.RID2, 7, self.stamp(roles=None)),
+                                    (self.RID3, 7, self.stamp(reason="something_else")))
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out)["counts"]["stamped"], 3)
+        self.assertIn("NEED ASKS APPROVED_ELSEWHERE: 3 stamped (metadata.precedent_blocked), 1 listed for "
+                      "credit-approved-elsewhere, 2 BACKLOG_NO_SEND_ROUTE (roles unread: 1), 0 told", err)
+        lst = json.loads((self.d / "list.json").read_text())
+        self.assertEqual(len(lst["elsewhere"]), 1)
+        self.assertEqual(len(lst["backlog"]), 2)
+
+    def test_the_cli_says_zero_when_nothing_is_stamped(self):
+        rc, _out, err = self.run_cli()
+        self.assertEqual(rc, 0)
+        self.assertIn("0 stamped (metadata.precedent_blocked), 0 listed for credit-approved-elsewhere, "
+                      "0 BACKLOG_NO_SEND_ROUTE (roles unread: 0), 0 told", err)
+
+    def test_the_cli_reports_the_measured_told_count_never_a_hardcoded_zero(self):
+        # QA review of hydra#1974: the line printed "0 told" whatever the ledger said, so a build that found the
+        # line already sent on a request could not be told apart from one that found nothing.
+        self.tell(self.RID2)
+        rc, _out, err = self.run_cli((self.RID, 7, self.stamp()), (self.RID2, 7, self.stamp()))
+        self.assertEqual(rc, 0)
+        self.assertIn("2 stamped (metadata.precedent_blocked), 1 listed for credit-approved-elsewhere, "
+                      "0 BACKLOG_NO_SEND_ROUTE (roles unread: 0), 1 told", err)
+
+    # ---- the send path ------------------------------------------------------------------------------------------
+    def listed(self, *rows):
+        path = self.d / "list.json"
+        path.write_text(json.dumps(self.build(*rows)))
+        return str(path)
+
+    def live(self, *pending, email="jane@example.com"):
+        """The send-time re-read: the account, and the requests still pending in core (with the roles the CUSTOMER
+        asked for, which are not the roles the line may name)."""
+        acct = {7: {"email": email, "professional_id": "9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", "auth_id": "auth0|7",
+                    "first_name": "Jane"}}
+        rows = {7: [{"request_id": rid, "profile_id": "", "track_id": "", "track_title": f"Song {i}",
+                     "artist_name": "Big Star", "role": "Producer, Engineer, Mixing", "_incomplete": False, "_pop": 1}
+                    for i, rid in enumerate(pending)]}
+        for name, val in (("accounts_of", lambda uids, _q: {u: acct[u] for u in uids if u in acct}),
+                          ("uvn_requests", lambda uids, _q, _st: {u: rows[u] for u in uids if u in rows})):
+            p = unittest.mock.patch.object(na.uvn_status, name, val)
+            p.start(); self.addCleanup(p.stop)
+
+    def ledger(self):
+        return str(self.d / "ledger.sqlite3")
+
+    def test_the_payload_names_the_shared_roles_never_the_roles_the_customer_asked_for(self):
+        self.live(self.RID)
+        gate = FakeGate()
+        rep = na.send_elsewhere(list_path=self.listed((self.RID, 7, self.stamp())), query=lambda _s: [], runner=gate,
+                                ledger_path=self.ledger())
+        self.assertEqual(rep.halted, "")
+        self.assertEqual(len(gate.calls), 1)
+        argv, payload = gate.calls[0]
+        self.assertEqual(argv[argv.index("--campaign") + 1], "credit-approved-elsewhere")
+        self.assertNotIn("--copy", argv)
+        self.assertEqual(payload["user"]["id"], "7")
+        self.assertEqual([c["request_id"] for c in payload["credits"]], [self.RID])
+        self.assertEqual(payload["credits"][0]["role"], "Engineer, Mixing")
+        self.assertNotIn("need", payload)
+
+    def test_a_dry_run_never_asks_the_gate_to_send(self):
+        self.live(self.RID)
+        gate = FakeGate()
+        na.send_elsewhere(list_path=self.listed((self.RID, 7, self.stamp())), query=lambda _s: [], runner=gate,
+                          ledger_path=self.ledger())
+        argv = gate.calls[0][0]
+        self.assertTrue({"--validate", "--dry-run"} & set(argv))
+
+    def test_one_note_per_user_and_only_the_requests_still_pending(self):
+        self.live(self.RID, self.RID3)            # RID2 was decided in core since the build
+        gate = FakeGate()
+        na.send_elsewhere(list_path=self.listed(*((r, 7, self.stamp()) for r in (self.RID, self.RID2, self.RID3))),
+                          query=lambda _s: [], runner=gate, ledger_path=self.ledger())
+        self.assertEqual(len(gate.calls), 1)
+        self.assertEqual([c["request_id"] for c in gate.calls[0][1]["credits"]], [self.RID, self.RID3])
+
+    def test_a_backlog_row_never_reaches_the_gate(self):
+        self.live(self.RID)
+        gate = FakeGate()
+        rep = na.send_elsewhere(list_path=self.listed((self.RID, 7, self.stamp(roles=None))), query=lambda _s: [],
+                                runner=gate, ledger_path=self.ledger())
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.candidates, 0)
+
+    def test_a_user_with_nothing_left_or_no_account_is_named_not_dropped(self):
+        gate = FakeGate()
+        self.live()                               # nothing pending any more
+        rep = na.send_elsewhere(list_path=self.listed((self.RID, 7, self.stamp())), query=lambda _s: [], runner=gate,
+                                ledger_path=self.ledger())
+        self.assertEqual(gate.calls, [])
+        self.assertEqual([f["user"] for f in rep.filtered], ["7"])
+        self.live(self.RID, email="")
+        rep = na.send_elsewhere(list_path=self.listed((self.RID, 7, self.stamp())), query=lambda _s: [], runner=gate,
+                                ledger_path=self.ledger())
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.filtered[0]["reason"], "no_deliverable_account")
+
+    def test_a_real_run_halts_on_the_committed_gate_before_any_read(self):
+        def no_read(*_a, **_k):
+            raise AssertionError("a real run reads nothing")
+        gate = FakeGate()
+        committed = str(ROOT / "scripts" / "intercom-verify-request.sh")
+        self.assertFalse(na.uvn_status.campaign_lock_open(committed, na.ELSEWHERE_LOCK))
+        with unittest.mock.patch.object(na.uvn_status, "accounts_of", no_read):
+            rep = na.send_elsewhere(list_path=str(self.d / "absent.json"), mode="apply", query=no_read, runner=gate,
+                                    wrapper=committed, ledger_path=self.ledger())
+        self.assertIn("send-locked in the gate (APPROVED_ELSEWHERE_COPY_APPROVED=0)", rep.halted)
+        self.assertEqual(gate.calls, [])
+        self.assertFalse(Path(self.ledger()).exists())
+
+    def test_opening_the_lock_alone_sends_nothing_because_the_campaign_has_no_daily_cap(self):
+        def no_read(*_a, **_k):
+            raise AssertionError("a real run reads nothing")
+        unlocked = self.d / "gate-open.sh"
+        unlocked.write_text("readonly APPROVED_ELSEWHERE_COPY_APPROVED=1\n")
+        gate = FakeGate()
+        with unittest.mock.patch.object(na.uvn_status, "accounts_of", no_read):
+            rep = na.send_elsewhere(list_path=str(self.d / "absent.json"), mode="apply", query=no_read, runner=gate,
+                                    wrapper=str(unlocked), ledger_path=self.ledger())
+        self.assertIn("no daily cap", rep.halted)
+        self.assertEqual(gate.calls, [])
+        self.assertFalse(Path(self.ledger()).exists())
+        self.assertNotIn("credit-approved-elsewhere", na.uvn_status.CREDIT_GROUP)
+
+    def test_the_cli_real_run_exits_1_and_sends_nothing(self):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = na._main(["send-elsewhere", "--list", str(self.d / "absent.json"), "--mode", "apply"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(out.getvalue())["sent"], 0)
+
+    def test_a_list_built_without_the_stamp_read_is_refused_not_read_as_nobody(self):
+        path = self.d / "old.json"
+        path.write_text(json.dumps({"users": [], "backlog": []}))
+        with self.assertRaises(na.NeedError):
+            na.send_elsewhere(list_path=str(path), query=lambda _s: [], runner=FakeGate(), ledger_path=self.ledger())
 
 
 if __name__ == "__main__":

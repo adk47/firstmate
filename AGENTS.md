@@ -1355,7 +1355,8 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   ask path, emitted together by `scale_drain.py asks --plan PLAN --out FILE`;
   `need_asks.py build --from-drain AUDIENCE` takes that
   audience and still decides WHICH document and owns the send through
-  `intercom-verify-request.sh --campaign proof-need-ask`. This is the reconciliation with
+  `intercom-verify-request.sh --campaign proof-need-ask`, and `credit-approved-elsewhere` (the conflict rule's
+  stamped rows, send-locked). This is the reconciliation with
   verify-ask-wiring-h2 (PR #1845). A drain ask with no sendable document is listed as
   `wait:no_sendable_document` with a `due_at`, never dropped. Do not grow a second sender.
 - `expires_at` does not exist in core; the snapshot derives it from **`asked_at`** +

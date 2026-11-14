@@ -119,6 +119,7 @@ CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "
              "status-doc-received", "status-team-review", "email-changed", "email-changed-dup",
              "claim-proof-ask", "claim-status", "gap-ask", "merge-pending", "credit-hold-status", "claim-proof-pending", "proof-need-ask",
              "merge-claim-first",
+             "credit-approved-elsewhere",   # send-locked; see APPROVED_ELSEWHERE below
              "reply-ref",   # [key=product-dispute-refs]: r5's approved reply set, reply_due answers only
              "refund-confirm",   # fable-copy-1103-d2/refund-confirm: a refund that ALREADY happened, told once per refund id
              "uvn-new-rows",   # fable-copy-1101-r5/n1: a told user's owed rows no ask named (one message per row ever)
@@ -185,6 +186,10 @@ MERGE_CLAIM_FIRST = "merge-claim-first"
 # it (once per request, ever), and it may follow a status-doc-received note inside 7 days.
 PROOF_NEED_ASK = "proof-need-ask"
 GAP_LIKE = (GAP_ASK, PROOF_NEED_ASK)
+# credit-approved-elsewhere (send-locked, the line is not approved): the line to a requester whose credit the
+# conflict rule decided `credit_approved_for_another_user`. A notice: only its own rows block it (one message per
+# request, ever), it is not an ask for the one-ask locks, and it closes no ask.
+APPROVED_ELSEWHERE = "credit-approved-elsewhere"
 # The notes the gap ask may follow inside 7 days (one per day still holds): the doc-received
 # status note says "we have the document you sent ... we'll message you here as soon as it's
 # checked", and the gap ask is that message (firstmate, verify-ask-wiring-h2 inbox 003).
@@ -195,7 +200,8 @@ STATUS_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", C
 # Notices: only their own rows block them (they are not asks and never close one).
 NOTICE_CAMPAIGNS = ("takeback-notice", "withdrawal-confirm", "status-doc-received", "status-team-review",
                     "email-changed", "email-changed-dup", CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN, MERGE_PENDING, MERGE_CLAIM_FIRST,
-                    CLAIM_PENDING_CAMPAIGN, CREDIT_HOLD_CAMPAIGN, "reply-ref", BACKLOG_REPLY, DECLINE_CAMPAIGN)
+                    CLAIM_PENDING_CAMPAIGN, CREDIT_HOLD_CAMPAIGN, "reply-ref", BACKLOG_REPLY, DECLINE_CAMPAIGN,
+                    APPROVED_ELSEWHERE)
 # Campaigns whose gate refusals are re-checkable (firstmate 076, 082, 083): a refusal holds the
 # USER (campaign, user_key or user_id) in verify_refusal_holds for RECHECK_DAYS (the runner and the gate skip
 # them until next_recheck_at, whatever requests are listed); a later send clears it; after
@@ -705,6 +711,18 @@ def blocked_ids(db: sqlite3.Connection, request_ids: list[str], campaign: str = 
         if r["status"] in BLOCKING or (r["status"] == "rejected" and int(r["attempts"]) >= MAX_ATTEMPTS):
             out.add(rid)
     return out
+
+
+def sent_request_ids(db: sqlite3.Connection, campaign: str) -> set[str]:
+    """Every request id (lower-cased) this campaign's note has gone out for, or may have: the request's own row in
+    `attempted` (claimed before the POST, so the message may have landed) or `sent`. It is the row the gate writes
+    when it sends, read as it stands, so the answer is the same for a second run, a retry and any other entry point.
+    Narrower than blocked_ids on purpose: a refused or skipped row closes the request for the campaign and tells the
+    customer nothing, and a claim the copy gate gave back (hold_copy_review) leaves no row here at all."""
+    if campaign not in CAMPAIGNS:
+        raise ValueError(f"unknown campaign {campaign!r}")
+    return {str(r[0]).lower() for r in db.execute(
+        "SELECT request_id FROM verify_requests WHERE campaign=? AND status IN ('attempted','sent')", (campaign,))}
 
 
 def _decline_family(db: sqlite3.Connection, request_ids: list[str]) -> int | None:

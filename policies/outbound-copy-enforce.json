@@ -3,10 +3,12 @@
   "_about": "Which campaigns the outbound copy gate ENFORCES (no signed approval on the exact bytes, no send) and which it OBSERVES (reviewed and recorded, sent anyway). Read by scripts/outbound_copy/gate.py from this path only; no caller, flag or environment variable selects a mode. A campaign listed nowhere takes `default`. A campaign with its own rubric family (RUBRIC_FAMILY in gate.py) is always enforced, whatever this file says. Three outcomes hold a message in either mode: a code-lint hit, a signed `refuse` verdict, a `retired` frame. Moving a campaign to `enforce` is a one-line PR that cites `gate.py report` showing every body it sends approved; one campaign at a time. A file the gate cannot read holds everything.",
   "default": "observe",
   "enforce": [
-    "decline"
+    "decline",
+    "credit-approved-elsewhere"
   ],
   "observe": [],
   "_enforce_why": {
+    "credit-approved-elsewhere": "A new line (a credit already verified for another person, and what to send if the requester shares it) that no reviewer has read. It is enforced from its first byte so it can never go out in observe mode on a review nobody approved. The campaign is send-locked in the sender (APPROVED_ELSEWHERE_COPY_APPROVED=0), so enforcing it stops no message that is sent today.",
     "decline": "captain 2026-11-12: the denial says the credit is denied for now, no reason, never fraud, and that the person can resubmit. The reviewer approved 4 of 4 rendered denial bodies (first measurement, 2026-11-12). The campaign is also locked off in production (DECLINE_CORE_ROUTE_OFF=0), so enforcing it stops no message that is sent today."
   },
   "retired": [

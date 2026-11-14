@@ -106,6 +106,7 @@ CAMPAIGN_STAGE = {
     "retro-past": "ask",
     "gap-ask": "ask",
     "proof-need-ask": "ask",
+    "credit-approved-elsewhere": "ask",
     "claim-proof-ask": "ask",
     "merge-claim-first": "ask",
     # the in-thread support notes (scripts/*-notify*.py, resolution-matcher, the duplicate pointer)

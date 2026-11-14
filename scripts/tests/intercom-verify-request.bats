@@ -999,6 +999,7 @@ unlocked_gate() { # derived copy with the send locks flipped: $1 = retro | windo
                  -e 's/^readonly CLAIM_PROOF_PENDING_COPY_APPROVED=0$/readonly CLAIM_PROOF_PENDING_COPY_APPROVED=1/'
                  -e 's/^readonly CLAIM_PROOF_ASK_COPY_APPROVED=0$/readonly CLAIM_PROOF_ASK_COPY_APPROVED=1/') ;;
     need)     e=(-e 's/^readonly PROOF_NEED_ASK_COPY_APPROVED=0$/readonly PROOF_NEED_ASK_COPY_APPROVED=1/') ;;
+    elsewhere) e=(-e 's/^readonly APPROVED_ELSEWHERE_COPY_APPROVED=0$/readonly APPROVED_ELSEWHERE_COPY_APPROVED=1/') ;;
     replyref) e=(-e 's/^readonly REPLY_REF_APPROVED=0$/readonly REPLY_REF_APPROVED=1/') ;;
     claims)   e=(-e 's/^readonly CLAIM_PROOF_ASK_COPY_APPROVED=0$/readonly CLAIM_PROOF_ASK_COPY_APPROVED=1/'
                  -e 's/^readonly CLAIM_STATUS_COPY_APPROVED=0$/readonly CLAIM_STATUS_COPY_APPROVED=1/') ;;
@@ -6315,4 +6316,155 @@ gf_reset() { rm -f "$TEST_TMPDIR"/*-argv "$TEST_TMPDIR"/*-env "$TEST_TMPDIR"/*-f
   # the real server takes the wrapper and the logic from its own location, and only the read's path from its caller
   grep -q 'serve --live "\$here/trino-query.sh"$' "$BATS_TEST_DIRNAME/../replica-serve.sh"
   [ -x "$BATS_TEST_DIRNAME/../replica-serve.sh" ]
+}
+
+# --- credit-approved-elsewhere: the line for a request the conflict rule decided credit_approved_for_another_user ---
+# It ships SEND-LOCKED and unapproved. What these pin: the decided request reaches a rendered line (never silence),
+# an unread role refuses the note (never a guess), the committed script sends nothing, the kill file stops it, and
+# under the SHIPPED mode table its bytes need the reviewer's signed approval of exactly those bytes.
+ELSE_R1="11111111-1111-4111-8111-111111111111"
+ELSE_R2="22222222-2222-4222-8222-222222222222"
+ELSE_R3="33333333-3333-4333-8333-333333333333"
+elsewhere_live() { # the go-live recipient guards apply: an aged Intercom USER contact, a pinned clock
+  unlocked_gate elsewhere
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+}
+else_dry() { # the dry run's rendered body, as the customer reads it
+  run -0 "$LOCKED" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  body="$(printf '%s\n' "$output" | sed 1d | jq -r .body | plain)"
+}
+
+@test "credit-approved-elsewhere: the decided request renders the line, for one role, several roles and several tracks" {
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "$ELSE_R1:Mixing:Song A:Big Star"
+  else_dry
+  [[ "$body" == *'a quick update on your request for the Mixing credit on "Song A" by Big Star: that credit is already verified for another person'* ]]
+  [[ "$body" == *"If you share that credit, reply to this message with a document that names you for the role: a split sheet"* ]]
+  [[ "$body" == *"Caroline, Muso Support"* ]]
+  # two requests on one track: the roles the two requests share, each once
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "$ELSE_R1:Mixing:Song A:Big Star" "$ELSE_R2:Engineer, Mixing:Song A:Big Star"
+  else_dry
+  [[ "$body" == *'your request for the Mixing and Engineer credits on "Song A" by Big Star: those credits are already verified for another person'* ]]
+  [[ "$body" == *"a document that names you for each role:"* ]]
+  # several tracks: each named title carries ONLY the roles the two requests share, and the sentence appears ONCE
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "$ELSE_R1:Producer, Mixing:Song A:Big Star" "$ELSE_R3:Engineer:Song B:Big Star"
+  else_dry
+  [[ "$body" == *'your credit requests: the Producer and Mixing credits on "Song A" and the Engineer credit on "Song B" are already verified for another person, so we can'* ]]
+  [ "$(printf '%s' "$body" | grep -o 'already verified for another person' | wc -l)" -eq 1 ]
+  # the mixed case: a request that asked Producer, Engineer and Mixing where only Producer and Mixing are shared
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "$ELSE_R1:Producer, Mixing:Song A:Big Star" "$ELSE_R3:Producer:Song B:Big Star"
+  else_dry
+  [[ "$body" == *'the Producer and Mixing credits on "Song A" and the Producer credit on "Song B" are already verified for another person'* ]]
+  [[ "$body" != *Engineer* ]]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "credit-approved-elsewhere: at most 3 tracks are named, then 'and N more'" {
+  # five distinct tracks, each with its own shared role: a swapped role would fail the assertion below
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" \
+    "$ELSE_R1:Producer:Song A:Big Star" "$ELSE_R2:Engineer:Song B:Big Star" "$ELSE_R3:Mixing:Song C:Big Star" \
+    "44444444-4444-4444-8444-444444444444:Mastering:Song D:Big Star" \
+    "55555555-5555-4555-8555-555555555555:Composer:Song E:Big Star"
+  else_dry
+  [[ "$body" == *'the Producer credit on "Song A", the Engineer credit on "Song B" and the Mixing credit on "Song C" and 2 more are already verified for another person'* ]]
+  [[ "$body" != *'Song D'* ]]
+  [[ "$body" != *'Song E'* ]]
+  [ "$(printf '%s' "$body" | grep -o 'already verified for another person' | wc -l)" -eq 1 ]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "credit-approved-elsewhere: exactly 3 tracks are all named, with no 'more' clause" {
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" \
+    "$ELSE_R1:Producer:Song A:Big Star" "$ELSE_R2:Engineer:Song B:Big Star" "$ELSE_R3:Mixing:Song C:Big Star"
+  else_dry
+  [[ "$body" == *'the Producer credit on "Song A", the Engineer credit on "Song B" and the Mixing credit on "Song C" are already verified for another person'* ]]
+  [[ "$body" != *' more'* ]]
+  [ "$(printf '%s' "$body" | grep -o 'already verified for another person' | wc -l)" -eq 1 ]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "credit-approved-elsewhere: an unread role refuses the note, and so does an entry that is not a credit request" {
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "$ELSE_R1::Song A:Big Star"
+  run -1 "$LOCKED" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" != *"already verified for another person"* ]]
+  [[ "$output" == "REFUSED:"* ]]
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "$ELSE_R1: , :Song A:Big Star"
+  run -1 "$LOCKED" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" != *"already verified for another person"* ]]
+  [[ "$output" == *"name no role"* ]]
+  # one unread role among several refuses the whole note: the readable ones are not sent with the other left out
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "$ELSE_R1:Mixing:Song A:Big Star" "$ELSE_R3::Song B:Big Star"
+  run -1 "$LOCKED" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" != *"already verified for another person"* ]]
+  [[ "$output" == "REFUSED:"* ]]
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "claim-12:Mixing:Song A:Big Star"
+  run -1 "$LOCKED" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" != *"already verified for another person"* ]]
+  [[ "$output" == *"not a credit request id"* ]]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "credit-approved-elsewhere: the committed script sends nothing and claims nothing; it has one copy and no follow-ups" {
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "$ELSE_R1:Mixing:Song A:Big Star"
+  run -1 "$LOCKED" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"APPROVED_ELSEWHERE_COPY_APPROVED=0"* ]]
+  [ "$(calls)" -eq 0 ]
+  [ "$(posts)" -eq 0 ]
+  [ ! -e "$INTERCOM_VERIFY_TEST_LEDGER" ]
+  run -1 "$LOCKED" send --campaign credit-approved-elsewhere --copy windowed --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  run -1 "$LOCKED" send --campaign credit-approved-elsewhere --kind reminder-14 --parent-message-id 1 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+}
+
+@test "credit-approved-elsewhere: the kill file stops an unlocked copy before anything is read or claimed" {
+  elsewhere_live
+  export INTERCOM_VERIFY_TEST_DISABLED_DIR="$TEST_TMPDIR/etc-hydra"; mkdir -p "$INTERCOM_VERIFY_TEST_DISABLED_DIR"
+  touch "$INTERCOM_VERIFY_TEST_DISABLED_DIR/credit-approved-elsewhere.disabled"
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "$ELSE_R1:Mixing:Song A:Big Star"
+  run -3 "$GATE" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "STOPPED credit-approved-elsewhere is disabled"* ]]
+  [ "$(calls)" -eq 0 ]
+  run -0 "$GATE" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "credit-approved-elsewhere (REAL gate.py, the SHIPPED mode table): no signed approval of these exact bytes, no send" {
+  elsewhere_live
+  real_copy_gate
+  # the table that ships: its default is observe, and this campaign is one of the rows it enforces
+  cp "$HYDRA_REPO/policies/outbound-copy-enforce.json" "$TEST_TMPDIR/gate-tree/policies/outbound-copy-enforce.json"
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "$ELSE_R1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 "$GATE" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"DEFERRED copy_review_pending credits=1"* ]]
+  [ "$(posts)" -eq 0 ]
+  [ "$(replies)" -eq 0 ]
+  [ "$(sql "SELECT status FROM verify_messages")" = "deferred" ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_requests")" = "0" ]
+  pending="$(ls "$INTERCOM_VERIFY_TEST_COPY_STORE/pending"/*.json)"
+  [ "$(jq -r .stage "$pending")" = "ask" ]
+  # a verdict signed by a key the tree does not pin is not a verdict
+  real_copy_gate stranger
+  run copy_verdicts approve stranger
+  [[ "$output" == *'"stored": 0'* ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 "$GATE" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$(posts)" -eq 0 ]
+  # the reviewer's signed approval: the same run sends, and the bytes that left are the bytes the verdict names
+  run copy_verdicts approve
+  [[ "$output" == *'"stored": 1'* ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 "$GATE" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message=1001 credits=1"* ]]
+  [ "$(posts)" -eq 1 ]
+  st="$(ls "$INTERCOM_VERIFY_TEST_COPY_STORE/verdicts"/*.json)"
+  [ "$(printf '%s' "$(msg .body)" | sha256sum | cut -d' ' -f1)" = "$(jq -r .body_sha256 "$st")" ]
+  [ "$(sql "SELECT copy_review FROM verify_messages WHERE status='sent'")" = "approved" ]
+  [ "$(sql "SELECT copy_verdict_id FROM verify_messages WHERE status='sent'")" = "$(jq -r .verdict_id "$st")" ]
+  [[ "$(msg .body | plain)" == *"that credit is already verified for another person"* ]]
+  # one message per request, ever
+  INTERCOM_VERIFY_TEST_DAY=2026-12-20 run -0 "$GATE" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"SKIPPED"* ]]
+  [ "$(posts)" -eq 1 ]
+  # the approval is of those bytes only: another role is another body, and it waits for its own verdict
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "$ELSE_R2:Producer:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-12-20 run -3 "$GATE" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"DEFERRED copy_review_pending"* ]]
+  [ "$(posts)" -eq 1 ]
 }

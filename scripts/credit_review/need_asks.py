@@ -9,7 +9,8 @@ captain-1028-213x (c)). Every send goes through intercom-verify-request.sh --cam
 copy, the lock (PROOF_NEED_ASK_COPY_APPROVED), the go-live guards and the send-time comm_state read; this module
 only decides WHO is listed and WHICH document each ask names.
 
-  build: one row per (user, request) whose LATEST doc-verify outcome is `unverifiable` with a sendable need code,
+  build: one row per (user, request) whose LATEST doc-verify outcome is `unverifiable` with a sendable need code -
+         an `unknown` read (our reader could not answer) is never asked: that is our defect, not the user's,
          for a request still pending on the replica, joined to the proof_intake row of that document (its arrival
          time, kind and filing conversation). Sendable codes (p1 ruling 098):
            readable_document, counterparty_signed_or_registered.
@@ -25,7 +26,28 @@ only decides WHO is listed and WHICH document each ask names.
          ask/notify path, and it is this one. A drain ask with no sendable document is listed as
          `wait:no_sendable_document`, never dropped.
 
-CLI:  need_asks.py build --out FILE [--from-drain AUDIENCE]
+  --blocked-stamps (the conflict rule's decision, read from core): a request the rule decided
+         `credit_approved_for_another_user` carries `metadata.precedent_blocked` on its core row. The writer is not
+         in this tree: it is the conflict rule on branch fm/verif-b3-conflict-rule-2
+         (https://github.com/Muso-AI/hydra/pull/1971), and until that lands every read of the stamp measures zero.
+         The shape read here (reason, roles, approved_request_ids, line_sent) is what this reader ACCEPTS, not
+         something verified against a writer. This module only reads it, and reads nothing else for that fact. A
+         stamped request whose shared roles are readable is listed under `elsewhere`: its line is the gate's
+         `credit-approved-elsewhere` campaign (send-locked, copy gate enforced). One that the gate would refuse
+         (roles unread, a stamp that is not an object, no account, a stamp naming another reason) is `backlog`
+         (reason backlog:no_send_route) with its `why`. Never under `users` and never a `wait:` row. No stamp =
+         not eligible and no row: the count on stderr is 0.
+         WHO HAS ALREADY BEEN TOLD is the verify ledger's answer, never the stamp's: a request with an `attempted`
+         or `sent` row for `credit-approved-elsewhere` (the row the gate writes when it sends) is listed nowhere
+         and is never the document ask, here and in `send` (which reads the same rows at send time, so a list
+         built without this flag cannot ask it either). The stamp's `line_sent` is not that record: true with no
+         ledger row is `backlog` (`told_flag_no_ledger_row`) and gets neither message.
+  send-elsewhere: one `credit-approved-elsewhere` note per user for the `elsewhere` rows still pending in core.
+         It renders and validates only: a real run halts before any read (the gate's lock is 0, and the campaign
+         has no daily cap yet).
+
+CLI:  need_asks.py build --out FILE [--from-drain AUDIENCE] [--blocked-stamps]
+      need_asks.py send-elsewhere --list FILE [--mode dry-run|apply] [--max-users N] [--preview DIR]
       need_asks.py send --list FILE --segment paid|free [--mode dry-run|apply] [--max-users N] [--preview DIR]
 """
 from __future__ import annotations
@@ -60,11 +82,144 @@ DV_STORE = "/var/lib/hydra-credit-verify/doc-verify.sqlite"
 PROOF_STORE = "/var/lib/hydra-credit-verify/proof.sqlite"
 PAYING = "/var/lib/credit-trust/paying-users.json"
 PENDING = ("user_verification_needed", "unverified")
+# The ONE status set for the stamp read AND for the send-time re-read of the rows it listed: a request listed at build
+# must still be open at send, or the user is dropped as "no pending request left" while their request is open.
+STAMP_STATUSES = owing_proof.OPEN_STATUSES
 
 
 class NeedError(RuntimeError):
     pass
 
+
+# ---- decided, and owed a line: the conflict rule's stamp -------------------------------------------------------------
+APPROVED_ELSEWHERE = "credit_approved_for_another_user"
+NO_ROUTE = "backlog:no_send_route"
+ELSEWHERE_CAMPAIGN = "credit-approved-elsewhere"       # the gate's campaign for that line
+ELSEWHERE_LOCK = "APPROVED_ELSEWHERE_COPY_APPROVED"     # 0 in the gate: the line is not approved, nothing is sent
+# The ONE source of "the conflict rule blocked this request": the stamp the rule writes on the core row. This module
+# never re-derives the conflict and reads no file for it (a second source of one fact is two answers).
+STAMP_KEY = "precedent_blocked"
+STAMPS_SQL = ("SELECT lower(CAST(cr.id AS varchar)), coalesce(CAST(cr.userid AS varchar), ''), "
+              f"json_format(json_extract(cr.metadata, '$.{STAMP_KEY}')) "
+              "FROM postgresql_core.public.credit_requests cr WHERE cr.deletedat IS NULL "
+              "AND cr.status IN (" + ", ".join(f"'{s}'" for s in STAMP_STATUSES) + ") "
+              f"AND json_extract(cr.metadata, '$.{STAMP_KEY}') IS NOT NULL")
+# A need is an ASK only when a send path consumes it. The proof-need-ask campaign accepts the SENDABLE codes, about a
+# document the customer filed; the approved-for-another-user line has its own campaign. A row its campaign would
+# refuse is our backlog, never the customer's ask: listing it under `users` or as a `wait:` row is the defect (a
+# recorded ask nothing delivers).
+ROUTES: dict[str, str] = {**{code: CAMPAIGN for code in SENDABLE}, APPROVED_ELSEWHERE: ELSEWHERE_CAMPAIGN}
+
+
+def route_of(need: str) -> str | None:
+    """The campaign whose send path delivers this need, or None when no send path carries it."""
+    return ROUTES.get(need)
+
+
+def read_roles(value: Any) -> list[str] | None:
+    """The roles the two requests share, as the conflict rule read them from the overlap - or None. Anything that is not
+    a non-empty list of non-empty strings is unread: the answer is null, never the claimant's own role list and never the
+    readable part of a damaged list (either would be a guess at what the other person's approved credit covers)."""
+    if not isinstance(value, list) or not value:
+        return None
+    if any(not isinstance(v, str) or not v.strip() for v in value):
+        return None
+    return [v.strip() for v in value]
+
+
+def blocked_stamps(query: uvn_status.Query) -> list[dict[str, Any]]:
+    """Every open request that carries the stamp: {id, uid, stamp}. `stamp` is the stamp when it is a JSON object and
+    None when it is anything else. A read that fails raises, and so does a row of another shape: "could not read the
+    decisions" must never render as "nobody is owed a line". No rows is a measured zero, and it is what the replica
+    answers until the conflict rule writes the stamp."""
+    out: list[dict[str, Any]] = []
+    try:
+        rows = query(STAMPS_SQL)
+    except Exception as exc:  # noqa: BLE001 - whatever the replica read raised, the build stops and says why
+        raise NeedError(f"blocked stamps unreadable: {exc}"[:300]) from exc
+    for row in rows:
+        if len(row) != 3 or not UUID_RE.fullmatch(str(row[0] or "")):
+            raise NeedError("unexpected blocked-stamp row shape")
+        try:
+            stamp = json.loads(row[2])
+        except (TypeError, ValueError):
+            stamp = None
+        out.append({"id": str(row[0]).lower(), "uid": str(row[1] or "").strip(),
+                    "stamp": stamp if isinstance(stamp, dict) else None})
+    return out
+
+
+def told_elsewhere(ledger_path: str | None = None) -> set[str]:
+    """The request ids (lower-cased) the approved-elsewhere line has gone out for, or may have: read from the verify
+    ledger, from the request's own row, which is the row the gate writes when it sends. This is the ONE answer to
+    "has this request been told": not a field of the stamp, not a count, nothing a build remembers. The ledger is
+    opened read-only and never created (a ledger that does not exist yet is an empty one: nothing was ever sent). A
+    ledger that cannot be read raises: "could not read who was told" must never render as "nobody was told"."""
+    from credit_review import verify_ledger  # noqa: PLC0415
+    try:
+        db = verify_ledger.connect_ro(ledger_path or verify_ledger.DEFAULT_PATH)
+        try:
+            return verify_ledger.sent_request_ids(db, ELSEWHERE_CAMPAIGN)
+        finally:
+            db.close()
+    except Exception as exc:  # noqa: BLE001 - whatever the ledger read raised, the build stops and says why
+        raise NeedError(f"verify ledger unreadable: {exc}"[:300]) from exc
+
+
+def stamped(rows: list[dict[str, Any]],
+            told: set[str] | frozenset[str] = frozenset()) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Counter[str]]:
+    """(elsewhere, backlog, counts) for the stamped requests, one row per request. Three cases, and only three:
+
+    no stamp          -> not here at all (blocked_stamps reads only stamped rows): not eligible, nothing recorded.
+    stamp, roles read -> `elsewhere`: eligible for the gate's campaign. The roles and the approved request ids are what
+                         the line needs; a stamp that names no reason is still this case, because the key itself is
+                         the rule's decision and the rule has one reason to block.
+    stamp, not usable -> `backlog` (backlog:no_send_route) with `why`: `roles_unread` (the role is null, never a
+                         guess), `stamp_unread` (the stamp is not an object, so it has no roles to read), `no_user`,
+                         `other_reason` (the stamp NAMES a different reason, so this line would be untrue), or
+                         `told_flag_no_ledger_row` (below).
+    A request in `told` (the ledger's sent rows, see told_elsewhere) has had the line: it is counted
+    (`stamp_line_already_sent`) and listed nowhere, because it is owed no second one. The stamp's own `line_sent`
+    is NOT that answer. A stamp that says true while the ledger holds no sent row is a disagreement between two
+    records: the request is kept off the line (never a second message on a guess) and is a backlog row that says
+    so, never silence. `build` keeps every stamped request off the document ask, these included (`decided` there)."""
+    elsewhere: list[dict[str, Any]] = []
+    backlog: list[dict[str, Any]] = []
+    counts: Counter[str] = Counter()
+    seen: set[str] = set()
+    for r in rows:
+        rid = r["id"]
+        if rid in seen:
+            continue
+        seen.add(rid)
+        counts["stamped"] += 1
+        st = r["stamp"]
+        if rid in told:
+            counts["stamp_line_already_sent"] += 1
+            continue
+        flag_only = st is not None and st.get("line_sent") is True
+        reason = (st or {}).get("reason")
+        other = isinstance(reason, str) and bool(reason.strip()) and reason != APPROVED_ELSEWHERE
+        uid = r["uid"] if r["uid"].isdigit() else None
+        roles = read_roles(st.get("roles")) if st is not None and not other else None
+        by = (st or {}).get("approved_request_ids")
+        row = {"user_id": uid, "request_id": rid,
+               "decision": None if st is None else str(reason)[:80] if other else APPROVED_ELSEWHERE,
+               "reason_in_stamp": reason == APPROVED_ELSEWHERE, "roles": roles,
+               "approved_request_ids": [str(x) for x in by] if isinstance(by, list) else None,
+               "owed": "customer_line", "line_sent": False}
+        why = ("stamp_unread" if st is None else "other_reason" if other else "told_flag_no_ledger_row" if flag_only
+               else "no_user" if not uid else "roles_unread" if roles is None else "")
+        if why:
+            backlog.append({**row, "reason": NO_ROUTE, "why": why})
+            counts["backlog_no_send_route"] += 1
+            counts[f"backlog_{why}"] += 1
+            if row["decision"] == APPROVED_ELSEWHERE:
+                counts["backlog_approved_for_another_user"] += 1
+        else:
+            elsewhere.append({**row, "need": APPROVED_ELSEWHERE, "route": ELSEWHERE_CAMPAIGN})
+            counts["elsewhere_listed"] += 1
+    return elsewhere, backlog, counts
 
 
 MAX_DOC_GROUP = 20      # QA #1418: the most documents one per-need ask may name (the gate's MAX_DOC_GROUP)
@@ -170,8 +325,20 @@ def drain_asks(plan_path: str) -> set[tuple[int, str]]:
 
 def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_path: str = PAYING,
           query: uvn_status.Query | None = None, now: datetime | None = None, tray: str | None = None,
-          from_drain: str | None = None) -> dict[str, Any]:
+          from_drain: str | None = None, stamps: bool = False, ledger_path: str | None = None) -> dict[str, Any]:
     counts: Counter[str] = Counter()
+    # read first: an unreadable stamp read, or an unreadable ledger, stops the build before anything is listed
+    stamp_rows = blocked_stamps(query or uvn_status.trino) if stamps else []
+    # who has had the line already: the ledger's own sent rows, never the stamp's flag (told_elsewhere)
+    told = told_elsewhere(ledger_path) if stamps else set()
+    elsewhere, backlog, c_counts = stamped(stamp_rows, told)
+    counts.update(c_counts)
+    # EVERY stamped request, whatever became of its stamp: listed for the line, backlog, or already told the line
+    # (which is in neither list). The rule's decision is exclusive of the document ask on the stamp itself, never on
+    # which list the row landed in: a told request left out of this set was asked for a document after it was told
+    # the credit is verified for another person (QA review of hydra#1974). A request the ledger says was told is
+    # kept off the document ask too, stamped or not (`told`, checked beside this set below).
+    decided = {r["id"] for r in stamp_rows}
     asked: set[tuple[int, str]] | None = drain_asks(from_drain) if from_drain else None
     if asked is not None:
         counts["drain_asks"] = len(asked)
@@ -201,16 +368,37 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
         raise NeedError(f"input unreadable: {exc}") from exc
     cands: dict[int, list[dict[str, Any]]] = {}
     for (uid, rid, _doc), (outcome, need, sha) in outcomes.items():
+        if str(rid).lower() in told:
+            # the ledger says the approved-elsewhere line went out for this request: it is never also asked for a
+            # document, whatever its stamp says now and whether or not it still carries one
+            counts["skip_told_approved_elsewhere"] += 1
+            continue
+        if str(rid).lower() in decided:
+            # the conflict rule already decided this request: it is ONE `elsewhere` or backlog row, or it has been
+            # told the line. Never also a document ask, which would message the customer twice about it and ask for
+            # what the rule decided
+            counts["skip_decided_by_conflict_rule"] += 1
+            continue
         if asked is not None and (int(uid), str(rid).lower()) not in asked:
             # the drain did not ask this one (it was a duplicate, a precedent, a verdict or an expiry)
             counts["skip_not_in_drain"] += 1
             continue
-        if outcome != "unverifiable" or not need:
+        if outcome == "unknown":
+            # our reader could not answer (provider down, cap, no key): our failure, retried, never the user's
+            counts["skip_reader_failed"] += 1
+            continue
+        if outcome != "unverifiable":
+            counts["skip_not_unverifiable"] += 1
+            continue
+        if not need:
+            # the reader answered `unverifiable` and recorded no need: there is nothing specific to ask for, and that
+            # is not the reader failing, so it is counted under its own name
+            counts["skip_unverifiable_no_need"] += 1
             continue
         if need in NOT_YET:
             counts[f"skip_{NOT_YET[need]}"] += 1
             continue
-        if need not in SENDABLE:
+        if route_of(need) != CAMPAIGN:      # this list is proof-need-ask's: nothing else is listed as its ask
             counts["skip_unknown_need"] += 1
             continue
         doc = intake.get((uid, sha))
@@ -263,6 +451,14 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
         # operator cannot tell which is the live one.
         already_waiting = {(int(w["user_id"]), str(w["request_id"]).lower()) for w in waits}
         for uid, rid in sorted(asked - covered - already_waiting):
+            if rid in told:
+                counts["drain_ask_told_approved_elsewhere"] += 1      # told the line: not a wait row either
+                continue
+            if rid in decided:
+                # the conflict rule decided this one: it is ONE `elsewhere` or backlog row, or it has been told the
+                # line, not also a wait row that reads as a document ask we are about to send
+                counts["drain_ask_decided_by_conflict_rule"] += 1
+                continue
             waits.append({"user_id": str(uid), "paid": uid in (tray_paid if tray_paid is not None else paying),
                           "request_id": rid, "reason": "wait:no_sendable_document",
                           "due_at": (t_now + timedelta(days=1)).isoformat(timespec="seconds")})
@@ -271,7 +467,10 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
     facts = replica_facts(query or uvn_status.trino, [u.get("user_id") for u in users]) if users else {}
     for u in users:
         u["facts"] = facts_of(u, facts)
-    return {"generated_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
+    for b in backlog + elsewhere:
+        b["paid"] = bool(b["user_id"]) and int(b["user_id"]) in (tray_paid if tray_paid is not None else paying)
+    return {"backlog": backlog, "elsewhere": elsewhere, "blocked_stamps_read": bool(stamps),
+            "generated_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
             "replica_facts": facts_header(users), "users": users, "counts": dict(counts), "waits": waits,
             "signed_on": verify_notify.deployed_head()}
 
@@ -460,6 +659,88 @@ def _filtered(sink: list[dict[str, str]] | None, uid: Any, reason: str) -> None:
         sink.append({"user": str(uid), "result": "filtered", "reason": reason[:200]})
 
 
+def elsewhere_payloads(rows: list[dict[str, Any]], query: uvn_status.Query, told: set[str] | None = None,
+                       filtered_out: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
+    """ONE `credit-approved-elsewhere` payload per user: every listed request that is still pending in core (re-read
+    now) and that this campaign has not already written about. A credit's `role` is the roles the stamp names as
+    shared - never the request's own role list, which is what the customer asked for and not what the other person's
+    approved credit covers."""
+    told = {t.lower() for t in (told or set())}
+    by_user: dict[int, dict[str, list[str]]] = {}
+    for r in rows:
+        roles = read_roles(r.get("roles"))
+        rid = str(r.get("request_id") or "").lower()
+        if roles is None or not str(r.get("user_id") or "").isdigit() or not rid or rid in told:
+            continue
+        by_user.setdefault(int(r["user_id"]), {})[rid] = roles
+    uids = sorted(by_user)
+    if not uids:
+        return []
+    accts = uvn_status.accounts_of(uids, query)
+    pend = uvn_status.uvn_requests(uids, query, STAMP_STATUSES)
+    out = []
+    for uid in uids:
+        acct = accts.get(uid)
+        if not acct or not acct.get("email"):
+            _filtered(filtered_out, uid, "no_deliverable_account")
+            continue
+        credits = [{**{k: v for k, v in row.items() if not k.startswith("_")},
+                    "role": ", ".join(by_user[uid][row["request_id"].lower()])}
+                   for row in pend.get(uid, [])
+                   if row["request_id"].lower() in by_user[uid] and not row["_incomplete"]]
+        if not credits:
+            _filtered(filtered_out, uid, "no pending request left to write about (re-read now)")
+            continue
+        out.append({"user": {"email": acct["email"], "id": str(uid), "professional_id": acct["professional_id"],
+                             "auth_id": acct["auth_id"], "first_name": acct.get("first_name", "")},
+                    "credits": credits})
+    return out
+
+
+def send_elsewhere(*, list_path: str, mode: str = "dry-run", max_users: int = 25, preview_dir: str | None = None,
+                   query: uvn_status.Query | None = None, wrapper: str = verify_notify.WRAPPER,
+                   runner: verify_notify.Runner = verify_notify._run,
+                   ledger_path: str | None = None) -> verify_notify.Report:
+    """The `elsewhere` rows of a built list through the gate's `credit-approved-elsewhere` campaign. The gate owns the
+    copy, its lock, the kill file, the once-per-request rule and the copy-gate verdict; this only hands it payloads.
+
+    A real run sends NOTHING from here, and halts before any ledger or replica read, for two separate reasons:
+    the gate's lock is 0 (the line is not approved), and this campaign has no daily cap and no place in the shared
+    credit budget (policies/credit-verify-outbound.json), which every credit sender spends under one group lock.
+    Opening the lock alone does not make this function send: the budget is a decision of its own, and its code is
+    written when that decision exists."""
+    report = verify_notify.Report()
+    if mode == "apply":
+        if not uvn_status.campaign_lock_open(wrapper, ELSEWHERE_LOCK):
+            report.halted = (f"{ELSEWHERE_CAMPAIGN} is send-locked in the gate ({ELSEWHERE_LOCK}=0); nothing sent "
+                             "(dry-run renders it)")
+        else:
+            report.halted = (f"{ELSEWHERE_CAMPAIGN} has no daily cap and no place in the shared credit budget "
+                             "(policies/credit-verify-outbound.json); a real run is not built until it has one; "
+                             "nothing sent")
+        return report
+    with open(list_path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    verify_notify.bind_list(doc)
+    rows = doc.get("elsewhere")
+    if not isinstance(rows, list):
+        raise NeedError("the list has no `elsewhere` rows: it was built without --blocked-stamps")
+    report.listed_users = sorted({str(r.get("user_id")) for r in rows})
+    try:
+        from credit_review import verify_ledger  # noqa: PLC0415
+        db = verify_ledger.connect(ledger_path or verify_ledger.DEFAULT_PATH)
+        keys = sorted({str(r.get("request_id")) for r in rows})
+        told = set(verify_ledger.blocked_ids(db, keys, ELSEWHERE_CAMPAIGN)) if keys else set()
+    except Exception as exc:  # noqa: BLE001 - an unreadable ledger sends nothing
+        report.halted = f"the verify ledger is unreadable ({exc}); nothing sent"[:300]
+        return report
+    ps = elsewhere_payloads(rows, query or uvn_status.trino, told, report.filtered)[:max(0, int(max_users))]
+    report.candidates = len(ps)
+    verify_notify.send_all(ps, report, mode=mode, wrapper=wrapper, runner=runner,
+                           extra=["--campaign", ELSEWHERE_CAMPAIGN], pace_seconds=1.0, preview_dir=preview_dir)
+    return report
+
+
 def issue_code(request_id: str, user_id: str) -> dict[str, str]:
     """F9 (#1476): the request's 7-day challenge code (an active one is returned again) as {code, expires_at}; {} when
     it cannot be issued."""
@@ -599,6 +880,12 @@ def _send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int
         db = verify_ledger.connect(ledger_path or verify_ledger.DEFAULT_PATH)
         keys = sorted({a["request_id"] for u in users for a in u["asks"]})
         asked = set(verify_ledger.blocked_ids(db, keys, CAMPAIGN)) if keys else set()
+        if keys:
+            # a request the approved-elsewhere line went out for is never also asked for a document. Read here, at
+            # the send, from the ledger row that send wrote: a list built without --blocked-stamps, an old list and
+            # a retry all pass this line, so no entry point can ask twice (QA review of hydra#1974)
+            told = verify_ledger.sent_request_ids(db, ELSEWHERE_CAMPAIGN)
+            asked |= {k for k in keys if str(k).lower() in told}
     except Exception as exc:  # noqa: BLE001 - an unreadable ledger sends nothing
         report.halted = f"the verify ledger is unreadable ({exc}); nothing sent"[:300]
         return report
@@ -767,6 +1054,14 @@ def _main(argv: list[str] | None = None) -> int:
                    help="the ask audience `scale_drain.py asks --plan PLAN --out FILE` emits (the drain's `ask` rows "
                         "plus the rows core refused back onto the ask path): the drain decides WHO, this "
                         "module decides WHICH document and owns the send")
+    b.add_argument("--blocked-stamps", action="store_true",
+                   help="also read the conflict rule's stamp (metadata.precedent_blocked) from core: stamped requests "
+                        "are listed under `elsewhere` (their own send-locked campaign) or `backlog`, never as asks")
+    e = sub.add_parser("send-elsewhere")
+    e.add_argument("--list", required=True)
+    e.add_argument("--mode", choices=("dry-run", "apply"), default="dry-run")
+    e.add_argument("--max-users", type=int, default=25)
+    e.add_argument("--preview", default=None, metavar="DIR")
     v = sub.add_parser("verify-facts")
     v.add_argument("--list", required=True)
     s = sub.add_parser("send")
@@ -862,14 +1157,30 @@ def _main(argv: list[str] | None = None) -> int:
             print(json.dumps({"changed": diffs}))
             return 1 if diffs else 0
         if a.op == "build":
-            res = build(tray=a.tray, from_drain=a.from_drain)
+            res = build(tray=a.tray, from_drain=a.from_drain, stamps=a.blocked_stamps)
             fd = os.open(a.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(res, fh, indent=1)
             print(json.dumps({"generated_at": res["generated_at"], "counts": res["counts"]}))
+            if a.blocked_stamps:
+                # the signal to us (stderr: stdout stays the one JSON line the tick reads). Printed on every read of
+                # the stamp, a zero included: "0 stamped" is measured, and silence would not say so.
+                c = res["counts"]
+                print(f"NEED ASKS APPROVED_ELSEWHERE: {c.get('stamped', 0)} stamped (metadata.{STAMP_KEY}), "
+                      f"{len(res['elsewhere'])} listed for {ELSEWHERE_CAMPAIGN}, {c.get('backlog_no_send_route', 0)} "
+                      f"BACKLOG_NO_SEND_ROUTE (roles unread: {c.get('backlog_roles_unread', 0)}), "
+                      f"{c.get('stamp_line_already_sent', 0)} told (a build sends nothing)", file=sys.stderr)
             return 0
         if a.preview:
             Path(a.preview).mkdir(mode=0o700, parents=True, exist_ok=True)
+        if a.op == "send-elsewhere":
+            rep = send_elsewhere(list_path=a.list, mode=a.mode, max_users=a.max_users, preview_dir=a.preview)
+            print(json.dumps({"campaign": ELSEWHERE_CAMPAIGN, "mode": a.mode, "halted": rep.halted,
+                              "candidates": rep.candidates, "validated": rep.validated, "sent": rep.sent_notes,
+                              "deferred": rep.deferred_users, "refused": rep.refused_users,
+                              "failed": rep.failed_users, "refusals": rep.refusals[:10],
+                              "filtered": list(rep.filtered)[:50], "failures": rep.failures[:10]}))
+            return 1 if rep.halted or rep.failed_users else 0
         if a.check_recipients and a.mode == "apply":
             print("NEED ASKS: --check-recipients is a dry-run check; nothing sent")
             return 2

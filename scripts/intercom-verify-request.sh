@@ -105,7 +105,7 @@ set -euo pipefail
 #
 # Usage:
 #   intercom-verify-request.sh send --credits-file FILE --approved-by <SlackUID|fable-ruling-YYYYMMDD-N> \
-#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|decline|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask] [--kind initial|reminder-14|reminder-25 \
+#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|decline|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask|credit-approved-elsewhere] [--kind initial|reminder-14|reminder-25 \
 #        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued|received (status-doc-received) | no-ask|count (status-team-review)] \
 #       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, claim-status, email-changed, gap-ask, merge-pending,
 #        credit-hold-status, claim-proof-pending, proof-need-ask)] [--inapp-fallback] [--channel inapp (uvn-status, status notes,
@@ -170,6 +170,15 @@ set -euo pipefail
 # "verify_code": the 7-day code we issued (distributor_dashboard only)} from b1's need tray. One ask per
 # request, ever; like gap-ask it may follow a status-doc-received note inside 7 days (that note promised this
 # message) and never crosses a gap ask on the same request.
+# credit-approved-elsewhere (firstmate brief humanless-need-asks-r1; SEND-LOCKED, the line is NOT approved):
+# the line for a credit request the conflict rule decided `credit_approved_for_another_user` - the same credit on the
+# same track is already verified for another person. FILE carries user.id and one credits entry per decided request
+# (request_id, role, track_title, artist_name), where role is the roles the two requests SHARE, never the whole role
+# list of the request: a credit with no role is refused, so the line never names a role nobody read. It says the
+# credit is verified for another person and what to send if they share it; it names nobody and denies nothing. One
+# message per request, ever; never within 7 days of another note from this gate. This gate does not decide who is
+# in that state and re-reads nothing about it: the caller's list is the conflict rule's decision.
+# Its bytes need the reviewer's APPROVAL in every mode (policies/outbound-copy-enforce.json lists it as enforced).
 #
 # FILE is JSON: {"user": {"email": "...", "id": "<muso user id>", "professional_id": "<users.neptuneProfessionalId>",
 #                         "auth_id": "<auth0 subject>", "first_name": "..."},
@@ -361,6 +370,10 @@ readonly MERGE_CLAIM_FIRST_PROOF_ACK="We have the documents you sent for these c
 #   CLAIM_PROOF_PENDING_COPY_APPROVED claim-proof-pending (S2, verbatim): LOCKED until the captain's yes on L14b.
 readonly CREDIT_HOLD_STATUS_COPY_APPROVED=0
 readonly CLAIM_PROOF_PENDING_COPY_APPROVED=0
+#   APPROVED_ELSEWHERE_COPY_APPROVED  credit-approved-elsewhere: LOCKED. Nobody has approved this line. It opens only
+#       in a PR that records the reviewer's signed approval of the rendered bodies and the captain's yes; until then
+#       --dry-run renders it and every real send is refused before the ledger is read.
+readonly APPROVED_ELSEWHERE_COPY_APPROVED=0
 #   PROOF_NEED_ASK_COPY_APPROVED  proof-need-ask (proof-loop captain card L11c, the four per-need lines + common
 #       opening + closing, verbatim): LOCKED until the captain's yes lands in a PR that flips it.
 #       UNLOCKED 2026-10-29 by Fable ruling [key=l11c-asks] (captain 14:3xZ status-wording delegation + 03:2xZ "use fable
@@ -486,6 +499,7 @@ readonly APPROVAL_REF_MERGE_CLAIM_FIRST="pr-review-fable-r5 fable-copy-1030-r5/e
 readonly APPROVAL_REF_MERGE_PENDING="captain 2026-10-28 12:4xZ: \"go live today and start conversations with users who requested credits, profiles (claims) or merges ASAP\"; copy = program-lead-fable-p2 go-live-today line M1, sent only on the captain's own yes to M1"
 readonly APPROVAL_REF_OWING_PROOF="captain U7RP6HKUZ 2026-10-27 20:1xZ: \"are you sure all users that need to be communicated have been already? If not get on it - make this a durable process that does not rely on my computer; do this all on OVH.\"; copy = Fable verify-program-lead-fable-l1 copy-owing-proof-1027 (20:2xZ), sent only on the captain's yes (L14a S1 credit-hold-status / L14b S2 claim-proof-pending)"
 readonly APPROVAL_REF_PROOF_NEED_ASK="captain 2026-10-27 21:5xZ: every user who owes proof is told exactly what we need (proof-loop-lead-fable-p1 plan section 1); copy = proof-loop captain card L11c (22:5xZ), verbatim per need code; sent only on the captain's yes"
+readonly APPROVAL_REF_APPROVED_ELSEWHERE="firstmate brief humanless-need-asks-r1 2026-11-14: a request blocked by another person's approved credit gets a decision and a message; the line itself is unapproved and send-locked (APPROVED_ELSEWHERE_COPY_APPROVED)"
 readonly APPROVAL_REF_REMOVAL="firstmate 2026-10-16 15:14Z, captain-driven: owners of credits WE removed must be told which credit and role, why, and how to dispute by replying with a document (support measured 35 owners never told). Fraud removals stay silent by captain order (firstmate 2026-10-16 15:48Z)."
 # Ruling refund-confirm-1103 (Fable d2, 2026-11-03 22:0xZ, relayed to this lane as firstmate inbox 109): customers
 # whose money ALREADY moved are told so without waiting on a human Slack id. The copy is the ruling's own text; the
@@ -1218,6 +1232,12 @@ case "$CAMPAIGN" in
       refuse "e_stale_filing: the document this per-need ask is about was sent more than 180 days ago; a human picks it up (wait:stale_filing). Nothing was sent or claimed."
     fi
     ;;
+  credit-approved-elsewhere)
+    # One message per user for the requests the conflict rule decided, up to 3 titles + "and N more".
+    MAX_CREDITS=1000; MAX_LISTED=3; COPY="apprelsewhere"; APPROVAL_REF="$APPROVAL_REF_APPROVED_ELSEWHERE"
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live and the status notes; credit-approved-elsewhere has one copy."
+    [ "$KIND" = "initial" ] || refuse "credit-approved-elsewhere has no follow-ups: one message per request, ever."
+    ;;
   gap-ask)
     # Fable's gap ask for credits whose document on file does not cover them (stage-2
     # need_more). Once per credit; up to 3 track/role pairs, then "and N more".
@@ -1251,7 +1271,7 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live; wait-apology has one copy, d2's file verbatim."
     [ "$KIND" = "initial" ] || refuse "wait-apology has no follow-ups: one message per user, ever."
     ;;
-  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, decline, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask, wait-apology (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
+  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, decline, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask, wait-apology or credit-approved-elsewhere (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
 esac
 # C11 (p1 223): --check-recipient is the dry run that equals the send. It runs every send-time check a real send runs
 # up to the claim (the ledger peek, core_notice, the go-live guards, comm_state, the status-note Intercom reads, the
@@ -1819,6 +1839,15 @@ if [ "$CAMPAIGN" = "proof-need-ask" ]; then
       | $k == ($n.doc_shas | length) and $k == $n.doc_count and $k >= 1 and $k <= $max' "$CREDITS_FILE" >/dev/null \
     || refuse "need_doc_group_mismatch: need.doc_shas must be exactly need.doc_count distinct sha256s (1 to $MAX_DOC_GROUP); the ask would name documents it does not check. Nothing was sent or claimed."
 fi
+if [ "$CAMPAIGN" = "credit-approved-elsewhere" ]; then
+  printf '%s' "$USER_ID" | grep -qE '^[0-9]{1,12}$' || refuse "credit-approved-elsewhere needs user.id, the Muso account id."
+  # The role is the overlap the conflict rule read. An unread overlap is null upstream and must stay silent here:
+  # a credit that names no role is refused, never rendered with a blank or with the request's own role list.
+  norole="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select([(.role // "") | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0)] | length == 0)] | length')"
+  [ "$norole" -eq 0 ] || refuse "credit-approved-elsewhere: $norole credit(s) name no role. The line names only the roles the conflict rule read as shared; an unread role is never guessed. Nothing was sent or claimed."
+  notreq="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select(.request_id | test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") | not)] | length')"
+  [ "$notreq" -eq 0 ] || refuse "credit-approved-elsewhere: $notreq credit(s) carry an id that is not a credit request id. Nothing was sent or claimed."
+fi
 if [ "$CAMPAIGN" = "gap-ask" ]; then
   # The verdict is read HERE, from the proof store, never taken from the caller: every credit's
   # latest stage-2 verdict (every claimed role) must be need_more for THIS account, the account
@@ -1919,6 +1948,9 @@ if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "proof-need-ask" ] && [ "$PROOF_NEED_ASK
 fi
 if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "proof-need-ask" ] && [ "$NEED_CODE" = "distributor_dashboard_with_code" ] && [ -z "$DISTRIBUTOR_COPY_APPROVED" ]; then
   printf 'HELD distributor_copy_unapproved credits=%s; nothing was sent or claimed\n' "$N"; exit 3
+fi
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "credit-approved-elsewhere" ] && [ "$APPROVED_ELSEWHERE_COPY_APPROVED" != "1" ]; then
+  refuse "the credit-approved-elsewhere copy is not approved for sending (APPROVED_ELSEWHERE_COPY_APPROVED=0). Nobody has approved this line yet; --dry-run renders exactly what would be sent."
 fi
 # an F9 challenge code verifies exactly ONE request: a distributor ask names exactly one credit
 if [ "$CAMPAIGN" = "proof-need-ask" ] && [ "$NEED_CODE" = "distributor_dashboard_with_code" ] && [ "$N" -ne 1 ]; then
@@ -2564,6 +2596,31 @@ def proof_need_ask($fn; $c; $n; $maxl):
                  {p: proof_need_line_plural($n; $x)},
                  {p: "Your requests stay open while we look, and nothing is removed."} ] + sig) }
     end;
+# credit-approved-elsewhere (UNAPPROVED, send-locked): the credit is verified for another person, and what to send
+# if they share it. It names nobody, gives no date and denies nothing. The roles are the ones the two requests share.
+def approved_elsewhere($fn; $c; $maxl):
+  def shared: [ (.role // "") | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0) ];
+  def uniq: reduce .[] as $y ([]; if any(.[]; ascii_downcase == ($y | ascii_downcase)) then . else . + [$y] end);
+  def named_line: "the \(.r | andjoin) \(if (.r | length) > 1 then "credits" else "credit" end) on \(.t | qt)";
+  def per_track: reduce (.[] | select((shared | length) > 0)) as $x ([];
+                   ($x | tkey) as $k
+                   | if any(.[]; .k == $k) then map(if .k == $k then . + {r: (.r + [($x | shared[])])} else . end)
+                     else . + [{k: $k, t: $x.track_title, r: ($x | shared)}] end);
+  "a split sheet, a label or distributor statement, a PRO or MLC registration, a studio or session invoice, or liner notes or an official release page (PDF, PNG or JPG). We'll check it." as $docs
+  | if (utitles($c) | length) == 1 then
+      $c[0] as $x | (track_roles($c)) as $r | (($r | length) > 1) as $many
+      | { subject: "About your Muso credit request\(if ($c | length) > 1 then "s" else "" end)",
+          segs: ([ {p: "Hi \($fn), a quick update on your request for the \($r | join(", ") | role_credits) on \($x.track_title | qt) by \($x.artist_name): \(if $many then "those credits are" else "that credit is" end) already verified for another person, so we can't add \(if $many then "them" else "it" end) to your profile from the request alone."},
+                   {p: "If you share \(if $many then "those credits" else "that credit" end), reply to this message with a document that names you for \(if $many then "each role" else "the role" end): \($docs)"} ] + sig) }
+    else
+      ($c | per_track | map(.r |= uniq)) as $tracks
+      | if ($tracks | length) == 0 then error("approved_elsewhere_no_shared_role") else . end
+      | ($tracks[:$maxl] | map(named_line)) as $lines
+      | (($tracks | length) - ($lines | length)) as $rest
+      | { subject: "About your Muso credit requests",
+          segs: ([ {p: "Hi \($fn), a quick update on your credit requests: \($lines | andjoin)\(if $rest > 0 then " and \($rest) more" else "" end) are already verified for another person, so we can't add them to your profile from the requests alone."},
+                   {p: "If you share those credits, reply to this message with a document that names you for each role: \($docs)"} ] + sig) }
+    end;
 def gap_label: {split_sheet: "split sheet", contract: "contract", invoice: "invoice",
   letter_of_direction: "letter of direction", pro_portal: "PRO registration",
   distributor_portal: "distributor screenshot", dsp_for_artists: "streaming-dashboard screenshot",
@@ -2659,6 +2716,7 @@ def gap_ask($fn; $c; $maxl):
    elif $copy == "gap" then gap_ask($fn; .credits; $maxl)
    elif $copy == "waitapol" then wait_apology($fn; .credits; $maxl; (.apology // {}))
    elif $copy == "proofneed" then proof_need_ask($fn; .credits; .need; $maxl)
+   elif $copy == "apprelsewhere" then approved_elsewhere($fn; .credits; $maxl)
    elif $copy == "takeback" then takeback_notice($fn; .credits; $maxl)
    elif $copy == "removal" then removal_notice($fn; .credits; $maxl)
    elif $copy == "past" then
@@ -3069,7 +3127,7 @@ for_each_account_contact() { # <fn>: the first non-empty answer of <fn> over thi
 # The clock G1 reads; the test copy pins it (INTERCOM_VERIFY_TEST_NOW, epoch) so the 24h rule is testable.
 g1_now() { if [ "$TESTABLE" = "1" ] && [ -n "${INTERCOM_VERIFY_TEST_NOW:-}" ]; then printf '%s' "$INTERCOM_VERIFY_TEST_NOW"; else date -u +%s; fi; }
 GOLIVE=0
-case "$CAMPAIGN:$COPY" in merge-pending:*|merge-claim-first:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*|uvn-new-rows:*|proof-need-ask:*) GOLIVE=1 ;; esac
+case "$CAMPAIGN:$COPY" in merge-pending:*|merge-claim-first:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*|uvn-new-rows:*|proof-need-ask:*|credit-approved-elsewhere:*) GOLIVE=1 ;; esac
 # QA #1517: every reply_due answer, whatever its class, passes the go-live recipient gates (G1-G5; G2's opener rule is
 # replaced by the verified trigger for reply_due only)
 [ -z "$REPLY_DUE" ] || GOLIVE=1
@@ -3414,7 +3472,7 @@ recently_messaged() { # <contact-id> -> prints the reason when we wrote to them 
   done
   return 0
 }
-case "$CAMPAIGN" in uvn-status|uvn-new-rows|status-doc-received|status-team-review|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
+case "$CAMPAIGN" in uvn-status|uvn-new-rows|status-doc-received|status-team-review|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask|credit-approved-elsewhere) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
 # A claim ask never crosses a person: any admin or Caroline reply to this user in the last 7
 # days defers the note AND its reminder (nothing closed; the next run looks again; a reminder
 # deferred past the day before the close day is never sent).
