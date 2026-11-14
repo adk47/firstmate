@@ -52,6 +52,19 @@ Callers:
 
 - `RETRY_SAME_TIER` = `rate_limited`, `server_error`, `timeout` — the same tier
   is retried (2 attempts, 0.5 s then 1.5 s backoff) before the next tier runs.
+- `bad_answer` is in `RETRY_SAME_TIER` too since 2026-11-14 (a node-8 hand edit
+  of 2026-11-10, landed): about 10% of deepseek-v4.1-flash calls came back empty
+  on 2026-11-09, exhausted the chain and left the row with no decision. It
+  differs from the three transport classes: the retry is **billable** (a bad
+  answer was served, so each ask is charged and reserved against the cap), and an
+  answer cut at the token cap (`finish_reason: length`) is **not** re-sent, since
+  the same prompt at the same budget is cut at the same place
+  (`retry_same_tier()`).
+- `MAX_BILLABLE_ASKS_PER_TIER` = 2 — one budget for the asks a tier is paid for,
+  shared by the `bad_answer` retry and the `reasoning_exhausted` raised-budget
+  retry, at any `retries`. `bad_answer` then `reasoning_exhausted` stops there:
+  no third ask. It counts billed answers, not attempts, so the raised-budget ask
+  after a free `rate_limited` is still made.
 - `ABORT_CHAIN` = `unsafe` — a refusal or a tool violation is **never laundered
   onto another model**. The chain stops and reports. `credit_trust`'s own ladder
   applies the same rule itself: the codex helper's rc 4 (`tool_violation`) and
@@ -60,6 +73,8 @@ Callers:
   answer what the tool-less subscription refused.
 - Everything else advances immediately: a quota spend, a dead token or a
   non-JSON answer is not worth a second round trip on the same tier.
+  (Since 2026-11-14 the non-JSON answer is the exception: it is `bad_answer`,
+  which gets its one more ask first, as above.)
 
 **A tier that cannot do what the call needs is SKIPPED, not guessed.** A web
 call skips tier 1 with `reason=web_search_unavailable`; a tool-less extraction

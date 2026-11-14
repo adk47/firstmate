@@ -1522,6 +1522,193 @@ class TestLedgerFailClosed(ChainBase):
         self.assertIn("daily cap", res.attempts[-1]["reason"])
 
 
+class TestBadAnswerRetriesSameTier(ChainBase):
+    """The node-8 hand edit of 2026-11-10, landed: an empty or unparseable completion is
+    asked again ONCE on the same tier before the chain moves on. Observed 2026-11-09 on
+    deepseek-v4.1-flash: about 10% of calls came back empty and the row got no decision."""
+
+    QUOTA = [(3, "", "reason=quota")]      # the subscription declines without answering
+
+    @staticmethod
+    def empty():
+        """The provider returned nothing and reasoned nothing: BAD_ANSWER, not
+        REASONING_EXHAUSTED (no reasoning tokens, finish_reason stop)."""
+        return {"model": mc.FALLBACK_MODEL,
+                "usage": {"prompt_tokens": 700, "completion_tokens": 0, "cost": 0.0002},
+                "choices": [{"finish_reason": "stop", "message": {"content": ""}}]}
+
+    @staticmethod
+    def truncated():
+        return {"model": mc.FALLBACK_MODEL,
+                "usage": {"prompt_tokens": 900, "completion_tokens": 4000, "cost": 0.0011},
+                "choices": [{"finish_reason": "length", "message": {"content": '{"verdict": "o'}}]}
+
+    def metered_kinds(self):
+        return [(r["outcome"], r.get("kind")) for r in self.rows()
+                if r.get("tier") == mc.TIER_FALLBACK and r.get("outcome") in ("ok", "error")]
+
+    def test_an_empty_metered_answer_is_asked_again_and_served(self):
+        orouter = FakeOpenRouter([self.empty(), openrouter_ok('{"verdict": "ok"}')])
+        res = self.chain(subscription_runner=FakeCodex(self.QUOTA), opener=orouter).call(
+            "judge this", schema=SCHEMA)
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual(res.tier, mc.TIER_FALLBACK)
+        self.assertEqual(len(orouter.requests), 2)
+        self.assertEqual(orouter.requests[0]["body"], orouter.requests[1]["body"],
+                         "the same request, not a raised budget")
+        self.assertEqual(len(self.sleeps), 1, "one backoff between the two asks")
+        self.assertEqual(self.metered_kinds(), [("error", mc.BAD_ANSWER), ("ok", None)])
+        self.assertNotIn(mc.CHAIN_EXHAUSTED, [r["outcome"] for r in self.rows()])
+
+    def test_an_unparseable_metered_answer_is_asked_again_on_the_metered_only_path(self):
+        orouter = FakeOpenRouter([openrouter_ok("I cannot answer in JSON"),
+                                  openrouter_ok('{"verdict": "ok"}')])
+        res = self.chain(opener=orouter).call_fallback("judge this", schema=SCHEMA)
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual(len(orouter.requests), 2)
+        self.assertEqual(self.metered_kinds(), [("error", mc.BAD_ANSWER), ("ok", None)])
+
+    def test_the_retry_is_one_and_both_asks_are_charged(self):
+        """A model that keeps answering nothing is asked twice, never a third time, and
+        the second ask is not free: a bad answer is billable."""
+        for name in ("call", "call_fallback"):
+            with self.subTest(path=name):
+                self.ledger_path.unlink(missing_ok=True)
+                orouter = FakeOpenRouter([self.empty()])
+                chain = self.chain(subscription_runner=FakeCodex(self.QUOTA), opener=orouter)
+                res = getattr(chain, name)("judge this", schema=SCHEMA)
+                self.assertFalse(res.ok)
+                self.assertEqual(len(orouter.requests), 2)
+                self.assertEqual(self.metered_kinds(), [("error", mc.BAD_ANSWER)] * 2)
+                self.assertAlmostEqual(mc.UsageLedger(self.ledger_path).spent_today_usd(),
+                                       0.0002 * 2, places=9)
+                self.assertEqual(self.rows()[-1]["outcome"], mc.CHAIN_EXHAUSTED)
+
+    def test_an_answer_cut_at_the_token_cap_is_not_asked_again(self):
+        """The same prompt at the same budget is cut at the same place: re-sending it buys
+        a second charge for the same unusable answer (QA 2026-11-03). The hand edit did
+        re-send it; this is the one point where the landed code is narrower."""
+        for name in ("call", "call_fallback"):
+            with self.subTest(path=name):
+                self.ledger_path.unlink(missing_ok=True)
+                orouter = FakeOpenRouter([self.truncated()])
+                chain = self.chain(subscription_runner=FakeCodex(self.QUOTA), opener=orouter)
+                res = getattr(chain, name)("judge this", schema=SCHEMA)
+                self.assertFalse(res.ok)
+                self.assertEqual(len(orouter.requests), 1)
+                self.assertEqual(self.metered_kinds(), [("error", mc.BAD_ANSWER)])
+                self.assertEqual(res.finish_reason, "length")
+
+    def test_the_raised_budget_retry_and_the_bad_answer_retry_do_not_stack(self):
+        """reasoning_exhausted takes its one raised-budget ask; an empty answer to THAT is
+        attempt 2 of 2, so there is no third ask."""
+        exhausted = TestLedgerFailClosed.reasoning_exhausted()
+        orouter = FakeOpenRouter([exhausted, self.empty(), openrouter_ok('{"verdict": "never"}')])
+        res = self.chain(subscription_runner=FakeCodex(self.QUOTA), opener=orouter).call(
+            "judge this", schema=SCHEMA, max_tokens=mc.MIN_MAX_TOKENS_REASONING)
+        self.assertFalse(res.ok)
+        self.assertEqual([r["body"]["max_tokens"] for r in orouter.requests],
+                         [mc.MIN_MAX_TOKENS_REASONING, 4096])
+        self.assertEqual(self.metered_kinds(),
+                         [("error", mc.REASONING_EXHAUSTED), ("error", mc.BAD_ANSWER)])
+
+    def test_a_bad_answer_then_a_reasoning_exhausted_one_gets_no_third_paid_ask(self):
+        """QA 2026-11-14 on hydra#1981, the exact sequence: BAD_ANSWER on ask 1 is asked
+        again, REASONING_EXHAUSTED on ask 2 used to take its raised-budget ask as well,
+        three charges for one row. The two retries share one budget of billable asks."""
+        exhausted = TestLedgerFailClosed.reasoning_exhausted()
+        spent = 0.0002 + exhausted["usage"]["cost"]
+        for name in ("call", "call_fallback"):
+            with self.subTest(path=name):
+                self.ledger_path.unlink(missing_ok=True)
+                orouter = FakeOpenRouter([self.empty(), exhausted,
+                                          openrouter_ok('{"verdict": "never"}')])
+                chain = self.chain(subscription_runner=FakeCodex(self.QUOTA), opener=orouter)
+                res = getattr(chain, name)("judge this", schema=SCHEMA,
+                                           max_tokens=mc.MIN_MAX_TOKENS_REASONING)
+                self.assertFalse(res.ok)
+                self.assertEqual(len(orouter.requests), 2, "a third ask is a third charge")
+                self.assertEqual([r["body"]["max_tokens"] for r in orouter.requests],
+                                 [mc.MIN_MAX_TOKENS_REASONING] * 2, "no raised-budget ask was made")
+                self.assertEqual(self.metered_kinds(),
+                                 [("error", mc.BAD_ANSWER), ("error", mc.REASONING_EXHAUSTED)])
+                self.assertAlmostEqual(mc.UsageLedger(self.ledger_path).spent_today_usd(),
+                                       spent, places=9)
+
+    def test_the_paid_ask_budget_holds_at_a_higher_retry_count(self):
+        """`retries` bounds attempts; it must not raise what one row can be charged."""
+        self.assertEqual(mc.MAX_BILLABLE_ASKS_PER_TIER, 2)
+        exhausted = TestLedgerFailClosed.reasoning_exhausted()
+        for script in ([self.empty()],                               # bad, bad, (bad)
+                       [self.empty(), exhausted, self.empty()],      # bad, exhausted, (raised)
+                       [exhausted, self.empty(), self.empty()]):     # exhausted, raised bad, (bad)
+            for name in ("call", "call_fallback"):
+                with self.subTest(path=name, first=script[0]["choices"][0]["finish_reason"],
+                                  asks=len(script)):
+                    self.ledger_path.unlink(missing_ok=True)
+                    orouter = FakeOpenRouter(list(script))
+                    chain = self.chain(subscription_runner=FakeCodex(self.QUOTA), opener=orouter,
+                                       retries=5)
+                    res = getattr(chain, name)("judge this", schema=SCHEMA,
+                                               max_tokens=mc.MIN_MAX_TOKENS_REASONING)
+                    self.assertFalse(res.ok)
+                    self.assertEqual(len(orouter.requests), 2)
+
+    def test_an_ask_that_cost_nothing_does_not_use_the_paid_budget(self):
+        """The budget counts billed answers, not attempts. A 429 is not billed, so the
+        raised-budget ask after one is still made, as it was before this budget existed,
+        and a bad answer after a 429 keeps its one retry when `retries` leaves room."""
+        exhausted = TestLedgerFailClosed.reasoning_exhausted()
+        orouter = FakeOpenRouter([(429, "slow down"), exhausted, openrouter_ok('{"verdict": "ok"}')])
+        res = self.chain(subscription_runner=FakeCodex(self.QUOTA), opener=orouter).call(
+            "judge this", schema=SCHEMA, max_tokens=mc.MIN_MAX_TOKENS_REASONING)
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual([r["body"]["max_tokens"] for r in orouter.requests],
+                         [mc.MIN_MAX_TOKENS_REASONING, mc.MIN_MAX_TOKENS_REASONING, 4096])
+        self.assertEqual(self.metered_kinds(), [("error", mc.RATE_LIMITED),
+                                                ("error", mc.REASONING_EXHAUSTED), ("ok", None)])
+
+        self.ledger_path.unlink(missing_ok=True)
+        orouter = FakeOpenRouter([(429, "slow down"), self.empty(), openrouter_ok('{"verdict": "ok"}')])
+        res = self.chain(opener=orouter, retries=3).call_fallback("judge this", schema=SCHEMA)
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual(self.metered_kinds(), [("error", mc.RATE_LIMITED),
+                                                ("error", mc.BAD_ANSWER), ("ok", None)])
+
+    def test_an_unusable_subscription_answer_is_asked_again_before_any_spend(self):
+        codex = FakeCodex([(0, codex_events("I cannot answer in JSON"), ""),
+                           (0, codex_events('{"verdict": "ok"}'), "")])
+        orouter = FakeOpenRouter([openrouter_ok('{"verdict": "fallback"}')])
+        res = self.chain(subscription_runner=codex, opener=orouter).call("judge this", schema=SCHEMA)
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual(res.tier, mc.TIER_SUBSCRIPTION)
+        self.assertEqual(len(codex.calls), 2)
+        self.assertEqual(orouter.requests, [], "the free tier answered: nothing metered was asked")
+
+    def test_an_unsafe_answer_is_never_asked_again(self):
+        codex = FakeCodex([(4, "", "tool violation")])
+        orouter = FakeOpenRouter([openrouter_ok('{"verdict": "never"}')])
+        res = self.chain(subscription_runner=codex, opener=orouter).call("judge this", schema=SCHEMA)
+        self.assertFalse(res.ok)
+        self.assertEqual(res.error_kind, mc.UNSAFE)
+        self.assertEqual(len(codex.calls), 1)
+        self.assertEqual(orouter.requests, [])
+
+    def test_which_attempts_are_asked_again(self):
+        def att(kind, outcome="error", **meta):
+            return mc.TierAttempt(mc.TIER_FALLBACK, outcome, kind=kind, meta=meta)
+        for kind in (mc.RATE_LIMITED, mc.SERVER_ERROR, mc.TIMEOUT, mc.BAD_ANSWER):
+            self.assertTrue(mc.retry_same_tier(att(kind)), kind)
+        self.assertTrue(mc.retry_same_tier(att(mc.BAD_ANSWER, finish_reason="stop")))
+        self.assertFalse(mc.retry_same_tier(att(mc.BAD_ANSWER, finish_reason="length")))
+        # A 429 carries no finish_reason; a stray one must not stop a transport retry.
+        self.assertTrue(mc.retry_same_tier(att(mc.RATE_LIMITED, finish_reason="length")))
+        for kind in (mc.QUOTA, mc.AUTH_EXPIRED, mc.UNAVAILABLE, mc.UNSAFE, mc.REASONING_EXHAUSTED):
+            self.assertFalse(mc.retry_same_tier(att(kind)), kind)
+        self.assertFalse(mc.retry_same_tier(att(mc.BAD_ANSWER, outcome="skipped")))
+        self.assertFalse(mc.retry_same_tier(att(None, outcome="ok")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

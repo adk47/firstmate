@@ -492,6 +492,25 @@ class KnownAgentApproverTests(unittest.TestCase):
         self.assertIn("automation uvn-under30", a)
         self.assertIn("not approved:true", a)
 
+    def test_the_precedent_account_is_named_and_alerted_while_unregistered(self):
+        """The node-8 hand edit of 2026-11-10, landed: agent-precedent@muso.ai is named as
+        precedent-v1 instead of reading as an anonymous agent token. Naming is not approving:
+        with no approved:true registry row the approval is still alerted."""
+        from credit_review.policy import KNOWN_AGENT_APPROVERS
+        who = "agent-precedent@muso.ai"
+        self.assertEqual(KNOWN_AGENT_APPROVERS[who], "precedent-v1")
+        a = self.alert(account=who)
+        self.assertEqual(a, f"automation precedent-v1 ({who}) approved while it is not approved:true in "
+                            "policies/credit-approval-automation.json")
+        # The shape core records for this program (no isAgent flag) reads the same way.
+        r = request("a1", pid=PID_GOOD, track="t3", roles=("Mixing",), approved=False)
+        r["metadata"]["approval"] = {"via": "precedent_v1", "account": who, "reversible": True}
+        self.assertEqual(approver_identity_alert(r), a)
+        # Only a registry row makes it a judged automation, and then its rules are checked.
+        self.assertIsNone(self.alert(account=who, approved=("precedent-v1",)))
+        broke = self.alert(account=who, approved=("precedent-v1",), rules={"reject_role_mismatch": 100})
+        self.assertTrue(broke.startswith(f"automation precedent-v1 ({who}) approval broke:"), broke)
+
     def test_registry_reading_fails_closed(self):
         from credit_review.policy import approved_automations
         with tempfile.TemporaryDirectory() as tmp:

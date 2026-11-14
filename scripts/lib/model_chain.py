@@ -1,3 +1,11 @@
+# Reviewed baseline: deploy overwrites - 2026-11-14 (hydra-hotpatch-land-h1). node-8 held a hand-edited copy
+# (sha256 c43dcf4eb7a3, written 2026-11-10 00:08Z) with ONE hunk the repo did not have: BAD_ANSWER added to
+# RETRY_SAME_TIER. This file carries that retry merged into the newer code (see RETRY_SAME_TIER and
+# retry_same_tier), NARROWED on two points: an answer cut at the token cap (finish_reason: length) is not
+# re-sent, and a tier is paid for at most MAX_BILLABLE_ASKS_PER_TIER asks per call, so a bad answer followed
+# by a reasoning-exhausted one gets no third ask. The hand edit did both. Overwriting the hand-edited copy
+# therefore changes live behaviour on those two cases and nothing else. While this line stands, a later hand
+# edit of this file on node-8 is overwritten without a halt.
 """ONE model chain for every SCRIPTED user-request path.
 
 Captain 2026-11-03: "primary = the OpenClaw subscription token model; when it
@@ -347,13 +355,42 @@ def _billable_row(row: dict) -> bool:
     return row.get("outcome") == "ok" or row.get("kind") in BILLABLE_KINDS
 CHAIN_EXHAUSTED = "chain_exhausted"
 
-RETRY_SAME_TIER = frozenset({RATE_LIMITED, SERVER_ERROR, TIMEOUT})
+# BAD_ANSWER is here since the node-8 hand edit of 2026-11-10: an empty or unparseable
+# completion is transient (observed 2026-11-09 on deepseek-v4.1-flash: about 10% of calls
+# came back empty, exhausted the chain, and the row got NO decision). One more ask on the
+# same tier serves most of them. It is BILLABLE, unlike the three transport classes, so it
+# is bounded twice: `attempt_no < retries` (one retry at the default of 2) and the shared
+# MAX_BILLABLE_ASKS_PER_TIER below.
+RETRY_SAME_TIER = frozenset({RATE_LIMITED, SERVER_ERROR, TIMEOUT, BAD_ANSWER})
 # A reasoning-exhausted answer is retried on the SAME tier at a larger budget:
 # the model was fine, the ceiling was not.
 RETRY_WITH_MORE_TOKENS = frozenset({REASONING_EXHAUSTED})
 # Never fall back after these: the answer was refused for a safety reason, and
 # re-asking a different model the same question would launder the refusal.
 ABORT_CHAIN = frozenset({UNSAFE})
+# ONE budget for the asks a tier is paid for, whatever the reasons (QA 2026-11-14 on
+# hydra#1981). The bad-answer retry counts attempts and the raised-budget retry counts its
+# own rungs, and the two bounds did not know about each other: BAD_ANSWER, then
+# REASONING_EXHAUSTED, then the raised ask was three charges for one call. A tier that has
+# given this many billable failures is not asked again, by either retry and at any
+# `retries`. It counts what was billed, not attempts: a 429 costs nothing, so the
+# raised-budget ask that follows one is still made, as it was before.
+MAX_BILLABLE_ASKS_PER_TIER = 2
+
+
+def retry_same_tier(att: "TierAttempt") -> bool:
+    """True when re-sending the SAME request to the same tier can give a different answer.
+
+    Every RETRY_SAME_TIER class does, with one exception: an answer cut at the token cap
+    (``finish_reason: length``). The same prompt at the same budget is cut at the same
+    place, and that attempt was billed, so the retry would be a second charge for the same
+    unusable answer ("a retry must change the request", QA 2026-11-03). A caller that can
+    change the request (doc-verify: chunk, or ``frequency_penalty``) does so itself."""
+    if att.outcome != "error" or att.kind not in RETRY_SAME_TIER:
+        return False
+    if att.kind == BAD_ANSWER and (att.meta or {}).get("finish_reason") == "length":
+        return False
+    return True
 
 _QUOTA_RE = re.compile(r"quota|usage limit|usage_limit|insufficient_quota|subscription usage", re.I)
 _AUTH_RE = re.compile(r"auth|401|403|invalid_api_key|token_invalidated|could not be refreshed|session has ended|log out and sign in|token_expired", re.I)
@@ -1089,6 +1126,7 @@ class ModelChain:
             # retried on the same tier with more room (RETRY_WITH_MORE_TOKENS).
             budget = int(max_tokens)
             more_tokens_used = 0
+            billable_asks = 0
             while True:
                 attempt_no += 1
                 att = self._attempt(tier, prompt_text, msgs, schema=schema, images=images, web=web,
@@ -1116,6 +1154,10 @@ class ModelChain:
                     self._log(f"[model-chain] surface={self.surface} step={step} tier={att.tier} "
                               f"outcome=aborted kind={att.kind} reason={att.reason}")
                     return res
+                if att.outcome == "error" and att.kind in BILLABLE_KINDS:
+                    billable_asks += 1
+                    if billable_asks >= MAX_BILLABLE_ASKS_PER_TIER:
+                        break
                 if att.kind in RETRY_WITH_MORE_TOKENS and more_tokens_used < MORE_TOKENS_RETRIES:
                     raised = raised_budget(budget)
                     if raised > budget:
@@ -1124,7 +1166,7 @@ class ModelChain:
                         self._log(f"[model-chain] surface={self.surface} step={step} tier={tier} "
                                   f"kind={att.kind} retrying at max_tokens={budget}")
                         continue
-                if att.outcome == "error" and att.kind in RETRY_SAME_TIER and attempt_no < self.retries:
+                if retry_same_tier(att) and attempt_no < self.retries:
                     self._sleep(self._backoff(attempt_no))
                     continue
                 break
@@ -1164,6 +1206,7 @@ class ModelChain:
         attempt_no = 0
         budget = int(max_tokens)
         more_tokens_used = 0
+        billable_asks = 0
         while True:
             attempt_no += 1
             att = self._attempt(TIER_FALLBACK, prompt_text, msgs, schema=schema, images=images, web=web,
@@ -1185,6 +1228,10 @@ class ModelChain:
             if att.kind in ABORT_CHAIN:
                 res.error, res.error_kind = f"{att.tier}: {att.reason}", att.kind
                 return res
+            if att.outcome == "error" and att.kind in BILLABLE_KINDS:
+                billable_asks += 1
+                if billable_asks >= MAX_BILLABLE_ASKS_PER_TIER:
+                    break
             if att.kind in RETRY_WITH_MORE_TOKENS and more_tokens_used < MORE_TOKENS_RETRIES:
                 raised = raised_budget(budget)
                 if raised > budget:
@@ -1193,7 +1240,7 @@ class ModelChain:
                     self._log(f"[model-chain] surface={self.surface} step={step} "
                               f"kind={att.kind} retrying at max_tokens={budget}")
                     continue
-            if att.outcome == "error" and att.kind in RETRY_SAME_TIER and attempt_no < self.retries:
+            if retry_same_tier(att) and attempt_no < self.retries:
                 self._sleep(self._backoff(attempt_no))
                 continue
             break

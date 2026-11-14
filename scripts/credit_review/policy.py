@@ -1,3 +1,8 @@
+# Reviewed baseline: deploy overwrites - 2026-11-14 (hydra-hotpatch-land-h1). node-8 held a hand-edited copy
+# (sha256 d31f922bebab, written 2026-11-10 16:50Z) with ONE hunk the repo did not have: the
+# 'agent-precedent@muso.ai': 'precedent-v1' row of KNOWN_AGENT_APPROVERS. This file carries that row as it ran,
+# so overwriting the hand-edited copy changes no live behaviour. While this line stands, a later hand edit of
+# this file on node-8 is overwritten without a halt.
 """Deterministic verdict policy around the model.
 
 The model is advisory. This module decides the final verdict from the
@@ -70,6 +75,12 @@ KNOWN_AGENT_APPROVERS = {
     "agent-uvn-cron@muso.ai": "uvn-under30",
     # L12 executor approvals (core FABLE_RULED, #11010/#11011): Fable's own account; anchor-backed rows only.
     "agent-fable@muso.ai": "fable-decider",
+    # precedent_v1 (node-8 hand edit 2026-11-10): the program that approves a user's request on that
+    # user's own earlier approved credits. This row NAMES the automation in the audit; it grants
+    # nothing. "precedent-v1" has no row in policies/credit-approval-automation.json, so every such
+    # approval is still alerted, as "automation precedent-v1 (...) approved while it is not
+    # approved:true", until a recorded captain decision registers it.
+    "agent-precedent@muso.ai": "precedent-v1",
 }
 
 # Server mirror (core-backend services/credit-requests/agentApprovalGuard.js).
