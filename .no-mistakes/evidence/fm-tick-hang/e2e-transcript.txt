@@ -1,0 +1,192 @@
+=== fixture: sandbox /tmp ===
+  total 44
+  drwxrwxr-x 9 aaron aaron  4096 Nov 14 13:42 .
+  drwx------ 8 aaron aaron  4096 Nov 14 13:42 ..
+  drwxrwxr-x 2 aaron aaron  4096 Oct  5 14:42 ak47-live
+  drwxrwxr-x 2 aaron aaron 12288 Oct  5 14:42 big-junk
+  drwxrwxr-x 2 aaron aaron  4096 Oct  5 14:42 cli-proxy-api
+  drwxrwxr-x 2 aaron aaron  4096 Oct  5 14:42 fm-01M7LIVE
+  drwxrwxr-x 2 aaron aaron  4096 Nov 14 13:42 fresh-junk
+  drwxrwxr-x 2 aaron aaron  4096 Oct  5 14:42 held-junk
+  lrwxrwxrwx 1 aaron aaron    35 Oct  5 14:42 link-junk -> /tmp/ak47-e2e.U4h07U/outside-target
+  drwxrwxr-x 2 aaron aaron  4096 Nov 11 13:42 tmp.abcdefghij
+
+=== 1. the tick (one run, --apply) ===
+tick exit=0
+--- devops.log (the one line per run an operator reads) ---
+2026-11-14T18:42:34Z tick mode=apply tmp_before=8 tmp_after=7 moved=1 deleted=0 busy=0 protected=0 failures=0 actions=1 loop_gap=0s classes=tmp-mktemp:1 expire_pending=0 breaches=agent_count=223>160 top=cli-proxy:1,fm-01M7LIVE:1,held-junk:1,fresh-junk:1,ak47-live:1,big-junk:1,link-junk:1
+--- inbox calls ---
+(none)
+--- tree after the tick ---
+  ak47-live
+  big-junk
+  cli-proxy-api
+  fm-01M7LIVE
+  fresh-junk
+  held-junk
+  link-junk
+--- quarantine contents ---
+  20261114
+  20261114/tmp.abcdefghij
+  20261114/tmp.abcdefghij/x
+
+=== 2. tmp-takedown.sh --dry-run (the big-entry take-down) ===
+tmp-takedown: root=/tmp/ak47-e2e.U4h07U/tmp top=20 min_age=21600s max=20 apply=0
+tmp-takedown: quarantine=/tmp/ak47-e2e.U4h07U/state/quarantine/20261114-takedown
+tmp-takedown: DRY-RUN would quarantine /tmp/ak47-e2e.U4h07U/tmp/big-junk 8012KB idle=960h
+tmp-takedown: held or unprovable, leaving alone: /tmp/ak47-e2e.U4h07U/tmp/held-junk (rc=0)
+tmp-takedown: DRY-RUN would quarantine /tmp/ak47-e2e.U4h07U/tmp/link-junk 0KB idle=960h
+tmp-takedown: moved=2 skipped=5 failures=0 freed_gb=0 quarantine=/tmp/ak47-e2e.U4h07U/state/quarantine/20261114-takedown
+dry-run exit=0
+
+=== 3. tmp-takedown.sh --apply ===
+tmp-takedown: root=/tmp/ak47-e2e.U4h07U/tmp top=20 min_age=21600s max=20 apply=1
+tmp-takedown: quarantine=/tmp/ak47-e2e.U4h07U/state/quarantine/20261114-takedown
+tmp-takedown: quarantine /tmp/ak47-e2e.U4h07U/tmp/big-junk -> /tmp/ak47-e2e.U4h07U/state/quarantine/20261114-takedown/big-junk 8012KB idle=960h revert='mv /tmp/ak47-e2e.U4h07U/state/quarantine/20261114-takedown/big-junk /tmp/ak47-e2e.U4h07U/tmp/big-junk'
+tmp-takedown: held or unprovable, leaving alone: /tmp/ak47-e2e.U4h07U/tmp/held-junk (rc=0)
+tmp-takedown: quarantine /tmp/ak47-e2e.U4h07U/tmp/link-junk -> /tmp/ak47-e2e.U4h07U/state/quarantine/20261114-takedown/link-junk 0KB idle=960h revert='mv /tmp/ak47-e2e.U4h07U/state/quarantine/20261114-takedown/link-junk /tmp/ak47-e2e.U4h07U/tmp/link-junk'
+tmp-takedown: moved=2 skipped=5 failures=0 freed_gb=0 quarantine=/tmp/ak47-e2e.U4h07U/state/quarantine/20261114-takedown
+apply exit=0
+--- big-junk still on disk? ---
+  moved out of the live tree
+--- inside quarantine (moved, not deleted) ---
+  20261114
+  20261114-takedown
+  20261114-takedown/big-junk
+  20261114-takedown/link-junk
+  20261114/tmp.abcdefghij
+--- protected paths untouched ---
+  kept: /tmp/ak47-e2e.U4h07U/tmp/ak47-live
+  kept: /tmp/ak47-e2e.U4h07U/tmp/cli-proxy-api
+  kept: /tmp/ak47-e2e.U4h07U/tmp/fm-01M7LIVE
+  kept: /tmp/ak47-e2e.U4h07U/tmp/held-junk
+  kept: /tmp/ak47-e2e.U4h07U/tmp/fresh-junk
+
+=== 4. bounded size walk: an overrunning walk falls back, is not re-paid, and is reported ===
+  tick finished in 2s with a du that never returns (budget 2s)
+--- tick line: the budget scored the last real measurement, not an invented 0 ---
+2026-11-14T18:42:37Z tick mode=apply tmp_before=5 tmp_after=5 moved=0 deleted=0 busy=0 protected=0 failures=0 actions=0 loop_gap=1s classes=none expire_pending=0 breaches=tmp_gb=698>20,agent_count=223>160 top=cli-proxy:1,fm-01M7LIVE:1,held-junk:1,fresh-junk:1,ak47-live:1
+--- the sample the weekly review reads ---
+1794681757 load15=17.07 swap_pct=40 mem_avail_gb=70 tmp_entries=5 tmp_gb=698 root_disk_pct=25 tmux_core_pct=0 agent_count=223 pids_pct=39
+--- cached value after the failed walk (re-stamped, so it is not re-paid next tick) ---
+tmp_gb_ok	1794670955	698
+tmp_gb	1794681757	698
+--- second tick straight after: the failure marker short-circuits the retry ---
+  second tick finished in 1s (no du budget paid again)
+--- the finding an operator gets ---
+  2026-11-14T18:42:37Z tmp-gb-stale /tmp has not been measured for 180 min: the 2s size walk did not finish, so the budget is scoring a stale number. Measure by hand: find /tmp -maxdepth 1 -type d -printf '%p\0' | xargs -0 du -sx --block-size=1M | sort -rn | head -20
+  note --source health ak47 hygiene: /tmp has not been measured for 180 min: the 2s size walk did not finish, so the budget is scoring a stale number. Measure by hand: find /tmp -maxdepth 1 -type d -printf '%p\0' | xargs -0 du -sx --block-size=1M | sort -rn | head -20; board /tmp/ak47-e2e.U4h07U/state/status.md
+--- third tick with the retry window elapsed: the walk is due again, once ---
+  tick with AK47_DU_RETRY=0 finished in 5s (the failed walk is paid once more)
+
+=== 4a. expiry is bounded per run, and the deferred backlog is on the line ===
+  2026-11-14T18:42:49Z tick mode=apply tmp_before=5 tmp_after=5 moved=0 deleted=3 busy=0 protected=0 failures=0 actions=4 loop_gap=8s classes=none expire_pending=2 breaches=tmp_gb=698>20,agent_count=223>160 top=cli-proxy:1,fm-01M7LIVE:1,held-junk:1,fresh-junk:1,ak47-live:1
+  entries left in the old quarantine day: 2 of 5
+  2026-11-14T18:42:49Z deferred class=quarantine-expire pending=2 reason='per-run bound quarantine_expire_max=3; the next tick continues where this one stopped'
+
+=== 4b. the in-use set: no completion marker means "could not tell", never "free" ===
+  complete set, nothing held -> rc=1 (1 = provably free)
+  set without its marker -> rc=2 (2 = could not tell, delete refused)
+  set missing entirely -> rc=2 (2 = could not tell, delete refused)
+=== 5. swap reclaim: the unit's script always restores swap ===
+swap-reclaim exit=1 (1 = reclaim failed)
+--- swap.log ---
+  2026-11-14T18:42:50Z 1794681770 swap-reclaim before=40% after=40% reclaimed_gb=0 budget=1800s rc=1
+--- commands it ran ---
+  swapoff -a
+  swapon -a
+--- inbox ---
+  note --source health ak47 hygiene: /tmp has not been measured for 180 min: the 2s size walk did not finish, so the budget is scoring a stale number. Measure by hand: find /tmp -maxdepth 1 -type d -printf '%p\0' | xargs -0 du -sx --block-size=1M | sort -rn | head -20; board /tmp/ak47-e2e.U4h07U/state/status.md
+  note --source health ak47 swap reclaim did not finish within 1800s (swap 40% -> 40%); swap is back on, and the next tick will try again
+--- the unit that owns it ---
+  Type=oneshot
+  ExecStart=%h/.local/lib/ak47/swap-reclaim.sh
+  TimeoutStartSec=infinity
+
+=== 6. weekly review: a CHANGE next to a HOLDen ceiling, both visible ===
+  # ak47 hygiene review - 20261114 (last 7 days)
+  
+  ## what the box actually did
+  
+  METRIC                p05      p50      p95      max      n
+  ------                ---      ---      ---      ---      -
+  swap_pct               99       99       99       99    200
+  tmp_entries          1000     1000     1000     1000    200
+  tmp_gb                 10       10       10       25    200
+  
+  ## tick health
+  
+  - tick lines in the window: 1
+  - last tick: 2026-11-14T18:32:50Z
+  - runs reporting a failure: 0
+  - runs with a loop gap over 3 intervals: 0
+  - no action log at /tmp/ak47-e2e.U4h07U/state/reap.log
+  - no findings log at /tmp/ak47-e2e.U4h07U/state/findings.log
+  
+  ## proposed threshold changes
+  
+  ```diff
+  --- ak47/budget.conf
+  +++ ak47/budget.conf (proposed)
+  @@ -38,7 +38,7 @@
+   # glob, ls, find and test run slow while the disk was only 14% full. 200,000 is
+   # the acceptance ceiling and roughly the point where a top-level readdir stays
+   # under a second.
+  -tmp_entries|200000|max|entries|950k entries slowed every glob and test run at 14% disk; 200k keeps a top-level readdir under a second
+  +tmp_entries|10000|max|entries|950k entries slowed every glob and test run at 14% disk; 200k keeps a top-level readdir under a second
+   # 20 GB is the scratch a week of live work needs. The 163 GB today is leaked test
+   # scratch, not work in progress.
+   tmp_gb|20|max|GB|a week of live scratch fits in 20 GB; the 163 GB today is leaked test scratch, not work in progress
+  ```
+  
+  - tmp_entries: 200000 -> 10000 (p95 1000 is below half of 200000; the reason text may need rewriting)
+  
+  ## ceilings held, and why
+  
+  - HELD swap_pct: HELD - p95 99 is at the metric's own maximum (100%); raising a ceiling cannot help, this is a sustained-at-ceiling finding
+  - HELD tmp_gb: HELD - the proposal 16 would sit below the observed peak 25, which breaches the moment the box does that again
+  
+  ## what this review will not do
+  
+  It will not apply the diff, add a class to the tick's table, or widen the
+  tick's authority. A new action class needs the captain's word; a threshold
+  change needs a human to accept the diff above.
+  
+  diff: /tmp/ak47-e2e.U4h07U/state/review-20261114.diff
+  weekly-review.sh: wrote /tmp/ak47-e2e.U4h07U/state/review-20261114.md
+  weekly-review.sh: proposed diff at /tmp/ak47-e2e.U4h07U/state/review-20261114.diff
+--- the diff artifact the inbox note points at (CHANGE and HELD together) ---
+  --- ak47/budget.conf
+  +++ ak47/budget.conf (proposed)
+  @@ -38,7 +38,7 @@
+   # glob, ls, find and test run slow while the disk was only 14% full. 200,000 is
+   # the acceptance ceiling and roughly the point where a top-level readdir stays
+   # under a second.
+  -tmp_entries|200000|max|entries|950k entries slowed every glob and test run at 14% disk; 200k keeps a top-level readdir under a second
+  +tmp_entries|10000|max|entries|950k entries slowed every glob and test run at 14% disk; 200k keeps a top-level readdir under a second
+   # 20 GB is the scratch a week of live work needs. The 163 GB today is leaked test
+   # scratch, not work in progress.
+   tmp_gb|20|max|GB|a week of live scratch fits in 20 GB; the 163 GB today is leaked test scratch, not work in progress
+  
+  - HELD swap_pct: HELD - p95 99 is at the metric's own maximum (100%); raising a ceiling cannot help, this is a sustained-at-ceiling finding
+  - HELD tmp_gb: HELD - the proposal 16 would sit below the observed peak 25, which breaches the moment the box does that again
+
+--- and the inbox line a CHANGE files ---
+  note --source health ak47 weekly review proposes threshold changes: /tmp/ak47-e2e.U4h07U/state/review-20261114.diff (report /tmp/ak47-e2e.U4h07U/state/review-20261114.md)
+
+
+=== 7. the tick rings the reclaim unit and never swaps inline ===
+--- tick line ---
+  2026-11-14T18:42:50Z tick mode=apply tmp_before=5 tmp_after=5 moved=0 deleted=0 busy=0 protected=0 failures=0 actions=1 loop_gap=600s classes=none expire_pending=0 breaches=swap_pct=99>50,agent_count=223>160 top=cli-proxy:1,fm-01M7LIVE:1,held-junk:1,fresh-junk:1,ak47-live:1
+--- the action record with its revert ---
+  2026-11-14T18:42:50Z swap-pressure swap=99% mem=85G action='started ak47-swap-reclaim.service' revert='none needed: pages back in; swap is restored when it finishes'
+--- what it rang ---
+  systemctl --user is-active --quiet ak47-swap-reclaim.service
+  systemctl --user start --no-block ak47-swap-reclaim.service
+
+=== 8. an unprivileged tick files one finding instead of failing to swap every tick ===
+  2026-11-14T18:42:51Z tick mode=apply tmp_before=5 tmp_after=5 moved=0 deleted=0 busy=0 protected=0 failures=0 actions=0 loop_gap=1s classes=none expire_pending=0 breaches=swap_pct=99>50,agent_count=223>160 top=cli-proxy:1,fm-01M7LIVE:1,held-junk:1,fresh-junk:1,ak47-live:1
+  swap findings recorded: 1
+  note --source health ak47 hygiene: swap 99% full with 85 GB RAM free; reclaiming it needs root - grant it with the sudoers rule in ak47/README.md, or run: sudo swapoff -a && sudo swapon -a; board /tmp/ak47-e2e.U4h07U/state/status.md
+
+=== sandbox: /tmp/ak47-e2e.U4h07U (preserved for inspection) ===
