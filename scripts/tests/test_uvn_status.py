@@ -1905,6 +1905,27 @@ class WithdrawalConfirmTests(unittest.TestCase):
                                    capture_output=True, text=True, env=env, timeout=60, check=False)
                 self.assertEqual((p.returncode, p.stdout.strip()), (0, "NO_REPLY"), (argv[0], p.stderr))
 
+    def test_an_only_users_file_that_names_nobody_sends_nothing(self):
+        """A supplied scope that is empty is a broken scope file, never "no scope": reading it as
+        unscoped would offer the whole eligible population to a caller that asked for one account."""
+        with tempfile.TemporaryDirectory() as d:
+            env = {**os.environ, "CREDIT_OPS_NOTES_KILL_SWITCH": str(Path(d) / "absent"),
+                   "CREDIT_REVIEW_LOG": str(Path(d) / "run.log")}
+            argv = [sys.executable, str(ROOT / "scripts" / "credit-review.py"), "uvn-status",
+                    "--list", str(Path(d) / "list.json"), "--segment", "paid", "--mode", "dry-run"]
+            empty = Path(d) / "nobody.txt"
+            empty.write_text("# nobody\n\n")
+            p = subprocess.run([*argv, "--only-users", str(empty)], capture_output=True, text=True,
+                               env=env, timeout=60, check=False)
+            self.assertEqual(p.returncode, 2, p.stderr)
+            self.assertIn("names no user", p.stderr)
+            named = Path(d) / "one.txt"
+            named.write_text("7\n")
+            p = subprocess.run([*argv, "--only-users", str(named)], capture_output=True, text=True,
+                               env=env, timeout=60, check=False)
+            self.assertNotEqual(p.returncode, 2, p.stderr)
+            self.assertNotIn("names no user", p.stderr + p.stdout)
+
     def test_only_the_ops_notes_switch_stops_them_never_the_verify_notify_one(self):
         import contextlib
         import importlib.util

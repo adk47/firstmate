@@ -136,7 +136,7 @@
       "status_note": "ON for `profiles merge` only (captain 2026-10-30 12:4xZ). Never on tier2-approvers.txt, so it grants no delete, no bulk-destructive verb and no track merge. Effective only once node-8 runs a muso-cli release containing #64: on an older CLI the handle is simply refused (fail closed), it is not silently widened."
     },
     "claim-handoff-receiver": {
-      "description": "scripts/handoff/claim_handoff_receiver.py (H3a, handoff-contract.md \u00a72/\u00a74): after H2's shared gate admits a Caroline hand-off envelope and resolves one account, reads that account's own pending claims (replica) and either runs the claim-status campaign through intercom-verify-request.sh (claim_status) or files attachments by sha256 into proof_intake with subject claim (claim_proof). It never approves, rejects, holds or E1-verifies a claim and composes no text. Registered here so the switch that lets its status line reach a customer is a captain decision: while approved is false the campaign runs in dry-run (outcome line_withheld, reason shadow).",
+      "description": "scripts/handoff/claim_handoff_receiver.py (H3a, handoff-contract.md §2/§4): after H2's shared gate admits a Caroline hand-off envelope and resolves one account, reads that account's own pending claims (replica) and either runs the claim-status campaign through intercom-verify-request.sh (claim_status) or files attachments by sha256 into proof_intake with subject claim (claim_proof). It never approves, rejects, holds or E1-verifies a claim and composes no text. Registered here so the switch that lets its status line reach a customer is a captain decision: while approved is false the campaign runs in dry-run (outcome line_withheld, reason shadow).",
       "entrypoints": [
         "handoff/claim_handoff_receiver.py"
       ],
@@ -249,6 +249,17 @@
       "wrapper_predicate": "is_scale_drain_approval",
       "approval_ref": "captain-1111-night-order: captain verbatim 2026-11-11 \"im going to bed can you assure we reach our goal and you setup creds properly (monitor whoever is doing it) create a loop to check and drive it from here figure it out\" + work order item 3 \"the full pass: 16 shards, 32-wide read, 6-wide apply, idempotency key per request\"; design of record data/verification-scale-plan.md; operator doc docs/credit-verification/scale-drain.md",
       "status_note": "Approve scope is precedent and proof-verdict rows ONLY, each citing a row-specific anchor the wrapper gate parses. The drain is not scheduled: it is run by an operator/firstmate loop, so cron_names is empty on purpose."
+    },
+    "proof-review-coded": {
+      "description": "scripts/ops_intake/proof_review.py review --mode apply: answers a 'review the proof' ask from H3 + doc-verify + dsp-verify + the fraud lens. It APPROVES NOTHING and sends nothing itself: the only customer action it can name is one of the single sender's ask campaigns (gap-ask / uvn-status via credit-review.py uvn-status --from-stage2), and a SUFFICIENT verdict only records the ask as waiting_route. Registered here anyway so a future cron that runs it can never slip past this guard.",
+      "entrypoints": [
+        "ops_intake/proof_review.py"
+      ],
+      "cron_names": [],
+      "approved": false,
+      "approved_by": null,
+      "approval_ref": null,
+      "status_note": "Cannot approve by construction: no approval writer exists (policies/proof-review-route.json approval_route.mode is off), so a sufficient proof review waits for a captain decision. Turning that on is a captain decision and a reviewed PR that also sets approved/approved_by/approval_ref here."
     }
   }
 }

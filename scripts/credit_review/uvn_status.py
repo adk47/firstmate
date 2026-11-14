@@ -1252,7 +1252,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         now: datetime | None = None, preview_dir: str | None = None, pace_seconds: float = 1.0,
         check_recipients: bool = False, campaign: str = CAMPAIGN, post: verify_notify.Poster = verify_notify.post_cs_priority,
         wording: str = "", from_stage2: bool = False, stage2_path: str | None = None,
-        exclude_users: set[str] | frozenset[str] = frozenset(), lens: fraud_lens.LensFn | None = None,
+        exclude_users: set[str] | frozenset[str] = frozenset(),
+        only_users: set[str] | frozenset[str] = frozenset(), lens: fraud_lens.LensFn | None = None,
         watchlist_path: str | None = None, holds_path: str | None = None,
         segment_daily_cap: int | None = None, gmail_fallback_o: bool = False,
         no_correction: bool = False, max_entries: int | None = None, start_entry: int = 0,
@@ -1307,6 +1308,11 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             if why:
                 report.halted = why
                 return report
+    if only_users:
+        # A caller asking for ONE named account scopes the run positively: this filter is applied to the
+        # population read HERE, so a user who became eligible after the caller's own read can never take
+        # the page ahead of it (--exclude-users alone cannot promise that: it is a snapshot of everyone else).
+        users = [u for u in users if str(u.get("user_id")) in only_users]
     if lens is None:
         try:
             lens = DEFAULT_LENS(query, watchlist_path=watchlist_path, holds_path=holds_path)

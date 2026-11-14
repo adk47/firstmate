@@ -32,9 +32,12 @@ before any model sees it.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import sqlite3
 import sys
 import tempfile
+import unittest.mock
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -71,6 +74,20 @@ class Recorder:
 
     def pager(self, text: str) -> None:
         self.pages.append(text)
+
+
+class CleanProofLens:
+    """The coded review's fraud lens in a replay: it answered for every account asked about and
+    cleared it. A lens that returns nothing for an account is UNMEASURED, which `load_fraud_lens`
+    holds, so a replay that stubs the lens empty would be replaying a HOLD, not a proof verdict."""
+    held: tuple[str, ...] = ()
+    watch: tuple[str, ...] = ()
+    single_signal_rows = 0
+
+
+def clean_proof_lens() -> Any:
+    """A `real_lens` stand-in that answers clean for every id it is asked about."""
+    return lambda ids: {int(u): CleanProofLens() for u in ids}
 
 
 class StubLens:
@@ -156,7 +173,55 @@ def build_backends(case: dict[str, Any], rec: Recorder) -> answer_mod.Backends:
     return backends
 
 
+def _proof_stores(spec: dict[str, Any], workdir: Path) -> dict[str, str]:
+    """A proof store and a doc-verify store from a case's declarative stub, so a coded verdict is
+    reproducible on a host with no production store."""
+    proof = workdir / "proof.sqlite"
+    db = sqlite3.connect(proof)
+    db.executescript(
+        "CREATE TABLE proof_intake (intake_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,"
+        " subject TEXT NOT NULL, candidate_request_ids_json TEXT NOT NULL DEFAULT '[]',"
+        " conversation_id TEXT NOT NULL, source TEXT NOT NULL, file_sha256 TEXT NOT NULL,"
+        " file_path TEXT, mime TEXT, bytes INTEGER, received_at TEXT NOT NULL,"
+        " filed_by TEXT NOT NULL, matched_by TEXT, contact_h TEXT, detail_json TEXT);"
+        "CREATE TABLE forensics (id INTEGER PRIMARY KEY AUTOINCREMENT, proof_id TEXT NOT NULL,"
+        " analyzer_version TEXT NOT NULL, check_id TEXT NOT NULL, name TEXT NOT NULL,"
+        " severity TEXT NOT NULL, value_json TEXT, reason TEXT, evidence_json TEXT,"
+        " created_at TEXT NOT NULL, request_id TEXT NOT NULL DEFAULT '');")
+    for user_id, conversation, sha, requests in spec.get("filings") or []:
+        db.execute(
+            "INSERT INTO proof_intake (intake_id, user_id, subject, candidate_request_ids_json,"
+            " conversation_id, source, file_sha256, received_at, filed_by, detail_json)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (sha, int(user_id), "credit", json.dumps(list(requests)), str(conversation),
+             "intercom", sha, "2026-11-04T00:00:00Z", "redteam", "{}"))
+    db.commit()
+    db.close()
+    dv = workdir / "doc-verify.sqlite"
+    db = sqlite3.connect(dv)
+    db.execute(
+        "CREATE TABLE dv_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, at TEXT,"
+        " proof_id TEXT, request_id TEXT, role TEXT, user_id INTEGER, source_ref TEXT,"
+        " h3_verdict TEXT, outcome TEXT, reason TEXT, need TEXT, account_hold INTEGER,"
+        " detail_json TEXT, version TEXT)")
+    for rid, role, outcome in spec.get("dv") or []:
+        db.execute(
+            "INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, h3_verdict, outcome,"
+            " reason, need, account_hold, detail_json, version)"
+            " VALUES ('r','2026-11-04T00:00:00Z','p',?,?,'H3C',?,'because',NULL,0,'{}','v1')",
+            (rid, role, outcome))
+    db.commit()
+    db.close()
+    injection = workdir / "injection.jsonl"
+    injection.write_text("")
+    return {"PROOF_DB": str(proof), "DV_DB": str(dv), "DSP_DB": str(workdir / "absent-dsp.sqlite"),
+            "INJECTION_LEDGER": str(injection)}
+
+
 def build_guard(case: dict[str, Any], rec: Recorder) -> guard.Guard:
+    """A guard is ALWAYS present in a replay: with no `judge` stub it answers an empty payload
+    instead of reaching the network, so a case that forgot to declare a model path fails loudly
+    rather than quietly calling a provider."""
     spec = (case.get("stubs") or {}).get("judge")
 
     def _judge(prompt: str, schema: dict[str, Any] | None, spec=spec, rec=rec):
@@ -202,12 +267,25 @@ def run_case(case: dict[str, Any], *, policy: policy_mod.Policy,
     store = store_mod.AskStore(workdir / f"asks-{case['id']}.sqlite")
     led = ledger_mod.ActionLedger(workdir / f"actions-{case['id']}.sqlite")
     repeats = int(case.get("repeat") or 1)
+    proof_spec = (case.get("stubs") or {}).get("proof_db")
     results = []
-    for i in range(repeats):
-        env = _envelope(case, seq=i, base=base)
-        results.append(router_mod.route(
-            envelope=env, policy=policy, store=store, ledger=led, backends=backends,
-            guardobj=guardobj, now=base + timedelta(minutes=i * 20 // max(repeats, 1))))
+    with contextlib.ExitStack() as stack:
+        if proof_spec:
+            # Same split as the header imports: the daily timer runs this file directly
+            # (`python3 scripts/ops_intake/redteam.py`), where a relative import raises.
+            if __package__ in (None, ""):
+                from ops_intake import proof_review
+            else:
+                from . import proof_review
+            stack.enter_context(unittest.mock.patch.multiple(
+                proof_review, **_proof_stores(proof_spec, workdir)))
+            stack.enter_context(unittest.mock.patch.object(
+                proof_review, "real_lens", clean_proof_lens))
+        for i in range(repeats):
+            env = _envelope(case, seq=i, base=base)
+            results.append(router_mod.route(
+                envelope=env, policy=policy, store=store, ledger=led, backends=backends,
+                guardobj=guardobj, now=base + timedelta(minutes=i * 20 // max(repeats, 1))))
     rows = led.connect()
     with rows as conn:
         ledger_rows = [dict(r) for r in conn.execute(

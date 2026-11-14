@@ -2368,6 +2368,286 @@ class Sources(Base):
         self.assertIn("INSUFFICIENT", out.reply or "")
         self.assertEqual(ledger.rows_for_ask(out.ask_id), [])
 
+    def _empty_ledger(self, name: str) -> Path:
+        path = self.tmp / name
+        path.write_text("")
+        return path
+
+    def _proof_store(self, conversation: str, request_id: str, candidates: str | None = None,
+                     users: tuple[int, ...] = (7,)) -> str:
+        path = self.tmp / "proof.sqlite"
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            "CREATE TABLE proof_intake (intake_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,"
+            " subject TEXT NOT NULL, candidate_request_ids_json TEXT NOT NULL DEFAULT '[]',"
+            " conversation_id TEXT NOT NULL, source TEXT NOT NULL, file_sha256 TEXT NOT NULL,"
+            " file_path TEXT, mime TEXT, bytes INTEGER, received_at TEXT NOT NULL,"
+            " filed_by TEXT NOT NULL, matched_by TEXT, contact_h TEXT, detail_json TEXT);"
+            "CREATE TABLE forensics (id INTEGER PRIMARY KEY AUTOINCREMENT, proof_id TEXT NOT NULL,"
+            " analyzer_version TEXT NOT NULL, check_id TEXT NOT NULL, name TEXT NOT NULL,"
+            " severity TEXT NOT NULL, value_json TEXT, reason TEXT, evidence_json TEXT,"
+            " created_at TEXT NOT NULL, request_id TEXT NOT NULL DEFAULT '');")
+        for n, user_id in enumerate(users):
+            sha = "ab"[n % 2] * 64
+            conn.execute(
+                "INSERT INTO proof_intake (intake_id, user_id, subject, candidate_request_ids_json,"
+                " conversation_id, source, file_sha256, received_at, filed_by, detail_json)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (sha, user_id, "credit", json.dumps([request_id]) if candidates is None else candidates,
+                 conversation, "intercom", sha, "2026-11-04T00:00:00Z", "test", "{}"))
+        conn.commit()
+        conn.close()
+        return str(path)
+
+    def test_a_proof_review_ask_stays_open_until_the_customer_is_actually_asked(self):
+        from ops_intake import proof_review as pr
+        proof = self._proof_store("215476444480749", REQ_A)
+        dv = self._dv_db([(REQ_A, "unverifiable", "producer", "2026-11-04T12:00:00Z")])
+        store, ledger = self.stores()
+        with unittest.mock.patch.multiple(
+                pr, PROOF_DB=proof, DV_DB=dv, DSP_DB=str(self.tmp / "absent.sqlite"),
+                INJECTION_LEDGER=str(self._empty_ledger("injection.jsonl")),
+                real_lens=redteam.clean_proof_lens):
+            out = router_mod.route(
+                envelope=self.envelope("tell firstmate that the user provided a proof for his "
+                                       "credit claim. conversation 215476444480749"),
+                policy=self.policy, store=store, ledger=ledger,
+                backends=answer_mod.Backends(), now=NOW)
+        # The review chose gap-ask, but the router runs `mode="dry-run"`: nothing was sent, so closing the
+        # ask `answered` would retire it from the open queue before the customer was ever asked.
+        self.assertEqual(out.state, "ask")
+        self.assertEqual(store.get(out.ask_id)["verdict_source"], "coded")
+        self.assertEqual(store.get(out.ask_id)["state"], "ask")
+        self.assertIn("proof-review", out.reply or "")
+        # The card's COUNTS must carry the verdict: the bare substring "gap-ask" is present in
+        # "0 gap-ask" too, so it passed on an ask the review never resolved to an account.
+        self.assertIn("1 request", out.reply or "")
+        self.assertIn("1 gap-ask", out.reply or "")
+        self.assertIn("gap-ask", out.reply or "")
+        self.assertIn("approved sender has not been invoked", out.reply or "")
+        self.assertNotIn("unfiled", out.reply or "")
+        self.assertEqual(ledger.rows_for_ask(out.ask_id), [])
+
+    def test_a_proof_review_ask_closes_once_the_sender_records_the_send(self):
+        # The mirror of the test above: the SAME review state, but the sender reported a note sent
+        # (`rev.sent` names the campaign), so the ask has been asked and closes.
+        from ops_intake import proof_review as pr
+        proof = self._proof_store("215476444480749", REQ_A)
+        store, ledger = self.stores()
+        asked = pr.Ask(ask_id="oa-sent", conversation_id="215476444480749", user_ids=(7,),
+                       account_h="deadbeefdeadbeef")
+        sent = pr.Review(ask=asked, state="asked", campaign="gap-ask", sent="gap-ask",
+                         counts={pr.GAP_ASK: 1},
+                         verdicts=(pr.RequestVerdict(request_id=REQ_A, verdict=pr.GAP_ASK,
+                                          why="the document on file does not cover this claim"),),
+                         card="proof-review oa-sent · acct deadbeef · 1 request: 1 gap-ask · sent: gap-ask")
+        with unittest.mock.patch.multiple(
+                pr, PROOF_DB=proof, DSP_DB=str(self.tmp / "absent.sqlite"),
+                real_lens=redteam.clean_proof_lens):
+            with unittest.mock.patch.object(pr, "build_ask", lambda **kw: asked), \
+                    unittest.mock.patch.object(pr, "run", lambda *a, **kw: sent):
+                out = router_mod.route(
+                    envelope=self.envelope("tell firstmate that the user provided a proof for his "
+                                           "credit claim. conversation 215476444480749"),
+                    policy=self.policy, store=store, ledger=ledger,
+                    backends=answer_mod.Backends(), now=NOW)
+        self.assertEqual(store.get(out.ask_id)["state"], "answered")
+        self.assertEqual(out.state, "answered")
+
+    def test_a_proof_review_ask_carrying_two_accounts_states_its_refusal_in_the_reply(self):
+        from ops_intake import proof_review as pr
+        # The review renders no card for a two-account ask, and an empty evidence would break the
+        # reply contract into `contract-fallback`, dropping the split instruction staff must act on.
+        proof = self._proof_store("215476444480749", REQ_A, users=(7, 8))
+        dv = self._dv_db([(REQ_A, "unverifiable", "producer", "2026-11-04T12:00:00Z")])
+        store, ledger = self.stores()
+        with unittest.mock.patch.multiple(
+                pr, PROOF_DB=proof, DV_DB=dv, DSP_DB=str(self.tmp / "absent.sqlite"),
+                INJECTION_LEDGER=str(self._empty_ledger("injection.jsonl")),
+                real_lens=redteam.clean_proof_lens):
+            built = pr.build_ask(ask_id="two-accounts", conversation_id="215476444480749",
+                                 lens=redteam.clean_proof_lens)
+            self.assertEqual(built.user_ids, (7, 8))
+            rev = pr.review(built)
+            out = router_mod.route(
+                envelope=self.envelope("tell firstmate that the user provided a proof for his "
+                                       "credit claim. conversation 215476444480749"),
+                policy=self.policy, store=store, ledger=ledger,
+                backends=answer_mod.Backends(), now=NOW)
+        self.assertEqual(rev.card, "", "the two halves must not be re-coupled")
+        self.assertEqual(out.state, "ask")
+        reply = out.reply or ""
+        self.assertNotIn("contract-fallback", reply)
+        self.assertIn(out.ask_id, reply)
+        self.assertIn(rev.ask.account, reply)
+        self.assertIn("2 accounts", reply)
+        self.assertIn("split", reply)
+        self.assertIn("sent: none", reply)
+        self.assertEqual(store.get(out.ask_id)["state"], "ask")
+        self.assertEqual(ledger.rows_for_ask(out.ask_id), [])
+
+    def test_a_proof_review_ask_naming_two_conversations_is_not_decided_on_the_first(self):
+        from ops_intake import proof_review as pr
+        # Only the first conversation has a filing that resolves to a verdict. Reviewing it and
+        # marking the ask answered would decide an ask whose second conversation was never read.
+        proof = self._proof_store("215476444480749", REQ_A)
+        dv = self._dv_db([(REQ_A, "unverifiable", "producer", "2026-11-04T12:00:00Z")])
+        store, ledger = self.stores()
+        with unittest.mock.patch.multiple(
+                pr, PROOF_DB=proof, DV_DB=dv, DSP_DB=str(self.tmp / "absent.sqlite"),
+                INJECTION_LEDGER=str(self._empty_ledger("injection.jsonl")),
+                real_lens=redteam.clean_proof_lens):
+            out = router_mod.route(
+                envelope=self.envelope("tell firstmate that the user provided a proof for his "
+                                       "credit claim. conversation 215476444480749 and "
+                                       "conversation 215476444480750"),
+                policy=self.policy, store=store, ledger=ledger,
+                backends=answer_mod.Backends(), now=NOW)
+        self.assertEqual(out.state, "ask")
+        self.assertIn("2 conversations", out.reply or "")
+        self.assertNotIn("gap-ask", out.reply or "")
+        self.assertEqual(store.get(out.ask_id)["state"], "ask")
+        self.assertEqual(ledger.rows_for_ask(out.ask_id), [])
+
+    def test_a_proof_review_ask_whose_store_is_unreadable_fails_and_pages(self):
+        from ops_intake import proof_review as pr
+        store, ledger = self.stores()
+        with unittest.mock.patch.multiple(
+                pr, PROOF_DB=str(self.tmp / "absent.sqlite"),
+                real_lens=redteam.clean_proof_lens):
+            out = router_mod.route(
+                envelope=self.envelope("tell firstmate that the user provided a proof for his "
+                                       "credit claim. conversation 215476444480749"),
+                policy=self.policy, store=store, ledger=ledger,
+                backends=answer_mod.Backends(), now=NOW)
+        self.assertEqual(out.state, "failed")
+        self.assertIn("proof-review", out.page or "")
+        self.assertNotIn("no coded verdict yet", out.reply or "")
+
+    def test_a_proof_review_ask_with_a_corrupt_candidate_list_fails_and_pages(self):
+        from ops_intake import proof_review as pr
+        proof = self._proof_store("215476444480749", REQ_A,
+                                   candidates='["48a8d1f0-6f2e-4b47-9d1e-0e3f7a6f0b11",')
+        dv = self._dv_db([(REQ_A, "unverifiable", "producer", "2026-11-04T12:00:00Z")])
+        store, ledger = self.stores()
+        with unittest.mock.patch.multiple(
+                pr, PROOF_DB=proof, DV_DB=dv, DSP_DB=str(self.tmp / "absent.sqlite"),
+                INJECTION_LEDGER=str(self._empty_ledger("injection.jsonl")),
+                real_lens=redteam.clean_proof_lens):
+            out = router_mod.route(
+                envelope=self.envelope("tell firstmate that the user provided a proof for his "
+                                       "credit claim. conversation 215476444480749"),
+                policy=self.policy, store=store, ledger=ledger,
+                backends=answer_mod.Backends(), now=NOW)
+        # Unreadable candidate ids are unreadable evidence: the review fails and pages, it never
+        # reads as "this account has no requests" and answers zero.
+        self.assertEqual(out.state, "failed")
+        self.assertIn("candidate requests are unreadable", out.reply or "")
+        self.assertIn("proof-review", out.page or "")
+
+    def test_a_proof_review_ask_with_no_filing_stays_open_with_the_filing_step(self):
+        from ops_intake import proof_review as pr
+        # The store exists and holds another conversation's filing, so this is "nothing filed for
+        # THIS ask", not "the store is missing".
+        proof = self._proof_store("999", REQ_A)
+        store, ledger = self.stores()
+        with unittest.mock.patch.multiple(
+                pr, PROOF_DB=proof, DV_DB=str(self.tmp / "absent-dv.sqlite"),
+                DSP_DB=str(self.tmp / "absent.sqlite"),
+                INJECTION_LEDGER=str(self._empty_ledger("injection.jsonl")),
+                real_lens=redteam.clean_proof_lens):
+            out = router_mod.route(
+                envelope=self.envelope("tell firstmate that the user provided a proof for his "
+                                       "credit claim. conversation 215476444480749"),
+                policy=self.policy, store=store, ledger=ledger,
+                backends=answer_mod.Backends(), now=NOW)
+        # It stays an open ask with the filing step named: an unfiled review is not an answer.
+        self.assertEqual(out.state, "ask")
+        self.assertEqual(store.get(out.ask_id)["state"], "ask")
+        self.assertIn("unfiled", out.reply or "")
+        self.assertIn("credit-proof.py file --apply", out.reply or "")
+
+    def test_an_all_unknown_proof_review_ask_stays_open_for_the_next_read(self):
+        from ops_intake import proof_review as pr
+        # One unreadable doc-verify read: nothing asked, nothing approved - so the ask must not be
+        # persisted `answered` and nothing may be written to the action ledger.
+        proof = self._proof_store("215476444480749", REQ_A)
+        dv = self._dv_db([(REQ_A, "unknown", "producer", "2026-11-04T12:00:00Z")])
+        store, ledger = self.stores()
+        with unittest.mock.patch.multiple(
+                pr, PROOF_DB=proof, DV_DB=dv, DSP_DB=str(self.tmp / "absent.sqlite"),
+                INJECTION_LEDGER=str(self._empty_ledger("injection.jsonl")),
+                real_lens=redteam.clean_proof_lens):
+            out = router_mod.route(
+                envelope=self.envelope("tell firstmate that the user provided a proof for his "
+                                       "credit claim. conversation 215476444480749"),
+                policy=self.policy, store=store, ledger=ledger,
+                backends=answer_mod.Backends(), now=NOW)
+        self.assertEqual(out.state, "ask")
+        self.assertIn("unknown", out.reply or "")
+        self.assertIn("next read", out.reply or "")
+        self.assertEqual(store.get(out.ask_id)["state"], "ask")
+        self.assertEqual(ledger.rows_for_ask(out.ask_id), [])
+
+    def _answer_with_review_state(self, state: str, counts: dict | None = None):
+        """Route one proof-review ask whose review lands on `state`.
+
+        The precedence itself is pinned in scripts/tests/test_proof_review.py; what is under test
+        here is what the ROUTER does with the state it gets back, so the review is the stub.
+        """
+        from ops_intake import proof_review as pr
+        proof = self._proof_store("215476444480749", REQ_A)
+        store, ledger = self.stores()
+
+        def _run(built, mode="dry-run"):
+            return pr.Review(ask=built, verdicts=(pr.RequestVerdict(REQ_A, state, "because"),),
+                             counts=dict(counts or {}), state=state,
+                             card=f"proof-review {built.ask_id} · acct {built.account} · sent: none")
+
+        with unittest.mock.patch.multiple(
+                pr, PROOF_DB=proof, DSP_DB=str(self.tmp / "absent.sqlite"),
+                INJECTION_LEDGER=str(self._empty_ledger("injection.jsonl")),
+                run=_run, real_lens=redteam.clean_proof_lens):
+            out = router_mod.route(
+                envelope=self.envelope("tell firstmate that the user provided a proof for his "
+                                       "credit claim. conversation 215476444480749"),
+                policy=self.policy, store=store, ledger=ledger,
+                backends=answer_mod.Backends(), now=NOW)
+        return out, store, ledger
+
+    def test_a_held_proof_review_is_held_and_pages_instead_of_closing_as_answered(self):
+        # A forged document is a hold a person decides: closing the ask `answered` drops it out of
+        # every queue, so the row is HELD, the human is paged, and nothing is written.
+        out, store, ledger = self._answer_with_review_state("hold", {"hold": 1})
+        self.assertEqual(out.state, "held")
+        self.assertEqual(store.get(out.ask_id)["state"], "held")
+        self.assertIn("a person decides this ask", out.reply or "")
+        self.assertIn("a named human decides", out.reply or "")
+        self.assertTrue(out.page and "hold" in out.page, out.page)
+        self.assertEqual(ledger.rows_for_ask(out.ask_id), [])
+
+    def test_a_contradicted_proof_review_is_held_and_pages_instead_of_closing_as_answered(self):
+        out, store, ledger = self._answer_with_review_state("declined", {"declined": 1})
+        self.assertEqual(out.state, "held")
+        self.assertEqual(store.get(out.ask_id)["state"], "held")
+        self.assertIn("a named human decides", out.reply or "")
+        self.assertIn("contradicts the claim", out.reply or "")
+        self.assertTrue(out.page and "declined" in out.page, out.page)
+        self.assertEqual(ledger.rows_for_ask(out.ask_id), [])
+
+    def test_a_supported_proof_review_waits_in_the_open_queue_for_the_captains_decision(self):
+        # Every role supported, and no approval route to record it: the ask stays OPEN (the overdue
+        # tick chases a captain decision) instead of closing as answered.
+        out, store, ledger = self._answer_with_review_state("waiting_route", {"sufficient": 1})
+        self.assertEqual(out.state, "ask")
+        row = store.get(out.ask_id)
+        self.assertEqual(row["state"], "ask")
+        self.assertTrue(row["due_at"])
+        self.assertIn("captain decision", out.reply or "")
+        self.assertIn("1 sufficient", out.reply or "")
+        self.assertIsNone(out.page)
+        self.assertEqual(ledger.rows_for_ask(out.ask_id), [])
+
 
 @unittest.skipUnless(shutil.which("jq"), "jq not installed (scripts/tests/check-ops-intake-policy.bats covers the guard)")
 class PolicyGuardScript(unittest.TestCase):

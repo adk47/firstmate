@@ -382,6 +382,33 @@ readonly APPROVED_ELSEWHERE_COPY_APPROVED=0
 #       code line is captain-approved (DISTRIBUTOR_COPY_APPROVED); issuer_email is HELD at send.
 #   Reviewed baseline: deploy overwrites - 2026-10-29 (verify-ask-wiring-h2): this blob sets PROOF_NEED_ASK_COPY_APPROVED=1.
 readonly PROOF_NEED_ASK_COPY_APPROVED=1
+#   SPLIT_ACCOUNT_COPY_*  the multi-account proof-review note (the refusal fired when one ask's documents cover two
+#       accounts): the captain asked firstmate for "We received documents from two different Muso accounts..." and the
+#       outbound copy gate rewrote it - the reviewer refused the original wording under rubric rules 1 and 2 (naming
+#       two accounts and "so we can match it" hints at a check and at suspicious activity) and APPROVED its own
+#       replacement, which is the text below, on 2026-11-14T10:31:53Z: verdict ocv-49139bdc4dfc3e75, reviewer
+#       mac-pool/claude-fable-5-1, rubric default 2c505d21f105afe8922204c32c27d1cfc345d09e99ee605b8d3dfa2d022a7cfa.
+#       The verdict binds these exact bytes (body_sha256 SPLIT_ACCOUNT_COPY_SHA256, subject sha
+#       6601ac4d5167dceb8573189b1de96c6643414094e03720ed56c7c726037c74be); edit one byte and the approval is void,
+#       which scripts/tests/test_split_account_copy.py enforces.
+#   SPLIT_ACCOUNT_COPY_APPROVED  LOCKED at 0: the COPY is approved, but the sender campaign that renders it does not
+#       exist yet (a follow-up lane adds the campaign, its recipient rules and its dry run). The multi-account refusal
+#       in scripts/ops_intake/proof_review.py therefore records the split reason and sends nothing; it never claims a
+#       send it did not make.
+# shellcheck disable=SC2034  # approved copy registered ahead of its sender campaign (follow-up lane)
+readonly SPLIT_ACCOUNT_COPY_APPROVED=0
+# shellcheck disable=SC2034  # approved copy registered ahead of its sender campaign (follow-up lane)
+readonly SPLIT_ACCOUNT_COPY_VERDICT="ocv-49139bdc4dfc3e75"
+# shellcheck disable=SC2034  # approved copy registered ahead of its sender campaign (follow-up lane)
+readonly SPLIT_ACCOUNT_COPY_SHA256="1da7a62bded59a31aafe4ff475917d769986c7780f19285baf63dc8b52e30b9c"
+# shellcheck disable=SC2034  # approved copy registered ahead of its sender campaign (follow-up lane)
+readonly SPLIT_ACCOUNT_COPY_SUBJECT='About the documents you sent for your Muso credits'
+# shellcheck disable=SC2034  # approved copy registered ahead of its sender campaign (follow-up lane)
+readonly SPLIT_ACCOUNT_COPY_BODY='Thanks for sending your documents. To continue, we need your proof sent from the Muso account that made this credit request. Please reply to this message from that account and attach your proof.
+
+Your request is waiting on this. Once we have it, our team will review it and let you know what happens next.'
+# shellcheck disable=SC2034  # approved copy registered ahead of its sender campaign (follow-up lane)
+readonly SPLIT_ACCOUNT_COPY_SUBJECT_SHA256="6601ac4d5167dceb8573189b1de96c6643414094e03720ed56c7c726037c74be"
 #   VERIFY_AT_ENABLED  verify@muso.ai intake (the issuer_email_from_official_domain need line asks the issuer to write
 #       to it). OFF until Intercom identity verification (i2) is live (Fable exec-plan captain-1028-213x (c); p1
 #       ruling 096): that need is HELD at send (exit 3, nothing claimed); the dry run still renders it.

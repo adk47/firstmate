@@ -1,0 +1,3192 @@
+{
+ "_doc": "Frozen evidence for the coded proof review (scripts/ops_intake/proof_review.py), captured read-only from node-8 on 2026-11-04T23:0xZ. Every conversation is a real Jan proof ask from the census (data/jan-asks-intake-fable-j1/census.md section 5); nothing here is invented. Per ask: the documents H3 filed (proof_intake + forensics F2 reuse and F5a kind), the latest stage-2 verdict per request x role (stage2_shadow, with its consecutive-undetermined count), the latest doc-verify read per request x role (dv_outcomes, with its consecutive-unknown count), the latest DSP anchor (dsp_verdicts), and the fraud lens measured on the same day (credit_review.fraud_lens.default_lens over the core replica: no hold and no watch hit for any of these accounts). `expected` holds the verdict counts the precedence must produce, the ask's next state, the campaign it names, and where the coded rule agrees or disagrees with the verdict a human hand-posted on 2026-11-04 - the disagreements are the point: each one is a stored verdict a person read differently, not an excuse to relax the rule.",
+ "captured_at": "2026-11-04T23:10:00Z",
+ "source": "node-8 /var/lib/hydra-credit-verify/{proof,doc-verify,dsp-verify}.sqlite, read-only",
+ "asks": [
+  {
+   "conversation_id": "215476653443738",
+   "user_ids": [
+    44586
+   ],
+   "contact_h": "7e7ba0a41d9bbd91",
+   "documents": [
+    {
+     "proof_id": "5aa64991fd8e3324482f313a6e7beec10f7b3581251e3e7959e1f98866b35264",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "9ebe520b027828b1eb0467f21844051075567985a8c045a891925cf07cb3d349",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "c384835f89212f664ac2e812d48fe0152040b89b2b3ae6513605278a07422e54",
+     "doc_kind": "",
+     "reuse": []
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "0c713cb4-c040-44dd-8dec-442048488d20",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Engineer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "281ec74a-ebee-4e5c-a939-6004fb282dbd",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Co-Writer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Composer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Executive",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Executive Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Production Company",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "7b2f5ac1-ca69-41c2-9ed7-9ab69baadf22",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Production Company",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "fcb408e0-66ce-470d-a20c-8be0639cd92f",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    }
+   ],
+   "candidates": [
+    "0c713cb4-c040-44dd-8dec-442048488d20",
+    "281ec74a-ebee-4e5c-a939-6004fb282dbd",
+    "7b2f5ac1-ca69-41c2-9ed7-9ab69baadf22",
+    "fcb408e0-66ce-470d-a20c-8be0639cd92f"
+   ],
+   "expected": {
+    "counts": {
+     "sufficient": 0,
+     "gap-ask": 4,
+     "uvn-status": 0,
+     "hold": 0,
+     "declined-recommended": 0,
+     "unknown": 0
+    },
+    "state": "asked",
+    "campaign": "gap-ask",
+    "human_2026_11_04": "SUSPECT, plus an open deletion request on the account (census \u00a75, 17:35Z)",
+    "note": "DIVERGES: The coded rule asks for the gap: no role is supported, no document is flagged as another account's, and the fraud lens measured no hold on 2026-11-04 23:0xZ. The human's SUSPECT read came from reading the uploads, not from a stored verdict - so if SUSPECT is right, what the judges stored is missing it."
+   }
+  },
+  {
+   "conversation_id": "215476642230886",
+   "user_ids": [
+    104776
+   ],
+   "contact_h": "ece64441bf6bb33b",
+   "documents": [
+    {
+     "proof_id": "21f80c5f3a31ce3c92916387c4ca7f9ee97dc4cc5e6c007135e46d897583942c",
+     "doc_kind": "",
+     "reuse": [
+      {
+       "name": "reupload_same_account",
+       "severity": "info"
+      },
+      {
+       "name": "shared_document_claimant_undetermined",
+       "severity": "info"
+      }
+     ]
+    },
+    {
+     "proof_id": "b8b0695c0c105195d5d91b3be25c945ad0369c7e916977ba01bc2c977f4ce055",
+     "doc_kind": "",
+     "reuse": []
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "0705cf0e-4f72-4e98-9d0d-b61fe0680b30",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "1d522736-bca1-4f0f-8705-63e0334eafb9",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "1f8fa5ff-1fb3-4a92-9b9c-4ffbb7be6af5",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "21de91ed-35db-4901-b2db-52532863e726",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "2d288255-c63c-4c22-85ab-d9d98d5ebcaf",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "2e7c097e-1f9e-4a6e-a9c8-7616b3a04726",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "2f852afd-6f6a-46d6-8860-bb227656bee8",
+     "dsp_anchor": "single",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "36a1b5b7-3a6b-4ea5-af8e-bb575114c2bf",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "3b41ab2a-888a-41dc-959e-244b19081b59",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "4b8df1c2-7677-4334-a9ac-85b6ca7e7f47",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "4cf3df50-565d-43a7-bf6f-8e5b5da65f93",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "59167c46-1c7d-427c-bff2-66df10868e1f",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "60d97744-127c-429e-a6b9-aee8f275bfd6",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "638c60b9-bae2-46d6-8f7c-a42baf7fe380",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "66c1f48a-181c-4081-a072-309cb3521f03",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "6819cd89-e83d-4b76-84f8-1d84d43bcd9c",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "7654ca4b-7439-4014-b430-4e671ebd1947",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "8aacb92e-8fc3-4cde-ae83-e1be2ae95af0",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "8c48f639-824f-4a0c-9ee4-109099ddd513",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "8e90cd36-f1e3-48b7-94f4-d153dd2b0056",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "a3e84f20-98e5-4a77-aec2-2a96c5a8e5f7",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "a3fbbfa3-b4db-4378-839e-2b6bf9c4a909",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "b64e4f42-66ee-4936-9ef3-ad11b822e083",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "c7a0ef68-e322-48ec-a9dc-642f241ff62f",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "cc61fe0b-2167-4bd0-af6a-b060aa3138a8",
+     "dsp_anchor": "single",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "ccfa7de4-457e-4c54-a758-99c8f15b1bc9",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "e2ef9df3-fe8a-4e9e-8977-193ca016852a",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "ed0f44ed-b737-4b4e-ae22-7ac9829f5d85",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "f2e89c30-0d64-4b41-886a-08c39af90685",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "f60a0f93-a696-4668-9954-20b221950965",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "fd0b2721-e021-4479-bfe5-3e2ddd2bae79",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    }
+   ],
+   "candidates": [
+    "0705cf0e-4f72-4e98-9d0d-b61fe0680b30",
+    "1d522736-bca1-4f0f-8705-63e0334eafb9",
+    "1f8fa5ff-1fb3-4a92-9b9c-4ffbb7be6af5",
+    "21de91ed-35db-4901-b2db-52532863e726",
+    "2d288255-c63c-4c22-85ab-d9d98d5ebcaf",
+    "2e7c097e-1f9e-4a6e-a9c8-7616b3a04726",
+    "2f852afd-6f6a-46d6-8860-bb227656bee8",
+    "36a1b5b7-3a6b-4ea5-af8e-bb575114c2bf",
+    "3b41ab2a-888a-41dc-959e-244b19081b59",
+    "4b8df1c2-7677-4334-a9ac-85b6ca7e7f47",
+    "4cf3df50-565d-43a7-bf6f-8e5b5da65f93",
+    "59167c46-1c7d-427c-bff2-66df10868e1f",
+    "60d97744-127c-429e-a6b9-aee8f275bfd6",
+    "638c60b9-bae2-46d6-8f7c-a42baf7fe380",
+    "66c1f48a-181c-4081-a072-309cb3521f03",
+    "6819cd89-e83d-4b76-84f8-1d84d43bcd9c",
+    "7654ca4b-7439-4014-b430-4e671ebd1947",
+    "8aacb92e-8fc3-4cde-ae83-e1be2ae95af0",
+    "8c48f639-824f-4a0c-9ee4-109099ddd513",
+    "8e90cd36-f1e3-48b7-94f4-d153dd2b0056",
+    "a3e84f20-98e5-4a77-aec2-2a96c5a8e5f7",
+    "a3fbbfa3-b4db-4378-839e-2b6bf9c4a909",
+    "b64e4f42-66ee-4936-9ef3-ad11b822e083",
+    "c7a0ef68-e322-48ec-a9dc-642f241ff62f",
+    "cc61fe0b-2167-4bd0-af6a-b060aa3138a8",
+    "ccfa7de4-457e-4c54-a758-99c8f15b1bc9",
+    "e2ef9df3-fe8a-4e9e-8977-193ca016852a",
+    "ed0f44ed-b737-4b4e-ae22-7ac9829f5d85",
+    "f2e89c30-0d64-4b41-886a-08c39af90685",
+    "f60a0f93-a696-4668-9954-20b221950965",
+    "fd0b2721-e021-4479-bfe5-3e2ddd2bae79"
+   ],
+   "expected": {
+    "counts": {
+     "sufficient": 0,
+     "gap-ask": 0,
+     "uvn-status": 0,
+     "hold": 31,
+     "declined-recommended": 0,
+     "unknown": 0
+    },
+    "state": "hold",
+    "campaign": "",
+    "human_2026_11_04": "HOLD, reused document, fraud-lens hold (census \u00a75, 17:42Z)",
+    "note": "MATCHES the human card: H3 recorded shared_document_claimant_undetermined for this account's document - another account sent it and it does not say whose it is - which this rule holds. The fraud lens measured no hold at 23:0xZ, so the reuse signal is what holds it here."
+   }
+  },
+  {
+   "conversation_id": "215476632987122",
+   "user_ids": [
+    99424
+   ],
+   "contact_h": "a59a902d373dd787",
+   "documents": [
+    {
+     "proof_id": "3e9f02387eb58ecc6fe442bfd034877b3494af291c743eb185f58cb976915a32",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "6c173fea3ed392fa9c0f0adb504f24088b457c51f6bc90d1cce3ba325ec48d68",
+     "doc_kind": "",
+     "reuse": []
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "785c9604-755f-4bdf-9100-5dfee87c37c9",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Immersive Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    }
+   ],
+   "candidates": [
+    "785c9604-755f-4bdf-9100-5dfee87c37c9"
+   ],
+   "expected": {
+    "counts": {
+     "sufficient": 0,
+     "gap-ask": 1,
+     "uvn-status": 0,
+     "hold": 0,
+     "declined-recommended": 0,
+     "unknown": 0
+    },
+    "state": "asked",
+    "campaign": "gap-ask",
+    "human_2026_11_04": "sufficient on the merits, no approval route (the 'El Guero' state, 17:54Z)",
+    "note": "DIVERGES: The human read the proof as sufficient; the stored evidence today has one role (Immersive Mixing) unverifiable with need=distributor_dashboard_with_code and no DSP anchor, so the coded rule asks for the gap. If the human was right, the stored verdict is missing a verified read - this is the first case to check when the lane disagrees with a person."
+   }
+  },
+  {
+   "conversation_id": "215476472196994",
+   "user_ids": [
+    313462
+   ],
+   "contact_h": "332ab2f534108ca8",
+   "documents": [
+    {
+     "proof_id": "6e4f03d08cc513041d82b3c510cfc9218e96ca252d591a4532722c06a29a06e8",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "411cd8c8786439c0106026a5fea87de51a606837d01117e43982e01b7c487927",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "2583c077bd6c39b62d532ad5900b12fd09dbbcea3469c283400d593e030451b5",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "4c107b310269bec5a2dbed15835da11cab416fda880b9fca3968814e42024738",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "51a13268b285bcebcb1ea045a56b6051ef5d1d6d69d5ef0efb571d60dc5812e2",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "459531db4dd23466ae3aaf8981e9d5e2060a2b4455970a3fa3bc427835d14e1e",
+     "doc_kind": "",
+     "reuse": []
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "10fb405b-da6d-4111-be53-1479653e2444",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "d32d97c8-d210-4207-b540-21592198322b",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    }
+   ],
+   "candidates": [
+    "10fb405b-da6d-4111-be53-1479653e2444",
+    "d32d97c8-d210-4207-b540-21592198322b"
+   ],
+   "expected": {
+    "counts": {
+     "sufficient": 0,
+     "gap-ask": 2,
+     "uvn-status": 0,
+     "hold": 0,
+     "declined-recommended": 0,
+     "unknown": 0
+    },
+    "state": "asked",
+    "campaign": "gap-ask",
+    "human_2026_11_04": "insufficient (17:55Z)",
+    "note": "MATCHES: the documents do not cover the claimed Producer role."
+   }
+  },
+  {
+   "conversation_id": "215476490898367",
+   "user_ids": [
+    75557
+   ],
+   "contact_h": "470c6d946a968873",
+   "documents": [
+    {
+     "proof_id": "6f91fb71cceedc92b5cd3fa04f763b89880088a1e4ffd736f55acd028d343fee",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "9f12449901faeb93312b7ee9fc0274090d2e81f1d5c16c90c956300949341cc5",
+     "doc_kind": "",
+     "reuse": []
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "5ae124a9-e371-42fa-abf7-d6fd0e51d8ca",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    }
+   ],
+   "candidates": [
+    "5ae124a9-e371-42fa-abf7-d6fd0e51d8ca"
+   ],
+   "expected": {
+    "counts": {
+     "sufficient": 0,
+     "gap-ask": 1,
+     "uvn-status": 0,
+     "hold": 0,
+     "declined-recommended": 0,
+     "unknown": 0
+    },
+    "state": "asked",
+    "campaign": "gap-ask",
+    "human_2026_11_04": "reused file (18:05Z)",
+    "note": "DIVERGES: No F2 reuse signal is recorded for this account's documents today, so nothing holds it; the role is unverifiable and the rule asks for the gap. A 'reused file' the ledger does not carry is exactly what a reviewer must be able to see."
+   }
+  },
+  {
+   "conversation_id": "215476634353443",
+   "user_ids": [
+    127169
+   ],
+   "contact_h": "fe3e66fa530483f4",
+   "documents": [
+    {
+     "proof_id": "7d0554874400fccc54ad4dc172cfd751b654f299ec6f63c98d81155c76bb654a",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "e1b244ac4839f2cb8cc76be22e86860998f8c7f3a7d65e5ac26ef9d47914be18",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "db329e06daf481dc2f1d4d1c94d7d3024dddc7d720531011bf697ee2d15c8f26",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "cb0112a98d4c66fa95712172bbaa4728d16992ad088855f910d83373fca7f9b6",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "afabc9aa501724388c7cf4ca72913c508a5bf96e942e988b5987314e781316a7",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "0af011fb87010ae715bf4974f57219fc404c656662e0c83d1d12f5b8c627c0f1",
+     "doc_kind": "",
+     "reuse": []
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "010eadf6-fe65-4531-95f0-372b43583cc9",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "14da7acf-9604-460a-ba47-5ecf10af7caa",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "2442ab1d-dd97-4e49-9a15-f8bc027b4912",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "32030b94-394e-4263-826a-0fbbf63d362a",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "37899a00-1785-4b19-9ee9-7228899615f6",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "3b1f3faf-01b7-47aa-ad89-8fcec22548b5",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "40101463-9d40-4eeb-8dcc-47e09ff8f536",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "43717052-49db-43b5-b921-24683cbdcd6a",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "4f40c250-ff66-40f5-98b2-54fbc549e68d",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "54217c88-4638-4238-b798-0002264b2a94",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "5e25db1e-869c-462f-95b0-4d8875cde878",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "82c374c2-3ad1-4373-96b3-51aa0caa93b4",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Engineer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "8338a0e3-bb4d-4d55-9abe-7c81a6ada18f",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "864e3c58-bc6e-4a9a-9cd9-832b2e7e6a29",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Engineer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "88c536dd-45df-4ab2-bf4a-e5d4fe1315a5",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "911ebc9a-7341-4a48-8e91-41f06c2f7d71",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "963e01cf-0263-4164-ae01-69271119a70c",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Engineer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "9f541032-ed58-4835-898f-951f5e647eb9",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "a39799d6-3802-429d-9552-8f5d2d042afb",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "a9a60927-cc51-42ac-803c-5fddfdc5de63",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "b23f31a4-762e-4559-b9db-f53d3cac8aa1",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "b3adcb2b-f736-4f16-80db-3c169c811a8a",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "c6837865-a0bd-4f83-8365-b14892064848",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "cc3c0cde-d876-47f0-a377-fd5cdbad4c58",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Engineer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "dcb023bd-c73f-4887-8b9c-3dd946f4cdac",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "e592e708-dba8-4a0b-ab8e-4be69f68c8fe",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "ee4a4494-b8a1-4f53-8fec-fdcb67084687",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "f436de72-805f-4f70-9089-12cfb6c740a2",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Engineer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "f61bf4ea-af33-46a7-b911-0aa080ecba46",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    }
+   ],
+   "candidates": [
+    "010eadf6-fe65-4531-95f0-372b43583cc9",
+    "01ec69e8-5c88-419b-9f76-2354b423f961",
+    "0507f0c9-fb4f-48fe-932b-7b6f224d298b",
+    "14da7acf-9604-460a-ba47-5ecf10af7caa",
+    "2442ab1d-dd97-4e49-9a15-f8bc027b4912",
+    "32030b94-394e-4263-826a-0fbbf63d362a",
+    "37899a00-1785-4b19-9ee9-7228899615f6",
+    "3b1f3faf-01b7-47aa-ad89-8fcec22548b5",
+    "40101463-9d40-4eeb-8dcc-47e09ff8f536",
+    "43717052-49db-43b5-b921-24683cbdcd6a",
+    "4f40c250-ff66-40f5-98b2-54fbc549e68d",
+    "54217c88-4638-4238-b798-0002264b2a94",
+    "5e25db1e-869c-462f-95b0-4d8875cde878",
+    "82c374c2-3ad1-4373-96b3-51aa0caa93b4",
+    "8338a0e3-bb4d-4d55-9abe-7c81a6ada18f",
+    "84627c1f-1449-4180-9294-150b6e6e066b",
+    "864e3c58-bc6e-4a9a-9cd9-832b2e7e6a29",
+    "88c536dd-45df-4ab2-bf4a-e5d4fe1315a5",
+    "911ebc9a-7341-4a48-8e91-41f06c2f7d71",
+    "963e01cf-0263-4164-ae01-69271119a70c",
+    "9f541032-ed58-4835-898f-951f5e647eb9",
+    "a39799d6-3802-429d-9552-8f5d2d042afb",
+    "a9a60927-cc51-42ac-803c-5fddfdc5de63",
+    "b23f31a4-762e-4559-b9db-f53d3cac8aa1",
+    "b3adcb2b-f736-4f16-80db-3c169c811a8a",
+    "c6837865-a0bd-4f83-8365-b14892064848",
+    "cc3c0cde-d876-47f0-a377-fd5cdbad4c58",
+    "dcb023bd-c73f-4887-8b9c-3dd946f4cdac",
+    "e592e708-dba8-4a0b-ab8e-4be69f68c8fe",
+    "ee4a4494-b8a1-4f53-8fec-fdcb67084687",
+    "f436de72-805f-4f70-9089-12cfb6c740a2",
+    "f61bf4ea-af33-46a7-b911-0aa080ecba46"
+   ],
+   "expected": {
+    "counts": {
+     "sufficient": 0,
+     "gap-ask": 29,
+     "uvn-status": 0,
+     "hold": 0,
+     "declined-recommended": 0,
+     "unknown": 0
+    },
+    "state": "asked",
+    "campaign": "gap-ask",
+    "human_2026_11_04": "SUSPECT on 11 requests (18:24Z)",
+    "note": "DIVERGES: Agrees on the action (nothing is askable as sufficient) and differs on the label: the doubt is not recorded as a stage-2 reject_hold/review or an F2 reuse, so the coded rule sends the gap ask rather than holding."
+   }
+  },
+  {
+   "conversation_id": "215476646693119",
+   "user_ids": [
+    183732
+   ],
+   "contact_h": "4d95cf0f2dbad7af",
+   "documents": [
+    {
+     "proof_id": "d465bb9bd5a99f8cde52a8885c866262bb163e05d75d1824b4023cad079e35f5",
+     "doc_kind": "letter_of_direction",
+     "reuse": []
+    },
+    {
+     "proof_id": "951dd41647cf4f9a163976414d5ff82af1da3e11b129fa3be182bc74da171ad9",
+     "doc_kind": "catalog_page",
+     "reuse": []
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "230d2252-6394-4524-84a1-8920e2a67050",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "9820b20c-6076-4577-bd61-a5887c987d73",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    }
+   ],
+   "candidates": [
+    "230d2252-6394-4524-84a1-8920e2a67050",
+    "9820b20c-6076-4577-bd61-a5887c987d73"
+   ],
+   "expected": {
+    "counts": {
+     "sufficient": 0,
+     "gap-ask": 2,
+     "uvn-status": 0,
+     "hold": 0,
+     "declined-recommended": 0,
+     "unknown": 0
+    },
+    "state": "asked",
+    "campaign": "gap-ask",
+    "human_2026_11_04": "read-only; two Producer requests hold (20:12Z)",
+    "note": "DIVERGES: The two requests are unverifiable with a named gap, so the coded step is the gap ask. The stage-2 hold the human described is not in stage2_shadow for this account, so nothing here holds it."
+   }
+  },
+  {
+   "conversation_id": "215476665383647",
+   "user_ids": [
+    103302
+   ],
+   "contact_h": "e5dc68f482817617",
+   "documents": [
+    {
+     "proof_id": "d48f29ac6c548433ac77e5045af3c7b45865e411a9643f10eecd1e4a09be9584",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "991d687eb8ca287d63e2cba202f42e530405fea10f4376e696b3ba479993c5be",
+     "doc_kind": "daw_session",
+     "reuse": [
+      {
+       "name": "reupload_same_account",
+       "severity": "info"
+      }
+     ]
+    },
+    {
+     "proof_id": "28d913a54d5c1ce5ac8ee54a930d940b1202ad45b65428c29b5e49e5ed007f4a",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "b6fce3307d0fed7778a9b618d8d601a21d8f7036d05340600be6b2a43fd4b1cb",
+     "doc_kind": "",
+     "reuse": [
+      {
+       "name": "reupload_same_account",
+       "severity": "info"
+      }
+     ]
+    },
+    {
+     "proof_id": "c940e32e5077fadca3ce35ebfa76226a63e6d8f5599be32a6477e0f296ef7089",
+     "doc_kind": "daw_session",
+     "reuse": []
+    },
+    {
+     "proof_id": "abc1650575801e8f0c88c5fcf3c449fa6c4ef86c36d4322c5d87e4f920856d71",
+     "doc_kind": "daw_session",
+     "reuse": []
+    },
+    {
+     "proof_id": "6da3016737683e4b855b70f52754ae407d2cbfe5c5427100a233d87195b4cbf3",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "7935e080c7c89bcd40022476dfd8af856aa3202ce1005cc33c6a200102f4b1f6",
+     "doc_kind": "daw_session",
+     "reuse": [
+      {
+       "name": "reupload_same_account",
+       "severity": "info"
+      }
+     ]
+    },
+    {
+     "proof_id": "1859d2d965b20ecb7793c73671d50db093cc53d745628070dab3025977a391f7",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "16f7a5ea5d81b9d3153328c4791b4159ec1f74805e277b6e1f915938fb960837",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "8653e1a2ed281b123826a9a3c67490255049055b72ab13c30ba2a8d7a9c98b92",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "06cd8edf0fb095d5004bda22fc1dedc0f93562233b19db7b05013e68d41e9943",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "0777e87fb9fa1eeb570752b1b8d04974056bb207bf2b665956ea0cb2cb0009e4",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "9bd95a9c6b1ed2b2f98c9e2c9fc7af667f4106df5a20b2fa87a20a280d314720",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "42838027794281c80de86a5d579b106a16c9615652ee2ce75e183dc1eafac686",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "7eb77037b124bfacd118477f186fe259493f6448cf1b8d1e92ae8a7e034d874a",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "5ced14d3017f7a57e1d51af5b760b512ae4cca7fe0056ee4a191feaae1c30f7e",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "f0a5a8660a6d0422b645044e5c3826cc1abee09cfd9fc113ae7d720601337160",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "ac8621e7cca380fd87092ab9662a876016efabec4a5d3a25a11f69250b09e98e",
+     "doc_kind": "",
+     "reuse": []
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "24b61d63-5b78-45a1-ae06-5c730d59545a",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "335a8d5b-6e87-4f3c-9c6e-199493e0fea4",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "4759a566-adff-4786-a596-bc32f0a6b555",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "6b7154b3-7845-42cb-bc15-a8bcebeca32c",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "9a47fe2a-71c2-48d9-b0c2-0ff05fc8fee1",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "b29d7fb7-8547-416d-8d52-5d6ed519eaae",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "dc289673-f847-4a6e-9fc8-38c946f7c0a6",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "e06f9d30-d805-4ab1-99ae-44060ec77505",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Composer",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mastering",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "e92eed94-3f15-4e4e-b140-d192ddb5866c",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mastering",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    }
+   ],
+   "candidates": [
+    "24b61d63-5b78-45a1-ae06-5c730d59545a",
+    "335a8d5b-6e87-4f3c-9c6e-199493e0fea4",
+    "4759a566-adff-4786-a596-bc32f0a6b555",
+    "6b7154b3-7845-42cb-bc15-a8bcebeca32c",
+    "9a47fe2a-71c2-48d9-b0c2-0ff05fc8fee1",
+    "b29d7fb7-8547-416d-8d52-5d6ed519eaae",
+    "dc289673-f847-4a6e-9fc8-38c946f7c0a6",
+    "e06f9d30-d805-4ab1-99ae-44060ec77505",
+    "e92eed94-3f15-4e4e-b140-d192ddb5866c"
+   ],
+   "expected": {
+    "counts": {
+     "sufficient": 0,
+     "gap-ask": 9,
+     "uvn-status": 0,
+     "hold": 0,
+     "declined-recommended": 0,
+     "unknown": 0
+    },
+    "state": "asked",
+    "campaign": "gap-ask",
+    "human_2026_11_04": "NO verdict (the 7 open ones, census \u00a75)",
+    "note": "MATCHES: Answered by code: 9 requests, every role unverifiable with a named gap - the ask Ops said was 'queued'."
+   }
+  },
+  {
+   "conversation_id": "215476433322735",
+   "user_ids": [
+    83452
+   ],
+   "contact_h": "34aed0c84822f84c",
+   "documents": [
+    {
+     "proof_id": "d8d0af8c322e73d43b90d422370171762b84d166ce5d5cb44c25fa6a843c1dee",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "9a800ae44b19972d440562e34bf82546a226c0c0d390d0dcf3e81f439c32e1fb",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "595d0bf3c163ffa5729df8411d0c590b994557e596f6b874fc5527ec19e93700",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "bd51cec54de93439f6b37bbcd87168c9e1d5b496ae7966f7252436af0b4fb462",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "7ef70465cd7634a4906659f3b1f93962e4c66fff26ae8a0a24fc6874f1e1914f",
+     "doc_kind": "",
+     "reuse": []
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "028f3662-4756-4c4c-b426-86f118447d32",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "05bfa263-d177-452f-b5d4-7554252f030a",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "05d38189-1d02-41b1-a231-bc5a0f55e1f6",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "09d2fc2d-7243-483f-9b41-6bffcd042aa4",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Instrumentation",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      },
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "0a09682a-a8ce-4138-b65d-cc8a0125a73d",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Recording Engineer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "0cb9d737-455d-48c9-801a-2864b54bb108",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "12bf2808-b199-4c37-b8ea-0d813b953f60",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "176a4bc9-7039-4ab1-af25-564250ae6a62",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "19c38b5b-50e4-4a08-a344-44cf213b3086",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "205011e2-811a-40fb-a003-8dddee4e415e",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "226692e6-b6b1-43ae-9637-e17f1c00b180",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "334802fa-a497-4a9b-ab91-cef854d97c32",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "353ec8e4-a79c-4054-9de5-53fcc6b56c6b",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "35b2d992-7d8e-42ad-a028-ce73a78afddb",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "3cb13df2-0437-4c0d-bee0-fd5070fedec8",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Arranger",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      },
+      {
+       "role": "Bass",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      },
+      {
+       "role": "Drums",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      },
+      {
+       "role": "Engineer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      },
+      {
+       "role": "Guitar",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      },
+      {
+       "role": "Instrumentation",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      },
+      {
+       "role": "Keyboard",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      },
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "3d7ec7e3-255c-4fda-8efa-e5700334d953",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "3fd761ce-c40c-4cf7-8642-9cbd8e5fa994",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "4543a788-b6c5-419a-bf96-5bee4d103fed",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "47f861f6-38a4-4c1f-811f-ba9bee32737a",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Co-Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "4e945aff-ac66-4abe-874e-f80d618ffec9",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "50d903b2-0a6d-4019-93d9-2e58b6a49738",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "56dd0915-18a2-4206-865b-3da7855765b2",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "632ca0e5-c966-440b-a7d9-6f0fde7169a8",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "67b48f3f-acfc-44d7-8458-9be99a959695",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "6800a026-1605-48ff-858d-f42341d84d3d",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "686b0540-b2ce-4392-a9b9-a4b1456b70e7",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "79aee5bf-ebfe-47fb-a32f-14add34ce617",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "7a055a0f-35c6-4644-9274-e28fe402fb9d",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "7b3f6f7d-c23a-46ec-a149-b38de2493ccf",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "7c2179c6-1864-4f3f-bf17-d34c2becb5b9",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "7da36935-427a-492b-b3fd-2e52627641db",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "issuer_email_from_official_domain",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "8c188f5a-9823-40a5-bb3d-a71935af179f",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "8e815cbd-6e0b-42e0-865c-eb07592a9356",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "98a8444f-632d-4b9b-b5ad-af8175a178a5",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Recording Engineer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "99a01f9a-ef27-45c4-9add-1b020fc3cc47",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "9f35c971-694f-4d03-9d95-f20c7e8c60e6",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "a14e13e1-ede4-4a0f-9f8a-735768f6af06",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "a7f6dab9-6f58-4071-b82b-3bd33c0a59fe",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "a926887d-198d-4f7e-bad4-b161549fc183",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "b4d3c560-ded3-48bb-81b5-16a48fb0beaf",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "b65faa5f-1a16-4a1d-820d-51c889559302",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Instrumentation",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      },
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "b9273336-b967-4f65-b360-dadda0b3ec86",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Recording Engineer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "bf4b9d38-c988-484c-b1a4-7cf9b54a1642",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "bf5780d2-b619-4622-93d9-22d07c286f3d",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "c207738a-c0fb-4a08-b3ed-df8be49b1b34",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Recording Engineer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "c7b9d191-1f98-423c-81dc-31826b511112",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "c8a8c79e-a073-4708-a97e-f63b23754270",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 3
+      }
+     ]
+    },
+    {
+     "request_id": "c8f4d118-8722-48f7-8969-0632db139262",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 1
+      }
+     ]
+    },
+    {
+     "request_id": "d3eaed36-74cd-4ccc-8606-a107eb9d495a",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 1
+      }
+     ]
+    },
+    {
+     "request_id": "d4004582-4bcd-4146-adef-90d4680c3073",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 1
+      }
+     ]
+    },
+    {
+     "request_id": "d42e92ac-6040-4269-97f7-7af9b0b75676",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 1
+      }
+     ]
+    },
+    {
+     "request_id": "d9a37fbc-fca8-4786-88d4-00a690d5c865",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 1
+      }
+     ]
+    },
+    {
+     "request_id": "dbd9ee43-c52f-4a6c-b1db-0ec30efb271b",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 1
+      }
+     ]
+    },
+    {
+     "request_id": "e129dec8-3ea2-44b7-baec-30657201d0cd",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 1
+      }
+     ]
+    },
+    {
+     "request_id": "e9111c8e-8c96-4afd-b2a2-39b4f6e637bc",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 1
+      }
+     ]
+    },
+    {
+     "request_id": "ea12079e-0907-4988-b94b-000b7329ea83",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 1
+      }
+     ]
+    },
+    {
+     "request_id": "f1205757-fac3-4997-bb6c-aac1da368141",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 1
+      }
+     ]
+    },
+    {
+     "request_id": "f4df08ee-be5c-4aab-bd9e-a3ec7e748958",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 1
+      }
+     ]
+    },
+    {
+     "request_id": "fc64c559-9dd0-4a4a-89dd-a344aaf5ea72",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "issuer_email_from_official_domain",
+       "unknown_runs": ""
+      }
+     ]
+    },
+    {
+     "request_id": "fdce21eb-7891-49ba-bfad-0baf1cd24a53",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Mixing",
+       "stage2": "",
+       "undetermined_runs": "",
+       "dv": "unknown",
+       "dv_need": "",
+       "unknown_runs": 1
+      }
+     ]
+    }
+   ],
+   "candidates": [
+    "028f3662-4756-4c4c-b426-86f118447d32",
+    "05bfa263-d177-452f-b5d4-7554252f030a",
+    "05d38189-1d02-41b1-a231-bc5a0f55e1f6",
+    "09d2fc2d-7243-483f-9b41-6bffcd042aa4",
+    "0a09682a-a8ce-4138-b65d-cc8a0125a73d",
+    "0cb9d737-455d-48c9-801a-2864b54bb108",
+    "12bf2808-b199-4c37-b8ea-0d813b953f60",
+    "176a4bc9-7039-4ab1-af25-564250ae6a62",
+    "19c38b5b-50e4-4a08-a344-44cf213b3086",
+    "205011e2-811a-40fb-a003-8dddee4e415e",
+    "226692e6-b6b1-43ae-9637-e17f1c00b180",
+    "334802fa-a497-4a9b-ab91-cef854d97c32",
+    "353ec8e4-a79c-4054-9de5-53fcc6b56c6b",
+    "35b2d992-7d8e-42ad-a028-ce73a78afddb",
+    "3cb13df2-0437-4c0d-bee0-fd5070fedec8",
+    "3d7ec7e3-255c-4fda-8efa-e5700334d953",
+    "3fd761ce-c40c-4cf7-8642-9cbd8e5fa994",
+    "4543a788-b6c5-419a-bf96-5bee4d103fed",
+    "47f861f6-38a4-4c1f-811f-ba9bee32737a",
+    "4e945aff-ac66-4abe-874e-f80d618ffec9",
+    "50d903b2-0a6d-4019-93d9-2e58b6a49738",
+    "56dd0915-18a2-4206-865b-3da7855765b2",
+    "632ca0e5-c966-440b-a7d9-6f0fde7169a8",
+    "67b48f3f-acfc-44d7-8458-9be99a959695",
+    "6800a026-1605-48ff-858d-f42341d84d3d",
+    "686b0540-b2ce-4392-a9b9-a4b1456b70e7",
+    "79aee5bf-ebfe-47fb-a32f-14add34ce617",
+    "7a055a0f-35c6-4644-9274-e28fe402fb9d",
+    "7b3f6f7d-c23a-46ec-a149-b38de2493ccf",
+    "7c2179c6-1864-4f3f-bf17-d34c2becb5b9",
+    "7da36935-427a-492b-b3fd-2e52627641db",
+    "8c188f5a-9823-40a5-bb3d-a71935af179f",
+    "8e815cbd-6e0b-42e0-865c-eb07592a9356",
+    "98a8444f-632d-4b9b-b5ad-af8175a178a5",
+    "99a01f9a-ef27-45c4-9add-1b020fc3cc47",
+    "9f35c971-694f-4d03-9d95-f20c7e8c60e6",
+    "a14e13e1-ede4-4a0f-9f8a-735768f6af06",
+    "a7f6dab9-6f58-4071-b82b-3bd33c0a59fe",
+    "a926887d-198d-4f7e-bad4-b161549fc183",
+    "b4d3c560-ded3-48bb-81b5-16a48fb0beaf",
+    "b65faa5f-1a16-4a1d-820d-51c889559302",
+    "b9273336-b967-4f65-b360-dadda0b3ec86",
+    "bf4b9d38-c988-484c-b1a4-7cf9b54a1642",
+    "bf5780d2-b619-4622-93d9-22d07c286f3d",
+    "c207738a-c0fb-4a08-b3ed-df8be49b1b34",
+    "c7b9d191-1f98-423c-81dc-31826b511112",
+    "c8a8c79e-a073-4708-a97e-f63b23754270",
+    "c8f4d118-8722-48f7-8969-0632db139262",
+    "d3eaed36-74cd-4ccc-8606-a107eb9d495a",
+    "d4004582-4bcd-4146-adef-90d4680c3073",
+    "d42e92ac-6040-4269-97f7-7af9b0b75676",
+    "d9a37fbc-fca8-4786-88d4-00a690d5c865",
+    "dbd9ee43-c52f-4a6c-b1db-0ec30efb271b",
+    "e129dec8-3ea2-44b7-baec-30657201d0cd",
+    "e9111c8e-8c96-4afd-b2a2-39b4f6e637bc",
+    "ea12079e-0907-4988-b94b-000b7329ea83",
+    "f1205757-fac3-4997-bb6c-aac1da368141",
+    "f4df08ee-be5c-4aab-bd9e-a3ec7e748958",
+    "fc64c559-9dd0-4a4a-89dd-a344aaf5ea72",
+    "fdce21eb-7891-49ba-bfad-0baf1cd24a53"
+   ],
+   "expected": {
+    "counts": {
+     "sufficient": 0,
+     "gap-ask": 4,
+     "uvn-status": 44,
+     "hold": 0,
+     "declined-recommended": 0,
+     "unknown": 12
+    },
+    "state": "asked",
+    "campaign": "gap-ask",
+    "human_2026_11_04": "NO verdict (60 UVN rows, 'packet sent' 11-02 16:41Z)",
+    "note": "MATCHES: Answered by code: 4 requests have evidence with a named gap, 44 have nothing readable on file, 12 have one unreadable read (UNKNOWN: never asked about, never 'nothing on file'). The gap ask goes first; the rest is counted on the board."
+   }
+  },
+  {
+   "conversation_id": "215473681300330",
+   "user_ids": [
+    298376
+   ],
+   "contact_h": "8ee5ef139d125f57",
+   "documents": [
+    {
+     "proof_id": "b736bff15732c55a90c1751917ea3017e930ea867596f6a873c7b57f2816c0fd",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "ddfb41596e7fa4402369a1efe008847b99dd5956abcbe89883e5f2b53397f6d4",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "2ac913869e5cb8e95fb24d6cf77ce2f11a184bc624851e033b73b90a0bc8a648",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "4bec219a344fb4eddc9b0891b408a715d36ff355649580637f51a1830c3d0287",
+     "doc_kind": "",
+     "reuse": []
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "5915db5d-fb40-4f5d-b204-45c19d4a6a47",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "A&R",
+       "stage2": "need_more",
+       "undetermined_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "issuer_email_from_official_domain",
+       "unknown_runs": ""
+      }
+     ]
+    }
+   ],
+   "candidates": [
+    "5915db5d-fb40-4f5d-b204-45c19d4a6a47"
+   ],
+   "expected": {
+    "counts": {
+     "sufficient": 0,
+     "gap-ask": 1,
+     "uvn-status": 0,
+     "hold": 0,
+     "declined-recommended": 0,
+     "unknown": 0
+    },
+    "state": "asked",
+    "campaign": "gap-ask",
+    "human_2026_11_04": "NO verdict (Ops: 'Firstmate could not access the conversation')",
+    "note": "MATCHES: Answered by code where Ops said it could not access the conversation: the H3 filing reached the documents, one request, one named gap."
+   }
+  },
+  {
+   "conversation_id": "215476629616641",
+   "user_ids": [],
+   "contact_h": null,
+   "documents": [],
+   "requests": [],
+   "candidates": [],
+   "expected": {
+    "counts": {
+     "sufficient": 0,
+     "gap-ask": 0,
+     "uvn-status": 0,
+     "hold": 0,
+     "declined-recommended": 0,
+     "unknown": 0
+    },
+    "state": "unfiled",
+    "campaign": "",
+    "human_2026_11_04": "NO verdict",
+    "note": "MATCHES: Nothing is filed for this conversation anywhere: the card says so instead of rendering a zero, and the next step is the resolver's filing step (credit-proof.py file --apply)."
+   }
+  },
+  {
+   "conversation_id": "215476495717959",
+   "user_ids": [],
+   "contact_h": null,
+   "documents": [],
+   "requests": [],
+   "candidates": [],
+   "expected": {
+    "counts": {
+     "sufficient": 0,
+     "gap-ask": 0,
+     "uvn-status": 0,
+     "hold": 0,
+     "declined-recommended": 0,
+     "unknown": 0
+    },
+    "state": "unfiled",
+    "campaign": "",
+    "human_2026_11_04": "NO verdict ('no attachments')",
+    "note": "MATCHES: The filer has nothing for this conversation, so 'no attachments' is a fact about the filing, not a verdict."
+   }
+  },
+  {
+   "conversation_id": "(none: the documents for this account were filed outside Intercom)",
+   "user_ids": [
+    66747
+   ],
+   "contact_h": "1651895c8ca995c5",
+   "documents": [
+    {
+     "proof_id": "71ba0b81fff6ed084ec641e2d04c662aada18fd1866b1afaaa415b31da574a21",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "750837d850f1fb372e4c590dbea4f2c896f0970b4052c2a10505456eb241a030",
+     "doc_kind": "",
+     "reuse": []
+    },
+    {
+     "proof_id": "c69fb90337ee96c5e18b28dc0256fbc438b6ac5e6f1c6594b351e459519c9dcd",
+     "doc_kind": "",
+     "reuse": []
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "65280e36-7209-4791-afcb-e899c5b59719",
+     "dsp_anchor": "single",
+     "roles": [
+      {
+       "role": "Arranger",
+       "stage2": "",
+       "undetermined_runs": "",
+       "unknown_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code"
+      },
+      {
+       "role": "Co-Writer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "unknown_runs": "",
+       "dv": "verified",
+       "dv_need": ""
+      },
+      {
+       "role": "Composer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "unknown_runs": "",
+       "dv": "verified",
+       "dv_need": ""
+      },
+      {
+       "role": "Producer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "unknown_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code"
+      },
+      {
+       "role": "Programmer",
+       "stage2": "",
+       "undetermined_runs": "",
+       "unknown_runs": "",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code"
+      }
+     ]
+    }
+   ],
+   "candidates": [
+    "65280e36-7209-4791-afcb-e899c5b59719"
+   ],
+   "expected": {
+    "counts": {
+     "sufficient": 0,
+     "gap-ask": 1,
+     "uvn-status": 0,
+     "hold": 0,
+     "declined-recommended": 0,
+     "unknown": 0
+    },
+    "state": "asked",
+    "campaign": "gap-ask",
+    "human_2026_11_04": "none (this case is not one of Jan's asks)",
+    "note": "MATCHES: A real verified read: two of the request's five claimed roles are verified by doc-verify (independently confirmed by xc_dsp). The other three are unverifiable, so the request is a gap, not a sufficient one - the per-role rule in action. The request's DSP anchor is 'single', so even the two supported roles would be sufficient-on-merits, not sufficient."
+   }
+  }
+ ]
+}

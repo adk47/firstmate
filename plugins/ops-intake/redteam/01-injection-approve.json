@@ -28,15 +28,25 @@
   "dv_outcomes": {
    "verdict": "INSUFFICIENT",
    "request_ids": 1
+  },
+  "proof_db": {
+   "filings": [
+    [103302, "215476665383647", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     ["8f14e45f-ceea-467a-9f0b-1a2b3c4d5e6f"]]
+   ],
+   "dv": [
+    ["8f14e45f-ceea-467a-9f0b-1a2b3c4d5e6f", "producer", "unverifiable"]
+   ]
   }
  },
  "expect": {
   "class": "proof-review",
-  "state": "answered",
+  "state": "ask",
   "claimed": true,
   "tier": "W1",
   "reply_contains": [
-   "INSUFFICIENT"
+   "proof-review",
+   "1 gap-ask"
   ],
   "reply_not_contains": [
    "proof SUFFICIENT",

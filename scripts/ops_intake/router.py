@@ -339,7 +339,7 @@ def route(*, envelope: Envelope, policy: policy_mod.Policy | None = None,
         ans = _answer_for(cls=cls.cls, ask={"ask_id": ask_id}, extracted=extracted,
                           backends=backends, due_at=due_at, policy=policy,
                           requester=requester, frame=frame, guardobj=guardobj,
-                          text=envelope.text)
+                          text=envelope.text, asked_at=_iso(now))
     except Exception as exc:  # noqa: BLE001 - fail closed, never invent an answer
         ans = answer_mod.Answer(state="failed",
                                 verdict=f"answerer error ({type(exc).__name__}) - nothing done",
@@ -481,13 +481,126 @@ def route(*, envelope: Envelope, policy: policy_mod.Policy | None = None,
     return finish(ans, ledger_id=ledger_id)
 
 
+def _proof_review_answer(*, ask: dict[str, Any], ids: ids_mod.ExtractedIds, due_at: str,
+                         asked_at: str) -> answer_mod.Answer:
+    """The coded proof-review verdict for a conversation the router reached. Dry run only: the
+    customer send stays on the credit-review.py uvn-status path, never here."""
+    from . import proof_review
+    if len(ids.intercom) > 1:
+        # A review is ONE conversation: build_ask matches a single conversation_id, so naming two and
+        # reviewing the first would mark the ask answered with the second one's proof never read. A
+        # person splits the ask instead of this lane deciding on a conversation it was not asked about.
+        return answer_mod.Answer(
+            state="ask",
+            verdict=(f"proof-review not decided: the ask names {len(ids.intercom)} conversations and a review "
+                     "is one conversation"),
+            verdict_source="coded", evidence=ids.evidence(),
+            next_step="a person must split the ask into one conversation per ask, then re-ask",
+            due_at=due_at)
+    conversation = ids.intercom[0] if ids.intercom else ""
+    try:
+        built = proof_review.build_ask(ask_id=str(ask.get("ask_id") or ""),
+                                       conversation_id=conversation,
+                                       asked_at=asked_at or proof_review.utcnow(),
+                                       lens=proof_review.real_lens())
+        rev = proof_review.run(built, mode="dry-run")
+    except proof_review.ProofReviewError as exc:
+        return answer_mod.Answer(
+            state="failed",
+            verdict=f"proof-review could not read the evidence ({exc}) - no verdict produced",
+            verdict_source="coded", evidence=ids.evidence(),
+            next_step="page: coded proof-review store unreadable", due_at=due_at,
+            page=f"ops-intake: proof-review evidence unreadable on {conversation or 'no conversation'}")
+    if not rev.verdicts:
+        # Nothing was decided: no H3 filing at all (`unfiled`), filings whose candidate requests were
+        # never recorded, or an ask this lane refuses to decide (it covers several accounts). That is
+        # not an answer - the ask stays OPEN with the gate reason, so the missing step is chased
+        # instead of the ask closing on zero requests. A refused ask carries no card, and an empty
+        # evidence trips the reply contract, so the refusal states itself here.
+        evidence = rev.card or (f"proof-review {rev.ask.ask_id} · acct {rev.ask.account} · refused: "
+                               f"{rev.gate_reason or 'no verdict'} · sent: none")
+        return answer_mod.Answer(
+            state="ask",
+            verdict=f"proof-review {rev.state}: no verdict produced for this ask",
+            verdict_source="coded", evidence=evidence,
+            next_step=(rev.gate_reason or "file the conversation's proof and its candidate requests "
+                       "(credit-proof.py file --apply) before the review can decide"),
+            due_at=due_at)
+    if rev.state in ("unknown", "ask"):
+        # UNKNOWN asks nothing and approves nothing: a judge has not finished reading (or a read
+        # names no document on file), so the ask is not answered and not closed - it stays OPEN and
+        # is chased by the overdue-ask tick until doc-verify's next read or the stage-2 write decides
+        # it. The campaign travels with the review; the sender owns the copy and the send.
+        counts = ", ".join(f"{n} {v}" for v, n in sorted(rev.counts.items()) if n)
+        return answer_mod.Answer(
+            state="ask",
+            verdict=f"proof-review {rev.state}: nothing asked and nothing decided"
+                    + (f": {counts}" if counts else ""),
+            verdict_source="coded", evidence=rev.card,
+            next_step="doc-verify's next read or the stage-2 write decides this ask; it stays open until then"
+                      + (f" (campaign {rev.campaign})" if rev.campaign else ""),
+            due_at=due_at)
+    counts = ", ".join(f"{n} {v}" for v, n in sorted(rev.counts.items()) if n)
+    if rev.state in ("hold", "declined"):
+        # A hold (a forged document, a fraud hold) and a contradiction are decisions this lane may
+        # NOT take: un-holding a forged document or refusing a claim is a named human's. So the ask
+        # is not answered - it is HELD, the human queue is paged, and the state says which one it is
+        # so nobody reads "answered" as resolved.
+        held_for = ("a held or forged document and the claim" if rev.state == "hold"
+                    else "a returned document that contradicts the claim")
+        return answer_mod.Answer(
+            state="held",
+            verdict=f"proof-review {rev.state}: a person decides this ask"
+                    + (f": {counts}" if counts else ""),
+            verdict_source="coded", evidence=rev.card,
+            next_step=f"a named human decides {held_for}; this lane records the verdict and sends nothing",
+            due_at=due_at,
+            page=(f"ops-intake: proof-review {rev.state} on ask {ask.get('ask_id') or '-'} "
+                  f"- a person decides"))
+    if rev.state == "waiting_route":
+        # Every request is supported, but approving a credit is not this lane's step and the route
+        # that would record the approval is OFF (`policies/proof-review-route.json`). The ask is not
+        # answered: it stays OPEN in the ask state, so the overdue tick chases the captain decision
+        # instead of the review closing on a decision nobody made.
+        return answer_mod.Answer(
+            state="ask",
+            verdict=(f"proof-review {rev.state}: every request is supported, no approval route to record it"
+                     + (f": {counts}" if counts else "")),
+            verdict_source="coded", evidence=rev.card,
+            next_step=("approval is a captain decision and the route that records it is off, so this ask "
+                       "stays open until a person rules on it"),
+            due_at=due_at)
+    if rev.state == "asked" and rev.sent in ("", "none"):
+        # The review chose a campaign but nothing has been sent: this answer runs `mode="dry-run"`, so no
+        # customer message leaves from here. Closing the ask `answered` would retire it from the open queue
+        # before anyone was asked, so it stays OPEN and the missing send is what a person is told to do.
+        # A recorded send (`rev.sent` names the campaign the sender reported `sent_notes` for) closes it.
+        return answer_mod.Answer(
+            state="ask",
+            verdict=(f"proof-review asked: {rev.campaign or 'a campaign'} chosen, no customer message sent yet"
+                     + (f": {counts}" if counts else "")),
+            verdict_source="coded", evidence=rev.card,
+            next_step=("the approved sender has not been invoked for this ask: run the sender's "
+                       f"--campaign {rev.campaign or 'gap-ask|uvn-status'} for this account, then re-ask"),
+            due_at=due_at)
+    return answer_mod.Answer(
+        state="answered",
+        verdict=f"proof-review {rev.state}" + (f": {counts}" if counts else ""),
+        verdict_source="coded", evidence=rev.card,
+        next_step="the ask is the only coded step; approval is a captain decision",
+        due_at=due_at)
+
+
 def _answer_for(*, cls: str, ask: dict[str, Any], extracted: ids_mod.ExtractedIds,
                 backends: answer_mod.Backends, due_at: str,
                 policy: policy_mod.Policy, requester: policy_mod.Requester,
                 frame: fraud.Frame | None | None = None,
                 guardobj: guard.Guard | None = None,
-                text: str | None = None) -> answer_mod.Answer:
+                text: str | None = None,
+                asked_at: str = "") -> answer_mod.Answer:
     if cls == "proof-review":
+        if extracted.intercom:
+            return _proof_review_answer(ask=ask, ids=extracted, due_at=due_at, asked_at=asked_at)
         return answer_mod.answer_proof_review(ask=ask, ids=extracted, backends=backends,
                                               due_at=due_at)
     if cls == "summarize-resolve":

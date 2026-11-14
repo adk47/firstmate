@@ -19,6 +19,7 @@ __all__ = [
     "facts",
     "intent",
     "output_guard",
+    "proof_review",
     "resolutions",
     "router",
     "summarize",

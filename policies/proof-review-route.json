@@ -1,0 +1,9 @@
+{
+  "_doc": "The approval route a coded proof review (scripts/ops_intake/proof_review.py) may use when a request comes back SUFFICIENT. mode is off | log | on and defaults to off: a missing, unreadable or malformed file reads OFF, because a broken policy file must never look like a lifted gate. OFF is today's truth and NOT a bug: there is no proof-backed single-request approval route in production (on 2026-11-04 18:37Z core answered needs_human_review even for Jan and Nick, and the IDP validator alone approves), so a sufficient proof review waits as ask row state=waiting_route and is counted on the board; nothing is sent to the user beyond the on-file status and the word 'approved' never appears on a card. `log` would record only. `on` does not approve either: this lane has no approval writer, and writing one is a captain decision (the standing rule: nothing approves without a recorded captain decision), so flipping this file alone changes nothing until a reviewed PR adds the writer and records approved_by + approval_ref in policies/credit-approval-automation.json.",
+  "approval_route": {
+    "mode": "off",
+    "enabled_by": null,
+    "approval_ref": null,
+    "status_note": "No proof-backed approval route exists in production. Sufficient-on-merits requests are held as waiting_route, exactly as Jan's 2026-11-04 asks had to be handled by hand."
+  }
+}

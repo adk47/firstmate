@@ -1,0 +1,594 @@
+{
+ "_doc": "Hand-built cases that pin each arm of the precedence in scripts/ops_intake/proof_review.py, including the ones no production account happens to show today. These are synthetic INPUTS (a stage-2 outcome, a doc-verify outcome, an H3 reuse signal) written by hand from the shapes the stores record; they are not copied from a person's case. `expected` is the verdict, and `why` must appear in the reason the module gives, so a rule that changes arm silently fails here.",
+ "cases": [
+  {
+   "name": "fraud lens holds the account",
+   "documents": [
+    {
+     "proof_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-fraud",
+     "roles": [
+      {
+       "role": "Composer",
+       "dv": "verified"
+      }
+     ]
+    }
+   ],
+   "fraud_held": [
+    "fraud-lens hold: banned account"
+   ],
+   "expected": "hold",
+   "why": "fraud lens holds the account"
+  },
+  {
+   "name": "another account already sent the document (H3 reuse, hard)",
+   "documents": [
+    {
+     "proof_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "reuse": [
+      {
+       "name": "reused_by_another_account_same_claim",
+       "severity": "hard"
+      }
+     ]
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-reuse",
+     "roles": [
+      {
+       "role": "Composer",
+       "dv": "verified"
+      }
+     ]
+    }
+   ],
+   "expected": "hold",
+   "why": "another account already sent"
+  },
+  {
+   "name": "another account sent it and it does not say whose it is (INFO severity, still a hold)",
+   "documents": [
+    {
+     "proof_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "reuse": [
+      {
+       "name": "shared_document_claimant_undetermined",
+       "severity": "info"
+      }
+     ]
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-shared",
+     "roles": [
+      {
+       "role": "Composer",
+       "dv": "unverifiable"
+      }
+     ]
+    }
+   ],
+   "expected": "hold",
+   "why": "another account already sent"
+  },
+  {
+   "name": "a co-writer split sheet two accounts hold is not reuse",
+   "documents": [
+    {
+     "proof_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+     "reuse": [
+      {
+       "name": "shared_split_sheet",
+       "severity": "positive"
+      }
+     ]
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-cowriter",
+     "roles": [
+      {
+       "role": "Composer",
+       "dv": "verified",
+       "proof_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+     ],
+     "dsp_anchor": "both"
+    }
+   ],
+   "expected": "sufficient",
+   "why": "every claimed role"
+  },
+  {
+   "name": "a likely forged document holds, it does not decline",
+   "documents": [
+    {
+     "proof_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-forged",
+     "roles": [
+      {
+       "role": "Composer",
+       "dv": "forged"
+      }
+     ]
+    }
+   ],
+   "expected": "hold",
+   "why": "likely forged"
+  },
+  {
+   "name": "a document that contradicts the claim is a decline recommendation",
+   "documents": [
+    {
+     "proof_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-contra",
+     "roles": [
+      {
+       "role": "Composer",
+       "dv": "contradicted",
+       "dv_need": "readable_document"
+      }
+     ]
+    }
+   ],
+   "expected": "declined-recommended",
+   "why": "contradicts the claim"
+  },
+  {
+   "name": "stage 2 forensic doubt (review) holds",
+   "documents": [
+    {
+     "proof_id": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-review",
+     "roles": [
+      {
+       "role": "Composer",
+       "stage2": "review"
+      }
+     ]
+    }
+   ],
+   "expected": "hold",
+   "why": "stage 2 recorded review"
+  },
+  {
+   "name": "stage 2 account hold (human) holds",
+   "documents": [
+    {
+     "proof_id": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-human",
+     "roles": [
+      {
+       "role": "Composer",
+       "stage2": "human"
+      }
+     ]
+    }
+   ],
+   "expected": "hold",
+   "why": "stage 2 recorded human"
+  },
+  {
+   "name": "stage 2 reject_hold holds",
+   "documents": [
+    {
+     "proof_id": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-reject",
+     "roles": [
+      {
+       "role": "Composer",
+       "stage2": "reject_hold"
+      }
+     ]
+    }
+   ],
+   "expected": "hold",
+   "why": "stage 2 recorded reject_hold"
+  },
+  {
+   "name": "every role supported and a same-run Spotify AND Tidal anchor",
+   "documents": [
+    {
+     "proof_id": "3333333333333333333333333333333333333333333333333333333333333333",
+     "doc_kind": "split_sheet"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-suff",
+     "dsp_anchor": "both",
+     "roles": [
+      {
+       "role": "Composer",
+       "stage2": "approve",
+       "proof_id": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      {
+       "role": "Lyricist",
+       "dv": "verified",
+       "proof_id": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+     ]
+    }
+   ],
+   "expected": "sufficient",
+   "why": "same-run Spotify and Tidal anchor"
+  },
+  {
+   "name": "every role supported, no DSP anchor: the 2026-11-04 El Guero state",
+   "documents": [
+    {
+     "proof_id": "4444444444444444444444444444444444444444444444444444444444444444",
+     "doc_kind": "split_sheet"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-merits",
+     "dsp_anchor": "none",
+     "roles": [
+      {
+       "role": "Composer",
+       "stage2": "approve",
+       "proof_id": "4444444444444444444444444444444444444444444444444444444444444444"
+      }
+     ]
+    }
+   ],
+   "expected": "sufficient-on-merits-no-route",
+   "why": "no route"
+  },
+  {
+   "name": "one role supported, another covered by nothing: a gap, not sufficient",
+   "documents": [
+    {
+     "proof_id": "5555555555555555555555555555555555555555555555555555555555555555",
+     "doc_kind": "split_sheet"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-partial",
+     "dsp_anchor": "both",
+     "roles": [
+      {
+       "role": "Composer",
+       "stage2": "approve",
+       "proof_id": "5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      {
+       "role": "Mixing",
+       "stage2": "need_more"
+      }
+     ]
+    }
+   ],
+   "expected": "gap-ask",
+   "why": "does not cover the claim"
+  },
+  {
+   "name": "an unverifiable document with a named need is a gap ask",
+   "documents": [
+    {
+     "proof_id": "6666666666666666666666666666666666666666666666666666666666666666"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-need",
+     "roles": [
+      {
+       "role": "Producer",
+       "dv": "unverifiable",
+       "dv_need": "counterparty_signed_or_registered"
+      }
+     ]
+    }
+   ],
+   "expected": "gap-ask",
+   "why": "counterparty_signed_or_registered"
+  },
+  {
+   "name": "stage 2 need_more is a gap ask",
+   "documents": [
+    {
+     "proof_id": "7777777777777777777777777777777777777777777777777777777777777777"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-need2",
+     "roles": [
+      {
+       "role": "Producer",
+       "stage2": "need_more"
+      }
+     ]
+    }
+   ],
+   "expected": "gap-ask",
+   "why": "does not cover the claim"
+  },
+  {
+   "name": "nothing readable on file is the uvn-status ask",
+   "documents": [
+    {
+     "proof_id": "8888888888888888888888888888888888888888888888888888888888888888"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-nodoc",
+     "roles": [
+      {
+       "role": "Producer",
+       "stage2": "no_document"
+      }
+     ]
+    }
+   ],
+   "expected": "uvn-status",
+   "why": "nothing readable"
+  },
+  {
+   "name": "unreadable in two stage-2 runs is no_document",
+   "documents": [
+    {
+     "proof_id": "9999999999999999999999999999999999999999999999999999999999999999"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-undet",
+     "roles": [
+      {
+       "role": "Producer",
+       "stage2": "undetermined",
+       "undetermined_runs": 2
+      }
+     ]
+    }
+   ],
+   "expected": "uvn-status",
+   "why": "nothing readable"
+  },
+  {
+   "name": "unreadable twice by doc-verify is no_document",
+   "documents": [
+    {
+     "proof_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-unk2",
+     "roles": [
+      {
+       "role": "Producer",
+       "dv": "unknown",
+       "unknown_runs": 2
+      }
+     ]
+    }
+   ],
+   "expected": "uvn-status",
+   "why": "nothing readable"
+  },
+  {
+   "name": "unreadable ONCE is unknown: no ask, no approval",
+   "documents": [
+    {
+     "proof_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-unk1",
+     "roles": [
+      {
+       "role": "Producer",
+       "dv": "unknown",
+       "unknown_runs": 1
+      }
+     ]
+    }
+   ],
+   "expected": "unknown",
+   "why": "has not finished reading"
+  },
+  {
+   "name": "a request no judge has looked at is unknown",
+   "documents": [
+    {
+     "proof_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-none",
+     "roles": []
+    }
+   ],
+   "expected": "unknown",
+   "why": "no judge has recorded a verdict"
+  },
+  {
+   "name": "only screenshots of a catalog panel is the uvn-status ask",
+   "documents": [
+    {
+     "proof_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "doc_kind": "catalog_page"
+    },
+    {
+     "proof_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "doc_kind": "daw_session"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-shot",
+     "roles": [
+      {
+       "role": "Producer",
+       "dv": "unverifiable",
+       "dv_need": "distributor_dashboard_with_code"
+      }
+     ]
+    }
+   ],
+   "expected": "uvn-status",
+   "why": "screenshots"
+  },
+  {
+   "name": "a document H3 read as an injection surface is still only unverifiable",
+   "documents": [
+    {
+     "proof_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+     "injection": "high"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-inj",
+     "roles": [
+      {
+       "role": "Producer",
+       "dv": "unverifiable",
+       "dv_need": "readable_document"
+      }
+     ]
+    }
+   ],
+   "expected": "gap-ask",
+   "why": "readable_document"
+  },
+  {
+   "name": "a judged role list shorter than the claim is a partial read, not coverage",
+   "documents": [
+    {
+     "proof_id": "5555555555555555555555555555555555555555555555555555555555555555",
+     "doc_kind": "split_sheet"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-partial",
+     "dsp_anchor": "both",
+     "roles": [
+      {
+       "role": "Composer",
+       "stage2": "approve",
+       "proof_id": "5555555555555555555555555555555555555555555555555555555555555555"
+      }
+     ],
+     "claimed_roles": ["Composer", "Producer"]
+    }
+   ],
+   "expected": "unknown",
+   "why": "not read: Producer"
+  },
+  {
+   "name": "no requests at all (the ask names nothing filed) is unknown",
+   "documents": [],
+   "requests": [],
+   "expected": "unknown",
+   "why": ""
+  },
+  {
+   "name": "a verified role whose document is not on file is unmeasured, not sufficient",
+   "documents": [],
+   "requests": [
+    {
+     "request_id": "req-unfiled",
+     "dsp_anchor": "both",
+     "roles": [
+      {
+       "role": "Producer",
+       "dv": "verified",
+       "proof_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+     ]
+    }
+   ],
+   "expected": "unknown",
+   "why": "not on file"
+  },
+  {
+   "name": "an approved role whose document is a different one from what is on file is unmeasured",
+   "documents": [
+    {
+     "proof_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "doc_kind": "split_sheet"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-mismatch",
+     "dsp_anchor": "both",
+     "roles": [
+      {
+       "role": "Composer",
+       "stage2": "approve",
+       "proof_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+     ]
+    }
+   ],
+   "expected": "unknown",
+   "why": "not on file"
+  },
+  {
+   "name": "a verified role citing only a screenshot is not a document of record",
+   "documents": [
+    {
+     "proof_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "doc_kind": "catalog_page"
+    }
+   ],
+   "requests": [
+    {
+     "request_id": "req-shot",
+     "dsp_anchor": "both",
+     "roles": [
+      {
+       "role": "Composer",
+       "dv": "verified",
+       "proof_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     ]
+    }
+   ],
+   "expected": "uvn-status",
+   "why": "screenshots"
+  }
+ ]
+}

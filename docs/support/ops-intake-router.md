@@ -65,7 +65,7 @@ caps, lens, quarantine, reply contract).
 
 | class | answerer | notes |
 |---|---|---|
-| `proof-review` | `answer_proof_review` | verdict from coded `dv_outcomes` ONLY; no verdict = `open` with a due time |
+| `proof-review` | `_proof_review_answer` when the ask carries an Intercom conversation id, else `answer_proof_review` | with exactly one conversation: the coded review (`scripts/ops_intake/proof_review.py`, dry run) renders the card and verdict — see `docs/credit-verification/proof-review-coded.md`. With several conversations, or several accounts on one ask (a review is one conversation and one account): the ask stays `ask` with the split instruction, and the refusal states itself as the answer's own evidence since no card is rendered. Without a conversation: verdict from coded `dv_outcomes` ONLY; no verdict = `open` with a due time |
 | `summarize-resolve` | `answer_summarize_resolve` | a facts card from code reads plus a LOOKUP in `policies/ops-resolutions.json`; executes nothing (returns a `WriteRequest`) — see `docs/support/ops-summarize-resolve.md` |
 | `gdpr-hide` | `answer_gdpr_hide` | only the reversible HIDDEN_ENTITY_IDS PR, only on a register-hide-eligible page |
 | `clickup-categorize` | `answer_clickup` | counts from code; status moves are W1 |
@@ -121,6 +121,9 @@ and **3 writes / target profile / day**; over a cap the ask is `held` and paged.
 * **`dv_outcomes`** (`/var/lib/hydra-credit-verify/doc-verify.sqlite`) for
   proof-review; the newest row per request id, and `MIXED` only when two
   DIFFERENT requests land on different verdicts (history is not a disagreement).
+  This is the fallback answerer; an ask carrying an Intercom conversation id goes
+  to the coded proof review, which additionally reads H3, the DSP anchor and the
+  fraud lens (`docs/credit-verification/proof-review-coded.md`).
 * **Intercom conversation parts** for the summary (`credit_verify/proof/intercom.py`).
 
 **Not wired yet, on purpose:** ClickUp counts and the status-report counts. A

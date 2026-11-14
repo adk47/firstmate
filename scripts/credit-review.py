@@ -873,6 +873,15 @@ def _uvn_status(args: argparse.Namespace) -> int:
     if args.exclude_users:
         exclude = {ln.strip() for ln in Path(args.exclude_users).read_text().splitlines()
                    if ln.strip() and not ln.startswith("#")}
+    only: set[str] = set()
+    if getattr(args, "only_users", None):
+        only = {ln.strip() for ln in Path(args.only_users).read_text().splitlines()
+                if ln.strip() and not ln.startswith("#")}
+        if not only:
+            # A supplied scope that names nobody is a broken scope file, never "no scope": reading it as
+            # unscoped would offer the FULL eligible population to a caller that asked for one account.
+            print(f"--only-users {args.only_users} names no user; nothing sent", file=sys.stderr)
+            return 2
     why = preflight_outcomes(args)
     if why:
         print(f"UVN STATUS: {why}.")
@@ -881,6 +890,7 @@ def _uvn_status(args: argparse.Namespace) -> int:
                             campaign=args.campaign, wording=args.wording or "",
                             ledger_path=args.ledger, proof_path=args.proof_on_file, preview_dir=args.preview,
                             from_stage2=args.from_stage2, stage2_path=args.proof_store, exclude_users=exclude,
+                            only_users=only,
                             check_recipients=args.check_recipients, segment_daily_cap=args.segment_daily_cap,
                             gmail_fallback_o=args.gmail_fallback_o,
                             no_correction=args.no_correction, max_entries=args.max_entries,
@@ -1402,6 +1412,8 @@ def parser() -> argparse.ArgumentParser:
                          "in-app (open conversation, else an Intercom in-app message), up to 5,000 a day")
     us.add_argument("--exclude-users", default=None, metavar="FILE",
                     help="user ids (one per line) another lane messages today: left for a later run")
+    us.add_argument("--only-users", default=None, metavar="FILE",
+                    help="user ids (one per line) this run may message: nobody else in the population is offered")
     us.set_defaults(fn=cmd_uvn_status)
 
     cp = sub.add_parser("claim-proof-ask", help="dated code ask to band B/C claimants + its day-7 reminder "

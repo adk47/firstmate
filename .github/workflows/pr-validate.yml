@@ -2770,6 +2770,15 @@ jobs:
           # ledger-only (the hooks never change a reader's result), digest/watch candidates, and the doc-verify
           # red-team (an injected document can never make the gate verify without an independent anchor).
           python3 scripts/tests/test_injection_watch.py
+          # Coded proof review (scripts/ops_intake/proof_review.py): every "review the proof" ask
+          # answered by code. The precedence arm by arm, the 11-04 census asks and the six verdicts
+          # firstmate hand-posted (with a recorded reason wherever the coded rule disagrees), the
+          # card contract (no account names, never the word "approved" without a decision row), and
+          # the next step: the sender is named, never replaced. Frozen fixtures, stdlib only.
+          python3 scripts/tests/test_proof_review.py
+          # The multi-account refusal copy's byte contract with the outbound copy gate: the body and
+          # subject in scripts/intercom-verify-request.sh must still hash to the approved verdict's shas.
+          python3 scripts/tests/test_split_account_copy.py
           # Document intake (credit-proof.py file): files a conversation's documents into
           # proof_intake with the account + candidate requests; never judges. Intercom/Trino faked.
           python3 scripts/tests/test_proof_intake.py

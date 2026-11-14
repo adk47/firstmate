@@ -744,6 +744,11 @@ by `credit-review.py intercom-reconcile`, which is audited and revertible. Every
 from every ask until a stage-2 verdict releases the credit
 (`scripts/credit_review/stage2_verdicts.py`: need_more -> `gap-ask`, no_document -> `uvn-status`);
 the decider never asks those users itself.
+A "review the proof" ask is answered by code, not by an agent turn: `scripts/ops_intake/proof_review.py`
+(one verdict per request from H3 + doc-verify + the DSP anchor + the fraud lens, one next step, one
+reply card). It approves nothing and builds no customer message - a SUFFICIENT verdict is recorded as
+`waiting_route` until a captain decision creates an approval writer (`policies/proof-review-route.json`).
+See `docs/credit-verification/proof-review-coded.md`.
 
 Every credit-trust AI call goes through `scripts/credit_trust/llm.py` (Codex on the
 subscription, tool-less via `scripts/lib/codex-judge-exec.sh` -> Jev), which writes

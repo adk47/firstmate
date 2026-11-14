@@ -287,6 +287,21 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("1 left out: another lane messages them today (--exclude-users)", text)
         self.assertIn("1 documents on file (not asked)", text)
 
+    def test_only_users_scopes_the_run_to_the_named_account_whatever_else_became_eligible(self):
+        # QA on #1945: the one-account call names its account POSITIVELY. A same-segment user who
+        # became eligible after the caller's own read sorts ahead of ours (paid first, then user id),
+        # and can never take the single slot.
+        proof(self.proof, [entry(6), entry(7)])
+        self.s.add("r6", 6, "need_more")
+        self.s.add("r7", 7, "need_more")
+        q = replica([6, 7], status={6: "unverified", 7: "unverified"}, requests={6: ["r6"], 7: ["r7"]})
+        rep, gate = self.go("gap-ask", q, only_users={"7"})
+        self.assertEqual(self.sent(gate), {"7": ["r7"]})
+        self.assertEqual(len(gate.calls), 1)
+        # ... and an account that is no longer in the population is offered to nobody.
+        rep, gate = self.go("gap-ask", replica([6, 7]), only_users={"9"})
+        self.assertEqual(self.sent(gate), {})
+
     def test_gap_ask_needs_a_stage2_population_and_rereads_the_verdict_before_each_send(self):
         with self.assertRaises(ValueError):
             uvn_status.run(list_path=str(self.list), segment="paid", campaign="gap-ask")
