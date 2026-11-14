@@ -17,7 +17,7 @@ metadata:
 
 # change-watch
 
-Load this on a `check: change-watch <task-id> <pr-url> <metric> regressed` wake, on a `check: change-watch <task-id> <pr-url> interrupted at +Nm` wake, on a `check: change-watch <task-id> <pr-url> unmeasurable (<reason>)` wake, on a `procevent when-cw-<hash> <sequence>` completion wake, or when deciding whether a merged change needs a by-effect watch.
+Load this on a `check: change-watch <task-id> <pr-url> <metric> regressed` wake, on a `check: change-watch <task-id> <pr-url> beta <metric> regressed` wake, on a `check: change-watch <task-id> <pr-url> interrupted at +Nm` wake, on a `check: change-watch <task-id> <pr-url> unmeasurable (<reason>)` wake, on a `procevent when-cw-<hash> <sequence>` completion wake, or when deciding whether a merged change needs a by-effect watch.
 
 ## What the watch is
 
@@ -28,7 +28,7 @@ A Kubernetes target is not scored until its rollout fingerprint (pod images plus
 A Sentry read waits for that same landing, taking it from whichever kind the watch has: the Deployments' rollout when the watch has any, otherwise its mapped deploy workflow's run for this merge, so a repository deployed by its own workflow is not read before that deploy has landed either.
 The per-sample budget bounds the cluster reads only; the Sentry and deploy-workflow reads go over the network under their own bounds and are never costed against a budget the pod reads spent.
 A registration that could not read a manifest says `could not read N manifest(s)`: that is a measurement gap to re-register once the forge answers, not a PR without a service; it writes the unmeasurable row and queues the unmeasurable wake even though no watch directory exists. A manifest the PR deleted is named `manifest removed` and needs no watch. A Deployment that declares no namespace is a gap too, never `not-applicable`.
-`bin/fm-change-watch.sh`'s header is the one owner of the exact commands, metrics, bars, schedule, and test seams; read it before acting.
+`bin/fm-change-watch.sh`'s header is the one owner of the exact commands, metrics, bars, schedule, target resolution, beta stage, and test seams; read it before acting.
 
 The watch is armed automatically when a merged PR touches a deployable service, from both `bin/fm-pr-merge.sh` and the watcher's merged-poll landing path.
 Registration is additive: a registration failure never turns a successful merge into a reported failure, and a PR that touches no deployable service registers nothing.

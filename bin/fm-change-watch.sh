@@ -143,15 +143,20 @@
 # merged sha to reach the target, and only then reads. The wait is bounded by
 # FM_CW_BETA_WAIT_ATTEMPTS x FM_CW_BETA_POLL_SECONDS because registration runs on
 # the merge path; a rollout that has not landed inside that bound is stated as
-# unmeasured rather than read as a pass.
+# unmeasured rather than read as a pass, and so is a target whose pre-merge pod
+# fingerprint could not be read at registration, because an unproven landing is
+# never treated as landed.
 #
-# The readings go through the same metric reader and the same bar function a
-# sample uses, scored against that beta baseline rather than an absolute bar,
-# because an absolute bar on a dev environment is not evidence about the change.
-# A metric whose baseline could not be read is left unscored and named in the
-# verdict, never scored absolutely.
+# The readings go through the same metric reader a sample uses, scored against
+# that beta baseline rather than an absolute bar, because an absolute bar on a dev
+# environment is not evidence about the change. The beta bars are relative to the
+# beta baseline: oomkilled regressed when value > baseline, rss_ratio when
+# value > baseline + 0.05, and every other beta metric by its production bar,
+# which is already relative to the baseline it is given. A metric whose baseline
+# could not be read is left unscored and named in the verdict, never scored
+# absolutely.
 #
-# Four verdicts, recorded in the watch's beta record:
+# Five verdicts, recorded in the watch's beta record:
 #   beta clean: <n> metric(s) read on <target>, none crossed its bar
 #   beta clean: <n> of <total> metric(s) read on <target>, none crossed its bar;
 #               unmeasured: <metrics>
