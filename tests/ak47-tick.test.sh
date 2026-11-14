@@ -97,6 +97,34 @@ test_expiry_does_not_run_lsof_per_entry() {
 }
 
 
+test_an_unprivileged_tick_says_so_instead_of_failing_to_swap() {
+  # The tick is a user unit: swapoff and swapon are root-only. If it just tried,
+  # every tick on a full swap would WARN and count a failure while swap stayed
+  # full - a capability it does not have, reported as a transient error. It must
+  # prove it can swap first, then file the one line that grants the capability.
+  local box
+  box=$(mktemp -d "${TMPDIR:-/tmp}/ak47-swappriv.XXXXXX")
+  mkdir -p "$box/bin"
+  printf '#!/bin/sh\necho called >>"%s/swapoff.calls"\nexit 0\n' "$box" >"$box/bin/swapoff"
+  printf '#!/bin/sh\nexit 0\n' >"$box/bin/swapon"
+  chmod +x "$box/bin/swapoff" "$box/bin/swapon"
+  {
+    printf 'SwapTotal:      33554428 kB\n'
+    printf 'SwapFree:         335544 kB\n'
+    printf 'MemAvailable:   90000000 kB\n'
+  } >"$box/meminfo"
+  # The sandbox conf arms the reclaim, so the only thing stopping it is privilege.
+  sed -i 's/^swap_pressure=.*/swap_pressure=1/' "$SANDBOX/config/devops.conf"
+  PATH="$box/bin:$PATH" AK47_SWAP_PRIVILEGE=no AK47_MEMINFO="$box/meminfo" \
+    "$ROOT/ak47/tick.sh" --apply >/dev/null 2>&1
+  sed -i 's/^swap_pressure=.*/swap_pressure=0/' "$SANDBOX/config/devops.conf"
+  [ -s "$box/swapoff.calls" ] && fail "an unprivileged tick tried to run swapoff anyway"
+  grep -q '^.*swap-unprivileged ' "$SANDBOX/state/findings.log" 2>/dev/null \
+    || fail "the tick did not report that reclaiming swap needs root"
+  rm -rf "$box"
+  pass "an unprivileged tick reports the missing privilege instead of failing to swap"
+}
+
 test_swap_is_restored_even_when_the_reclaim_fails() {
   # swapoff -a && swapon -a has two failure modes that only appear when it goes
   # wrong: a tick killed between the two calls leaves the box with no swap, and
@@ -597,3 +625,4 @@ test_expiry_is_bounded_per_run_and_says_what_is_left
 test_expiry_does_not_run_lsof_per_entry
 test_the_finding_class_is_one_the_inbox_accepts
 test_swap_is_restored_even_when_the_reclaim_fails
+test_an_unprivileged_tick_says_so_instead_of_failing_to_swap

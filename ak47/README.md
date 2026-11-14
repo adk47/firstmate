@@ -282,6 +282,21 @@ nothing, and `oomctl` lists **no** monitored cgroups. Three verified reasons:
    unit has never read it. `daemon-reload` alone does not re-apply service
    properties to a running unit.
 
+**Swap reclamation needs root too.** The tick's `swap-pressure` action does
+`swapoff -a` then `swapon -a`; both are root-only, and the tick runs as a user
+unit, so it would WARN and count a failure every tick on a full swap while swap
+stayed full. It now proves the capability with `swap_privileged` before trying,
+and files `swap-unprivileged` — the one line Aaron needs, not a transient error.
+The 2026-11-14 reclaim was run by hand and took swap from 31.9 GB of 31.9 GB to
+0 (RAM 69 GB used, 54 GB available). To let the tick do it, one sudoers rule:
+
+```
+printf 'aaron ALL=(root) NOPASSWD: /sbin/swapoff -a, /sbin/swapon -a\n' \
+  | sudo tee /etc/sudoers.d/60-ak47-swap
+sudo chmod 0440 /etc/sudoers.d/60-ak47-swap
+# revert: sudo rm /etc/sudoers.d/60-ak47-swap
+```
+
 Aaron's call, not the tick's — enabling the watch lets oomd kill the largest
 cgroup under the slice after 20 s at 50% pressure, and that cgroup can be a
 worker, a lane, or the chair:
@@ -453,7 +468,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-103 tests across seven files: the budget, the census, the guards, the guarded
+104 tests across seven files: the budget, the census, the guards, the guarded
 delete, the big-entry take-down, the tick, and the weekly review. They are hermetic — no tmux, no
 network, no live fleet state — and registered as `pure-contract-unit` in
 `bin/fm-test-run.sh`.

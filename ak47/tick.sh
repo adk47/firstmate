@@ -345,7 +345,13 @@ report_only() {
   sw=$(ak47_swap_pct); mem=$(ak47_mem_avail_gb)
   if [ "${sw:-0}" -ge 70 ] && [ "${mem:-0}" -ge 20 ]; then
     if [ "$SWAP_ARMED" = 1 ] && [ "$APPLY" -eq 1 ]; then
-      if swap_reclaim; then
+      # This runs as a user unit, and swapoff/swapon are root-only. Arming the
+      # reclaim without saying so is a capability the tick does not have: it
+      # would WARN and count a failure every tick while swap stayed full. So it
+      # proves it can swap before it tries, and files the one line Aaron needs.
+      if ! swap_privileged; then
+        finding swap-unprivileged "swap ${sw}% full with ${mem} GB RAM free; reclaiming it needs root - grant it with the sudoers rule in ak47/README.md, or run: sudo swapoff -a && sudo swapon -a"
+      elif swap_reclaim; then
         act "swap-pressure swap=${sw}% mem=${mem}G action='swapoff -a; swapon -a' reclaimed_gb=${AK47_SWAP_RECLAIMED:-0} revert='none needed: pages back in'"
       else
         act "WARN swap-pressure swap=${sw}% action failed; left alone"

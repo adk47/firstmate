@@ -155,12 +155,12 @@ ak47_tmp_gb() {
 
 # ak47_swap_pct - swap used as a whole percentage.
 ak47_swap_pct() {
-  awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{printf "%d", (t>0)?((t-f)*100/t):0}' /proc/meminfo
+  awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{printf "%d", (t>0)?((t-f)*100/t):0}' "${AK47_MEMINFO:-/proc/meminfo}"
 }
 
 # ak47_mem_avail_gb - MemAvailable in whole GB.
 ak47_mem_avail_gb() {
-  awk '/^MemAvailable:/{printf "%d", $2/1048576}' /proc/meminfo
+  awk '/^MemAvailable:/{printf "%d", $2/1048576}' "${AK47_MEMINFO:-/proc/meminfo}"
 }
 
 # ak47_load15 - the 15-minute load average.
@@ -328,4 +328,19 @@ swap_reclaim() {
   # shellcheck disable=SC2034  # read by the tick after this call
   AK47_SWAP_RECLAIMED=$(( ${after:-0} - ${before:-0} ))
   return "$rc"
+}
+
+# swap_privileged - 0 when this process may actually stop and start swap.
+#
+# swapoff and swapon are root-only, and the tick runs as a user unit. Arming the
+# reclaim without checking would WARN and count a failure every tick while swap
+# stayed full, so the tick proves the capability first and files the one line
+# that grants it. AK47_SWAP_PRIVILEGE overrides the probe: yes/no/auto.
+swap_privileged() {
+  case "${AK47_SWAP_PRIVILEGE:-auto}" in
+    yes) return 0 ;;
+    no)  return 1 ;;
+  esac
+  [ "$(id -u)" -eq 0 ] && return 0
+  sudo -n true 2>/dev/null
 }
