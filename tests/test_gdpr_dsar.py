@@ -38,6 +38,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 PROFILE = "7950a3c4-db2f-49bb-9acf-0d406bfb09ae"
 
 
+def _reviewed(account):
+    """A claim filed against an existing profile and processed with the claimant's links: the kind the identity
+    step counts as a tie (hide_guard.prove)."""
+    return {"claim_id": f"claim-{account}", "account": account, "reason": "", "created": 1_760_000_000,
+            "links": {"instagram": "https://instagram.com/the.artist"}}
+
+
 def utc(*a):
     return datetime(*a, tzinfo=timezone.utc)
 
@@ -185,6 +192,8 @@ class Decide(unittest.TestCase):
                                lambda ext, email, trusted: (account, "external_id (professional id)" if account else "")), \
                 mock.patch.object(sources, "account_names", lambda ids: {i: ("Laczkovszki Arpad",) for i in ids}), \
                 mock.patch.object(sources, "processed_claims", lambda ids: {i: claims[i] for i in ids if i in claims}), \
+                mock.patch.object(sources, "claim_proofs", lambda ids: {i: [_reviewed(u) for u in claims.get(i, ())]
+                                                                        for i in ids}), \
                 mock.patch.object(sources, "page_facts", page_facts):
             self.run.decide_rows([self.s.get(rid)], set(hidden), conv_reader=lambda cid: conv,
                                  prefix_resolver=resolver or (lambda prefixes: {}))
@@ -2436,6 +2445,7 @@ class FirstReply(unittest.TestCase):
         with mock.patch.object(sources, "resolve_account", resolve_account), \
                 mock.patch.object(sources, "account_names", lambda ids: {i: ("Laczkovszki Arpad",) for i in ids}), \
                 mock.patch.object(sources, "processed_claims", lambda ids: {i: {7} for i in ids}), \
+                mock.patch.object(sources, "claim_proofs", lambda ids: {i: [_reviewed(7)] for i in ids}), \
                 mock.patch.object(sources, "page_facts", page_facts):
             self.run.decide_all(set(), conv_reader=lambda cid: conv, stale_hours=20,
                                 prefix_resolver=lambda prefixes: {})

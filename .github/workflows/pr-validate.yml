@@ -2255,6 +2255,17 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_gdpr_dsar
+      - name: Run GDPR hide guard tests
+        # scripts/gdpr_pipeline/hide_guard.py stands between the hide plan and the hide PRs. These lock: a
+        # page is admitted only when the requester's own claim shows the profile is theirs (a reviewed
+        # claim, or an unreviewed one on the one profile that account created) or a verified sender writes
+        # from the profile's own site; a name match and a legal request with no ownership are held; one
+        # requester over 3 profiles or the register over 20 in 24 h is held and paged once; a proof that
+        # cannot be read stops the run before the open PR is touched; a dry run spends no cap. The identity
+        # step asks with the same rule (hide_guard.prove). Stdlib unittest, targeted by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_gdpr_hide_guard
       - name: Run Caroline billing and hide boundary tests
         # policies/caroline-billing-and-hide.json states, per billing shape, whether Caroline answers from a
         # read, performs one bounded write, or hands off, plus the refund caps and every undo. This pins it to

@@ -205,6 +205,15 @@ ships.
 
 ### Legal threats
 
+**Changed 2026-11-13.** The hide guard (`docs/support/gdpr-pipeline.md`, "The hide guard") holds a legal-threat page
+unless the requester owns the profile, on the `--include-legal` run too. The 90-day audit found 45 profiles removed
+on a legal or takedown request with no approver and no ownership on record, one of them claimed by a different
+account. Ownership is the exemption: a legal threat sent by the account that holds the verified claim on the profile
+is decided on path A, like any owner request, and the guard prepares it. Only a legal threat with no owner match is
+held (`legal_request_without_ownership`), and the hold names the ask - the requester's claim on the profile, or the
+owner's written authorisation (a link, or a label/management document). The bullets describe the 2026-10-23 rule the
+identity step still records as `LEGAL_HIDE_FIRST`.
+
 - A legal-threat request on a small page is `LEGAL_HIDE_FIRST`: the hide is owed on the same 24-hour deadline, with no
   identity step first (captain, 2026-10-23: hide the disputed item now, as narrowly as the claim allows, reversibly).
   It is the same reversible hide with the same undo. A big-name page goes to Jan.
@@ -219,8 +228,9 @@ ships.
   /opt/hydra/scripts/gdpr-pipeline.py hide-batch --include-legal --open-prs  # prepares the PRs
   ```
 
-  11 rows (18 pages) are past their deadline on that command, the oldest due 2026-09-18. After it runs, later routine
-  runs keep those ids in the PR.
+  11 rows (18 pages) are past their deadline on that command, the oldest due 2026-09-18. Only the pages whose
+  requester holds the claim enter the PR; each other page comes back `held` with what its hold needs. After it runs,
+  later routine runs keep those ids in the PR.
 - Legal-threat rows that named no page (51) get no ask, because that copy is approved for privacy erasure only.
   Releasing it for another class is a ruling on customer copy (`copy.ASK_APPROVED_CLASSES`), not a code change.
 

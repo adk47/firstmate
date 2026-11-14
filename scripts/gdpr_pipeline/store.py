@@ -350,6 +350,16 @@ class Store:
     def events(self, rid: int) -> list[dict]:
         return [dict(r) for r in self.db.execute("SELECT * FROM erasure_events WHERE request_id=? ORDER BY id", (rid,))]
 
+    def events_of_kind(self, kind: str) -> list[dict]:
+        """Every event of one kind across the register, oldest first, `detail` parsed (the hide guard's caps are
+        counted over all requests, not one)."""
+        out = []
+        for r in self.db.execute("SELECT * FROM erasure_events WHERE kind=? ORDER BY id", (kind,)):
+            d = dict(r)
+            d["detail"] = json.loads(d.get("detail") or "{}")
+            out.append(d)
+        return out
+
     # ---- writes
     def event(self, rid: int, kind: str, **detail) -> None:
         self.db.execute("INSERT INTO erasure_events(request_id, at, kind, detail) VALUES (?,?,?,?)",

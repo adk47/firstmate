@@ -24,10 +24,14 @@ big-name / safety cases, and (with the captain) anything irreversible. Runs on n
 - **Never deletes.** No `DELETE /api/v3/admin/profile`, no muso-cli delete (legal hold 1350); a test greps the
   package for a DELETE path. Undo of a hide = remove the id from both lists.
 - **The pipeline never hides by itself.** It prepares the batch PR; a person merges (captain standing order).
+- **No page reaches a hide PR without passing the hide guard** (`gdpr_pipeline/hide_guard.py`, section "The hide
+  guard" below): the requester's ownership is read again from core, a name match or a legal request alone is held,
+  and one requester or one day cannot take down a run of profiles.
 - **A page held for the captain's legal-threat call stays out of the routine batch**, even when a DIFFERENT register
   row decides that same page PASS. Rows share page ids in practice (register #126 and #246 both carry
   `7871c617-…`, withdrawn from an earlier batch for exactly this reason) and the batch dedups by page, so without this
-  the second row would quietly overturn the withdrawal. `--include-legal` (the captain's GO) is the only way in.
+  the second row would quietly overturn the withdrawal. `--include-legal` (the captain's GO) is the only way into the
+  plan, and since 2026-11-13 the hide guard holds a legal page there too unless the requester owns the profile.
 - **"Already in an open PR" means the PR ADDS the id**, not merely that its head file contains it: the head hide list is
   read with the same parser the read-back uses and the PR's BASE file is subtracted, so a PR into a branch that already
   carries an id cannot suppress the batch that is supposed to add it. An unreadable file, a PR without a base sha, or a
@@ -291,7 +295,16 @@ class**, not a fourth human: `reply --purpose gdpr-erasure`.
   still pages (`listed, read-back pending`) until `hidden_at` — the 410 + noindex read-back — is set: a merged PR
   whose deploy failed leaves the page exposed and must never read as done. `GONE` (catalog AND public 404) does not. The batch PR stays a person's
   merge; this is the alert that keeps the deadline from passing in silence until the 30-day warning. It includes
-  `LEGAL_HIDE_FIRST` rows (the captain owns the hide, not the alert), so an overdue legal-threat request pages too.
+  `LEGAL_HIDE_FIRST` rows (the captain owns the hide, not the alert), so an overdue legal-threat request is still on
+  screen - as a held line naming what the hold needs whenever the guard has no ownership on record for it.
+  A page the hide guard HOLDS is read from the guard's own last decision (`hide_guard.latest`): the line says it is
+  held, repeats what the hold needs, and carries no "open/merge the hide batch PR" - that PR can never contain it.
+  A page the guard has never judged names the next routine `hide-batch` run (`HH:20Z`, four a day) beside the
+  condition, never as a promise: a routine run judges a page that is in its batch (another open row holding the page
+  as a legal hide-first, or a page two rows name, keeps it out of that batch), and a legal page enters only on
+  `--include-legal`, which no timer runs. Only a line whose page the
+  guard ADMITTED still says "open/merge the hide batch PR", and only those lines reach the message head that names a
+  person; a message made only of held or not-yet-judged lines carries a plain head (no mention, no alarm emoji).
 - **The page shows every due request.** The watchdog packs the lines into as many Slack messages as the length
   limit needs (40 lines maximum each) and nothing is discarded in the packing: a request counts as paged only
   when every message posted, so a 94-request backlog is all on screen — not 40 sent and the rest silently
@@ -315,6 +328,74 @@ class**, not a fourth human: `reply --purpose gdpr-erasure`.
   subset — the 101 extra are 79 Intercom tickets older than the lookback, 19 notices@/legal@ tickets, and 3
   register rows. Anyone treating backfill as the source of truth would therefore drop 101 statutory requests
   silently. The register is the record; the sources are only how rows arrive.
+
+## The hide guard (`gdpr_pipeline/hide_guard.py`)
+
+The guard runs inside `hide-batch`, after the plan and before `hide_batch.open_prs`. It exists because of what the
+90-day audit found (`data/gdpr-takedown-ownership-f3/report.md`, 2026-11-13): of 253 profiles removed, 60 had the
+owner's claim behind them, 61 rested on a matching name, 45 on a legal or takedown request nobody is recorded as
+approving, and one was removed while a different account held its claim.
+
+**What admits a page.** Only an ownership pass, and the proof is read again from core at the moment of the batch:
+
+| Pass | What the guard reads now | Admitted when |
+|---|---|---|
+| `PASS_A` | the processed claims on the profile (`sources.claim_proofs`) | the requesting account holds one that shows the profile is theirs (below) |
+| `PASS_D` | the website on the live admin profile (`sources.profile_sites`) | the profile's website host is still the sender host the pass recorded (`sender_host`, the exact host, never a free-mail one); otherwise `sender_is_not_at_the_profiles_site_now`. `hide-batch --open-prs` also has the identity step decide every `PASS_D` row again first, because only that step reads whether the sender is verified |
+| `PASS_B`, `PASS_C` (name match) | nothing | never: `name_match_is_not_ownership` |
+| `LEGAL_HIDE_FIRST` | nothing: the guard admits no legal page | never: `legal_request_without_ownership`. A legal threat from the account that holds the claim is decided by the identity step as `PASS_A` (an owner's request) and enters the batch as path A, so the guard never sees it as a legal page |
+
+A track or an album is weighed on its one artist's profile.
+
+**Which claims show ownership.** A processed claim counts when either holds:
+
+- it was filed against an existing profile (empty `reason`) and carries at least one verification link; or
+- it carries no review, and the profile still holds exactly one source, a muso one, created within 60 seconds of
+  the claim. That is the account's own new profile: 4,429 of the 4,432 instant claims measured on 2026-11-13.
+
+A claim with no review on a profile that has other sources is not ownership (`claim_not_verified`). Two instant
+claims had reached an artist's catalog page that way, through a later merge. The profile's sources come from the
+live admin profile (`sources.profile_sources`), never the catalog view, which was four days behind when measured.
+
+**The identity step uses the same rule.** `Run.decide_row` calls `hide_guard.prove` before it decides, so a
+requester whose only claim is unproven is decided `ASK_IDENTITY` and asked, instead of passing and then being held.
+The guard is the backstop for a decision that is stale, skipped or wrong. `hide-batch --open-prs` decides again
+first every row in the planned batch whose recorded pass the guard would no longer admit - one recorded before
+2026-11-13 that names no account and profile, or one whose claim has since been deleted or whose profile has gained
+sources - so the identity step answers `ASK_IDENTITY` and the ask goes out, instead of the page sitting behind a
+hold nobody told the requester about. A legal hide-first row is not decided again by that pass: the guard holds it,
+and it lifts when a later identity pass decides the requester as path A because the account holds the claim.
+
+**Caps.** At most 3 new profiles per requester and 20 across the register in any 24 hours
+(`REQUESTER_PROFILES_PER_DAY`, `GLOBAL_PROFILES_PER_DAY`). The rest are held (`requester_over_daily_cap`,
+`over_global_daily_cap`), posted once to #cs_priority, and offered again on the next run, most overdue first. A page
+already admitted stays admitted and spends nothing. A post that Slack does not confirm fails the run (exit 2) and is
+posted again next run.
+
+**The record.** Every admit and every hold is a `hide_guard` event on the request (`erasure_events`), written when
+the outcome changes: page, basis, proof, claim id, requester key, reason. The requester key is the account id, or a
+hash of the address; no name and no address is written or printed.
+
+```
+sqlite3 'file:/var/lib/hydra-gdpr/erasure.sqlite?mode=ro' \
+  "select request_id, at, detail from erasure_events where kind='hide_guard' order by id desc limit 20"
+```
+
+**What it never does.**
+
+- It never treats a read that failed as an answer. Claims or a profile that cannot be read stop the run with exit 2
+  before the open PR is touched; the next run tries again.
+- It never waits on a person. Every hold reason names what the requester has to show (`hide_guard.NEXT`), and the
+  24-hour hide page says the page is held and repeats that line instead of asking for the batch PR (a held page
+  cannot enter it).
+- It sends nothing. An ask is the identity step's.
+- A dry run (`hide-batch` without `--open-prs`) prints the holds, records nothing and spends no cap.
+
+**What it does not cover.** The guard stands on the hide-list path only. The admin soft-delete
+(`DELETE /admin/profile/<id>`) is refused for agents and the muso CLI by https://github.com/Muso-AI/hydra/pull/1951;
+a person's own admin token, the admin console and a hand-written hide PR are outside hydra.
+
+**Undo.** Revert the commit. The `hide_guard` events stay in the register and nothing reads them but the guard.
 
 ## The DSAR ladder: acknowledgement, status updates, the clock (`gdpr_pipeline/dsar.py`)
 
@@ -586,7 +667,7 @@ conflicting with `main` (the hide list is one line, so any other merge to it doe
 the whole set and only then is the old one closed with a comment naming its replacement: never a force-push (an
 approval must not ride onto ids its reviewer did not see) and never a branch delete, so `gh pr reopen` undoes the
 close. A routine run keeps the legal-threat ids an `--include-legal` run already put in the open PR and never adds one
-itself. If what an open pipeline PR adds cannot be read, that repository is left alone and the run exits 2. A
+itself; the hide guard then weighs a kept id like any other, so one with no ownership behind it leaves the next PR. If what an open pipeline PR adds cannot be read, that repository is left alone and the run exits 2. A
 hand-written hide PR (a different branch) is somebody else's: its ids are left out of the batch.
 This replaced "defer while a pair is unmerged" (both PRs insert at the same point of the same file, which is still why
 there is only one): deferral was per repository and left the two repositories permanently out of step (11-10 / 11-11:
@@ -616,8 +697,10 @@ different key of the same row reuses it. `dedupe` is the repair for rows minted 
 carried a `register:19:again:<at>` / `gmail:legal@…:again:<at>` pair: two deadlines, two watchdogs and two letters for
 one message); it is a report unless `--apply` is passed.
 
-**The two deadlines page separately**: the 24-hour hide page and the `due_at - 3 d` confirmation warning are tracked
-per register number AND per kind (`hide:<n>` / `confirm:<n>`), so an overdue-hide page never suppresses the
-statutory-date warning that becomes due later the same day.
+**The two deadlines page separately, and a waiting line is not an action line**: the 24-hour hide page and the
+`due_at - 3 d` confirmation warning are tracked per register number AND per kind (`hide:<n>` for a line that needs a
+person, `hidewait:<n>` for one that waits on the guard or the read-back, `confirm:<n>`), so an overdue-hide page never
+suppresses the statutory-date warning that becomes due later the same day, and a page held over the daily cap at 00:20Z
+still pages a person when the 06:20Z batch admits it.
 
 Kill switch: `/etc/hydra/gdpr-pipeline.disabled`.

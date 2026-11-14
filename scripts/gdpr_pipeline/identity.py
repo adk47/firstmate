@@ -12,7 +12,8 @@ The table this implements (Fable, `gdpr-ack-v2-and-arpad-1101.md` §3; implement
                     independently of the request: the request text is never an input)
   E representative  written authorisation from the data subject -- a person cannot be verified by code,
                     so a representative is ASKed for it and a reply carrying one goes to Jan
-  legal_threat      hide first, identity after (10-23 exception) -- except a big-name page, which goes to Jan
+  legal_threat      hide first, identity after (10-23 exception) -- except a big-name page, which goes to Jan,
+                    and except a claim the requesting account holds, which is decided on path A
 
 A claim is ONE path, never a requirement (Aaron 1 Nov; claim-first is the DMCA rule).
 
@@ -75,6 +76,9 @@ class Page:
     item_read: bool = False
     artists: tuple = ()
     item_why: str = ""
+    # Accounts whose processed claim does not show the page is theirs (hide_guard.prove): taken out of
+    # claim_user_ids and named here. Last on purpose: page_facts builds a Page by position.
+    claim_unproven: frozenset = frozenset()
 
 
 @dataclass
@@ -94,6 +98,14 @@ class PageVerdict:
     entity_id: str
     verdict: str
     why: str
+    # What a pass rests on, so the hide guard (hide_guard.py) can read the proof again from its source instead of
+    # trusting this verdict: the account whose claim passed (path A), and the PROFILE that claim or website is on
+    # (the page itself, or the one artist of a track / album).
+    account_id: int | None = None
+    owner_page: str = ""
+    # Path D only: the sender host that equalled the profile's website host. The guard compares it with the
+    # website the profile carries at the moment of the batch.
+    sender_host: str = ""
 
 
 @dataclass
@@ -199,11 +211,20 @@ def decide_page(p: Page, r: Requester, cls: str) -> PageVerdict:
                           f"the big-name exclusion cannot be established, so no path may pass; re-read next run")
     if cls == "dmca_takedown":
         if r.account_id is not None and r.account_id in p.claim_user_ids:
-            return v(PASS_A, "DMCA claim-first: the requesting account holds the processed claim")
+            return PageVerdict(p.entity_id, PASS_A, "DMCA claim-first: the requesting account holds the processed "
+                                                    "claim", r.account_id, p.entity_id)
         return v(DMCA_REVIEW, "DMCA/takedown is claim-first (captain 10-23): the requester holds no processed claim")
     if cls == "legal_threat":
         if big_name(p):
             return v(JAN_BIGNAME, f"legal threat on a big-name page (popularity {p.popularity}, {p.credit_count} credits)")
+        # Hide-first is what a legal threat gets when nobody is known to own the page. An ownership pass is stronger
+        # than the exception it displaces: the account that holds the claim is asking for its own profile to come
+        # down, so the request is decided as any owner's (2026-11-13; before this every legal page was held, and no
+        # claim state could ever release it).
+        if r.account_id is not None and r.account_id in p.claim_user_ids:
+            return PageVerdict(p.entity_id, PASS_A,
+                               f"A: account {r.account_id} holds the processed claim on the page, so a legal threat on "
+                               f"it is decided as an owner's request", r.account_id, p.entity_id)
         return v(LEGAL_HIDE_FIRST, "legal threat: hide first, identity after (10-23 exception); the captain owns the reply")
     if not (r.name or r.email or r.account_id is not None):
         return v(UNKNOWN, "no requester on file (the mail ledger keeps no sender): the thread must be read before "
@@ -214,7 +235,12 @@ def decide_page(p: Page, r: Requester, cls: str) -> PageVerdict:
     if r.representative:
         return v(ASK_AUTH, "E: writing for someone else -> ask for the data subject's written authorisation")
     if r.account_id is not None and r.account_id in p.claim_user_ids:
-        return v(PASS_A, f"A: account {r.account_id} holds the processed claim on the page")
+        return PageVerdict(p.entity_id, PASS_A, f"A: account {r.account_id} holds the processed claim on the page",
+                           r.account_id, p.entity_id)
+    if r.account_id is not None and r.account_id in p.claim_unproven:
+        return v(ASK_IDENTITY, f"account {r.account_id} holds a claim on the page that was made without "
+                               f"verification, and the page holds sources that account did not create: that claim "
+                               f"is not a tie to the page; ask for evidence of authority")
     if p.is_claimed or p.claim_user_ids:
         return v(ASK_IDENTITY, "the page is claimed by an account that is not the requester's: mismatch = ASK")
     # A NAME MATCH IS NOT A TIE (captain 2026-11-12: "a passport proves the person, not that the profile is theirs").
@@ -232,7 +258,8 @@ def decide_page(p: Page, r: Requester, cls: str) -> PageVerdict:
     sd, wd = host_of(r.email), host_of(p.website)
     if sd and wd and sd not in FREEMAIL and sd == wd:
         if r.verified:
-            return v(PASS_D, f"D: verified sender host {sd} is the page's own website host in our catalog")
+            return PageVerdict(p.entity_id, PASS_D, f"D: verified sender host {sd} is the page's own website host "
+                                                    f"in our catalog", r.account_id, p.entity_id, sd)
         return v(ASK_IDENTITY, f"D would pass on the address host {sd}, but the sender is not verified: "
                                f"ask for a written authorisation from that address")
     return v(ASK_IDENTITY, "no path passed: the name does not match and there is no claim, account or domain")
@@ -290,6 +317,13 @@ def decide_item(p: Page, r: Requester, cls: str) -> PageVerdict:
             return v(JAN_REVIEW, f"legal threat on {a_kind} whose artist "
                                  f"{', '.join(a.entity_id[:8] for a in unread)} cannot be read (deleted or unreadable "
                                  f"profile): the big-name exclusion cannot be established, so a person decides")
+        if len(p.artists) == 1:
+            artist = p.artists[0]
+            av = decide_page(artist, r, cls)
+            if av.verdict == PASS_A:
+                return PageVerdict(p.entity_id, PASS_A,
+                                   f"{kind} of one artist ({artist.entity_id}), whose processed claim the requesting "
+                                   f"account holds - {av.why}", av.account_id, av.owner_page)
         return v(LEGAL_HIDE_FIRST, f"legal threat on {a_kind}: hide first, identity after (10-23 exception: the "
                                    f"disputed item, as narrowly as the claim allows); the captain owns the reply")
     if len(p.artists) != 1:
@@ -303,7 +337,9 @@ def decide_item(p: Page, r: Requester, cls: str) -> PageVerdict:
     if p.popularity >= BIG_POPULARITY:
         return v(JAN_BIGNAME, f"{av.verdict} would pass on the artist, but a big-name {kind} (popularity "
                               f"{p.popularity}) goes to Jan")
-    return v(av.verdict, f"{kind} of one artist ({artist.entity_id}), who passes the same gate - {av.why}")
+    return PageVerdict(p.entity_id, av.verdict, f"{kind} of one artist ({artist.entity_id}), who passes the same "
+                                                f"gate - {av.why}", av.account_id, artist.entity_id,
+                       av.sender_host)
 
 
 # Row verdict: the most restrictive page wins, so a PASS page never carries an ASK page with it in the row

@@ -58,7 +58,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from gdpr_pipeline import approval, copy, copy_gate, dsar, hide_batch, send, sources  # noqa: E402
+from gdpr_pipeline import approval, copy, copy_gate, dsar, hide_batch, hide_guard, send, sources  # noqa: E402
 from gdpr_pipeline import intake as intake_core  # noqa: E402
 from gdpr_pipeline.run import JAN, Run, backfill_table, page_chunks, page_text, SLACK_CHANNEL  # noqa: E402
 from gdpr_pipeline import store  # noqa: E402
@@ -379,8 +379,10 @@ def slack_post(text: str) -> bool:
         return False
 
 
-HIDE_DUE_HEAD = (f"<@{JAN}> :rotating_light: *GDPR erasure register: the 24-hour HIDE deadline has passed and the "
-                 f"page is not hidden* - open/merge the hide batch PR")
+HIDE_DUE_HEAD = (f"<@{JAN}> :rotating_light: *GDPR erasure register: the 24-hour HIDE deadline has passed and a "
+                 f"page that can enter the batch PR is not hidden*")
+HIDE_WAIT_HEAD = (":hourglass_flowing_sand: *GDPR erasure register: the 24-hour HIDE deadline has passed and "
+                  "nothing is waiting on a person - each line says what it waits on*")
 
 
 def watchdog(run: Run, page: bool) -> None:
@@ -392,30 +394,38 @@ def watchdog(run: Run, page: bool) -> None:
     for ln in [line for _, line in rows_]:
         print("  " + ln)
     print(f"watchdog: {len(rows_)} confirmation line(s), {len(hide_rows)} overdue-hide line(s)")
-    for ln in [line for _, line in hide_rows]:
+    for ln in [line for _, line, _ in hide_rows]:
         print("  " + ln)
     if not page or not (rows_ or hide_rows):
         return
     state = _load_json(_state_path(run.store.path, "watchdog-last.json"))
     today = now.strftime("%Y-%m-%d")
     paged = {str(x) for x in state.get("paged", [])} if state.get("last_page_day") == today else set()
-    # The two deadlines are tracked SEPARATELY ("hide:<reg>" / "confirm:<reg>"). One flat set meant the 24-hour hide
-    # page, which fires first, suppressed the same row's 30-day confirmation warning arriving later that same day --
-    # the row went out with its deadline announced as "hide overdue" and its actual statutory date never announced.
+    # Three deadlines/state classes are tracked SEPARATELY ("hide:<reg>" for an action line, "hidewait:<reg>" for a
+    # line that waits on the guard or the read-back, "confirm:<reg>"). One flat set meant the 24-hour hide page, which
+    # fires first, suppressed the same row's 30-day confirmation warning arriving later that same day -- the row went
+    # out with its deadline announced as "hide overdue" and its actual statutory date never announced. A waiting line
+    # holding the action key would do the same one level down: a page held over the daily cap pages as waiting at
+    # 00:20Z, the batch admits it at 06:20Z, and the action page would never fire that day.
     # A bare register number from an older state file counts as a HIDE page (what that set was for); double-posting a
     # confirmation line is harmless, silently skipping one is not.
     fresh = [(reg, line) for reg, line in rows_ if f"confirm:{reg}" not in paged]
-    fresh_hide = [(reg, line) for reg, line in hide_rows if f"hide:{reg}" not in paged]
-    if not fresh and not fresh_hide:
+    action = [(reg, line) for reg, line, needs in hide_rows
+              if needs and f"hide:{reg}" not in paged and str(reg) not in paged]
+    waiting = [(reg, line) for reg, line, needs in hide_rows if not needs and f"hidewait:{reg}" not in paged]
+    if not fresh and not action and not waiting:
         return          # everything due today was already paged today; no repeat
     # The 24-hour HIDE deadline is its own page (received + 24 h, the ruling's first step): it fires long before the
-    # 30-day warning, so a PASS request whose batch PR never opened cannot pass in silence.
-    chunks = page_chunks([ln for _, ln in fresh_hide], head=HIDE_DUE_HEAD) if fresh_hide else []
+    # 30-day warning, so a PASS request whose batch PR never opened cannot pass in silence. A line whose page no PR
+    # can contain (held by the guard, or not judged yet) is not addressed to a person and carries the plain head.
+    chunks = page_chunks([line for _, line in action], head=HIDE_DUE_HEAD) if action else []
+    chunks += page_chunks([line for _, line in waiting], head=HIDE_WAIT_HEAD) if waiting else []
     chunks += page_chunks([ln for _, ln in fresh]) if fresh else []
     # EVERY chunk must post before any row counts as paged: a partial page must never suppress a request.
     posted = all([slack_post(c) for c in chunks])
     if posted:
-        newly = {f"confirm:{reg}" for reg, _ in fresh} | {f"hide:{reg}" for reg, _ in fresh_hide}
+        newly = ({f"confirm:{reg}" for reg, _ in fresh} | {f"hide:{reg}" for reg, _ in action}
+                 | {f"hidewait:{reg}" for reg, _ in waiting})
         with open(_state_path(run.store.path, "watchdog-last.json"), "w") as f:
             json.dump({"last_page_day": today, "paged": sorted(set(paged) | newly)}, f)
     else:
@@ -1114,22 +1124,57 @@ def main() -> int:
         except sources.Unknown as exc:
             run.fail("hide lists", exc)
             return 2
-        rows = run.store.all("open")
-        cand = hide_batch.plan(rows, hd, pdp, {}, include_legal=a.include_legal)
-        # `flight` is what OTHER people's open PRs already add. The pipeline's own PR is not in it: open_prs owns
-        # that PR and re-issues it with the whole set, so nothing queues behind an unmerged batch.
-        flight = hide_batch.in_flight_ids([c["id"] for c in cand]) if cand else {}
-        batch = hide_batch.plan(rows, hd, pdp, flight, include_legal=a.include_legal)
-        carried: set[str] = set()
-        if not a.include_legal:
-            # A legal hide-first id enters only on the captain's --include-legal run. Once that run's PR is open the
-            # GO is on record there, and this routine run must not replace that PR with one that drops the id.
-            routine = {b["id"] for b in batch}
-            batch = hide_batch.carry_legal(batch, hide_batch.plan(rows, hd, pdp, flight, include_legal=True),
-                                           hide_batch.own_added())
-            carried = {b["id"] for b in batch} - routine
-        print(f"hide batch: {len(batch)} id(s); already in somebody else's open PR: "
-              + ", ".join(f"{k} {len(v)}" for k, v in flight.items()))
+        def planned() -> tuple[list[dict], list[dict], dict, set[str]]:
+            rows = run.store.all("open")
+            cand = hide_batch.plan(rows, hd, pdp, {}, include_legal=a.include_legal)
+            # `flight` is what OTHER people's open PRs already add. The pipeline's own PR is not in it: open_prs
+            # owns that PR and re-issues it with the whole set, so nothing queues behind an unmerged batch.
+            flight = hide_batch.in_flight_ids([c["id"] for c in cand]) if cand else {}
+            batch = hide_batch.plan(rows, hd, pdp, flight, include_legal=a.include_legal)
+            carried: set[str] = set()
+            if not a.include_legal:
+                # A legal hide-first id enters only on an --include-legal run. Once that run's PR is open this
+                # routine run must not replace that PR with one that drops the id. (The hide guard below holds
+                # every legal page, so a carried id is listed and then held like any other.)
+                routine = {b["id"] for b in batch}
+                batch = hide_batch.carry_legal(batch, hide_batch.plan(rows, hd, pdp, flight, include_legal=True),
+                                               hide_batch.own_added())
+                carried = {b["id"] for b in batch} - routine
+            return rows, batch, flight, carried
+
+        rows, batch, flight, carried = planned()
+        # The hide guard (gdpr_pipeline/hide_guard.py): ownership read again from its source, the daily caps, and an
+        # audit row per page. A stored pass the guard would no longer admit (the claim was deleted, the profile gained
+        # sources, its website moved, or the decision never recorded what it rests on) is decided again first, so the
+        # identity step asks the requester instead of the page waiting behind a hold nobody told them about. Every
+        # own-site (path D) row is decided again too: only that step reads whether the sender is verified. A decision
+        # or a proof that cannot be READ stops the run here, before the open PR is touched.
+        try:
+            stale = hide_guard.needs_redecide(rows, batch)
+            if stale and a.open_prs:
+                run.decide_rows(stale, hd & pdp, half=sources.half_hidden(hd, pdp))
+                if run.errors:
+                    return 2
+                rows, batch, flight, carried = planned()
+            batch, decisions = hide_guard.guard(batch, rows, run.store, write=a.open_prs)
+        except sources.Unknown as exc:
+            run.fail("hide guard", exc)
+            return 2
+        held = [d for d in decisions if d["outcome"] == hide_guard.HELD]
+        for d in held:
+            print(f"held  #{d['register_no']} {d['entity']} {d['page']} {d['basis']}: {d['reason']} - "
+                  f"{hide_guard.NEXT[d['reason']]}")
+        if a.open_prs:
+            alert = hide_guard.to_page(decisions, run.store.events_of_kind(hide_guard.PAGED),
+                                       datetime.now(timezone.utc))
+            if alert and slack_post(hide_guard.page_text(alert)):
+                hide_guard.mark_paged(run.store, alert)
+            elif alert:
+                run.fail("hide guard page", sources.Unknown(
+                    f"{len(alert)} page(s) are held over the daily cap and the alert was not delivered; the next "
+                    f"run posts it again"))
+        print(f"hide batch: {len(batch)} id(s) admitted, {len(held)} held by the guard; already in somebody else's "
+              f"open PR: " + ", ".join(f"{k} {len(v)}" for k, v in flight.items()))
         for b in batch:
             print(f"  #{b['register_no']} {b['entity']} {b['id']} {b['basis']} due {b['due_at'][:10]} "
                   f"needs {'+'.join(b['need'])}"

@@ -1084,6 +1084,22 @@ Each repo has one live batch PR carrying the whole set; a changed set opens a ne
 force-push. What Caroline answers, does and hands off for billing and hides, the refund caps and every undo:
 `docs/support/caroline-billing-and-hide.md` (pinned by `policies/caroline-billing-and-hide.json` + its test).
 
+**No page reaches a hide PR without the hide guard** (`scripts/gdpr_pipeline/hide_guard.py`, captain 2026-11-13;
+`docs/support/gdpr-pipeline.md` §"The hide guard"; audit `data/gdpr-takedown-ownership-f3/report.md`). It re-reads
+the requester's claim from core at batch time and holds a name match and a legal request with no ownership, on
+`--include-legal` too; a legal threat from the account that holds the claim is decided on path A, like any owner
+request. A row in the planned batch whose recorded pass the guard no longer admits is decided again first, so the
+identity step asks the requester instead of the page waiting behind a hold. The 24-hour hide page reads the guard's
+own last decision: a held or not-yet-judged page is never reported as "open/merge the hide batch PR", and a message
+made only of those lines names no person. Three things to keep:
+- **A processed claim is not ownership by itself.** It counts when it was reviewed (empty `reason` and a
+  verification link) or sits on the one muso-source profile that account created. `Run.decide_row` applies the same
+  rule (`hide_guard.prove`), so an unproven claim is an `ASK_IDENTITY`, never a pass and never a silent hold.
+- **3 profiles per requester and 20 across the register per 24 h**; the rest are held, paged once and offered again.
+  Raising either constant is a captain decision, not a tuning change.
+- **A proof that cannot be read stops the run (exit 2) before the open PR is touched.** Read the profile's sources
+  from the admin profile, never `matvw_catalog_profile`: it was four days behind and lacked the newest profiles.
+
 **A statutory request (erasure, access) is handled by the DSAR ladder, never routed to a person** (captain
 2026-11-12; `scripts/gdpr_pipeline/dsar.py`, `docs/support/gdpr-pipeline.md` §"The DSAR ladder"). Three rules are code:
 - **No verdict, no send.** An acknowledgement or status update reaches a writer only when

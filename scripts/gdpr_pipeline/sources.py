@@ -102,6 +102,94 @@ def processed_claims(profile_ids: list[str]) -> dict[str, set[int]]:
     return out
 
 
+def _width(n: int, rows: list[list[str]]) -> list[list[str]]:
+    """The rows, when every one has `n` fields. A short or long row is a read that did not come back whole (a value
+    with a line break is cut by the line filter in `trino`), so it is `Unknown`, never a row to decide on."""
+    for r in rows:
+        if len(r) != n:
+            raise Unknown(f"replica read returned a row of {len(r)} fields where {n} were asked for")
+    return rows
+
+
+def claim_proofs(profile_ids: list[str]) -> dict[str, list[dict]]:
+    """{profile id: every PROCESSED, not deleted claim on it} with what the hide guard needs to weigh one:
+    {"claim_id", "account", "reason", "links" (the claimant's verification links, parsed), "created" (epoch s)}.
+
+    `processed_claims` answers "who holds a claim"; this answers "what kind of claim". Measured 2026-11-13: 5,217 of
+    6,189 claims processed in 30 days carry reason 'created by user', no links, and were processed the second they
+    were filed. The links are the claimant's own social and web addresses: they are returned to the guard and must
+    never be printed or logged."""
+    ids = sorted({p for p in profile_ids if UUID_RE.fullmatch(p)})
+    out: dict[str, list[dict]] = {p: [] for p in ids}
+    for i in range(0, len(ids), 150):
+        chunk = ids[i:i + 150]
+        extra = " OR ".join(f"strpos(lower(CAST(extraprofileids AS varchar)), '{p.lower()}') > 0" for p in chunk)
+        for cid, pid, uid, ex, reason, links, created in _width(7, trino(
+                "SELECT CAST(id AS varchar), CAST(profileid AS varchar), CAST(userid AS varchar), "
+                "CAST(extraprofileids AS varchar), CAST(reason AS varchar), json_format(verificationlinks), "
+                "CAST(CAST(to_unixtime(createdat) AS bigint) AS varchar) "
+                "FROM postgresql_core.public.claiming "
+                f"WHERE (CAST(profileid AS varchar) IN ({_q(chunk)}) OR {extra}) AND userid IS NOT NULL "
+                "AND deletedat IS NULL AND lower(CAST(status AS varchar)) = 'processed'")):
+            if not uid.isdigit() or not created.lstrip("-").isdigit():
+                raise Unknown(f"claim {cid}: the replica did not state the account or the filing time")
+            try:
+                parsed = json.loads(links) if links else None
+            except ValueError as exc:
+                raise Unknown(f"claim {cid}: verification links are not JSON") from exc
+            claim = {"claim_id": cid, "account": int(uid), "reason": reason or "", "links": parsed,
+                     "created": int(created)}
+            low = (ex or "").lower()
+            for target in chunk:
+                if target == pid or target.lower() in low:
+                    out[target].append(claim)
+    return out
+
+
+def profile_sources(profile_ids: list[str]) -> dict[str, dict]:
+    """{profile id: {"raws": the profile's sources as 'muso:<id>', 'tidal:<id>', ..., "created": epoch s}} from the
+    live admin profile. A profile core does not return is absent from the answer: "not read" is the caller's to
+    refuse, never an empty source list.
+
+    Not the catalog view: on 2026-11-13 its newest profile was four days old, so it lacked 782 of 5,214 new
+    profiles and would not have shown a merge made since."""
+    from datetime import datetime, timezone
+    out: dict[str, dict] = {}
+    for pid in sorted({p for p in profile_ids if UUID_RE.fullmatch(p)}):
+        doc = profile_doc(pid)
+        if not doc:
+            continue
+        raws, created = doc.get("rawProfiles"), doc.get("createdAt")
+        if not isinstance(raws, list) or not all(isinstance(x, dict) and isinstance(x.get("source"), str)
+                                                 and x["source"] for x in raws):
+            raise Unknown(f"admin profile {pid}: the answer did not state the profile's sources")
+        try:
+            at = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        except (AttributeError, ValueError) as exc:
+            raise Unknown(f"admin profile {pid}: the answer did not state when the profile was created") from exc
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        out[pid] = {"raws": [f"{x['source']}:{x.get('id') or ''}" for x in raws], "created": int(at.timestamp())}
+    return out
+
+
+def profile_sites(profile_ids: list[str]) -> dict[str, str]:
+    """{profile id: the website on the live admin profile, '' when it has none}. A profile core does not return is
+    absent from the answer. No website stated is '' on purpose: for the one reader (the hide guard, path D) an
+    empty website holds the page, so absence can only refuse a hide, never allow one."""
+    out: dict[str, str] = {}
+    for pid in sorted({p for p in profile_ids if UUID_RE.fullmatch(p)}):
+        doc = profile_doc(pid)
+        if not doc:
+            continue
+        links = doc.get("links")
+        site = links.get("website") if isinstance(links, dict) else None
+        if (links is not None and not isinstance(links, dict)) or (site is not None and not isinstance(site, str)):
+            raise Unknown(f"admin profile {pid}: the answer did not state the profile's website as text")
+        out[pid] = site or ""
+    return out
+
+
 def account_names(uids: list[int]) -> dict[int, tuple[str, ...]]:
     ids = sorted({int(u) for u in uids})
     out: dict[int, tuple[str, ...]] = {}

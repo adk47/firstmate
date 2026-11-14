@@ -240,6 +240,10 @@ class Identity(unittest.TestCase):
         self.assertEqual(identity.decide([self.item(page(gone=True))], r, "legal_threat").verdict, "JAN_REVIEW")
         self.assertEqual(identity.decide([self.item(page(facts_unknown="creditCount"))], r, "legal_threat").verdict,
                          "JAN_REVIEW")
+        # an item whose one artist the requester holds the claim on is that owner's request, on the artist's profile
+        owned = self.item(page(is_claimed=True, claim_user_ids=frozenset({42})))
+        d = identity.decide([owned], Requester(account_id=42), "legal_threat")
+        self.assertEqual((d.verdict, d.pages[0].owner_page), ("PASS_A", ARPAD))
 
     def test_dmca_on_an_item_is_claim_first_like_a_profile(self):
         claimed = page(is_claimed=True, claim_user_ids=frozenset({42}))
@@ -251,6 +255,16 @@ class Identity(unittest.TestCase):
     def test_legal_threat_hides_first_except_big_names(self):
         self.assertEqual(identity.decide([page()], Requester(), "legal_threat").verdict, "LEGAL_HIDE_FIRST")
         self.assertEqual(identity.decide([page(popularity=80)], Requester(), "legal_threat").verdict, "JAN_BIGNAME")
+        # the account holding the claim is asking for its own profile: path A, like any owner request
+        owned = page(is_claimed=True, claim_user_ids=frozenset({42}))
+        d = identity.decide([owned], Requester(account_id=42), "legal_threat")
+        self.assertEqual((d.verdict, d.basis, d.pages[0].account_id, d.pages[0].owner_page),
+                         ("PASS_A", "A", 42, ARPAD))
+        self.assertEqual(identity.decide([owned], Requester(account_id=7), "legal_threat").verdict,
+                         "LEGAL_HIDE_FIRST")
+        # a big-name page still goes to Jan on every path, a claim included
+        self.assertEqual(identity.decide([page(is_claimed=True, claim_user_ids=frozenset({42}), popularity=60)],
+                                         Requester(account_id=42), "legal_threat").verdict, "JAN_BIGNAME")
 
     def test_dmca_stays_claim_first(self):
         self.assertEqual(identity.decide([page()], Requester(name="Arpad Laczkovszki"), "dmca_takedown").verdict,
@@ -547,8 +561,10 @@ class RepresentativeBeatsClaim(unittest.TestCase):
         # the same claim without the representative flag is still path A
         self.assertEqual(decide_page(page, Requester("A P", "a@pm.me", account_id=42), "privacy_erasure").verdict,
                          PASS_A)
-        # legal_threat keeps the captain's hide-first exception, representative or not
-        self.assertEqual(decide_page(page, writer, "legal_threat").verdict, LEGAL_HIDE_FIRST)
+        # legal_threat from the account that holds the claim is decided as an owner's request, representative or not
+        self.assertEqual(decide_page(page, writer, "legal_threat").verdict, PASS_A)
+        self.assertEqual(decide_page(page, Requester(name="A P", email="a@pm.me", account_id=7),
+                                     "legal_threat").verdict, LEGAL_HIDE_FIRST)
 
 
 class Intake(unittest.TestCase):
@@ -2125,13 +2141,86 @@ class HideDueDeadline(unittest.TestCase):
                      (json.dumps([{"id": ARPAD, "verdict": "PASS_C", "why": "C"}]),))
         s.db.commit()
         rows = run.hide_due_rows(now)
-        self.assertEqual([reg for reg, _ in rows], [7])
+        self.assertEqual([reg for reg, _, _ in rows], [7])
         self.assertIn("24-hour HIDE", rows[0][1])
         # still open the day before the deadline: nothing to page
         self.assertEqual(run.hide_due_rows(datetime(2026, 11, 2, 12, tzinfo=timezone.utc)), [])
         # a hidden page, a GONE page, or a row with no PASS page is never this alert
         s.db.execute("UPDATE erasure_requests SET hidden_at='2026-11-03T09:00:00Z' WHERE register_no=7"); s.db.commit()
         self.assertEqual(run.hide_due_rows(now), [])
+
+    def test_an_unjudged_page_names_the_run_without_promising_it_judges_the_page(self):
+        from gdpr_pipeline.run import Run
+        s = Store(":memory:")
+        self.addCleanup(s.db.close)
+        rid, _ = s.upsert({"keys": ["intercom:11"], "channel": "intercom", "class": "privacy_erasure",
+                           "received_at": "2026-11-02T00:00:00Z", "pages": [{"id": ARPAD}]})
+        s.update(rid, "decide", identity_verdict="PASS_A",
+                 verdict_detail=[{"id": ARPAD, "verdict": "PASS_A", "why": "A", "account": 42,
+                                  "owner_page": ARPAD}])
+        run = Run(s, log=lambda *_: None)
+        now = datetime(2026, 11, 4, 13, 0, tzinfo=timezone.utc)
+        (_, line, needs), = run.hide_due_rows(now)
+        self.assertIn("18:20Z", line)
+        self.assertIn("judges a page that is in its batch", line)
+        self.assertNotIn("judges it", line)
+        self.assertFalse(needs)
+        # another open row holds the same page as a legal hide-first: the routine batch skips the page entirely, so
+        # the line must still not say the next run judges THIS page
+        legal, _ = s.upsert({"keys": ["intercom:12"], "channel": "intercom", "class": "legal_threat",
+                             "received_at": "2026-11-02T00:00:00Z", "pages": [{"id": ARPAD}]})
+        s.update(legal, "decide", identity_verdict="LEGAL_HIDE_FIRST",
+                 verdict_detail=[{"id": ARPAD, "verdict": "LEGAL_HIDE_FIRST", "why": "legal"}])
+        by_reg = {reg: (ln, nd) for reg, ln, nd in run.hide_due_rows(now, include_legal=True)}
+        mine = s.get(rid)["register_no"]
+        self.assertIn("judges a page that is in its batch", by_reg[mine][0])
+        self.assertFalse(by_reg[mine][1])
+        self.assertIn("`hide-batch --include-legal`, which no timer runs", by_reg[s.get(legal)["register_no"]][0])
+        # a second open row naming the same page: the planner dedups by page, so one row's page is judged and the
+        # other's is not - the text may only state the condition, never that the run decides this page
+        twin, _ = s.upsert({"keys": ["intercom:13"], "channel": "intercom", "class": "privacy_erasure",
+                            "received_at": "2026-11-02T03:00:00Z", "pages": [{"id": ARPAD}]})
+        s.update(twin, "decide", identity_verdict="PASS_A",
+                 verdict_detail=[{"id": ARPAD, "verdict": "PASS_A", "why": "A", "account": 42,
+                                  "owner_page": ARPAD}])
+        for _, ln, nd in run.hide_due_rows(now):
+            self.assertIn("judges a page that is in its batch", ln)
+            self.assertFalse(nd)
+
+    def test_the_hide_page_line_is_the_guard_decision_and_not_the_stored_verdict(self):
+        from gdpr_pipeline import hide_guard
+        s = Store(":memory:")
+        self.addCleanup(s.db.close)
+        rid, _ = s.upsert({"keys": ["intercom:11"], "channel": "intercom", "class": "privacy_erasure",
+                           "received_at": "2026-11-02T00:00:00Z", "pages": [{"id": ARPAD}]})
+        s.update(rid, "decide", identity_verdict="PASS_A",
+                 verdict_detail=[{"id": ARPAD, "verdict": "PASS_A", "why": "A", "account": 42,
+                                  "owner_page": ARPAD}])
+        run = Run(s, log=lambda *_: None)
+        now = datetime(2026, 11, 4, 13, 0, tzinfo=timezone.utc)
+        # never judged (a row decided before the guard existed, or one the routine batch has not reached): no PR can
+        # contain the page yet, so the line names the run that judges it and no person
+        (_, line, needs), = run.hide_due_rows(now)
+        self.assertFalse(needs)
+        self.assertIn("not yet judged", line)
+        self.assertIn("18:20Z", line)
+        self.assertNotIn("open/merge", line)
+        s.event(rid, hide_guard.EVENT, page=ARPAD, outcome=hide_guard.ADMITTED)
+        (_, line, needs), = run.hide_due_rows(now)
+        self.assertTrue(needs, "an admitted page IS in the batch PR: that is the one action this alert may ask for")
+        self.assertIn("next: open/merge the hide batch PR", line)
+        # a hold, a cap hold included, is not in the PR and is never a person's queue
+        s.event(rid, hide_guard.EVENT, page=ARPAD, outcome=hide_guard.HELD, reason=hide_guard.REQUESTER_CAP)
+        (_, line, needs), = run.hide_due_rows(now)
+        self.assertFalse(needs)
+        self.assertIn(hide_guard.REQUESTER_CAP, line)
+        self.assertIn("no person", line)
+        self.assertNotIn("open/merge", line)
+        s.event(rid, hide_guard.EVENT, page=ARPAD, outcome=hide_guard.HELD, reason=hide_guard.NOT_HOLDER)
+        (_, line, needs), = run.hide_due_rows(now)
+        self.assertFalse(needs)
+        self.assertIn(hide_guard.NOT_HOLDER, line)
+        self.assertNotIn(hide_guard.REQUESTER_CAP, line)
 
     def test_a_legal_hide_first_row_pages_on_the_real_tick_path(self):
         import importlib.util
@@ -2163,6 +2252,11 @@ class HideDueDeadline(unittest.TestCase):
             entry.watchdog(r, page=True)
         self.assertEqual(len(posts), 1)
         self.assertIn("#9", posts[0])
+        self.assertIn("not yet judged", posts[0])
+        self.assertIn("--include-legal", posts[0])
+        self.assertNotIn("<@", posts[0], "a page nobody judged needs no person")
+        self.assertNotIn(":rotating_light:", posts[0])
+        self.assertEqual(r.errors, [], "a held/not-yet-judged page is not a failed page")
         self.assertIn("HIDE deadline", posts[0])
 
     def test_the_tick_pages_the_hide_deadline_and_marks_it_paged(self):
@@ -2177,7 +2271,7 @@ class HideDueDeadline(unittest.TestCase):
         r.store.path = os.path.join(tempfile.mkdtemp(), "erasure.sqlite")
         r.errors = []
         r.watchdog_rows.return_value = []
-        r.hide_due_rows.return_value = [(7, "#7 intercom: the 24-hour HIDE deadline passed")]
+        r.hide_due_rows.return_value = [(7, "#7 intercom: the 24-hour HIDE deadline passed", True)]
         posts = []
         with mock.patch.object(entry, "slack_post", lambda c: posts.append(c) or True):
             entry.watchdog(r, page=True)
@@ -2685,7 +2779,7 @@ class OldThreadAndFiveHundreds(unittest.TestCase):
         row = s.get(rid)
         self.assertEqual(row["hidden_pages"], [], "a public page is not 'read back gone'")
         self.assertEqual(row["hidden_at"], "", "the completion marker is stale the moment the page is public")
-        self.assertEqual([n for n, _ in run.hide_due_rows(now)], [s.get(rid)["register_no"]],
+        self.assertEqual([n for n, _, _ in run.hide_due_rows(now)], [s.get(rid)["register_no"]],
                          "so the 24-hour hide deadline pages again")
         self.assertEqual([e["kind"] for e in s.events(rid) if e["kind"] == "unhidden"], ["unhidden"])
 
@@ -2772,7 +2866,7 @@ class OldThreadAndFiveHundreds(unittest.TestCase):
         run.mark_hidden(checker=lambda e, p: p == A)          # B still answers 200
         self.assertEqual(s.get(rid)["hidden_at"], "",
                          "the row is not 'hidden' while a page it now carries is public (QA 35th round)")
-        self.assertEqual([n for n, _ in run.hide_due_rows(now)], [s.get(rid)["register_no"]],
+        self.assertEqual([n for n, _, _ in run.hide_due_rows(now)], [s.get(rid)["register_no"]],
                          "a page that turned up after the read-back is not hidden, so the deadline still pages")
         self.assertIn(B[:8], run.hide_due_rows(now)[0][1])
         run.mark_hidden(checker=lambda e, p: True)            # B's hide merges and reads back
@@ -2794,7 +2888,7 @@ class OldThreadAndFiveHundreds(unittest.TestCase):
             run = Run(Store(os.path.join(tmp, "erasure.sqlite")), log=lambda *_: None)
             posted = []
             with mock.patch.object(cli, "slack_post", lambda text: posted.append(text) or True):
-                run.hide_due_rows = lambda now, include_legal=False: [(40, "HIDE line for #40")]
+                run.hide_due_rows = lambda now, include_legal=False: [(40, "HIDE line for #40", True)]
                 run.watchdog_rows = lambda now: []
                 cli.watchdog(run, page=True)                     # the 24-hour page goes out first
                 self.assertEqual(len(posted), 1)
@@ -2807,6 +2901,37 @@ class OldThreadAndFiveHundreds(unittest.TestCase):
             import json
             state = json.load(open(os.path.join(tmp, "watchdog-last.json")))
             self.assertEqual(sorted(state["paged"]), ["confirm:40", "hide:40"])
+
+    def test_a_waiting_line_never_spends_the_days_action_page(self):
+        """A page held over the daily cap pages as waiting at 00:20Z; the batch admits it at 06:20Z the same day. The
+        waiting stamp must not swallow the action page, or the page sits in the PR unannounced until tomorrow."""
+        import importlib.util
+        import tempfile
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location(
+            "gdpr_cli_wd", os.path.join(os.path.dirname(__file__), "..", "scripts", "gdpr-pipeline.py"))
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Run(Store(os.path.join(tmp, "erasure.sqlite")), log=lambda *_: None)
+            posted = []
+            run.watchdog_rows = lambda now: []
+            with mock.patch.object(cli, "slack_post", lambda text: posted.append(text) or True):
+                run.hide_due_rows = lambda now, include_legal=False: [(41, "CAP line for #41", False)]
+                cli.watchdog(run, page=True)
+                self.assertEqual(len(posted), 1)
+                self.assertIn("CAP line for #41", posted[0])
+                self.assertNotIn("<@", posted[0])
+                run.hide_due_rows = lambda now, include_legal=False: [(41, "ACTION line for #41", True)]
+                cli.watchdog(run, page=True)
+                self.assertEqual(len(posted), 2, "the admitted page must still page a person the same day")
+                self.assertIn("ACTION line for #41", posted[1])
+                self.assertIn("<@", posted[1])
+                cli.watchdog(run, page=True)
+                self.assertEqual(len(posted), 2)
+            import json
+            state = json.load(open(os.path.join(tmp, "watchdog-last.json")))
+            self.assertEqual(sorted(state["paged"]), ["hide:41", "hidewait:41"])
 
     def test_a_real_threat_after_the_confirmation_is_still_hide_first(self):
         """The other half: an ACTUAL escalation after the confirmation keeps its class, and is dated at the message

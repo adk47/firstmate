@@ -7,7 +7,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 
-from gdpr_pipeline import access, copy, copy_gate, dsar, identity, intake, sources
+from gdpr_pipeline import access, copy, copy_gate, dsar, hide_guard, identity, intake, sources
 from gdpr_pipeline import send as letter_send     # 'send' is a local in watchdog_rows: the ledger record for a row
 from gdpr_pipeline.store import Store, _dedupe_pages, now_iso, parse_iso
 
@@ -16,6 +16,8 @@ JAN = "U038BM16T7W"
 WARN_DAYS = 3
 ASK_CHASE_DAYS = 7
 LETTER_GRACE_HOURS = 24      # a letter the register has NOT sent, this long past its deadline, is named as such
+HIDE_TICK_HOURS = (0, 6, 12, 18)   # gdpr-hide-batch.timer: OnCalendar=*-*-* 00,06,12,18:20:00 UTC
+HIDE_TICK_MINUTE = 20
 
 
 ERASURE_FAMILY = ("privacy_erasure", "legal_threat")
@@ -181,6 +183,17 @@ def introducing_part_at(conv: dict, pages: list[dict]) -> int:
         if want & {p["id"] for p in intake.pages_in(part.get("text") or "")}:
             return int(part.get("at") or 0)
     return 0
+
+
+def next_hide_tick(now: datetime) -> str:
+    """The next routine hide-batch run (HH:20Z): the next scheduled run, not a promise that it judges a given page
+    (only pages in its batch reach the guard)."""
+    for hour in HIDE_TICK_HOURS:
+        at = now.replace(hour=hour, minute=HIDE_TICK_MINUTE, second=0, microsecond=0)
+        if at > now:
+            return at.strftime("%H:%MZ")
+    return (now + timedelta(days=1)).replace(hour=HIDE_TICK_HOURS[0], minute=HIDE_TICK_MINUTE, second=0,
+                                             microsecond=0).strftime("%H:%MZ")
 
 
 class Run:
@@ -656,6 +669,9 @@ class Run:
                      and any((p.get("entity") or "profile") in sources.ITEM_ENTITIES for p in pages))
             facts = (sources.page_facts(pages, hidden, claims, half, items=True) if items
                      else sources.page_facts(pages, hidden, claims, half))
+            # A processed claim is a tie only when it shows the page is the account's (hide_guard.prove): the
+            # requester's own unverified claim is taken off the page here, so the decision ASKS instead of passing.
+            facts = hide_guard.prove(facts, acc)
             req = identity.Requester(name=name, email=email, account_id=acc, account_names=names, representative=rep,
                                      verified=bool(trusted))
             dec = identity.decide(facts, req, cls)
@@ -664,7 +680,13 @@ class Run:
                 gates = dsar.gates(cls, acc, how, rep, [{"id": pv.entity_id, "verdict": pv.verdict}
                                                         for pv in dec.pages], len(pages),
                                    prefixes_read=getattr(self, "prefixes_read", False))
-        detail = [{"id": pv.entity_id, "verdict": pv.verdict, "why": pv.why} for pv in dec.pages]
+        # `account` / `owner_page` / `sender_host` are written only on a pass (identity.PageVerdict): they are what
+        # the hide guard reads the proof again from. A row decided before they existed lacks them, and the guard
+        # re-decides it.
+        detail = [{"id": pv.entity_id, "verdict": pv.verdict, "why": pv.why,
+                   **({"account": pv.account_id} if pv.account_id is not None else {}),
+                   **({"owner_page": pv.owner_page} if pv.owner_page else {}),
+                   **({"sender_host": pv.sender_host} if pv.sender_host else {})} for pv in dec.pages]
         # A page that answers 404 in the catalog AND publicly, with no merge record, was removed by something
         # other than the hide process (register #36's class). Marked per row so the Jan item can cite the store.
         gone = sorted({d["id"] for d in detail if d["verdict"] == identity.GONE})
@@ -917,15 +939,23 @@ class Run:
                                               f"confirm' line"))
         return out
 
-    def hide_due_rows(self, now: datetime, include_legal: bool = False) -> list[tuple[int, str]]:
-        """(register_no, line) for requests whose 24-hour HIDE deadline has passed and whose page is not hidden.
+    def hide_due_rows(self, now: datetime, include_legal: bool = False) -> list[tuple[int, str, bool]]:
+        """(register_no, line, needs_action) for requests whose 24-hour HIDE deadline has passed and whose page is
+        not hidden.
 
         `hide_due_at` is received + 24 h (the ruling's first step). The batch itself is a human-merged PR, so this
         is the alert that keeps the deadline from passing in silence: without it the hourly tick runs green until
-        the 30-day confirmation warning three weeks later."""
+        the 30-day warning three weeks later.
+
+        `needs_action` is True only when a pending page can actually enter the batch PR (the guard admitted it). A
+        page the guard HOLDS is reported as held, with what the hold needs; a page the guard has never judged names
+        the next routine run, which judges only pages in its batch (a legal page only on `hide-batch --include-legal`,
+        which no timer runs); a page on both hide lists waits for its read-back. None of those three is a person's
+        queue."""
         from gdpr_pipeline import identity as _id
         from gdpr_pipeline.identity import GONE, IDENTITY_PASS, LEGAL_HIDE_FIRST
         eligible = IDENTITY_PASS + ((LEGAL_HIDE_FIRST,) if include_legal else ())
+        holds = hide_guard.latest(self.store.events_of_kind(hide_guard.EVENT))
         out = []
         for r in self.store.all("open"):
             if not r["hide_due_at"] or parse_iso(r["hide_due_at"]) > now:
@@ -949,11 +979,44 @@ class Run:
                 continue
             shown = ", ".join(f"{pid[:8]} {v}" if v != "ALREADY_HIDDEN" else f"{pid[:8]} listed, read-back pending"
                               for pid, v in pending[:3])   # the PAGE verdict, not the row's
+            states = []
+            for pid, v in pending:
+                d = holds.get((r["id"], pid))
+                if d is None:
+                    if v == _id.ALREADY_HIDDEN:
+                        states.append(("readback", ""))
+                    elif v == LEGAL_HIDE_FIRST:
+                        states.append(("unjudged_legal", ""))
+                    else:
+                        states.append(("unjudged", ""))
+                elif d.get("outcome") == hide_guard.HELD:
+                    states.append(("held", d.get("reason") or ""))
+                else:
+                    states.append(("admitted", ""))
+            kinds = {k for k, _ in states}
+            cannot = "admitted" not in kinds
+            why = sorted({w for k, w in states if k == "held"})
+            parts = []
+            if not cannot:
+                parts.append("open/merge the hide batch PR")
+            if why:
+                parts.append("held by the hide guard (" + ", ".join(why) + "): this page cannot enter the batch PR - "
+                             + "; ".join(hide_guard.NEXT[w] for w in why)
+                             + ("; no person is sent after it" if cannot else ""))
+            if "unjudged" in kinds:
+                parts.append(f"not yet judged by the hide guard: the next hide-batch run ({next_hide_tick(now)}) "
+                             f"judges a page that is in its batch")
+            if "unjudged_legal" in kinds:
+                parts.append("not yet judged by the hide guard: a legal page enters it only on "
+                             "`hide-batch --include-legal`, which no timer runs")
+            if "readback" in kinds:
+                parts.append("listed in both hide lists, waiting for the public page to answer 410 (read-back)")
             out.append((r['register_no'],
                         f"#{r['register_no']} {r['channel']} received {r['received_at'][:10]}: the 24-hour HIDE "
                         f"deadline passed ({r['hide_due_at'][:10]}) and {len(pending)} page(s) are not hidden yet "
                         f"({shown}{', ...' if len(pending) > 3 else ''}); row identity {r['identity_verdict']}; "
-                        f"next: open/merge the hide batch PR"))
+                        f"next: {'; '.join(parts)}",
+                        not cannot))
         return out
 
     def watchdog(self, now: datetime) -> list[str]:
