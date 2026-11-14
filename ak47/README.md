@@ -379,7 +379,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-94 tests across six files: the budget, the census, the guards, the guarded
+95 tests across six files: the budget, the census, the guards, the guarded
 delete, the tick, and the weekly review. They are hermetic — no tmux, no
 network, no live fleet state — and registered as `pure-contract-unit` in
 `bin/fm-test-run.sh`.

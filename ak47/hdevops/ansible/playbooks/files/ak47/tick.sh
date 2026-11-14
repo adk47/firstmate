@@ -80,6 +80,13 @@ QUAR_DAYS=$(ak47_conf quarantine_days 7)
 QUAR_MAX=$(ak47_conf quarantine_expire_max 200)
 MAX_ENTRIES=$(ak47_conf tmp_max_entries 5000)
 MAX_MOVES=$(ak47_conf tmp_max_moves 2000)
+# The class a finding files under in firstmate's inbox. fm-inbox accepts only a
+# fixed vocabulary (captain: text|voice; automated: sentry|lane-tick|ci|watch|
+# health), and an unknown class exits 1 - which the delivery gate below reads as
+# "not delivered" and correctly refuses to commit the dedupe key. That is how
+# every ak47 finding went undelivered while the gate kept reporting FAILED
+# instead of SILENT: the class was simply not in the vocabulary.
+INBOX_CLASS=${AK47_INBOX_CLASS:-health}
 SWAP_ARMED=$(ak47_conf_bool swap_pressure 0)
 FAT_ARMED=$(ak47_conf_bool fat_process 0)
 FAT_GB=$(ak47_conf fat_process_gb 3)
@@ -516,7 +523,7 @@ if [ "${#findings[@]}" -gt 0 ]; then
   if [ "${#fresh[@]}" -gt 0 ]; then
     body=$(printf '%s; ' "${fresh[@]}")
     if [ -x "$FM_HOME/bin/fm-inbox.sh" ] && \
-       "$FM_HOME/bin/fm-inbox.sh" note --source ak47-devops \
+       "$FM_HOME/bin/fm-inbox.sh" note --source "$INBOX_CLASS" \
          "ak47 hygiene: ${body}board $AK47_STATE/status.md" >/dev/null 2>&1; then
       for kf in "${freshkeys[@]}"; do touch "$kf" 2>/dev/null || true; done
     else

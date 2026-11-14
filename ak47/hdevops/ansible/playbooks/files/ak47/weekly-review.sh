@@ -33,6 +33,8 @@ AK47_ROOT=${AK47_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)}
 . "$AK47_ROOT/lib/common.sh"
 
 DAYS=7; PRINT=0; INBOX=1
+# See ak47/tick.sh: fm-inbox only accepts its own vocabulary of classes.
+INBOX_CLASS=${AK47_INBOX_CLASS:-health}
 while [ $# -gt 0 ]; do
   case "$1" in
     --days) DAYS=${2:?--days needs a number}; shift 2 ;;
@@ -247,10 +249,10 @@ fi
 
 if [ "$INBOX" = 1 ] && [ -x "$FM_HOME/bin/fm-inbox.sh" ]; then
   if [ -f "$DIFF" ]; then
-    "$FM_HOME/bin/fm-inbox.sh" note --source ak47-devops \
+    "$FM_HOME/bin/fm-inbox.sh" note --source "$INBOX_CLASS" \
       "ak47 weekly review proposes threshold changes: $DIFF (report $REPORT)" >/dev/null 2>&1 || true
   else
-    "$FM_HOME/bin/fm-inbox.sh" note --source ak47-devops \
+    "$FM_HOME/bin/fm-inbox.sh" note --source "$INBOX_CLASS" \
       "ak47 weekly review: no threshold changes; report $REPORT" >/dev/null 2>&1 || true
   fi
 fi

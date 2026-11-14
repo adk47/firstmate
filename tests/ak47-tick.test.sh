@@ -96,6 +96,22 @@ test_expiry_does_not_run_lsof_per_entry() {
   pass "the tick deletes an expired entry without running lsof on it"
 }
 
+
+test_the_finding_class_is_one_the_inbox_accepts() {
+  # Every ak47 finding went undelivered for days because the tick filed under a
+  # class name fm-inbox does not have. The gate was honest - it logged
+  # DELIVERY-FAILED every run - but nothing was reading the gate's own log. This
+  # test reads it from the other side: the class must exist in the vocabulary.
+  local inbox=$ROOT/bin/fm-inbox.sh
+  [ -r "$inbox" ] || { pass "no fm-inbox.sh in this checkout, class check skipped"; return; }
+  local cls
+  cls=$(grep -o 'AK47_INBOX_CLASS:-[a-z-]*' "$TICK" | head -1 | sed 's/.*:-//')
+  [ -n "$cls" ] || fail "the tick names no inbox class"
+  grep -Eq "^(CAPTAIN_CLASSES|AUTOMATED_CLASSES)=\"[^\"]*\b${cls}\b" "$inbox" \
+    || fail "the tick files findings as '$cls', which fm-inbox does not accept"
+  pass "the class the tick files findings under exists in the inbox vocabulary"
+}
+
 # --- the refusals ---------------------------------------------------------------
 
 
@@ -555,3 +571,4 @@ test_a_size_walk_that_overruns_does_not_hang_the_tick
 test_an_unmeasurable_tree_is_a_finding_not_silence
 test_expiry_is_bounded_per_run_and_says_what_is_left
 test_expiry_does_not_run_lsof_per_entry
+test_the_finding_class_is_one_the_inbox_accepts
