@@ -82,10 +82,11 @@
 #      `resolved` never become current state or detail. Any busy verdict, from a
 #      stored state/<id>.busy-state record or from a pull of the harness's own
 #      artifact, is corroborated against a live agent process in the recorded
-#      worktree (bin/fm-lane-liveness-lib.sh) before it may read working: both
-#      are last-written evidence that survives a hard kill, so on its own such a
-#      verdict reports a corpse as working. No such process reads unknown/stale,
-#      and an unreadable process table reads unknown rather than dead.
+#      worktree (bin/fm-agent-proc-lib.sh, which owns that question) before it
+#      may read working: both are last-written evidence that survives a hard
+#      kill, so on its own such a verdict reports a corpse as working. Finding
+#      no such process reads unknown/stale, and an unreadable table reads
+#      unknown rather than dead.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -127,10 +128,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
-# shellcheck source=bin/fm-lane-liveness-lib.sh
-. "$SCRIPT_DIR/fm-lane-liveness-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-gemini-lib.sh
+. "$SCRIPT_DIR/fm-gemini-lib.sh"
 # shellcheck source=bin/fm-agent-proc-lib.sh
 . "$SCRIPT_DIR/fm-agent-proc-lib.sh"
 
@@ -844,11 +845,26 @@ if [ "$KIND" != secondmate ] && [ "$HAVE_TARGET" = 1 ]; then
   BUSY_SOURCE=${BUSY_VERDICT#* }
   case "${BUSY_VERDICT%% *}" in
     busy)
-      fm_lane_agent_live_in_worktree "$WT"
+      # bin/fm-agent-proc-lib.sh owns "is an agent running in this worktree":
+      # 0 = a live agent, 1 = the table was read and holds none, 2 = the table
+      # could not be read, which is never evidence that the agent is gone.
+      fm_agent_proc_in_worktree "$WT"
       case $? in
         0) emit working pane "harness busy ($BUSY_SOURCE)" ;;
-        1) emit unknown pane "busy verdict with no live agent process in the worktree (stale: $BUSY_SOURCE)" ;;
-        *) emit unknown pane "busy verdict unconfirmed: cannot read process working directories ($BUSY_SOURCE)" ;;
+        1)
+          # No agent process in the worktree. That is evidence of a corpse only
+          # for a harness the shared name vocabulary can recognize; a harness
+          # that runs as a bare interpreter (gemini is `node`) is invisible to
+          # it, so its absence proves nothing and the verdict stands.
+          if fm_agent_proc_recognizes "$HARNESS"; then
+            emit unknown pane "busy verdict with no live agent process in the worktree (stale: $BUSY_SOURCE)"
+          else
+            emit working pane "harness busy ($BUSY_SOURCE)"
+          fi
+          ;;
+        # The table could not be read. That is not evidence of death, so the
+        # historical answer stands rather than downgrading a live lane.
+        *) emit working pane "harness busy ($BUSY_SOURCE)" ;;
       esac
       ;;
     idle) ;;

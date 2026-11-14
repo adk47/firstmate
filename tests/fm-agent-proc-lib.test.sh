@@ -127,7 +127,7 @@ test_recognized_harnesses() {
     for h in pi claude codex opencode gemini ""; do
       if fm_agent_proc_recognizes "$h"; then printf "%s=yes " "$h"; else printf "%s=no " "$h"; fi
     done' _ "$ROOT")
-  assert_contains "$out" "pi=yes claude=yes codex=yes opencode=yes gemini=no =no" \
+  assert_contains "$out" "pi=yes claude=yes codex=yes opencode=yes gemini=yes =no" \
     "the recognized-harness answer changed"
   pass "absence is evidence only for a harness the process table can name"
 }
