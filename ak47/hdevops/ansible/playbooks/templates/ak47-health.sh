@@ -12,6 +12,10 @@
 # CPU/IO pressure, inotify near its limit, disk or /tmp filling, NVMe heat or
 # errors, zero-byte git objects, failed user units, no watcher beat.
 #
+# The one other PAGE is the user task cap: past 80% of user@<uid>.service
+# pids.max the uid cannot fork, and its own watcher is the first thing that
+# stops, so the page names the leaf scopes holding the tasks.
+#
 # Reporting: one line per new finding in ~/.local/state/ak47/health.log, a
 # rolling ~/.local/state/ak47/health-latest.md, and a note in the chair's inbox
 # (bin/fm-inbox.sh note) at most once per finding key per 6 h.
@@ -76,7 +80,34 @@ route_if=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="d
 agents=$(pgrep -c -x pi)
 beat=$(( $(date +%s) - $(stat -c %Y "$FM_HOME/state/.last-watcher-beat" 2>/dev/null || echo 0) ))
 failed=$(systemctl --user --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
-echo "$now load=$l1/$l5 memavail=${mem_av}G swap=${sw_pct}% psi_cpu=$cpu_some mem_full=$mem_full io_full=$io_full inotify=$ino/$ino_max disk=${root_pct}% tmp=${tmp_g}G tctl=${tctl} nvme=${nvt} wifi=${freq}MHz/${rssi}dBm/${link} route=$route_if pi=$agents beat=${beat}s" >>"$SD/samples.log"
+
+# ---- the user task cap, sampled and paged
+# 2026-11-14: user@1000.service reached pids.max 12000 at 02:49Z and every fork in
+# the uid returned EAGAIN until 08:04Z - the watcher, every worker shell and every
+# check failed to start for five hours, and this file had no threshold for it, so
+# nothing paged. Tasks are cheap, so load, swap and memory all stayed inside their
+# ceilings while the uid was already unable to fork.
+USLICE=${AK47_USER_SLICE:-"/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service"}
+pids_cur=$(cat "$USLICE/pids.current" 2>/dev/null | tr -dc 0-9)
+pids_max=$(cat "$USLICE/pids.max" 2>/dev/null | tr -d ' \n')
+case "${pids_max:-}" in ''|max|*[!0-9]*) pids_max=0 ;; esac
+# the leaf units actually holding the tasks, so a page names who to look at:
+# services and transient scopes under the slice's sub-cgroups, never an
+# aggregate *.slice that only repeats what its children already hold.
+tasks_units() {
+  local d
+  find "$USLICE" -mindepth 2 -maxdepth 3 \( -name '*.scope' -o -name '*.service' \) -type d 2>/dev/null |
+  while IFS= read -r d; do
+    [ -r "$d/pids.current" ] || continue
+    printf '%s|%s\n' "$(tr -dc 0-9 <"$d/pids.current" 2>/dev/null)" "${d#"$USLICE"/}"
+  done
+}
+tasks_heat() {
+  tasks_units | sort -t'|' -k1,1 -rn | head -5 |
+    awk -F'|' '{sub(/\.(service|scope)$/,"",$2); printf "%s(%s) ",$2,$1}'
+}
+
+echo "$now load=$l1/$l5 memavail=${mem_av}G swap=${sw_pct}% psi_cpu=$cpu_some mem_full=$mem_full io_full=$io_full inotify=$ino/$ino_max disk=${root_pct}% tmp=${tmp_g}G tctl=${tctl} nvme=${nvt} wifi=${freq}MHz/${rssi}dBm/${link} route=$route_if pi=$agents pids=${pids_cur:-0}/${pids_max:-0} beat=${beat}s" >>"$SD/samples.log"
 
 # ---- safe fix: spike snapshot
 if [ "${l1%.*}" -ge "$SPIKE" ]; then  # bash needs integers; ${l1%.*} truncates
@@ -127,6 +158,18 @@ awk -v v="$mem_full" 'BEGIN{exit !(v>5)}' && find_ mem-pressure "Memory pressure
 awk -v v="$io_full" 'BEGIN{exit !(v>10)}' && find_ io-pressure "Disk pressure: tasks fully stalled on I/O ${io_full}% of the last 10 s"
 [ "$ino" -ge $((ino_max * 80 / 100)) ] && find_ inotify "File-watch handles at $ino of $ino_max; new agents may fail to start"
 [ "$root_pct" -ge 80 ] && find_ disk "Main disk ${root_pct}% full"
+# ---- the page: the uid is running out of things it can fork
+# A fork-starved box cannot heal itself: the fix was always outside it (systemd
+# drop-ins), and the previous occurrence was found only because Aaron noticed the
+# fleet was silent. Page at 80%, before the cap, and name the scopes holding it.
+if [ "${pids_max:-0}" -gt 0 ] && [ -n "${pids_cur:-}" ]; then
+  pids_pct=$(( pids_cur * 100 / pids_max ))
+  if [ "$pids_pct" -ge 80 ]; then
+    page_ tasks-sustain "user task cap ${pids_pct}% used (${pids_cur} of ${pids_max} tasks for uid $USER) - holders: $(tasks_heat | sed 's/ $//') - past 100% every fork fails EAGAIN and the fleet stops starting; the slice cap is tasksmax-slice.conf and the per-unit cap is /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf - find the lane that grew: ~/.local/state/ak47/tasks-latest.md"
+    touch "$SD/.page-active"
+    { echo "# ak47 task cap $et ($now)"; echo; echo "${pids_cur} of ${pids_max} tasks (${pids_pct}%) for uid $USER"; echo; echo "by unit:"; tasks_heat | sed 's/ $//'; echo; echo "leaf units and their task counts:"; tasks_units | sort -t'|' -k1,1 -rn | head -20 | awk -F'|' '{printf "%-10s %s\n",$1,$2}'; } >"$SD/tasks-latest.md"
+  fi
+fi
 [ "${tmp_g:-0}" -ge 60 ] && find_ tmp "/tmp holds ${tmp_g} GB (it is emptied at every boot)"
 [ -n "$tctl" ] && [ "$tctl" -ge 95 ] && find_ cpu-hot "CPU at ${tctl}°C, near its throttle point"
 [ -n "$nvt" ] && [ "$nvt" -ge 70 ] && find_ nvme-hot "NVMe at ${nvt}°C"

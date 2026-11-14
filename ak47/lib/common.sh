@@ -138,6 +138,46 @@ ak47_tmux_core_pct() {
   ps -o pcpu= -p "$pid" 2>/dev/null | awk '{printf "%d", $1+0}'
 }
 
+# ak47_user_slice - the cgroup directory for this uid's systemd manager.
+# Overridable so a test can point at a fixture instead of the live cgroup: the
+# task-cap arithmetic is the part that stopped the box, and it must be provable
+# without editing the running system.
+ak47_user_slice() {
+  printf '%s' "${AK47_USER_SLICE:-/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service}"
+}
+
+# ak47_pids_cur - tasks (processes + threads) charged to this user's systemd
+# manager, i.e. pids.current on user@<uid>.service.
+# This is the number that stopped the box on 2026-11-14: it sat at its 12000 cap
+# and every fork in the uid returned EAGAIN, so the fleet's own watcher, worker
+# shells and checks all failed to start for five hours.
+ak47_pids_cur() {
+  local f; f=$(ak47_user_slice)/pids.current
+  [ -r "$f" ] || return 1
+  tr -dc 0-9 <"$f"
+}
+
+# ak47_pids_max - the same cgroup's pids.max, or 1 when it is the literal
+# "max" (no cap). A caller that divides by this must handle 1.
+ak47_pids_max() {
+  local f v; f=$(ak47_user_slice)/pids.max
+  [ -r "$f" ] || return 1
+  v=$(tr -d ' \n' <"$f")
+  case "$v" in ''|max) printf '1' ;; *[!0-9]*) return 1 ;; *) printf '%s' "$v" ;; esac
+}
+
+# ak47_pids_pct - tasks as a percentage of the cap. An uncapped manager reports
+# 0 rather than a fiction: there is nothing to be a percentage of.
+# An unreadable cgroup reports nothing at all, so the row is skipped instead of
+# scored, because a made-up 0 would look like headroom that is not there.
+ak47_pids_pct() {
+  local cur max
+  cur=$(ak47_pids_cur) || return 1
+  max=$(ak47_pids_max) || return 1
+  [ "$max" -gt 1 ] || { printf '0'; return 0; }
+  printf '%s' $(( cur * 100 / max ))
+}
+
 # ak47_metric <key> - print the live value for one budget key.
 ak47_metric() {
   case "$1" in
@@ -149,6 +189,7 @@ ak47_metric() {
     root_disk_pct) ak47_root_disk_pct ;;
     tmux_core_pct) ak47_tmux_core_pct ;;
     agent_count)   ak47_agent_count ;;
+    pids_pct)      ak47_pids_pct ;;
     *) return 1 ;;
   esac
 }
@@ -165,7 +206,7 @@ ak47_budget_rows() {
     case "$line" in ''|'#'*) continue ;; esac
     IFS='|' read -r key ceil dir unit reason <<<"$line"
     if [ -z "${key:-}" ] || [ -z "${ceil:-}" ] || [ -z "${dir:-}" ] || [ -z "${reason:-}" ]; then
-      echo "ak47: budget.conf line $n is malformed (need key|ceiling|max|min|unit|reason): $line" >&2
+      echo "ak47: budget.conf line $n is malformed (need key|ceiling|max-or-min|unit|reason): $line" >&2
       return 2
     fi
     case "$dir" in max|min) ;; *) echo "ak47: budget.conf line $n direction must be max or min, got '$dir'" >&2; return 2 ;; esac
