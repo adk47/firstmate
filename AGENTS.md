@@ -765,30 +765,62 @@ ever PROPOSED, in shadow, in `link_proposals`. That table is never the decider's
 every row as a credit decision. Code never links on a name alone and never relinks:
 `docs/credit-verification/profile-link-proposals.md`.
 
-## Claim documents get one recorded decision, in shadow
+## Claim documents get one recorded decision, in shadow, and none of them is a person's
 
 `scripts/claim-doc-ladder.py` (`claim-doc-ladder.timer`, every 4 h) is the claim twin of `doc_approve.py`: every open
-claim with a document on file gets ONE row in `/var/lib/hydra/claim-doc-ladder/decisions.sqlite` with an outcome
-(`approved`, `refused`, `needs_human_review`, `unreadable`) and a reason code. Operator doc, the ladder and the
-revert per field: `docs/credit-verification/claim-doc-ladder.md`; first real-row split: `data/claim-doc-ladder-v2/report.md`.
+claim with a document on file gets ONE row in `/var/lib/hydra/claim-doc-ladder/decisions.sqlite` with an outcome, a
+reason code and who moves next. Operator doc, the reason-to-ask table and the revert per field:
+`docs/credit-verification/claim-doc-ladder.md`; the measured population under these rules, on a fixture:
+`data/claims-no-human-p1/report.md`.
 
-- **It records and nothing else.** No executor, no admin API call, no message. Wiring one is a new approval
-  automation (a `policies/credit-approval-automation.json` row and a recorded captain decision).
+- **Four outcomes, no staff queue** (captain 2026-11-13): `approved`; `refused` (a document was read and does not
+  prove the claim: the row carries the internal reason AND the ask, what to send instead); `resend` (doc-verify's
+  last answer read nothing: the ask is a copy we can read, and it is no refusal); `awaiting_read` (WE have not read
+  the document or a fact: no verdict, no ask, and the row names the job that owes the read).
+- **A new reason needs its ask or its route in `doc_ladder.REASONS`, or the module does not import.** The reason
+  code is never an input to the words a claimant reads (`ask_text`); the words are `policies/claim-doc-asks.json`,
+  which does not load with an ask missing, an unknown ask, or copy that names an identity document.
+- **An unread document is ours and never a refusal.** Whether a job will still read it and whose failure the last
+  read was are doc-verify's own rules (`runner.extract_settled`, `gate.TOOLING_ERRORS`), read by `doc_sources` as
+  `read_final` / `tooling_error`. Do not write either rule again. One unread document keeps the whole claim
+  `awaiting_read`: the claimant is asked for nothing while the unopened document may be the proof.
+- **A route names a job, and whether that job is switched on is read, never assumed.** Each route is one row in
+  `doc_ladder.ROUTES` carrying the script and the schedule: `doc-verify` and `byte-restore` are crons
+  (`credit-doc-verify`, `credit-doc-verify-blob-backfill`, checked against `cron-jobs.json` by a test), and
+  `doc-sources` is the `claim-doc-ladder.timer` pass whose launcher a test executes. **`credit-doc-verify-blob-backfill`
+  ships `enabled: false`** and has its own kill file (`/etc/hydra/credit-doc-verify-blob-backfill.disabled`): arming
+  it is a separate change, and until then `doc_ladder.job_state` makes every `byte-restore` row read `job: disabled`
+  in `report`, `list` and `latest.json`. A file that cannot be read is `unread`, never `enabled`. A route naming
+  neither a cron nor a timer unit refuses to register. No route names a command a person runs, and no route
+  pretends the ladder reads a document.
+- **A waiting row keeps its age.** An `awaiting_read` row keeps the day it was first decided, so `report`, `list`
+  and `latest.json`'s `awaiting` carry how long it has waited, per route and reason: a loop with no read and no
+  age looks like work.
+- **Paying claimants first.** Claims are decided, recorded and listed in `doc_ladder.paid_first` order: a measured
+  `paid: true`, then everyone else, then by claim id. An unread paid flag sorts with the unpaid.
+- **A document of a kind the claim never accepts is refused on its kind**, even when it parsed and said nothing:
+  asking for a readable copy of a kind we never accept is a circle.
+- **It records and nothing else.** No executor, no admin API call, no message: an ask on a row has been sent to
+  nobody. A sender is a row in `policies/outbound-copy-senders.json` behind the outbound copy gate; an executor is
+  a `policies/credit-approval-automation.json` row and a recorded captain decision.
 - **The predicates decide; the model's part ends at the extraction**, which is the one doc-verify already recorded.
-  The ladder does not extract. doc-verify reads a filing with no candidate credit request when its account has an
-  open claim (`runner.claim_only_docs`: the extraction only, no key, no H3, no outcome row; before it, 10 of the
-  12 real replies to the claim ask were `unreadable: not_extracted`). They get the room the credit filings leave
-  and a floor of 5 per worker on top of `--max-docs` (`runner.claim_only_room`; the room alone read 0 of 116).
-  A failed open-claims read selects none and is a run error, never "nobody claims".
-- **No document, no decision; parsed-but-empty is `unreadable`; unmeasured is its own reason, never a pass.**
+  The ladder does not extract and starts no read. doc-verify reads a filing with no candidate credit request when
+  its account has an open claim (`runner.claim_only_docs`: the extraction only, no key, no H3, no outcome row).
+  They get the room the credit filings leave and a floor of 5 per worker on top of `--max-docs`
+  (`runner.claim_only_room`; the room alone read 0 of 116). A failed open-claims read selects none and is a run
+  error, never "nobody claims".
+- **No document, no decision; unmeasured is its own reason, never a pass and never a refusal.**
 - **A credits page is not accepted and a document must name a release on the profile**
   (`policies/claim-doc-ladder.json`): without those two the first real run approved 15 claims, 11 on a public page.
 - **Page ids are compared by `scripts/lib/page_identity.py` only** (equality, or a truncated prefix of 8+
   characters); names by `credit_review.roles.names_match`. Do not write either rule again.
-- An `approved` or `refused` row is never replaced by a later pass: a differing re-read is logged as `drift` and
-  the row stands until `release --claim-id N --by NAME --why ...`.
+- A differing decision replaces the row, a refusal included (the claimant answered the ask). The one exception: an
+  `approved` row is not replaced by `awaiting_read`; that is logged once as `drift`. `release` is an operator's
+  undo, never a step a claim waits on.
+- The first pass on a store the older ladder wrote sets its rows aside whole (`claim_doc_decisions_cdl1`) and
+  decides every claim again: `needs_human_review` and `unreadable` rows are not carried over.
 - A pass retires every standing row it did not decide (the claim closed, or its last document left the file), so
-  `queue` lists open work only. That is why an open-claims read or a `proof_intake` with no rows raises instead of
+  `list` shows open claims only. That is why an open-claims read or a `proof_intake` with no rows raises instead of
   reading as "nothing is open": an empty answer would retire the whole store.
 
 ## Caroline's replies pass a code output guard

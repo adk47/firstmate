@@ -1589,6 +1589,41 @@
       }
     },
     {
+      "id": "4b7f0c2e-9a51-4d8e-b3c6-1f2a9d5e7c40",
+      "agentId": "operations",
+      "createdAtMs": 1792972800000,
+      "updatedAtMs": 1792972800000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": false,
+      "name": "credit-doc-verify-blob-backfill",
+      "description": "Blob-backfill: the only path that restores bytes no reader will fetch (captain 2026-11-13: a claim may not wait on a command a person runs). Hourly at :20, between doc-verify runs: every support@ email filing whose attachment was filed without its bytes, and every stored Intercom blob that went missing, is restored into the doc-verify blob store, so the next credit-doc-verify run can read it. One Gmail message fetch fills every attachment filed from it, paced 6/min, at most 20 messages and 20 Intercom blobs per run, on the shared support@ Gmail lock, and it stops at once (recording the provider's retry time) on a quota refusal. SHIPS UNARMED (enabled: false): arming it is a separate, deliberate change, never a side effect of a merge, and until then the claim ladder reports the rows waiting on it with `job: disabled`. Kill files, any one stops a run before it fetches or writes anything: /etc/hydra/credit-doc-verify-blob-backfill.disabled (this job only), /etc/hydra/credit-verify.disabled and the support@ readers kill file. It approves nothing, changes no claim and sends nothing; the claim ladder's `no_bytes_on_file` row names this job. Docs: docs/credit-verification/doc-verify.md.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "20 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-doc-verify.py",
+          "blob-backfill",
+          "--max-messages",
+          "20",
+          "--per-min",
+          "6",
+          "--intercom-max",
+          "20"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 1200
+      }
+    },
+    {
       "id": "32d297fd-50d2-56fa-9220-5dbdf7f05db8",
       "agentId": "operations",
       "createdAtMs": 1793664000000,

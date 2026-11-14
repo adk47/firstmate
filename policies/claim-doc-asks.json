@@ -1,0 +1,26 @@
+{
+  "version": "cda-1",
+  "_doc": "docs/credit-verification/claim-doc-ladder.md. The words for each ask the claim document ladder can record (scripts/claim_verify/doc_ladder.py ASKS). The ladder refuses to load this file when an ask has no words, when the file names an ask the ladder does not have, or when any line names an identity document (a passport, a licence, an ID): a claim is proved by music paperwork. Each line says what to send and nothing else: no reason code, no reason for a refusal, no word about what a document was found to be. NOTHING SENDS THESE: the ladder records the ask in shadow. A sender is a separate change and its exact bytes pass the outbound copy gate (docs/credit-verification/outbound-copy-gate.md) before any claimant reads them.",
+  "doc_type_labels": {
+    "split_sheet": "a split sheet",
+    "contract": "a signed agreement (for example a producer, mixing, publishing, label or management agreement)",
+    "invoice": "an invoice for the work",
+    "pro_registration": "a registration with a collecting society (PRO)",
+    "dashboard_screenshot": "a royalty or distributor statement from your own account",
+    "letter": "a letter from the label or management"
+  },
+  "_doc_type_labels": "One phrase per document type a claim class can accept (policies/claim-doc-ladder.json accepted_doc_types). A type with no phrase here stops the ask from being rendered.",
+  "asks": {
+    "proof_naming_claimant": "Please send a music document, such as an agreement or a royalty statement, that shows your own name written the way it is on your Muso.AI account.",
+    "account_name": "Please add your name to your Muso.AI account, then send a music document, such as an agreement or a royalty statement, that shows that name.",
+    "claimed_profile_link": "Please send the link to the Muso.AI artist profile you are claiming. It starts with https://muso.ai/profile/.",
+    "proof_naming_profile": "Please send a music document, such as an agreement or a royalty statement, that shows the name of the profile you are claiming, or its Muso.AI link, next to your own name.",
+    "accepted_document_type": "Please send one of these: {types}. A screenshot of a public credits page is not one of them.",
+    "release_on_profile": "Please send a document that names a release listed on the profile you are claiming, with the title written the way the profile shows it.",
+    "document_from_issuer": "Please send the document as you received it from the company that issued it: the original file, or a full screenshot of the whole page.",
+    "own_document": "Please send a music document that was issued to you, such as your own agreement or royalty statement, and shows your own name.",
+    "claim_code_on_page": "Please put your claim code on a page the profile already links to, such as its official website or social page, and send us the link to that page.",
+    "company_authority": "Please send a letter or an email from the company, sent from the company's own email domain, saying that you manage this profile for it.",
+    "readable_copy": "We could not read the document we have for this claim. Please send a clear copy of it, or a link to it."
+  }
+}

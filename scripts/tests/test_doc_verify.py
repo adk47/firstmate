@@ -2059,7 +2059,7 @@ class IntakeD2Tests(unittest.TestCase):
 
     def test_a_claimants_filing_with_no_credit_request_is_extracted_and_its_claim_is_decided(self):
         # The claim ladder decides on the extraction doc-verify stored. A filing was selected by its candidate
-        # credit requests only, so a claimant with none was never read: `unreadable: not_extracted` (10 of the
+        # credit requests only, so a claimant with none was never read: `not_extracted` (10 of the
         # 12 replies to the claim ask on 2026-11-12).
         from claim_verify import decline_rules, doc_ladder, doc_sources
         os.makedirs(self.cache, exist_ok=True)
@@ -2093,7 +2093,7 @@ class IntakeD2Tests(unittest.TestCase):
 
         def extracts():
             return sorted(self.store.db.execute("SELECT proof_id, status FROM dv_steps WHERE step='extract'").fetchall())
-        self.assertEqual(decided(), (doc_ladder.UNREADABLE, "not_extracted"))
+        self.assertEqual(decided(), (doc_ladder.AWAITING, "not_extracted"))
         answers, asked = [""], []                  # the replica answers nothing, then one open-claim account
 
         def trino(sql):
@@ -2103,7 +2103,7 @@ class IntakeD2Tests(unittest.TestCase):
         stats, rows = self._run()                  # unmeasured is not "nobody claims": none read, and the run says so
         self.assertEqual((stats.claim_only, stats.outcomes, len(stats.errors)), (0, {"verified": 1}, 1))
         self.assertIn("claim-only filings not selected", stats.errors[0])
-        self.assertEqual((extracts(), decided()), ([(self.sha, "ok")], (doc_ladder.UNREADABLE, "not_extracted")))
+        self.assertEqual((extracts(), decided()), ([(self.sha, "ok")], (doc_ladder.AWAITING, "not_extracted")))
         answers[0] = '"_col0"\n"77"\n'
         stats, rows = self._run()
         self.assertEqual((stats.claim_only, stats.documents, stats.errors, rows), (1, 1, [], []))

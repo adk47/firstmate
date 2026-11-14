@@ -79,6 +79,34 @@ class GmailKillTests(unittest.TestCase):
         args = argparse.Namespace(store=None, proof_store="/nonexistent", max_messages=30, per_min=6)
         self.assertEqual(self.dv.cmd_blob_backfill(args), 0)
 
+    def test_blob_backfill_has_its_own_kill_file_and_stops_before_it_opens_a_store(self):
+        # the cron's `enabled` flag is in a file every deploy overwrites; this file is on the host
+        self.assertEqual(self.dv.BACKFILL_KILL, "/etc/hydra/credit-doc-verify-blob-backfill.disabled")
+        own = os.path.join(self.td.name, "blob-backfill.disabled")
+        self.dv.BACKFILL_KILL = own
+        self.dv.KILL_SWITCH = os.path.join(self.td.name, "no-credit-verify-kill")
+        args = argparse.Namespace(store=os.path.join(self.td.name, "never-created.sqlite"),
+                                  proof_store="/nonexistent", max_messages=30, per_min=6, intercom_max=20)
+        Path(own).touch()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.dv.cmd_blob_backfill(args), 0)
+        self.assertIn(own, err.getvalue())
+        self.assertFalse(os.path.exists(args.store))                          # no store opened, nothing written
+        os.remove(own)
+        # the file gone, the run goes on to the next stop: here the unreadable proof store, not a clean exit
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(Exception):
+                self.dv.cmd_blob_backfill(args)
+
+    def test_no_env_var_moves_the_blob_backfill_kill_file(self):
+        os.environ["CREDIT_DOC_BACKFILL_KILL"] = os.path.join(self.td.name, "elsewhere")
+        try:
+            m = load("credit_doc_verify_env_probe", "credit-doc-verify.py")
+            self.assertEqual(m.BACKFILL_KILL, "/etc/hydra/credit-doc-verify-blob-backfill.disabled")
+        finally:
+            del os.environ["CREDIT_DOC_BACKFILL_KILL"]
+
     def test_the_kill_path_is_a_constant_and_the_skill_preflight_checks_the_same_one(self):
         # r5 [key=unattended]: no env var may move a kill path
         pre = (HERE.parent / "workspaces/operations/skills/muso-support-email-triage/scripts/preflight.sh").read_text()

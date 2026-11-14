@@ -38,6 +38,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Iterable
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
@@ -46,7 +47,7 @@ if str(_SCRIPTS) not in sys.path:
 
 from claim_verify import decline_rules, doc_ladder  # noqa: E402
 from credit_review import doc_approve  # noqa: E402
-from credit_verify.docverify import extract  # noqa: E402
+from credit_verify.docverify import extract, gate, runner  # noqa: E402
 
 TRINO = "/opt/hydra/scripts/trino-query.sh"
 CHUNK = 400
@@ -114,6 +115,8 @@ def documents(proof_db: sqlite3.Connection, doc_db: sqlite3.Connection,
     filers: dict[str, set[int]] = {}
     extraction: dict[str, tuple[str, Any]] = {}
     blocking: dict[str, set[str]] = {}
+    not_json: set[str] = set()
+    dv = SimpleNamespace(db=doc_db)        # all `runner.extract_settled` reads of a store
     for part in _chunks(shas):
         marks = ",".join("?" * len(part))
         for sha, uid in proof_db.execute(
@@ -128,6 +131,7 @@ def documents(proof_db: sqlite3.Connection, doc_db: sqlite3.Connection,
                 extraction[sha] = (status, json.loads(detail))
             except ValueError:
                 extraction[sha] = ("error", {"ok": False, "error": "stored extraction is not JSON"})
+                not_json.add(sha)
         # each (request, role)'s newest verdict: a role once blocked and never re-judged still blocks
         for sha, outcome in doc_db.execute(
                 "SELECT lower(proof_id), outcome FROM dv_outcomes WHERE id IN (SELECT MAX(id) FROM dv_outcomes "
@@ -141,7 +145,13 @@ def documents(proof_db: sqlite3.Connection, doc_db: sqlite3.Connection,
         if not sha:
             continue
         status, body = extraction.get(sha, ("", None))
+        error = str(body.get("error") or "") if isinstance(body, dict) else ""
         out.setdefault(str(int(uid)), []).append({
+            # doc-verify's own answers, by its own rules: will it read this document again, and was a
+            # failed read our tooling or the document. The ladder turns them into `awaiting_read`
+            # (ours, no word to the claimant) or `resend`; it re-writes neither rule.
+            "read_final": body is not None and runner.extract_settled(dv, sha),
+            "tooling_error": status == "error" and (sha in not_json or error.startswith(gate.TOOLING_ERRORS)),
             "intake_id": intake_id, "source_sha256": sha, "received_at": received_at or "", "subject": subject or "",
             "has_bytes": bool(file_path), "extract_status": status, "extraction": body,
             "extractor": doc_approve.VERDICT_VERSION, "blocking_verdicts": sorted(blocking.get(sha, ())),
@@ -288,10 +298,11 @@ def tick(state_dir: str, policy: dict[str, Any], read: Callable[[], dict[str, An
     try:
         out = doc_ladder.run(snap, policy, db)
         check = doc_ladder.verify(db)
+        awaiting = doc_ladder.awaiting_age(db)
     finally:
         db.close()
     summary = {"read_at": snap["read_at"], "ladder_version": doc_ladder.VERSION, "sources": snap["sources"],
-               **out, "reproduced": check["reproduced"],
+               **out, "awaiting": awaiting, "reproduced": check["reproduced"],
                "not_reproducible": [m["claim_id"] for m in check["mismatch"]]}
     write_private(state / "latest.json", summary)
     return (1 if check["mismatch"] else 0), summary

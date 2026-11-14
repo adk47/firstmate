@@ -160,7 +160,7 @@ BACKLOG FORMING: credit documents back, we owe a look 3 items, oldest 2d, owner 
 |---|---|---|
 | credits nobody has touched | 24h | verify-ask-wiring-h2 |
 | credit documents back, we owe a look | 24h | verification worker, creds home (firstmate-assigned 2026-11-13) |
-| profile claims nobody has touched | 24h | claim-lane-resume-c2 |
+| profile claims nobody has touched | 24h | creds (carried in `policies/queue-report-held-lanes.json`) |
 | claim documents back, we owe a look | 24h | claim-lane-resume-c2 |
 | profile merges waiting on us | 24h | profile-merge-ops-m1 |
 | Intercom: the customer spoke last | 4h | cs-systemic-c3 |

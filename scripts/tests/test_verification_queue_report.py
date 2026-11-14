@@ -1785,6 +1785,13 @@ class HeldLanesFromLiveState(unittest.TestCase):
         self.assertEqual(set(lanes), set(vqr.CAPTAIN_HELD))
         self.assertEqual(lanes["credits_docs_in"]["owner"], DOCS_IN_OWNER)
 
+    def test_the_held_claims_lane_is_owned_by_the_creds_home(self):
+        """2026-11-13: the creds home owns the claim breaches; the page names it from the policy file."""
+        lanes = vqr.read_held_lanes()
+        self.assertEqual(lanes["claims_untouched"]["owner"], "creds")
+        held = vqr.held_lane("claims_untouched", vqr._EMPTY_FACTS(), lanes)
+        self.assertEqual(held["owner"], "creds")
+
     def test_the_docs_in_page_names_the_write_back_and_no_closed_lane(self):
         """2026-11-13: the page said the reader was not live for 17 days after it went live,
         and named two lanes that had already closed. Both are asserted on the rendered page."""

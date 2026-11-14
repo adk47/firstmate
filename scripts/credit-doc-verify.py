@@ -34,6 +34,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 KILL_SWITCH = os.environ.get("CREDIT_VERIFY_KILL_SWITCH", "/etc/hydra/credit-verify.disabled")
+# blob-backfill's own stop. The cron's `enabled` flag lives in cron-jobs.json, which every deploy
+# overwrites; this file is on the host and no deploy touches it. A constant: no env var moves it.
+BACKFILL_KILL = "/etc/hydra/credit-doc-verify-blob-backfill.disabled"
 PAYING_USERS = os.environ.get("CREDIT_TRUST_PAYING_USERS", "/var/lib/credit-trust/paying-users.json")
 
 
@@ -124,10 +127,12 @@ def cmd_blob_backfill(args: argparse.Namespace) -> int:
     from credit_verify.docverify.blobs import BlobStore
     from credit_verify.docverify.store import DocVerifyStore
     from credit_verify.proof import gmail_intake
-    if Path(KILL_SWITCH).exists():
-        log(f"kill switch present at {KILL_SWITCH}; no blob-backfill")
-        print("NO_REPLY")
-        return 0
+    for kill in (BACKFILL_KILL, KILL_SWITCH):
+        # before any store is opened and before any fetch: a stopped run reads and writes nothing
+        if Path(kill).exists():
+            log(f"kill switch present at {kill}; no blob-backfill")
+            print("NO_REPLY")
+            return 0
     from credit_verify.proof.gmail_kill import GMAIL_READERS_KILL, gmail_readers_disabled
     if gmail_readers_disabled():
         log(f"support@ Gmail readers disabled ({GMAIL_READERS_KILL}); no blob-backfill")

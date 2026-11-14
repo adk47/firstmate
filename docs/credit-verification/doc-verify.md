@@ -120,6 +120,7 @@ retrying through the quota refusals, holding support@ at 429 for ~9 h. Rules sin
    - One fetch per message, paced (`--per-min`, default 6) and budgeted (`--max-messages`).
    - It goes through `gmail_intake.gog_raw`, which holds the shared support@ lock (#1558); the command refuses to run on code without that lock.
    - The first quota refusal stops the run and records `gmail_backoff_until` from Retry-After (15 min without one). Every run refuses until then (exit 75).
+   - Its cron, `credit-doc-verify-blob-backfill`, ships `enabled: false`; arming it is its own change. Any one of three kill files stops a run before it opens a store or fetches anything: `/etc/hydra/credit-doc-verify-blob-backfill.disabled` (this command only), `/etc/hydra/credit-verify.disabled` and the support@ readers kill file. See `claim-doc-ladder.md` §"The byte-restore job ships switched off".
 3. **A cache delete never implies a re-fetch.**
    - Once a blob is registered (`dv_blobs`) and later goes missing, the reader treats it as owed by blob-backfill and never downloads it again, from Gmail or Intercom.
    - An Intercom filing is fetched at most once, then stored. A registered Intercom blob that goes missing is restored by `blob-backfill` (`--intercom-max`, filer cache copy first, else one Intercom fetch paced 1/s host-wide).

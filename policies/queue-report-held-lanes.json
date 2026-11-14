@@ -1,6 +1,6 @@
 {
   "purpose": "The words the captain's 30-minute queue report pages for a lane HELD BY HIS ORDER (scripts/verification-queue-report.py held_lane). Edit a line here when a blocker, owner or date changes; where the true blocker can be read from the box (account gate wired, approval kill switch, claim send locks), the script derives the sentence from live state and ignores the reason here.",
-  "updated": "2026-11-13 (credits_docs_in corrected from evidence measured on node-8 2026-11-13: the returned-document reader is live, the blocker is the missing verdict write-back; owner per firstmate 2026-11-13; its reason is derived live). Other lanes as of 2026-10-27 (firstmate 038/039: account gate live since 06:30Z)",
+  "updated": "2026-11-13 (claims_untouched owner is creds: that home owns the claim breaches as of 2026-11-13; credits_docs_in corrected from evidence measured on node-8 2026-11-13: the returned-document reader is live, the blocker is the missing verdict write-back; owner per firstmate 2026-11-13; its reason is derived live). Other lanes as of 2026-10-27 (firstmate 038/039: account gate live since 06:30Z)",
   "lanes": {
     "credits_docs_in": {
       "reason": "derived from live state on every tick (the reader's own store): see docs/credit-verification/verification-queue-report.md for what it says",
@@ -9,7 +9,7 @@
       "eta": "when the captain decides"
     },
     "claims_untouched": {
-      "owner": "claim-lane-resume-c2",
+      "owner": "creds",
       "unblock_after_status": "a returned document can be accepted (the reader is live; its verdict write-back is wired)"
     },
     "fable_decider": {
