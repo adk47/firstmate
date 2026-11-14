@@ -561,6 +561,7 @@ test_wedged_worktree_resolution_is_bounded_and_retried() {
   d="$TMP_ROOT/wedged-resolve"
   mkdir -p "$d/wt"
   make_home "$d" "lane-a:$d/wt"
+  # shellcheck disable=SC2329 # invoked indirectly by the check's subshell
   pwd() {
     if [ -n "${FM_TEST_WEDGE_DIR:-}" ] && [ "$PWD" = "$FM_TEST_WEDGE_DIR" ]; then
       sleep 300

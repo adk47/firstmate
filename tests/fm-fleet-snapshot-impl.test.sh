@@ -153,7 +153,6 @@ WT_SHIP=$(add_worktree ship fm/ship-native)
 WT_RUN=$(add_worktree run fm/run-branch)
 WT_OLD=$(add_worktree old fm/old-run)
 WT_DETACHED=$(add_worktree detached fm/detached)
-WT_DEAD=$(add_worktree dead fm/dead)
 git -C "$WT_SCOUT" checkout -q --detach
 git -C "$WT_DETACHED" checkout -q --detach
 
