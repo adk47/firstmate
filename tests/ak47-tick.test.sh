@@ -135,17 +135,16 @@ test_swap_is_restored_even_when_the_reclaim_fails() {
   mkdir -p "$box/bin"
   printf '#!/bin/sh\nexit 1\n' >"$box/bin/swapoff"
   printf '#!/bin/sh\necho on >>"%s/swapon.calls"\n' "$box" >"$box/bin/swapon"
-  printf '#!/bin/sh\n[ "$1" = -n ] && shift\necho "$*" >>"%s/sudo.calls"\nexec "$@"\n' "$box" >"$box/bin/sudo"
+  printf "#!/bin/sh\n[ \"\$1\" = -n ] && shift\necho \"\$*\" >>\"%s/sudo.calls\"\nexec \"\$@\"\n" "$box" >"$box/bin/sudo"
   chmod +x "$box/bin/swapoff" "$box/bin/swapon" "$box/bin/sudo"
-  (
-    export PATH="$box/bin:$PATH" AK47_STATE="$box/state"
-    export AK47_SWAPOFF="$box/bin/swapoff" AK47_SWAPON="$box/bin/swapon"
-    mkdir -p "$AK47_STATE"
-    # shellcheck source=../ak47/lib/common.sh
-    . "$ROOT/ak47/lib/common.sh"
-    swap_reclaim
-    echo "rc=$?"
-  ) >/dev/null 2>&1
+  cat >"$box/reclaim.sh" <<'SH'
+. "$1/ak47/lib/common.sh"
+swap_reclaim
+printf 'rc=%s\n' "$?"
+SH
+  PATH="$box/bin:$PATH" AK47_STATE="$box/state" \
+    AK47_SWAPOFF="$box/bin/swapoff" AK47_SWAPON="$box/bin/swapon" \
+    bash "$box/reclaim.sh" "$ROOT" >/dev/null 2>&1
   [ -s "$box/swapon.calls" ] || fail "a failed swapoff left swap off for good"
   grep -q "$box/bin/swapoff" "$box/sudo.calls" 2>/dev/null \
     || fail "swap_reclaim ran the root-only command without the documented sudo grant"
@@ -160,17 +159,17 @@ test_swap_privilege_probes_the_granted_command() {
   local box
   box=$(mktemp -d "${TMPDIR:-/tmp}/ak47-swappriv-probe.XXXXXX")
   mkdir -p "$box/bin"
-  printf '#!/bin/sh\n[ "$1" = -n ] && shift\ncase "$1" in */swapon|*/swapoff) exit 0 ;; *) exit 1 ;; esac\n' \
+  printf "#!/bin/sh\n[ \"\$1\" = -n ] && shift\ncase \"\$1\" in */swapon|*/swapoff) exit 0 ;; *) exit 1 ;; esac\n" \
     >"$box/bin/sudo"
   printf '#!/bin/sh\nexit 0\n' >"$box/bin/swapon"
   chmod +x "$box/bin/sudo" "$box/bin/swapon"
-  (
-    export PATH="$box/bin:$PATH" AK47_STATE="$box/state" AK47_SWAPON="$box/bin/swapon"
-    mkdir -p "$AK47_STATE"
-    # shellcheck source=../ak47/lib/common.sh
-    . "$ROOT/ak47/lib/common.sh"
-    swap_privileged
-  ) || { rm -rf "$box"; fail "the privilege probe did not accept the grant the README installs"; }
+  cat >"$box/probe.sh" <<'SH'
+. "$1/ak47/lib/common.sh"
+swap_privileged
+SH
+  PATH="$box/bin:$PATH" AK47_STATE="$box/state" AK47_SWAPON="$box/bin/swapon" \
+    bash "$box/probe.sh" "$ROOT" \
+    || { rm -rf "$box"; fail "the privilege probe did not accept the grant the README installs"; }
   rm -rf "$box"
   pass "the swap privilege probe asks for a command the sudoers rule grants"
 }

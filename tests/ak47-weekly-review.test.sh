@@ -146,7 +146,7 @@ test_holds_a_ceiling_that_sits_at_its_own_maximum() {
   seed_samples swap_pct 100 20
   AK47_REVIEW_MIN_SAMPLES=10 "$REVIEW" >/dev/null 2>&1
   local diff
-  diff=$(cat "$(ls "$AK47_STATE"/review-*.diff | tail -1)")
+  diff=$(cat "$AK47_STATE"/review-*.diff)
   case "$diff" in
     *"swap_pct|126"*|*"swap_pct|1"*) fail "the review proposed a percentage ceiling above 100" ;;
   esac
@@ -161,7 +161,7 @@ test_holds_a_ceiling_it_cannot_trust_to_few_samples() {
   seed_samples load15 31 3
   AK47_REVIEW_MIN_SAMPLES=100 "$REVIEW" >/dev/null 2>&1
   local diff
-  diff=$(cat "$(ls "$AK47_STATE"/review-*.diff | tail -1)")
+  diff=$(cat "$AK47_STATE"/review-*.diff)
   case "$diff" in
     *CHANGE*load15*) fail "the review proposed a change from 3 samples" ;;
     *"load15: HELD"*) : ;;
@@ -184,7 +184,7 @@ test_holds_a_ceiling_when_the_sampler_is_not_measuring() {
   }
   AK47_REVIEW_MIN_SAMPLES=10 "$REVIEW" >/dev/null 2>&1
   local diff
-  diff=$(cat "$(ls "$AK47_STATE"/review-*.diff | tail -1)")
+  diff=$(cat "$AK47_STATE"/review-*.diff)
   case "$diff" in
     *"tmp_gb|1"*) fail "the review lowered a ceiling to the sampler's zero" ;;
     *"tmp_gb: HELD"*) : ;;
@@ -217,7 +217,7 @@ test_prints_held_rows_next_to_a_change() {
   esac
   AK47_REVIEW_MIN_SAMPLES=10 "$REVIEW" --no-inbox >/dev/null 2>&1
   local diff
-  diff=$(cat "$(ls "$AK47_STATE"/review-*.diff | tail -1)")
+  diff=$(cat "$AK47_STATE"/review-*.diff)
   case "$diff" in
     *"-load15|32|"*) : ;;
     *) fail "the diff artifact dropped the change: $diff" ;;
