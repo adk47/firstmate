@@ -211,6 +211,21 @@ def choose(steps: list[dict]) -> dict | None:
     return next((s for s in steps if s["kind"] == "rerun"), None)
 
 
+def _ran(gh: GitHub, run: int, attempt: int) -> bool:
+    """Did any job of this attempt actually execute? False means it was cancelled while queued.
+
+    `started_at` is null on a job no runner ever picked up, which is the whole difference between
+    "superseded mid-flight" (re-run it) and "superseded in the queue" (leave it: the re-run only
+    cancels it again). An unreadable jobs list answers True — that is the pre-2026-11-14 behaviour,
+    and refusing to re-run on a read error would hide a real supersede behind an API hiccup.
+    """
+    try:
+        jobs = gh.pages(f"actions/runs/{run}/attempts/{attempt}/jobs", "jobs")
+    except ReadError:
+        return True
+    return any(j.get("started_at") for j in jobs)
+
+
 def sweep_pr(gh: GitHub, doctor, guard, number: int, now: datetime, apply: bool, max_attempts: int = MAX_ATTEMPTS,
              sleep=time.sleep) -> dict:
     """Plan one PR and perform at most one re-run. Returns what happened; raises ReadError."""
@@ -234,6 +249,21 @@ def sweep_pr(gh: GitHub, doctor, guard, number: int, now: datetime, apply: bool,
         raise ReadError(f"actions/runs/{step['run']}: no run_attempt")
     if status != "completed":
         out["outcome"], out["why"] = "wait", f"run {step['run']} is {status} (attempt {attempt}): already re-running"
+    elif not _ran(gh, step["run"], attempt):
+        # 2026-11-14 (cmux-infra-monitor lane, hydra#1961 measured): a run CANCELLED AT THE CONCURRENCY
+        # GATE never executed — the newer run on the same ref superseded it while it waited for a
+        # runner. Re-running it does not rescue the head, it *is* the canceller: the rerun request
+        # cancels the attempt that is queued and starts a fresh one at the back of the same queue,
+        # which the next supersede cancels again. hydra#1961 went round that loop four times (attempts
+        # at 08:46:41, 08:54:33, 08:59:34, 09:18:07, every one `cancelled` with no job ever started)
+        # while the ovh-hydra pool was at its cap with a dozen runs already queued, and each turn spent
+        # one of the three attempts the loop is allowed. A run that DID execute and was then cancelled
+        # is unchanged below: that one is a real supersede, and its re-run is the only way to get the
+        # head validated without an empty commit.
+        out["outcome"], out["why"] = "queued-cancel", (
+            f"run {step['run']} attempt {attempt} was cancelled before any job started (it was waiting "
+            f"for a runner, not running): a re-run would cancel it again and re-queue it — left for the "
+            f"pool to drain ({step['why']})")
     elif attempt >= max_attempts:
         out["outcome"] = "gave-up"
         out["why"] = (f"run {step['run']} has had {attempt} attempts and is still not green: left for a person "

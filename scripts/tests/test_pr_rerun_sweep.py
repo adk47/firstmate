@@ -80,10 +80,13 @@ class Fake:
 
     repo = "Muso-AI/hydra"
 
-    def __init__(self, heads, attempts=None, refuse=(), unreadable=(), graph=None):
+    def __init__(self, heads, attempts=None, refuse=(), unreadable=(), graph=None, jobs=None):
         self.heads = heads  # number -> (pull, checks, runs)
         self.state = {rid: {"run_attempt": a, "status": "completed"} for rid, a in (attempts or {}).items()}
         self.refuse, self.unreadable, self.graph = set(refuse), set(unreadable), graph
+        # run id -> the attempt's jobs. Absent means "every job started", the ordinary case; a test
+        # that sets [] is a run cancelled while it was still queued (2026-11-14, hydra#1961).
+        self.jobs = dict(jobs or {})
         self.reran: list[int] = []
         self.calls = 0
 
@@ -103,6 +106,10 @@ class Fake:
 
     def pages(self, path, key=None):
         self.calls += 1
+        m = re.match(r"actions/runs/(\d+)/attempts/\d+/jobs$", path)
+        if m:
+            rid = int(m.group(1))
+            return self.jobs[rid] if rid in self.jobs else [{"started_at": "2026-11-13T09:00:00Z"}]
         sha = re.search(r"(?:commits/|head_sha=)([0-9a-f]{40})", path).group(1)
         if "/check-runs" in path:
             name = re.search(r"check_name=([\w-]+)", path).group(1)
@@ -148,6 +155,36 @@ class WhatItReRunsTests(unittest.TestCase):
         out, gh = one(checks, runs=[run(SUITE_RUN)])
         self.assertEqual(gh.reran, [SUITE_RUN])
         self.assertEqual(out["outcome"], "rerun")
+
+    def test_a_run_cancelled_before_any_job_started_is_not_re_run(self):
+        """hydra#1961 (2026-11-14): cancelled AT THE CONCURRENCY GATE, no job ever got a runner.
+
+        Re-running that is not a rescue, it is the canceller: the request cancels the attempt that is
+        still queued and starts another one at the back of the same queue. Measured four times on one
+        run (attempts 08:46:41, 08:54:33, 08:59:34, 09:18:07, all `cancelled`, every job started_at
+        null) against an ovh-hydra pool already at its cap.
+        """
+        checks = [check("validate-code", SUITE_RUN, 1, conclusion="cancelled"), check("validate", SUITE_RUN, 2, conclusion="failure")]
+        out, gh = one(checks, runs=[run(SUITE_RUN)], jobs={SUITE_RUN: []})
+        self.assertEqual(gh.reran, [])
+        self.assertEqual(out["outcome"], "queued-cancel")
+        self.assertIn("before any job started", out["why"])
+
+    def test_an_unreadable_jobs_list_re_runs_as_before(self):
+        """A failed read must not silently disable the sweep's one job: fall back to the old answer."""
+        checks = [check("validate-code", SUITE_RUN, 1, conclusion="cancelled"), check("validate", SUITE_RUN, 2, conclusion="failure")]
+        gh = Fake({1936: (pull(1936), checks, [run(SUITE_RUN)])})
+        real_pages = gh.pages
+
+        def pages(path, key=None):
+            if "/attempts/" in path:
+                raise sw.ReadError("GET attempts/2/jobs: HTTP 502")
+            return real_pages(path, key)
+
+        gh.pages = pages
+        out = sw.sweep_pr(gh, doctor, Guard(), 1936, NOW, True, sleep=lambda s: None)
+        self.assertEqual(out["outcome"], "rerun")
+        self.assertEqual(gh.reran, [SUITE_RUN])
 
     def test_a_stale_guard_red_on_a_body_that_passes_today_is_re_run(self):
         checks = [check("validate-code", SUITE_RUN, 1), check("validate", SUITE_RUN, 2),
