@@ -1553,6 +1553,41 @@ measured audience: `docs/credit-verification/verify-request-notes.md` §"The day
   Diff the live file against the repo before merging a change to it and carry the live values, or the deploy
   changes caps and arming, a watchdog clamp included.
 
+## The notify tick tells every affirmed user and carries the others
+
+`scripts/credit-notify-tick.py` (node-8 `credit-notify-tick.timer`; in git since 2026-11-14, before that a
+hand-written host file) walks the untold precedent approvals in chunks; the loop and every stop are
+`scripts/credit_review/notify_chunks.py`.
+
+- **No affirmation count abandons a chunk.** The old `aff < 10` skip dropped the affirmed users with the rest. A
+  short chunk is told by signing a dry run of exactly its affirmed users, which is `decision_told.signed_subjects`'
+  own rule; never change `MIN_SIGNED_DRY` to get a send through or to quiet a log.
+- **Everyone not sent is carried into the next chunk with a reason**, except a chunk whose dry run itself did not
+  run (`dry_failed`): nothing was learned about those users, so they wait for the next tick instead of making the
+  next chunk unreadable too. A stop is per user, per chunk (`dry_failed`) or the run (`kill_file`, `day_cap`, the
+  ladder), and `notify-tick/last-run.json` accounts for every untold user.
+  `/etc/hydra/credit-notify-tick.disabled` stops this tick alone; `credit-decision-told.disabled` stops the sender.
+- **Who was sent is read from the ledger, not the apply's stdout.** `decision_told.py` on node-8 still differs
+  from git (hand patches): changing it in a PR is a deploy CONFLICT until that drift is settled.
+- **The read-back run id comes from the ledger, never from the environment.** `notify_chunks.ladder_state` names a
+  prior confirmed send only when the ledger holds MORE apply attempts than `FIRST_LIVE_LIMIT` — a caller cannot
+  reach the ladder's second live write without one, so that count is durable proof an operator climbed the rung.
+  Below it the tick certifies no read back of its own: the ladder admits exactly one live write (on a ledger with no
+  attempt yet, that one user is told), then the run exits 1 with a status line naming the stop, how many untold
+  users it blocked and the run to read back. That run id is read from the ledger AFTER the run, so a
+  first-ever live run names the run its own apply just wrote, and a ledger that cannot be read back after the run
+  writes `notify-tick: run not measured (...)` rather than a stale or `unknown` id. A read-back stop is never
+  rendered as "sent 0 this run".
+- **A run that cannot be measured says so before it propagates**: any unexpected exception writes
+  `notify-tick: run not measured (<type>)`, so the sentinel never reads the previous run's numbers as current.
+- **A chunk whose sender call fails outright is a run-level failure, never a quiet zero.** The per-user reasons
+  (`dry_failed`, `apply_failed`) stay, and the next chunk is still asked, but `sender_failures` in
+  `last-run.json` and a status line leading with `SENDER FAILED in chunk <n> (<dry|apply> rc <n>)` carry it, and
+  the tick exits 1. The kill file's rc is excluded: that is the named stop `kill_file`.
+- **The class is read by the host's query copied into a core-backend pod, and a copy that fails stops the run.**
+  The pod copy is content-addressed (`/tmp/mklist2-<sha256[:12]>.js`), so a failed `kubectl cp` cannot leave an
+  older revision of the predicate to be executed; a failed `get pod` stops it too.
+
 ## The standing review reads; it never steers
 
 `scripts/standing_review/review.py` (tick `scripts/standing-review-tick.sh`, every 2 h on ak47, the only box that

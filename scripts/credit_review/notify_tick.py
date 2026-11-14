@@ -1,10 +1,11 @@
 """notify-tick: the class `precedent_v1_untold` and who in it has not been told yet.
 
-Ported from two host-only files on node-8 that were never in the repository: `/opt/hydra/scripts/credit-notify-tick.py`
-(the tick) and `/root/mklist2.js` (the class query it copied into a core-backend pod and ran there). This module is
-the part of the tick that decides WHO: the class, the list built from it, and the subtraction of users this path
-already tried. It sends nothing and writes nothing; the per-user eligibility and the send stay in
-`decision_told.py` (one notice per (workspace, profile) group, the 7-day slot, the signed dry run, the day cap).
+Ported from two files that were host-only on node-8: `/opt/hydra/scripts/credit-notify-tick.py` (the tick, whose
+port is now `scripts/credit-notify-tick.py`) and `/root/mklist2.js` (the class query it copied into a core-backend pod
+and ran there, still host-only). This module is the part of the tick that decides WHO: the class, the list built from
+it, and the subtraction of users this path already tried. It sends nothing and writes nothing; the per-user
+eligibility and the send stay in `decision_told.py` (one notice per (workspace, profile) group, the 7-day slot, the
+signed dry run, the day cap).
 
 The class, in words: a credit request that is not deleted, has a user, was approved through the precedent rule
 (`metadata.approval.via = 'precedent_v1'`) and carries neither core notice stamp
