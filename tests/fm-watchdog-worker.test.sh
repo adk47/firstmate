@@ -70,6 +70,10 @@ printf 'control %s\n' "\$*" >> "$home/calls"
 if [ -f "$home/units/control-transient" ]; then
   exit 124
 fi
+if [ -f "$home/units/control-lock-contended" ]; then
+  printf 'error: another lifecycle action is already running for task %s\n' "\$1" >&2
+  exit 1
+fi
 if [ -f "$home/units/control-kind-refusal" ]; then
   printf "error: task %s records kind 'fix', which has no defined relaunch shape\n" "\$1" >&2
   exit 1
@@ -244,6 +248,28 @@ test_a_structural_refusal_outside_the_old_phrase_list_spends_no_budget() {
   pass "a structural refusal is classified by the control command's own error contract"
 }
 
+test_a_boot_transient_failure_keeps_the_lane_relaunch_history() {
+  local home now
+  home=$(make_home boot-transient); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  jq -n --argjson now "$now" \
+    '{schema: 1, boot_identity: "boot-old", units: {}, backlog: {},
+      tasks: { w1: { sig: "abc", since: $now, stage: 2, stage_at: $now,
+        rings: [$now, $now], relaunches: [$now, $now], steers: [$now], woke: false,
+        istage: 1, istage_at: $now, ibase: "001.msg", strikes: [$now],
+        refusal: "", refusal_at: 0 } }}' \
+    > "$home/state/.watchdog-worker.json"
+  BOOT=boot-new tick "$home" "$now" >/dev/null
+  assert_eq "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" "2" \
+    "a transient boot relaunch failure reset the lane's relaunch budget"
+  assert_eq "$(jq -r '.tasks.w1.strikes | length' "$home/state/.watchdog-worker.json")" "1" \
+    "a transient boot relaunch failure reset the lane's strike history"
+  pass "a transient boot relaunch failure preserves the lane's persisted counters"
+}
+
 test_a_boot_refusal_keeps_the_lane_relaunch_history() {
   local home now relaunches
   home=$(make_home boot-refusal); fake_tools "$home"
@@ -313,6 +339,22 @@ test_a_transient_spawn_failure_is_not_a_refusal() {
   [ -z "$(wakes "$home" | grep 'cannot relaunch w1')" ] \
     || fail "a transient spawn failure escalated as a refusal: $(wakes "$home")"
   pass "a transient spawn failure is retried on the ordinary budget"
+}
+
+test_lifecycle_lock_contention_is_retried_not_recorded() {
+  local home now
+  home=$(make_home lock-contended); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-lock-contended"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 600))" >/dev/null
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "2" \
+    "a lifecycle lock hold was not retried on the next pass"
+  [ -z "$(wakes "$home" | grep 'cannot relaunch w1')" ] \
+    || fail "a lifecycle lock hold was recorded as a permanent refusal: $(wakes "$home")"
+  pass "lifecycle lock contention stays retryable instead of becoming a 6h refusal"
 }
 
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake() {
@@ -887,7 +929,9 @@ test_a_refused_relaunch_spends_no_budget_and_escalates_once
 test_a_refused_relaunch_is_retried_only_after_its_window
 test_a_transient_relaunch_failure_is_not_a_refusal
 test_a_structural_refusal_outside_the_old_phrase_list_spends_no_budget
+test_a_boot_transient_failure_keeps_the_lane_relaunch_history
 test_a_boot_refusal_keeps_the_lane_relaunch_history
+test_lifecycle_lock_contention_is_retried_not_recorded
 test_an_orca_replacement_names_a_note_it_could_not_deliver
 test_a_spawn_preflight_refusal_spends_no_budget_and_retries_once
 test_a_transient_spawn_failure_is_not_a_refusal

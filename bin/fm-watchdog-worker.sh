@@ -565,16 +565,24 @@ delivery_id() {  # <seed> <epoch>
 # touches the agent, so it is the only line on stderr; a failure after the stop
 # or launch began reports the concrete partial state on a second `error:` line
 # from the rollback, which is worth retrying, and a timeout never reaches the
-# command at all. bin/fm-spawn.sh --relaunch exits 2 for its preflight
-# refusals and 1 for a launch that may be retried.
+# command at all. Contention for the task's own lifecycle lock or supervision
+# lease is a single preflight line too, but it clears on its own, so it stays
+# retryable. bin/fm-spawn.sh --relaunch exits 2 for its preflight refusals and
+# 1 for a launch that may be retried.
 relaunch_refusal() {  # <contract> <rc> <output>
   local contract=$1 rc=$2 out=$3 msg errors
   case "$contract" in
     spawn) [ "$rc" -eq 2 ] || return 1 ;;
     *)
-      [ "$rc" -ne 124 ] || return 1
+      case "$rc" in
+        6|124) return 1 ;;
+      esac
       errors=$(printf '%s\n' "$out" | grep -c '^error:')
       [ "${errors:-0}" -eq 1 ] || return 1
+      if printf '%s\n' "$out" | grep -qE \
+        'another lifecycle action is already running|is leased to the .* supervision actor'; then
+        return 1
+      fi
       ;;
   esac
   msg=$(printf '%s\n' "$out" | grep -m1 -F 'error:' || true)
@@ -913,11 +921,18 @@ boot_pass() {  # <boot>
       task_relaunch_refused "$id" "$state"
     elif [ "$rc" -eq 0 ]; then
       ok=$((ok + 1))
+    else
+      # A failed relaunch resets nothing: the lane's relaunch and strike
+      # history is what stops the resumed task pass from thrashing it.
+      task_load "$id"
+      task_store "$id"
     fi
     # A fresh agent takes a moment to make its endpoint answer, so this pass
     # must not read the endpoint it just relaunched and relaunch it again.
     : > "$WORK/touched.$id"
-    [ "$rc" -eq 2 ] || task_reset "$id" "$(now_epoch)"
+    if [ "$rc" -eq 0 ]; then
+      task_reset "$id" "$(now_epoch)"
+    fi
   done
   chair=$(chair_ensure)
   result="relaunched $ok of $tried task(s), chair $chair"
