@@ -210,14 +210,10 @@ for line in rows:
 if not changes and not helds:
     print("NO_CHANGES")
     raise SystemExit(0)
-if not changes:
-    for h in helds:
-        print(f"HELD {h}")
-    print("NO_CHANGES")
-    raise SystemExit(0)
-import difflib
-for d in difflib.unified_diff(rows, out, fromfile="ak47/budget.conf", tofile="ak47/budget.conf (proposed)", lineterm=""):
-    print(d)
+if changes:
+    import difflib
+    for d in difflib.unified_diff(rows, out, fromfile="ak47/budget.conf", tofile="ak47/budget.conf (proposed)", lineterm=""):
+        print(d)
 print("---")
 for h in helds:
     print(f"HELD {h}")
@@ -225,6 +221,9 @@ for c in changes:
     print(f"CHANGE {c}")
 PY
 ) || exit 2
+
+change_lines=$(printf '%s\n' "$proposal" | sed -n 's/^CHANGE /- /p')
+held_lines=$(printf '%s\n' "$proposal" | sed -n 's/^HELD /- HELD /p')
 
 # ---- the report ----------------------------------------------------------------
 {
@@ -268,14 +267,22 @@ PY
   echo
   echo "## proposed threshold changes"
   echo
-  if [ "$proposal" = "NO_CHANGES" ]; then
-    echo "None. Every ceiling still describes the box."
-  else
+  if [ -n "$change_lines" ]; then
     echo '```diff'
     printf '%s\n' "$proposal" | sed '/^---$/,$d'
     echo '```'
     echo
-    printf '%s\n' "$proposal" | sed -n 's/^CHANGE /- /p'
+    printf '%s\n' "$change_lines"
+  elif [ -n "$held_lines" ]; then
+    echo "None proposed. A ceiling was held, not ignored; see below."
+  else
+    echo "None. Every ceiling still describes the box."
+  fi
+  if [ -n "$held_lines" ]; then
+    echo
+    echo "## ceilings held, and why"
+    echo
+    printf '%s\n' "$held_lines"
   fi
   echo
   echo "## what this review will not do"
@@ -285,16 +292,25 @@ PY
   echo "change needs a human to accept the diff above."
 } >"$REPORT"
 
-if [ "$proposal" != "NO_CHANGES" ]; then
-  printf '%s\n' "$proposal" | sed '/^---$/,$d' >"$DIFF"
+if [ -n "$change_lines" ] || [ -n "$held_lines" ]; then
+  {
+    printf '%s\n' "$proposal" | sed '/^---$/,$d'
+    if [ -n "$held_lines" ]; then
+      echo
+      printf '%s\n' "$held_lines"
+    fi
+  } >"$DIFF"
 fi
 
 [ "$PRINT" = 1 ] && { cat "$REPORT"; [ -f "$DIFF" ] && { echo; echo "diff: $DIFF"; }; }
 
 if [ "$INBOX" = 1 ] && [ -x "$FM_HOME/bin/fm-inbox.sh" ]; then
-  if [ -f "$DIFF" ]; then
+  if [ -n "$change_lines" ]; then
     "$FM_HOME/bin/fm-inbox.sh" note --source "$INBOX_CLASS" \
       "ak47 weekly review proposes threshold changes: $DIFF (report $REPORT)" >/dev/null 2>&1 || true
+  elif [ -n "$held_lines" ]; then
+    "$FM_HOME/bin/fm-inbox.sh" note --source "$INBOX_CLASS" \
+      "ak47 weekly review held ceilings it cannot justify: $DIFF (report $REPORT)" >/dev/null 2>&1 || true
   else
     "$FM_HOME/bin/fm-inbox.sh" note --source "$INBOX_CLASS" \
       "ak47 weekly review: no threshold changes; report $REPORT" >/dev/null 2>&1 || true

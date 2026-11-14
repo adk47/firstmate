@@ -118,6 +118,29 @@ test_the_per_run_bound_is_honoured() {
   pass "one run moves at most AK47_TAKEDOWN_MAX entries"
 }
 
+test_a_hanging_size_walk_is_bounded() {
+  reset_tree
+  junk big-entry
+  local stub=$SANDBOX/bin start elapsed
+  mkdir -p "$stub"
+  printf '#!/bin/sh\nsleep 30\n' >"$stub/du"
+  chmod +x "$stub/du"
+  start=$SECONDS
+  PATH="$stub:$PATH" AK47_DU_BUDGET=2 "$TD" --dry-run --top 5 >/dev/null 2>&1
+  elapsed=$((SECONDS - start))
+  [ "$elapsed" -le 8 ] \
+    || fail "the size ranking ignored its configured budget (took ${elapsed}s)"
+  [ -d "$AK47_TMP_ROOT/big-entry" ] || fail "a bounded dry run still moved an entry"
+  pass "a hanging size walk is bounded and does not stall the take-down"
+}
+
+test_an_empty_root_is_not_a_failure() {
+  reset_tree
+  "$TD" --dry-run --top 5 >/dev/null 2>&1 \
+    || fail "an empty root was reported as a failure to build a safe set"
+  pass "an empty root is a completed run, not a ranking failure"
+}
+
 test_a_dry_run_moves_nothing() {
   reset_tree
   junk dry-run-victim
@@ -133,4 +156,6 @@ test_refuses_a_young_entry
 test_refuses_a_live_task_scratch_root
 test_refuses_every_protected_path
 test_the_per_run_bound_is_honoured
+test_a_hanging_size_walk_is_bounded
+test_an_empty_root_is_not_a_failure
 test_a_dry_run_moves_nothing

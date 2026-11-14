@@ -193,6 +193,42 @@ test_holds_a_ceiling_when_the_sampler_is_not_measuring() {
   pass "a metric whose sampler reported zero is held, not used to lower its ceiling"
 }
 
+test_prints_held_rows_next_to_a_change() {
+  # A suppressed ceiling must not disappear because another metric earned a
+  # change: the mixed state is the one where a quiet-looking review is wrong.
+  {
+    local i now
+    now=$(date +%s)
+    : >"$AK47_STATE/samples.log"
+    for ((i = 0; i < 20; i++)); do
+      printf '%s load15=30 swap_pct=100\n' "$((now - (20 - i) * 300))"
+    done >>"$AK47_STATE/samples.log"
+  }
+  local out
+  out=$(AK47_REVIEW_MIN_SAMPLES=10 "$REVIEW" --print --no-inbox 2>&1) \
+    || fail "the review failed: $out"
+  case "$out" in
+    *"- load15: 32 -> "*) : ;;
+    *) fail "the review dropped the change it can justify: $out" ;;
+  esac
+  case "$out" in
+    *"- HELD swap_pct: HELD"*) : ;;
+    *) fail "the review dropped the held ceiling next to a change: $out" ;;
+  esac
+  AK47_REVIEW_MIN_SAMPLES=10 "$REVIEW" --no-inbox >/dev/null 2>&1
+  local diff
+  diff=$(cat "$(ls "$AK47_STATE"/review-*.diff | tail -1)")
+  case "$diff" in
+    *"-load15|32|"*) : ;;
+    *) fail "the diff artifact dropped the change: $diff" ;;
+  esac
+  case "$diff" in
+    *"HELD swap_pct"*) : ;;
+    *) fail "the diff artifact dropped the held ceiling: $diff" ;;
+  esac
+  pass "held ceilings print separately even when another metric earns a change"
+}
+
 test_reads_a_sample_written_by_the_tick() {
   local tick=$ROOT/ak47/tick.sh out
   cat >"$AK47_CONFIG/devops.conf" <<'CONF'
@@ -294,6 +330,7 @@ test_counts_a_loop_gap_just_over_three_intervals
 test_holds_a_ceiling_that_sits_at_its_own_maximum
 test_holds_a_ceiling_it_cannot_trust_to_few_samples
 test_holds_a_ceiling_when_the_sampler_is_not_measuring
+test_prints_held_rows_next_to_a_change
 test_reads_a_sample_written_by_the_tick
 test_never_writes_the_budget
 test_never_proposes_a_new_action_class

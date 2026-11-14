@@ -335,10 +335,13 @@ nothing, and `oomctl` lists **no** monitored cgroups. Three verified reasons:
    properties to a running unit.
 
 **Swap reclamation needs root too.** The tick's `swap-pressure` action does
-`swapoff -a` then `swapon -a`; both are root-only, and the tick runs as a user
-unit, so it would WARN and count a failure every tick on a full swap while swap
-stayed full. It now proves the capability with `swap_privileged` before trying,
-and files `swap-unprivileged` — the one line Aaron needs, not a transient error.
+`swapoff -a` then `swapon -a` through `sudo -n`; both are root-only, and the tick
+runs as a user unit, so it would WARN and count a failure every tick on a full
+swap while swap stayed full. It now proves the capability with `swap_privileged`
+by running one of the commands the sudoers rule actually grants, and files
+`swap-unprivileged` — the one line Aaron needs, not a transient error. A failed
+restore after a successful `swapoff` is reported as a failure rather than
+swallowed, because that leaves the box with no swap.
 The 2026-11-14 reclaim was run by hand and took swap from 31.9 GB of 31.9 GB to
 0 (RAM 69 GB used, 54 GB available). To let the tick do it, one sudoers rule:
 

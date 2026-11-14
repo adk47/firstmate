@@ -135,9 +135,11 @@ test_swap_is_restored_even_when_the_reclaim_fails() {
   mkdir -p "$box/bin"
   printf '#!/bin/sh\nexit 1\n' >"$box/bin/swapoff"
   printf '#!/bin/sh\necho on >>"%s/swapon.calls"\n' "$box" >"$box/bin/swapon"
-  chmod +x "$box/bin/swapoff" "$box/bin/swapon"
+  printf '#!/bin/sh\n[ "$1" = -n ] && shift\necho "$*" >>"%s/sudo.calls"\nexec "$@"\n' "$box" >"$box/bin/sudo"
+  chmod +x "$box/bin/swapoff" "$box/bin/swapon" "$box/bin/sudo"
   (
     export PATH="$box/bin:$PATH" AK47_STATE="$box/state"
+    export AK47_SWAPOFF="$box/bin/swapoff" AK47_SWAPON="$box/bin/swapon"
     mkdir -p "$AK47_STATE"
     # shellcheck source=../ak47/lib/common.sh
     . "$ROOT/ak47/lib/common.sh"
@@ -145,8 +147,32 @@ test_swap_is_restored_even_when_the_reclaim_fails() {
     echo "rc=$?"
   ) >/dev/null 2>&1
   [ -s "$box/swapon.calls" ] || fail "a failed swapoff left swap off for good"
+  grep -q "$box/bin/swapoff" "$box/sudo.calls" 2>/dev/null \
+    || fail "swap_reclaim ran the root-only command without the documented sudo grant"
   rm -rf "$box"
   pass "swap is turned back on even when the reclaim itself fails"
+}
+
+test_swap_privilege_probes_the_granted_command() {
+  # The documented sudoers rule grants only /sbin/swapoff -a and /sbin/swapon -a.
+  # A probe of `sudo -n true` is outside that grant and always denied, so the
+  # capability must be proven with a command the rule actually carries.
+  local box
+  box=$(mktemp -d "${TMPDIR:-/tmp}/ak47-swappriv-probe.XXXXXX")
+  mkdir -p "$box/bin"
+  printf '#!/bin/sh\n[ "$1" = -n ] && shift\ncase "$1" in */swapon|*/swapoff) exit 0 ;; *) exit 1 ;; esac\n' \
+    >"$box/bin/sudo"
+  printf '#!/bin/sh\nexit 0\n' >"$box/bin/swapon"
+  chmod +x "$box/bin/sudo" "$box/bin/swapon"
+  (
+    export PATH="$box/bin:$PATH" AK47_STATE="$box/state" AK47_SWAPON="$box/bin/swapon"
+    mkdir -p "$AK47_STATE"
+    # shellcheck source=../ak47/lib/common.sh
+    . "$ROOT/ak47/lib/common.sh"
+    swap_privileged
+  ) || { rm -rf "$box"; fail "the privilege probe did not accept the grant the README installs"; }
+  rm -rf "$box"
+  pass "the swap privilege probe asks for a command the sudoers rule grants"
 }
 
 test_the_finding_class_is_one_the_inbox_accepts() {
@@ -625,4 +651,5 @@ test_expiry_is_bounded_per_run_and_says_what_is_left
 test_expiry_does_not_run_lsof_per_entry
 test_the_finding_class_is_one_the_inbox_accepts
 test_swap_is_restored_even_when_the_reclaim_fails
+test_swap_privilege_probes_the_granted_command
 test_an_unprivileged_tick_says_so_instead_of_failing_to_swap

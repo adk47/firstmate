@@ -14,9 +14,11 @@
 #      filesystem's root.
 #   3. OPEN HANDLES. lsof must prove nothing holds a file under the path. A probe
 #      that errors is "held", never "free" - fail closed.
-#   4. QUARANTINE FIRST. The path is renamed into a private sibling name, the
-#      handle scan runs again against the new name, and only then is it removed.
-#      A rename is atomic and reversible; an rm is neither.
+#   4. QUARANTINE FIRST. The path is renamed into a private sibling name, then
+#      removed. A rename is atomic and reversible; an rm is neither. Without an
+#      in-use set the handle scan runs again against the new name; with one the
+#      tick-start snapshot is all that exists, and the expiry scan's prefix
+#      match on the quarantine name is what catches a later handle.
 #
 # Public:
 #   ak47_path_identity <path>        canonical absolute path, symlinks resolved
@@ -237,17 +239,20 @@ ak47_safe_delete() {
     return 1
   fi
   AK47_SD_QPATH=$qpath
-  # Re-scan under the new name: a process that opened a file between the first
-  # scan and the rename is now visible here, and the rename is reversible.
-  rc=0
-  ${AK47_HANDLE_CHECK:-ak47_has_open_handles} "$qpath" || rc=$?
-  if [ "$rc" -ne 1 ]; then
-    mv -f -- "$qpath" "$id" 2>/dev/null || true
-    # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
-    AK47_SD_ERROR="handle appeared during quarantine; restored"
-    # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
-    AK47_SD_QPATH=""
-    return 1
+  # Re-scan under the new name only when a live scan exists. With an in-use set
+  # the answer comes from the tick-start snapshot, in which this fresh
+  # pid-suffixed name cannot appear, so asking again would always say "free".
+  if [ -z "${AK47_INUSE_SET:-}" ]; then
+    rc=0
+    ${AK47_HANDLE_CHECK:-ak47_has_open_handles} "$qpath" || rc=$?
+    if [ "$rc" -ne 1 ]; then
+      mv -f -- "$qpath" "$id" 2>/dev/null || true
+      # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
+      AK47_SD_ERROR="handle appeared during quarantine; restored"
+      # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+      AK47_SD_QPATH=""
+      return 1
+    fi
   fi
   if ! rm -rf --one-file-system -- "$qpath" 2>/dev/null; then
     rm -rf -- "$qpath" 2>/dev/null || true

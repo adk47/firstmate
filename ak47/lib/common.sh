@@ -311,6 +311,24 @@ ak47_breach() {
   }'
 }
 
+# swap_run <budget|-> <command> [args...] - run a root-only swap command.
+# Root runs it directly; everyone else goes through the one sudoers grant the
+# README installs for these exact absolute commands.
+swap_run() {
+  local budget=$1; shift
+  local -a cmd
+  if [ "$(id -u)" -eq 0 ]; then
+    cmd=("$@")
+  else
+    cmd=(sudo -n "$@")
+  fi
+  if [ "$budget" = - ]; then
+    "${cmd[@]}"
+  else
+    timeout "$budget" "${cmd[@]}"
+  fi
+}
+
 # swap_reclaim - stop swapping, let the pages come back, then start swapping again.
 #
 # The `swapoff -a && swapon -a` form has two defects that only show up when it
@@ -318,12 +336,14 @@ ak47_breach() {
 # next run's `swapoff -a` then fails instantly because nothing is on - so the
 # `&&` chain can never turn swap back on again. Swap is restored here whatever
 # happened above, and the reclaim itself is given a budget so a slow swapoff
-# cannot outlast the unit's start timeout.
+# cannot outlast the unit's start timeout. A failed restore is reported, not
+# swallowed, because that leaves the box with less swap than it had.
 swap_reclaim() {
-  local before after rc=0
+  local before after rc=0 restore=0
   before=$(awk '/^SwapFree:/{printf "%d", ($2)/1048576}' /proc/meminfo 2>/dev/null || echo 0)
-  timeout "${AK47_SWAPOFF_BUDGET:-600}" swapoff -a 2>/dev/null || rc=$?
-  swapon -a 2>/dev/null || true
+  swap_run "${AK47_SWAPOFF_BUDGET:-600}" "${AK47_SWAPOFF:-/sbin/swapoff}" -a 2>/dev/null || rc=$?
+  swap_run - "${AK47_SWAPON:-/sbin/swapon}" -a >/dev/null 2>&1 || restore=1
+  [ "$restore" -eq 1 ] && rc=1
   after=$(awk '/^SwapFree:/{printf "%d", ($2)/1048576}' /proc/meminfo 2>/dev/null || echo 0)
   # shellcheck disable=SC2034  # read by the tick after this call
   AK47_SWAP_RECLAIMED=$(( ${after:-0} - ${before:-0} ))
@@ -335,12 +355,14 @@ swap_reclaim() {
 # swapoff and swapon are root-only, and the tick runs as a user unit. Arming the
 # reclaim without checking would WARN and count a failure every tick while swap
 # stayed full, so the tick proves the capability first and files the one line
-# that grants it. AK47_SWAP_PRIVILEGE overrides the probe: yes/no/auto.
+# that grants it. The probe is one of the two granted commands: `sudo -n true`
+# is outside the documented sudoers rule and would always be denied.
+# AK47_SWAP_PRIVILEGE overrides the probe: yes/no/auto.
 swap_privileged() {
   case "${AK47_SWAP_PRIVILEGE:-auto}" in
     yes) return 0 ;;
     no)  return 1 ;;
   esac
   [ "$(id -u)" -eq 0 ] && return 0
-  sudo -n true 2>/dev/null
+  swap_run - "${AK47_SWAPON:-/sbin/swapon}" -a >/dev/null 2>&1
 }

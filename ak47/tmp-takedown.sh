@@ -33,6 +33,8 @@ AK47_ROOT=${AK47_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)}
 . "$AK47_ROOT/lib/common.sh"
 # shellcheck source=lib/safe-delete.sh
 . "$AK47_ROOT/lib/safe-delete.sh"
+# shellcheck source=lib/protected.sh
+. "$AK47_ROOT/lib/protected.sh"
 
 APPLY=0
 TOP=${AK47_TAKEDOWN_TOP:-20}
@@ -52,43 +54,6 @@ while [ $# -gt 0 ]; do
 done
 
 TMP_ROOT=${AK47_TMP_ROOT:-/tmp}
-PROTECTED_EXACT=(
-  "$TMP_ROOT/fm-move" "$TMP_ROOT/jest_0"
-  "$TMP_ROOT/.X11-unix" "$TMP_ROOT/.ICE-unix" "$TMP_ROOT/.font-unix"
-  "$TMP_ROOT/.Test-unix" "$TMP_ROOT/.XIM-unix"
-)
-PROTECTED_GLOB=(
-  "$TMP_ROOT/ak47-*" "$TMP_ROOT/orcad-*" "$TMP_ROOT/systemd-*" "$TMP_ROOT/snap*"
-  "$TMP_ROOT/.X*-lock" "$TMP_ROOT/*router*.sh" "$TMP_ROOT/*forward*"
-  "$TMP_ROOT/cli-proxy*" "$TMP_ROOT/*.token"
-)
-EXACT_CANON=(); for p in "${PROTECTED_EXACT[@]}"; do EXACT_CANON+=("$(ak47_path_identity "$p" || echo "$p")"); done
-GLOB_CANON=()
-for p in "${PROTECTED_GLOB[@]}"; do
-  d=${p%/*}; t=${p##*/}
-  GLOB_CANON+=("$(ak47_path_identity "$d" || echo "$d")/$t")
-done
-
-refuse_protected() {  # 0 when this path must not be touched
-  local id=$1 p
-  for p in "${EXACT_CANON[@]}"; do
-    [ "$id" = "$p" ] && return 0
-    case "$id" in "$p"/*) return 0 ;; esac
-  done
-  for p in "${GLOB_CANON[@]}"; do
-    # shellcheck disable=SC2053,SC2254  # these globs are patterns on purpose
-    case "$id" in $p) return 0 ;; esac
-  done
-  return 1
-}
-
-# A live task's scratch root is never touched, however idle it looks.
-live_task() {  # 0 when this path is /tmp/fm-<id> and <id> has metadata
-  local name=${1##*/} id
-  case "$name" in fm-*) ;; *) return 1 ;; esac
-  id=${name#fm-}
-  [ -e "$FM_HOME/state/$id.meta" ]
-}
 
 echo "tmp-takedown: root=$TMP_ROOT top=$TOP min_age=${MIN_AGE}s max=$MAX apply=$APPLY"
 echo "tmp-takedown: quarantine=$QUAR"
@@ -103,12 +68,27 @@ fi
 AK47_INUSE_SET=$INUSE
 export AK47_INUSE_SET
 
-# Rank direct children by size. `du` per child, bounded, so one pathological
-# subtree cannot stall the ranking.
+# Rank direct children by size. `du` runs per child under the remaining share
+# of one budget, so a single pathological subtree loses only its own rank and
+# the whole walk can never run longer than AK47_DU_BUDGET.
 ranked=$(mktemp) || exit 3
-trap 'rm -f "$ranked"' EXIT
-find "$TMP_ROOT" -mindepth 1 -maxdepth 1 -printf '%p\0' 2>/dev/null |
-  xargs -0 -r -n 20 du -skx -- 2>/dev/null | sort -rn | head -n "$TOP" >"$ranked"
+ranked_top=$ranked.top
+trap 'rm -f "$ranked" "$ranked_top"' EXIT
+deadline=$(( $(ak47_epoch) + ${AK47_DU_BUDGET:-90} ))
+candidates=0
+while IFS= read -r -d '' child; do
+  candidates=1
+  remaining=$(( deadline - $(ak47_epoch) ))
+  [ "$remaining" -lt 1 ] && break
+  kb=$(timeout "$remaining" du -skx -- "$child" 2>/dev/null | awk '{print $1}') || kb=
+  [ -n "$kb" ] && printf '%s\t%s\n' "$kb" "$child" >>"$ranked"
+done < <(find "$TMP_ROOT" -mindepth 1 -maxdepth 1 -printf '%p\0' 2>/dev/null)
+sort -rn "$ranked" | head -n "$TOP" >"$ranked_top"
+mv -f "$ranked_top" "$ranked"
+if [ "$candidates" -eq 1 ] && [ ! -s "$ranked" ]; then
+  echo "tmp-takedown: could not rank any entry within ${AK47_DU_BUDGET:-90}s; refusing to act" >&2
+  exit 3
+fi
 
 moved=0; freed_kb=0; skipped=0; failures=0
 while IFS=$'\t' read -r kb path; do
@@ -118,20 +98,18 @@ while IFS=$'\t' read -r kb path; do
   id=$(ak47_path_identity "$path") || { skipped=$((skipped + 1)); continue; }
   # Gate 1: the path must be exactly what it claims (no symlink surprise).
   ak47_path_same "$path" "$id" || { skipped=$((skipped + 1)); continue; }
-  # Gate 2: protected patterns.
-  if refuse_protected "$id"; then skipped=$((skipped + 1)); continue; fi
-  # Gate 3: a live task's scratch root.
-  if live_task "$path"; then skipped=$((skipped + 1)); continue; fi
-  # Gate 4: age, and only ever in combination with the gates above.
+  # Gate 2: protected patterns, including a live task's scratch root.
+  if ak47_protected_spelling "$id"; then skipped=$((skipped + 1)); continue; fi
+  # Gate 3: age, and only ever in combination with the gates above.
   mtime=$(stat -c %Y -- "$path" 2>/dev/null) || { skipped=$((skipped + 1)); continue; }
   if [ $(( $(ak47_epoch) - mtime )) -lt "$MIN_AGE" ]; then skipped=$((skipped + 1)); continue; fi
-  # Gate 5: nothing holds it or anything inside it.
+  # Gate 4: nothing holds it or anything inside it.
   rc=0; ak47_has_open_handles "$id" || rc=$?
   if [ "$rc" -ne 1 ]; then
     echo "tmp-takedown: held or unprovable, leaving alone: $path (rc=$rc)"
     skipped=$((skipped + 1)); continue
   fi
-  # Gate 6: never a mountpoint.
+  # Gate 5: never a mountpoint.
   if ak47_mount_hazard "$id"; then skipped=$((skipped + 1)); continue; fi
 
   hours=$(( ( $(ak47_epoch) - mtime ) / 3600 ))
