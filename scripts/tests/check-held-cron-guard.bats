@@ -366,19 +366,24 @@ restore() { git -C "$R" reset -q --hard HEAD; }
   [ "$status" -eq 2 ]
 }
 
-@test "this repo: policies/held-crons.json names real crons, every one enabled:false except the decider, and the guard is GREEN on HEAD" {
+@test "this repo: policies/held-crons.json names real crons, score-approve is listed or lifted on record, and the guard is GREEN on HEAD" {
   python3 - "$HYDRA_REPO" <<'PY'
 import json, sys
 root = sys.argv[1]
 jobs = {j["name"]: j for j in json.load(open(f"{root}/cron-jobs.json"))["jobs"]}
 held = json.load(open(f"{root}/policies/held-crons.json"))["held"]
 names = [e["name"] for e in held]
-assert "credit-trust-score-approve-15m" in names and "credit-trust-decide-15m" in names, names
+assert "credit-trust-decide-15m" in names, names
 for e in held:
     assert e["name"] in jobs, f"{e['name']} is not a cron"
     assert e["kill_file"].startswith("/etc/hydra/") and e["kill_file"].endswith(".disabled"), e
     assert e["kill_file"] in jobs[e["name"]].get("description", ""), f"{e['name']}: description does not name {e['kill_file']}"
-assert jobs["credit-trust-score-approve-15m"]["enabled"] is False
+# score-approve is either still held (and off), or it left the list by the recorded step whose record is committed.
+if "credit-trust-score-approve-15m" in names:
+    assert jobs["credit-trust-score-approve-15m"]["enabled"] is False
+else:
+    record = open(f"{root}/data/kill-lift/kill-lift-1114-2043.evidence").read().splitlines()
+    assert " lifted [key=kill-lift-1114-2043] " in record[-1], record[-1]
 PY
   run python3 "$GUARD" --repo "$HYDRA_REPO" --etc-dir "$TEST_TMPDIR/no-etc" --base HEAD
   echo "$output"

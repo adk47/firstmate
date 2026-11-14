@@ -581,13 +581,22 @@ SH
   grep -q "REFUSED: fixture" "$TEST_TMPDIR/r.txt"
 }
 
-@test "the score-approve cron row stays enabled: false in the repo until a PR that cites a kill-lift evidence key flips it" {
-  # The first of the three stops is the scheduler row. Flipping it is the captain's decision
-  # (docs/credit-verification/score-approve-switch-decision-brief.md asks that question), taken in a PR that cites the
-  # recorded step's [key=kill-lift-MMDD-HHMM] evidence - never as a side effect of another change. On 2026-11-07 an
-  # automated review fix flipped it to true inside a print-only PR; this pin is what stops that recurring. The PR that
-  # deliberately enables the row changes this test in the same diff, with the key in its body.
+@test "the score-approve cron row is enabled: true only with its executed kill-lift record committed and its hold entry gone" {
+  # The scheduler row is one of the three stops. It was flipped by the captain's decision (2026-11-14, "arm it now") in
+  # the PR that cites [key=kill-lift-1114-2043]. On 2026-11-07 an automated review fix flipped it to true inside a
+  # print-only PR; this pin is what stops an unrecorded flip recurring: the row may read true only while the executed
+  # step's record is in the repo, ends in `lifted`, and policies/held-crons.json no longer lists the cron. Setting
+  # the row back to false needs no record.
   run jq -r '.jobs[] | select(.name == "credit-trust-score-approve-15m") | .enabled' "$HYDRA_REPO/cron-jobs.json"
   [ "$status" -eq 0 ]
-  [ "$output" = "false" ]
+  if [ "$output" = "true" ]; then
+    ev="$HYDRA_REPO/data/kill-lift/kill-lift-1114-2043.evidence"
+    [ -f "$ev" ]
+    tail -n 1 "$ev" | grep -q ' lifted \[key=kill-lift-1114-2043\] '
+    grep -q '/etc/hydra/credit-trust-score-approve.disabled' "$ev"
+    run jq -r '[.held[].name] | index("credit-trust-score-approve-15m")' "$HYDRA_REPO/policies/held-crons.json"
+    [ "$output" = "null" ]
+  else
+    [ "$output" = "false" ]
+  fi
 }

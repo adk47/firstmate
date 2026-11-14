@@ -16,12 +16,6 @@
   ],
   "held": [
     {
-      "name": "credit-trust-score-approve-15m",
-      "kill_file": "/etc/hydra/credit-trust-score-approve.disabled",
-      "since": "2026-11-06T08:19Z",
-      "why": "firstmate re-armed deliberately: both switches come off together, in one recorded step, only after the coded-decider invalidation path is proved (run twice, second invalidates first, no Errno 13); the scheduler row is the first stop and is the captain's decision (docs/credit-verification/score-approve-switch-decision-brief.md)"
-    },
-    {
       "name": "credit-trust-decide-15m",
       "kill_file": "/etc/hydra/credit-trust-decide.disabled",
       "since": "2026-11-05T02:55Z",
