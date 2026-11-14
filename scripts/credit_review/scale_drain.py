@@ -173,6 +173,9 @@ DEFAULT_SHARDS = 16
 #: requester is exactly this, ``SCALE_DRAIN=1`` is set, the registry entry is approved,
 #: and the evidence excerpt is a well-formed drain digest naming an auto-approvable rule.
 SERVICE_REQUESTER = "scale-drain@hydra-ops"
+# muso-admin-api.sh MUSO_ADMIN_IDENTITY for an approve: /etc/openclaw/agents/scale-drain.env
+# = agent-scale-drain@muso.ai, the one account core binds verification-scale-drain to.
+ADMIN_IDENTITY = "scale-drain"
 
 #: The rules whose approve is evidence-bearing. ``ask``, ``expired`` and ``duplicate``
 #: can never approve, and the wrapper's gate enforces that independently of this list.
@@ -183,6 +186,44 @@ class DrainError(RuntimeError):
     pass
 
 
+#: Where a write stopped. The 11 November run lost 3,326 approvals behind one stderr line
+#: per row and a bare rc=1, and four different layers were blamed before anyone read the
+#: API's own answer. A failure now names its layer, and the ledger keeps it.
+#:
+#: ``local``     the writer refused before spawning anything (a hand-edited plan row)
+#: ``token``     the drain's token file is missing, unreadable or redirected
+#: ``wrapper``   the wrapper exited non-zero before an HTTP answer (a gate, a missing env)
+#: ``transport`` the call left and no HTTP answer came back: it MAY have landed
+#: ``api``       the API answered and the answer was not 2xx
+#: ``response``  a 2xx that does not name this row in ``updatedIds``
+#: ``readback``  a 2xx naming the row, and the live request does not hold the status
+#: ``unknown``   anything else
+LAYER_LOCAL, LAYER_TOKEN, LAYER_WRAPPER = "local", "token", "wrapper"
+LAYER_TRANSPORT, LAYER_API, LAYER_RESPONSE = "transport", "api", "response"
+LAYER_READBACK, LAYER_UNKNOWN = "readback", "unknown"
+
+#: Statuses that are NOT the API's verdict on the row: the session or the credential is
+#: not usable (401/403), the caller is throttled (429), or the call timed out at the
+#: server (408/425). Every one of them is the run's condition, so holding the row as
+#: refused would turn a transient throttle or an expired token into a durable refusal
+#: to send, and only ``--redrive-refused`` could ever undo it.
+NOT_A_ROW_VERDICT = frozenset({401, 403, 408, 425, 429})
+
+#: Consecutive failed writes, with no success between them, after which ``apply`` stops
+#: calling the API. One layer failing every row is a broken path, not 3,326 bad rows.
+BREAKER = 10
+
+#: Core's own reasons that put the row back on the ASK path: the claimant owes a
+#: document, or the precedent core found is not sound for this claimant. Neither is a
+#: verdict on the credit, so neither is held as a refusal to send.
+CORE_ASK_REASONS = ("proof_required", "no_sound_precedent")
+
+#: Where a refused row goes: ``ask`` (the ladder's own ask rows and these together are
+#: the audience ``need_asks.py --from-drain`` decides the document for) or ``hold``.
+ROUTE_ASK, ROUTE_HOLD = "ask", "hold"
+CORE_REFUSED = "refused_by_core"
+
+
 class DrainWriteError(DrainError):
     """A write through the reviewed path did not land. The row is NOT committed.
 
@@ -190,14 +231,24 @@ class DrainWriteError(DrainError):
     ``stats["error_classes"]``, so 3,326 failures read as one cause and not as 3,326
     lines: on 2026-11-11 every approve of the pass failed for the same reason and the
     summary said only ``errors``.
+
+    ``layer`` says WHERE it stopped; ``http_status``, ``error_code`` and ``reasons`` are
+    the API's own answer when there was one. Those four are what the ledger keeps
+    (``write_failures``), so the cause outlives the run that met it.
     """
 
     failure_class = "write_failed"
 
-    def __init__(self, message: str = "", failure_class: str | None = None):
+    def __init__(self, message: str = "", failure_class: str | None = None, *,
+                 layer: str = LAYER_UNKNOWN, http_status: int | None = None,
+                 error_code: str | None = None, reasons: Sequence[str] = ()):
         super().__init__(message)
         if failure_class:
             self.failure_class = failure_class
+        self.layer = layer
+        self.http_status = http_status
+        self.error_code = error_code
+        self.reasons = tuple(str(r) for r in reasons)
 
 
 class DrainConfigError(DrainWriteError):
@@ -222,6 +273,23 @@ class DrainRefusedByCore(DrainWriteError):
     """
 
     failure_class = "core_automation_not_registered"
+
+
+class DrainRowRefusedByCore(DrainRefusedByCore):
+    """core judged THIS row and refused it on the row's own facts.
+
+    The same error code, a different cause: the reasons name the row (it needs the
+    claimant's own proof, it has no sound precedent, the track is too big), not a
+    missing registration. Registering anything does not change the answer, and it says
+    nothing about the next row, so it does not count toward the breaker: a run in which
+    core refuses most rows and grants the rest is the path working.
+    """
+
+    failure_class = "core_row_refused"
+
+
+#: The reason core gives when the account is no registered automation for the row.
+CORE_NOT_REGISTERED_REASON = "no_registered_automation"
 
 
 # ── the idempotency key ─────────────────────────────────────────────────────
@@ -738,6 +806,38 @@ CREATE TABLE IF NOT EXISTS intents (
   CHECK ((state = 'planned') = (resolved_at IS NULL))
 );
 CREATE INDEX IF NOT EXISTS intents_state ON intents(state);
+CREATE TABLE IF NOT EXISTS write_failures (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  decision_key TEXT NOT NULL,
+  request_id   TEXT NOT NULL,
+  outcome      TEXT NOT NULL,
+  failed_at    TEXT NOT NULL,
+  layer        TEXT NOT NULL,        -- see the LAYER_* constants
+  http_status  INTEGER,              -- NULL when no HTTP answer was read
+  error_code   TEXT,                 -- the API's errorCode, verbatim
+  reasons      TEXT NOT NULL DEFAULT '[]',   -- the API's per-row reasons, a JSON list
+  detail       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS write_failures_key ON write_failures(decision_key, id);
+CREATE TABLE IF NOT EXISTS core_refusals (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  decision_key TEXT NOT NULL,
+  request_id   TEXT NOT NULL,
+  user_id      INTEGER,
+  reason       TEXT NOT NULL,        -- core's own reason for THIS row, verbatim
+  outcome      TEXT NOT NULL,        -- refused_by_core:<reason>, never 'approve'
+  route        TEXT NOT NULL CHECK (route IN ('ask', 'hold')),
+  refused_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS core_refusals_key ON core_refusals(decision_key, id);
+CREATE TRIGGER IF NOT EXISTS core_refusals_no_update BEFORE UPDATE ON core_refusals
+BEGIN SELECT RAISE(ABORT, 'core_refusals is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS core_refusals_no_delete BEFORE DELETE ON core_refusals
+BEGIN SELECT RAISE(ABORT, 'core_refusals is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS write_failures_no_update BEFORE UPDATE ON write_failures
+BEGIN SELECT RAISE(ABORT, 'write_failures is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS write_failures_no_delete BEFORE DELETE ON write_failures
+BEGIN SELECT RAISE(ABORT, 'write_failures is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS intents_no_delete BEFORE DELETE ON intents
 BEGIN SELECT RAISE(ABORT, 'an intent is never deleted'); END;
 CREATE TRIGGER IF NOT EXISTS intents_resolved_once BEFORE UPDATE ON intents
@@ -907,6 +1007,173 @@ def _abandon_intent(db: sqlite3.Connection, d: Decision, now: datetime, reason_c
         raise
 
 
+def _record_failure(db: sqlite3.Connection, d: Decision, at: datetime, exc: BaseException) -> str:
+    """Append one failed write to the ledger. Returns its ``layer/code`` key.
+
+    The row is what makes a failure countable afterwards and what stops the next run
+    sending the same refused call again. It never touches the intent: a failed write
+    leaves the intent ``planned``, exactly as before.
+    """
+    if isinstance(exc, subprocess.TimeoutExpired):
+        layer = LAYER_TRANSPORT     # the call left; whether it landed is unread
+    else:
+        layer = getattr(exc, "layer", LAYER_UNKNOWN)
+    status = getattr(exc, "http_status", None)
+    code = getattr(exc, "error_code", None)
+    reasons = list(getattr(exc, "reasons", ()) or ())
+    db.execute("INSERT INTO write_failures (decision_key, request_id, outcome, failed_at, layer,"
+               " http_status, error_code, reasons, detail) VALUES (?,?,?,?,?,?,?,?,?)",
+               (d.decision_key, d.request_id, d.outcome, _stamp_precise(at), layer, status,
+                code, json.dumps(reasons), f"{type(exc).__name__}: {exc}"[:1000]))
+    return f"{layer}/{code or status or '-'}"
+
+
+def _failure_row(row: Sequence[Any]) -> dict[str, Any]:
+    return {"layer": row[0], "http_status": row[1], "error_code": row[2],
+            "reasons": json.loads(row[3] or "[]"), "failed_at": row[4], "detail": row[5]}
+
+
+def last_failure(db: sqlite3.Connection, decision_key: str) -> dict[str, Any] | None:
+    """The most recent recorded failure of one decision's write, or None."""
+    row = db.execute("SELECT layer, http_status, error_code, reasons, failed_at, detail"
+                     " FROM write_failures WHERE decision_key = ? ORDER BY id DESC LIMIT 1",
+                     (decision_key,)).fetchone()
+    return _failure_row(row) if row else None
+
+
+def is_refusal(failure: dict[str, Any] | None) -> bool:
+    """Did the API itself say no to this row?
+
+    A 4xx carrying an ``errorCode`` is the API's verdict on the request as sent, and it
+    says nothing was written. Sending the same call again gets the same answer, so such a
+    row is HELD: later runs skip it, without a read and without a write, until a bounded
+    ``--redrive-refused N`` names how many to try again. Every other failure (a timeout,
+    a 5xx, a gate that could not run) proves nothing about the row and keeps the
+    read-then-retry path.
+    """
+    if not failure or failure["layer"] != LAYER_API or not failure["error_code"]:
+        return False
+    status = failure["http_status"]
+    return isinstance(status, int) and 400 <= status < 500 and status not in NOT_A_ROW_VERDICT
+
+
+def core_refusal_route(reasons: Sequence[str] | None) -> str:
+    """``ask`` when core named a reason the ask path answers, otherwise ``hold``.
+
+    A claimant owing a document, or a precedent core found unsound, is answerable by
+    asking - ``need_asks.py`` names the document. A row core holds on its own facts
+    (``validator_hold``) is held, and so is any reason this code does not recognise:
+    an unmeasured route is not an ask.
+    """
+    named = {str(r) for r in reasons or ()}
+    if "validator_hold" in named:
+        return ROUTE_HOLD
+    return ROUTE_ASK if named & set(CORE_ASK_REASONS) else ROUTE_HOLD
+
+
+def core_refusal_reason(reasons: Sequence[str] | None) -> str:
+    """The one reason the row's outcome is named after: the one that decided the route."""
+    named = [str(r) for r in reasons or () if str(r).strip()]
+    if core_refusal_route(named) == ROUTE_ASK:
+        return next(r for r in named if r in CORE_ASK_REASONS)
+    return named[0] if named else "-"
+
+
+def _record_core_refusal(db: sqlite3.Connection, d: Decision, at: datetime,
+                         exc: BaseException) -> str:
+    """Record that core judged this row, with its own reason as the outcome.
+
+    The intent and the failure keep what was attempted (an approve); this row is what
+    the row BECAME, so nothing downstream reads a refused approval as still in flight.
+    """
+    reasons = [str(r) for r in (getattr(exc, "reasons", ()) or ()) if str(r).strip()]
+    reason = core_refusal_reason(reasons)
+    outcome = f"{CORE_REFUSED}:{reason}"
+    db.execute(
+        "INSERT INTO core_refusals (decision_key, request_id, user_id, reason, outcome,"
+        " route, refused_at) VALUES (?,?,?,?,?,?,?)",
+        (d.decision_key, d.request_id, d.user_id, reason, outcome,
+         core_refusal_route(reasons), _stamp_precise(at)))
+    return outcome
+
+
+_ASK_ROUTE_SQL = (
+    " FROM core_refusals r"
+    " JOIN (SELECT decision_key, MAX(id) AS id FROM core_refusals GROUP BY decision_key) l"
+    "   ON l.id = r.id"
+    " JOIN intents i ON i.decision_key = r.decision_key AND i.state = ?"
+    " WHERE r.route = ? AND NOT EXISTS (SELECT 1 FROM applied a"
+    "   WHERE a.request_id = r.request_id AND a.outcome = 'approve')")
+
+
+def refusal_route(db: sqlite3.Connection, decision_key: str) -> str:
+    """Where this row went: the ask path if the ask selection would name it, else held.
+
+    The recorded ``core_refusals`` row is the only source. A ``write_failures`` row's
+    reasons are not evidence that an ask will be sent: a refusal whose route could not be
+    recorded, or one that was not core judging the row, has no ask behind it.
+    """
+    row = db.execute("SELECT r.route" + _ASK_ROUTE_SQL + " AND r.decision_key = ?",
+                     (PLANNED, ROUTE_ASK, decision_key)).fetchone()
+    return row[0] if row else ROUTE_HOLD
+
+
+def refused_asks(db: sqlite3.Connection) -> list[dict[str, Any]]:
+    """The rows a core refusal put back on the ask path, in the plan row's shape.
+
+    The ladder's ``ask`` rows and these together are the audience the ONE reviewed ask
+    path decides the document for. This function selects, it sends nothing: the row is
+    still open (no ``applied`` approval) and core named a reason asking answers.
+    """
+    rows = db.execute("SELECT r.decision_key, r.request_id, r.user_id, r.reason"
+                      + _ASK_ROUTE_SQL + " ORDER BY r.request_id",
+                      (PLANNED, ROUTE_ASK)).fetchall()
+    return [{"decision_key": key, "outcome": "ask",
+             "reason_code": f"{CORE_REFUSED}:{reason}", "request_id": rid,
+             "user_id": uid}
+            for key, rid, uid, reason in rows]
+
+
+def failure_summary(db: sqlite3.Connection) -> dict[str, Any]:
+    """How many writes are failing and why, from each open decision's LATEST failure.
+
+    A decision whose write later landed, or whose intent was abandoned, is not counted:
+    this is the list of what is still not done.
+    """
+    rows = db.execute(
+        "SELECT f.layer, f.http_status, f.error_code, f.reasons, f.failed_at, f.detail,"
+        "       f.request_id, f.outcome, f.decision_key"
+        " FROM write_failures f"
+        " JOIN (SELECT decision_key, MAX(id) AS id FROM write_failures GROUP BY decision_key) l"
+        "   ON l.id = f.id"
+        " JOIN intents i ON i.decision_key = f.decision_key AND i.state = ?"
+        " ORDER BY f.request_id", (PLANNED,)).fetchall()
+    by_reason: dict[str, int] = {}
+    held = 0
+    routed_to_ask = 0
+    listed = []
+    for row in rows:
+        failure = _failure_row(row)
+        key = "/".join([failure["layer"], str(failure["http_status"] or "-"),
+                        failure["error_code"] or "-", "+".join(failure["reasons"]) or "-"])
+        by_reason[key] = by_reason.get(key, 0) + 1
+        refused = is_refusal(failure)
+        route = refusal_route(db, row[8]) if refused else ROUTE_HOLD
+        asking = refused and route == ROUTE_ASK
+        held += refused and not asking
+        routed_to_ask += asking
+        listed.append({"request_id": row[6], "outcome": row[7], "held": refused and not asking,
+                       "route": route if refused else None, **failure})
+    never_tried = db.execute(
+        "SELECT COUNT(*) FROM intents i WHERE i.state = ? AND NOT EXISTS"
+        " (SELECT 1 FROM write_failures f WHERE f.decision_key = i.decision_key)",
+        (PLANNED,)).fetchone()[0]
+    return {"open_with_a_recorded_failure": len(rows), "held_refusals": held,
+            "routed_to_ask": routed_to_ask,
+            "open_with_no_recorded_failure": never_tried,
+            "by_reason": dict(sorted(by_reason.items())), "rows": listed}
+
+
 def mark_told(db: sqlite3.Connection, request_id: str, reason_code: str, now: datetime | None = None) -> bool:
     """Record that a refusal was told to the user. True the first time, False after.
 
@@ -1030,6 +1297,9 @@ ADMIN_ENV_REQUIRED = ("MUSO_API_URL", "MUSO_ADMIN_EMAIL", "MUSO_ADMIN_PASSWORD")
 #: With an identity named, the wrapper loads the account's email and password itself from
 #: ``/etc/openclaw/agents/<identity>.env`` and refuses a missing file on its own.
 ADMIN_IDENTITY_ENV = "MUSO_ADMIN_IDENTITY"
+#: Where the wrapper reads an identity's account from (its own default and its own env).
+ADMIN_IDENTITY_DIR = "/etc/openclaw/agents"
+ADMIN_IDENTITY_DIR_ENV = "MUSO_ADMIN_IDENTITY_DIR"
 #: The drain's kill file. The wrapper refuses both drain writes while it exists.
 DRAIN_KILL_FILE = "/etc/hydra/scale-drain.disabled"
 
@@ -1062,17 +1332,35 @@ def classify_refusal(text: str) -> tuple[str, bool]:
     return "wrapper_failed", False
 
 
+def _refusal_line(text: str) -> str:
+    """The line of the wrapper's output the classification matched, or ''."""
+    for pattern, _, _ in _WRAPPER_REFUSALS:
+        for line in (text or "").splitlines():
+            if re.search(pattern, line):
+                return line.strip()
+    return ""
+
+
 def _wrapper_failure(request_id: str, proc: Any) -> DrainWriteError:
     """The error for a wrapper that exited non-zero, classified from its own words."""
     text = (proc.stderr or proc.stdout or "").strip()
     failure_class, run_level = classify_refusal(text)
-    message = f"{request_id}: wrapper rc={proc.returncode}: {text[:300]}"
-    return (DrainConfigError if run_level else DrainWriteError)(message, failure_class)
+    # The line that names the cause comes first: the verifier's traceback can precede it,
+    # and 300 characters of traceback is the "wrapper rc=1" nobody could read a cause from.
+    cause = _refusal_line(text)
+    message = (f"{request_id}: wrapper rc={proc.returncode}: "
+               + (f"{cause[:300]} | " if cause and cause not in text[:300] else "") + text[:300])
+    # A transport failure is named on stdout: the call left and its fate is unread.
+    envelope = _last_json(proc.stdout)
+    sent = isinstance(envelope, dict) and envelope.get("transport_error") is not None
+    return (DrainConfigError if run_level else DrainWriteError)(
+        message, failure_class, layer=LAYER_TRANSPORT if sent else LAYER_WRAPPER)
 
 
 def admin_preflight(script: str | None = None, *, token_file: str = DRAIN_TOKEN_FILE,
                     kill_file: str = DRAIN_KILL_FILE,
-                    environ: dict[str, str] | None = None) -> list[tuple[str, str]]:
+                    environ: dict[str, str] | None = None,
+                    approves: bool = True) -> list[tuple[str, str]]:
     """Why this process could not land a single drain write, before it tries 3,326.
 
     Returns ``(failure class, what to do)`` pairs; empty means nothing here stops a write.
@@ -1082,6 +1370,12 @@ def admin_preflight(script: str | None = None, *, token_file: str = DRAIN_TOKEN_
     cause from. It reads no secret and calls nothing: it cannot tell a WRONG credential
     from a right one, only an absent one. A wrong one still fails at the first write,
     which now stops the run (``DrainConfigError``) instead of repeating itself.
+
+    ``MUSO_ADMIN_IDENTITY`` does NOT stand in for the admin env. The wrapper loads that
+    account only for ``login|call|upload``, while the verifier's anchor read and the
+    read-back both go through ``call-batch``, which loads no identity and dies in its own
+    env check. Accepting the identity alone would pass a run whose every row then failed
+    at ``admin_env_missing`` after its intents were already recorded.
     """
     env = os.environ if environ is None else environ
     script = script or env.get("CREDIT_REVIEW_ADMIN_SCRIPT", ADMIN_WRITER_SCRIPT)
@@ -1090,9 +1384,6 @@ def admin_preflight(script: str | None = None, *, token_file: str = DRAIN_TOKEN_
         problems.append(("admin_script_missing",
                          f"the reviewed wrapper {script} does not exist on this host"))
     needed = [name for name in ADMIN_ENV_REQUIRED if not (env.get(name) or "").strip()]
-    if env.get(ADMIN_IDENTITY_ENV):
-        # The wrapper loads the account from the identity file; only the URL is ours.
-        needed = [name for name in needed if name == "MUSO_API_URL"]
     if needed:
         problems.append((
             "admin_env_missing",
@@ -1100,6 +1391,20 @@ def admin_preflight(script: str | None = None, *, token_file: str = DRAIN_TOKEN_
             "admin env, so no approve or duplicate close can land. Start apply with the "
             "environment the admin wrapper is given on this host (a bare shell does not "
             "carry it)"))
+    if approves:
+        # An approve signs in as the drain's own account, which the wrapper reads from
+        # this file and nowhere else. The verifier's read and the read-back still use
+        # the admin env above (`call-batch` loads no identity), so both are needed.
+        identity_file = os.path.join(
+            (env.get(ADMIN_IDENTITY_DIR_ENV) or "").strip() or ADMIN_IDENTITY_DIR,
+            f"{ADMIN_IDENTITY}.env")
+        if not (os.path.isfile(identity_file) and os.access(identity_file, os.R_OK)):
+            problems.append((
+                "admin_env_missing",
+                f"admin identity '{ADMIN_IDENTITY}': {identity_file} is missing or "
+                "unreadable. Every approve signs in as the drain's own account "
+                "(core binds the verification-scale-drain automation to it) and there "
+                "is no fallback account, so no approve can land"))
     if DRAIN_TOKEN_FILE_ENV in env:
         problems.append(("drain_token",
                          f"{DRAIN_TOKEN_FILE_ENV} is set, but the token path is pinned to "
@@ -1151,13 +1456,15 @@ def admin_writer(script: str | None = None, *, timeout: int = 120,
             # through ``env``); saying so here names the cause before a process is spawned.
             raise DrainConfigError(
                 f"{d.request_id}: {DRAIN_TOKEN_FILE_ENV} is set, but the token path "
-                f"is pinned to {DRAIN_TOKEN_FILE} and cannot be redirected", "drain_token")
+                f"is pinned to {DRAIN_TOKEN_FILE} and cannot be redirected", "drain_token",
+                layer=LAYER_TOKEN)
         try:
             with open(token_file, encoding="utf-8") as fh:
                 env["SCALE_DRAIN_TOKEN"] = fh.read().strip()
         except OSError as exc:
             raise DrainConfigError(
-                f"{d.request_id}: {what} needs {token_file}: {exc}", "drain_token") from exc
+                f"{d.request_id}: {what} needs {token_file}: {exc}", "drain_token",
+                layer=LAYER_TOKEN) from exc
 
     def write(d: Decision) -> None:
         status = WRITE_STATUS.get(d.outcome)
@@ -1173,10 +1480,12 @@ def admin_writer(script: str | None = None, *, timeout: int = 120,
                 # missing original means a hand-edited plan. Refuse rather than close a
                 # row we cannot point at a standing decision for.
                 raise DrainWriteError(
-                    f"{d.request_id}: duplicate close with no decided original")
+                    f"{d.request_id}: duplicate close with no decided original",
+                    layer=LAYER_LOCAL)
             if d.status not in PENDING_STATUSES:
                 raise DrainWriteError(
-                    f"{d.request_id}: duplicate close with unknown expected status {d.status!r}")
+                    f"{d.request_id}: duplicate close with unknown expected status {d.status!r}",
+                    layer=LAYER_LOCAL)
             evidence = duplicate_evidence(d)
             env["SCALE_DRAIN"] = "1"
             env["EVIDENCE_EXCERPT"] = evidence
@@ -1199,7 +1508,7 @@ def admin_writer(script: str | None = None, *, timeout: int = 120,
                 # here means a plan file was hand-edited. Refuse rather than approve blind.
                 raise DrainWriteError(
                     f"{d.request_id}: rule {d.rule!r} with anchor {d.evidence_anchor!r} "
-                    "is not auto-approvable")
+                    "is not auto-approvable", layer=LAYER_LOCAL)
             evidence = drain_evidence(d)
             # The drain's OWN registered predicate in the wrapper, NOT the blanket
             # CV_APPROVE_GATE_DISABLED bypass. That variable skips every evidence
@@ -1208,6 +1517,11 @@ def admin_writer(script: str | None = None, *, timeout: int = 120,
             # shape) and the gate parses the digest before returning 0.
             env["SCALE_DRAIN"] = "1"
             env["EVIDENCE_EXCERPT"] = evidence
+            # The approve signs in as the drain's OWN account. core binds the
+            # verification-scale-drain automation to it, and the wrapper sends the
+            # automation header under no other login. A missing identity file fails
+            # in the wrapper before any request: there is no fallback account.
+            env["MUSO_ADMIN_IDENTITY"] = ADMIN_IDENTITY
             present_token(d, env, "approve")
             argv += ["--evidence-excerpt", evidence]
         argv += ["--requester", SERVICE_REQUESTER, "call", "PUT", "/admin/credit-requests", body]
@@ -1225,6 +1539,14 @@ def _account(env: dict[str, str]) -> str:
     if identity:
         return f"{ADMIN_IDENTITY_ENV}={identity}"
     return env.get("MUSO_ADMIN_EMAIL") or "<unknown>"
+
+
+def _last_json(stdout: str | None) -> Any:
+    """The wrapper's envelope is the last line it prints; None when there is none."""
+    try:
+        return json.loads((stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
 
 
 def live_reconciler(admin: Any = None) -> Reconciler:
@@ -1296,52 +1618,77 @@ def _error_body(envelope: Any) -> dict[str, Any]:
 
 def _refused_by_core(d: Decision, status: Any, body: dict[str, Any], account: str) -> DrainWriteError:
     """A non-2xx answer, as the cause it names rather than as a number."""
-    code = str(body.get("errorCode") or "")
+    code = str(body.get("errorCode") or "").strip()
     said = str(body.get("message") or "").strip()
+    answered = isinstance(status, int) and not isinstance(status, bool)
+    # Kept on the error, and from there on the ledger: this row's reasons, never a
+    # neighbour's. No HTTP status means the call left and nothing answered.
+    listed: list[str] = []
+    refused = body.get("refused")
+    for row in refused if isinstance(refused, list) else []:
+        if isinstance(row, dict) and str(row.get("id") or "").lower() == d.request_id.lower():
+            own = row.get("reasons")
+            listed = [str(r) for r in own] if isinstance(own, list) else []
+    kept: dict[str, Any] = {"layer": LAYER_API if answered else LAYER_TRANSPORT,
+                            "http_status": status if answered else None,
+                            "error_code": code or None, "reasons": listed}
     if code == CORE_AGENT_GUARD_CODE or "autonomous agent cannot approve" in said:
+        kept["error_code"] = CORE_AGENT_GUARD_CODE
         why = ""
         for row in body.get("refused") or []:
             if isinstance(row, dict) and str(row.get("id") or "").lower() == d.request_id.lower():
                 reasons = ",".join(str(r) for r in row.get("reasons") or []) or "-"
                 why = f" (band={row.get('band') or '-'} reasons={reasons})"
+        if listed and CORE_NOT_REGISTERED_REASON not in listed:
+            return DrainRowRefusedByCore(
+                f"{d.request_id}: core refused the approve with {CORE_AGENT_GUARD_CODE}{why}: "
+                f"HTTP {status}, nothing written. core judged this row on its own facts "
+                f"(account {account}); no registration changes that answer and a retry "
+                "gets the same one. The row is held for the proof path or a named human",
+                **kept)
         return DrainRefusedByCore(
             f"{d.request_id}: core refused the approve with {CORE_AGENT_GUARD_CODE}{why}: "
             f"HTTP {status}, nothing written. The admin account the drain logged in as "
             f"({account}) is not a registered automation bound to that account in "
             "core-backend for this row. hydra's registry entry verification-scale-drain "
             "and /etc/hydra/scale-drain.token only satisfy the wrapper's gate; core keeps "
-            "its own register, and this needs a registration there, not a retry")
+            "its own register, and this needs a registration there, not a retry", **kept)
     detail = " ".join(part for part in (code, said[:200]) if part)
     return DrainWriteError(
         f"{d.request_id}: wrapper reported HTTP {status}" + (f": {detail}" if detail else ""),
-        "http_error")
+        "http_error", **kept)
 
 
 def _assert_written(d: Decision, stdout: str, *, account: str = "<unknown>") -> None:
     """The backend's per-row report, not the HTTP code, is the proof the write landed."""
     text = (stdout or "").strip()
     if not text:
-        raise DrainWriteError(f"{d.request_id}: wrapper wrote nothing")
-    try:
-        envelope = json.loads(text.splitlines()[-1])
-    except (ValueError, IndexError) as exc:
-        raise DrainWriteError(f"{d.request_id}: unreadable wrapper output: {text[:200]}") from exc
+        raise DrainWriteError(f"{d.request_id}: wrapper wrote nothing", layer=LAYER_WRAPPER)
+    envelope = _last_json(text)
+    if envelope is None:
+        raise DrainWriteError(f"{d.request_id}: unreadable wrapper output: {text[:200]}",
+                              layer=LAYER_WRAPPER)
     status = envelope.get("http_status") if isinstance(envelope, dict) else None
     if not isinstance(status, int) or not 200 <= status < 300:
         raise _refused_by_core(d, status, _error_body(envelope), account)
     updated = _updated_ids(envelope)
     if updated is None:
         raise DrainWriteError(
-            f"{d.request_id}: wrapper response names no updatedIds; the write is unattributable")
+            f"{d.request_id}: wrapper response names no updatedIds; the write is unattributable",
+            layer=LAYER_RESPONSE, http_status=status)
     if d.request_id.lower() not in updated:
         raise DrainWriteError(
-            f"{d.request_id}: backend did not name this row in updatedIds")
+            f"{d.request_id}: backend did not name this row in updatedIds",
+            layer=LAYER_RESPONSE, http_status=status)
 
 
 def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int = DEFAULT_SHARDS,
           write_pool: int = WRITE_POOL, writer: Writer | None = None,
           now: datetime | None = None, stop_after: int | None = None,
-          commit_writes: bool = True, reconciler: Reconciler | None = None) -> dict[str, Any]:
+          commit_writes: bool = True, reconciler: Reconciler | None = None,
+          readback: Reconciler | None = None, max_writes: int | None = None,
+          redrive_refused: int = 0, breaker: int | None = BREAKER,
+          report: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     """Apply the plan through a bounded write pool, idempotently.
 
     The read (plan) already happened; this is the write half of change 4. ``write_pool``
@@ -1370,6 +1717,28 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
     ``commit_writes=False`` is the ledger-rehearsal mode: a writing outcome is reported
     as ``would_write`` and NOT committed, because the ledger means "the side effect
     happened". A committed rehearsal would make the next real run skip the row.
+
+    A write that fails is recorded in ``write_failures`` with the layer that failed and
+    the API's own answer, and the run says so in ``failures``. Four bounds follow from
+    that record:
+
+    * ``readback`` - after a write the API accepted, the live request is read and must
+      hold the status before the row is confirmed. A 2xx is not a granted credit. A
+      read that does not show it leaves the intent open, and the next run reads again.
+    * a row the API REFUSED (``is_refusal``) is held: skipped with no read and no write,
+      and counted in ``refused_held``. ``redrive_refused`` is how many held rows this
+      run may try again - after whatever refused them has changed. A row core refused on
+      a reason the ask path answers (``proof_required``, ``no_sound_precedent``) is
+      counted in ``refused_to_ask`` instead: it is not held, it is waiting on the ask.
+    * a row core judged on its own facts (``DrainRowRefusedByCore``) is counted in
+      ``held_by_core``, recorded with core's reason, and is not an incomplete run: only
+      an unexpected failure makes ``errors`` non-zero.
+    * ``max_writes`` - the most API writes this run may attempt. A bounded batch.
+    * ``breaker`` - this many failures in a row, with no success between, stop the run
+      (``stop_reason: breaker``). None disables it.
+
+    ``report`` receives one dict per row that reached a write, a hold or a settlement:
+    the request, its user and what happened (``granted`` only when read back).
     """
     stamp = now or datetime.now(timezone.utc)
     clock: Callable[[], datetime] = (lambda: now) if now else (lambda: datetime.now(timezone.utc))
@@ -1381,12 +1750,75 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
     lock = threading.Lock()
     stats = {"applied": 0, "skipped": 0, "told": 0, "errors": 0, "would_write": 0,
              "unmatched": 0, "reconciled": 0, "abandoned": 0, "unreconciled": 0,
-             "stopped": False, "error_classes": {}}
+             "stopped": False, "error_classes": {}, "attempted": 0, "refused_held": 0,
+             "refused_to_ask": 0, "held_by_core": 0, "redriven": 0, "failures": {}}
     committed = [0]
+    attempted = [0]              # API writes this run has started
+    redrive_left = [max(0, redrive_refused)]
+    failing = [0]                # failed writes in a row, with no success between
 
-    def fail(failure_class: str) -> None:
-        """Count one error under its cause. The caller holds ``lock``."""
-        stats["errors"] += 1
+    def tell(d: Decision, result: str, failure: dict[str, Any] | None = None) -> None:
+        if report is None:
+            return
+        line: dict[str, Any] = {"request_id": d.request_id, "user_id": d.user_id,
+                                "profile_id": d.profile_id, "rule": d.rule,
+                                "outcome": d.outcome, "result": result}
+        if failure:
+            line.update({k: failure[k] for k in ("layer", "http_status", "error_code",
+                                                 "reasons", "detail")})
+        report(line)
+
+    def stop(reason: str) -> None:
+        if not stats["stopped"]:
+            stats["stopped"] = True
+            stats["stop_reason"] = reason
+
+    def failed(d: Decision, exc: BaseException) -> None:
+        """Under the lock: count the failure, keep it, and stop a run that only fails."""
+        print(f"WRITERFAIL {d.request_id}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        row_refused = isinstance(exc, DrainRowRefusedByCore)
+        fail(getattr(exc, "failure_class", "writer_exception"), error=not row_refused)
+        if row_refused:
+            stats["held_by_core"] += 1
+        try:
+            key = _record_failure(db, d, clock(), exc)
+        except sqlite3.Error as lost:
+            # A failure the ledger cannot keep is one the next run would repeat unseen.
+            print(f"FAILUREUNRECORDED {d.request_id}: {type(lost).__name__}: {lost}",
+                  file=sys.stderr)
+            fail("ledger_error")
+            stop("ledger")
+            return
+        stats["failures"][key] = stats["failures"].get(key, 0) + 1
+        tell(d, "failed", last_failure(db, d.decision_key))
+        if row_refused:
+            # core answered and judged the row: the path works, this row does not pass.
+            # The row's outcome becomes core's own reason, so nothing downstream reads a
+            # refused approval as still in flight, and an askable reason is routed to the
+            # one reviewed ask path rather than held.
+            try:
+                _record_core_refusal(db, d, clock(), exc)
+            except sqlite3.Error as lost:
+                # The route has ONE source: this row. Losing it loses the ask, so every
+                # later approval would be sent while its refusals recorded nothing.
+                print(f"REFUSALUNRECORDED {d.request_id}: {type(lost).__name__}: {lost}",
+                      file=sys.stderr)
+                fail("ledger_error")
+                stop("ledger")
+            return
+        failing[0] += 1
+        if breaker and failing[0] >= breaker:
+            stats["breaker"] = {"failures_in_a_row": failing[0], "last": key}
+            stop("breaker")
+
+    def fail(failure_class: str, *, error: bool = True) -> None:
+        """Count one failure under its cause. The caller holds ``lock``.
+
+        ``error=False`` is for a failure that is the row's and was handled (core judged
+        it): it is counted, but it is not the run being incomplete.
+        """
+        if error:
+            stats["errors"] += 1
         classes = stats["error_classes"]
         classes[failure_class] = classes.get(failure_class, 0) + 1
 
@@ -1395,6 +1827,7 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
         The caller holds ``lock``. The first cause is the one reported."""
         stats["stopped"] = True
         stats.setdefault("stopped_reason", f"{exc.failure_class}: {exc}")
+        stats.setdefault("stop_reason", "run_misconfigured")
 
     def run_shard(shard: int, items: list[Decision]) -> None:
         for d in items:
@@ -1405,6 +1838,7 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
             # ledger is one connection, one lock, one transaction per step.
             side_effect = d.outcome in WRITING_OUTCOMES and writer is not None
             open_since: str | None = None   # planned_at of an intent an earlier run left open
+            planned_at: str | None = None   # this decision's intent, whoever recorded it
             with lock:
                 if stats["stopped"]:
                     return
@@ -1423,14 +1857,33 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
                 if d.outcome in WRITING_OUTCOMES:
                     try:
                         intent = intent_of(db, d.decision_key)
-                        if intent is None:
-                            if side_effect:
-                                _record_intent(db, d, shard, clock())
-                        elif intent[0] == ABANDONED:
+                        if intent is not None and intent[0] == ABANDONED:
                             stats["skipped"] += 1   # settled by an earlier run, with a reason
                             continue
+                        if side_effect:
+                            held = last_failure(db, d.decision_key)
+                            if is_refusal(held):
+                                # The API already said no to this exact call, and that
+                                # nothing was written. Not read again, not sent again.
+                                if redrive_left[0] <= 0:
+                                    if refusal_route(db, d.decision_key) == ROUTE_ASK:
+                                        # Not held: core named a reason asking answers.
+                                        stats["refused_to_ask"] += 1
+                                        tell(d, "routed_to_ask", held)
+                                    else:
+                                        stats["refused_held"] += 1
+                                        tell(d, "held", held)
+                                    continue
+                                redrive_left[0] -= 1
+                                stats["redriven"] += 1
+                            if max_writes is not None and attempted[0] >= max_writes:
+                                stop("max_writes")
+                                return
+                        if intent is None:
+                            if side_effect:
+                                planned_at = _record_intent(db, d, shard, clock())
                         else:
-                            open_since = intent[1]
+                            open_since = planned_at = intent[1]
                     except sqlite3.Error as exc:
                         # No intent on disk, so no API call: a side effect the ledger
                         # never heard about cannot be recovered from.
@@ -1450,6 +1903,7 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
                         try:
                             _abandon_intent(db, d, stamp, gone.reason_code)
                             stats["abandoned"] += 1
+                            tell(d, f"abandoned:{gone.reason_code}")
                         except (sqlite3.Error, DrainError):
                             fail("ledger_error")
                     continue
@@ -1476,6 +1930,7 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
                             stats["applied"] += 1
                             stats["reconciled"] += 1
                             committed[0] += 1
+                            tell(d, "reconciled")
                         else:
                             stats["skipped"] += 1
                     continue
@@ -1491,15 +1946,43 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
             # ``ask`` is not a write: the send belongs to need_asks.py, the one
             # reviewed ask path. Calling the writer for it would be a no-op at best.
             if side_effect:
+                with lock:
+                    # The bound is on calls STARTED. A row stopped here keeps its intent
+                    # and no write: the next run reads it as still pending and carries on.
+                    if stats["stopped"]:
+                        return
+                    if max_writes is not None and attempted[0] >= max_writes:
+                        stop("max_writes")
+                        return
+                    attempted[0] += 1
+                    stats["attempted"] += 1
                 try:
                     writer(d)
                 except Exception as exc:  # noqa: BLE001 - a writer failure is counted, never fatal
-                    print(f"WRITERFAIL {getattr(d,'request_id','?')}: {type(exc).__name__}: {exc}", file=sys.stderr)
                     with lock:
-                        fail(getattr(exc, "failure_class", "writer_exception"))
+                        failed(d, exc)
                         if isinstance(exc, DrainConfigError):
                             halt(exc)
                     continue  # no confirm: the intent stays open and the next run settles it
+                if readback is not None:
+                    # The API said yes. Read the request before the ledger says so too.
+                    try:
+                        seen = readback(d, planned_at or "")
+                        unread = None if seen == LANDED else DrainWriteError(
+                            f"{d.request_id}: the API accepted the write and the request "
+                            f"read back as {seen}, not {WRITE_STATUS[d.outcome]}",
+                            "not_read_back", layer=LAYER_READBACK)
+                    except Exception as exc:  # noqa: BLE001 - unread is not granted
+                        unread = DrainWriteError(
+                            f"{d.request_id}: the API accepted the write and the read-back "
+                            f"failed: {type(exc).__name__}: {exc}", "not_read_back",
+                            layer=LAYER_READBACK)
+                    if unread is not None:
+                        with lock:
+                            failed(d, unread)
+                        continue  # not confirmed: the next run reads the request again
+                with lock:
+                    failing[0] = 0
             with lock:
                 # Re-check under the commit lock: a worker that passed the first check
                 # before another worker committed could otherwise overshoot stop_after.
@@ -1518,6 +2001,9 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
                 if fresh:
                     stats["applied"] += 1
                     committed[0] += 1
+                    if side_effect:
+                        tell(d, "written_unread" if readback is None
+                             else "granted" if d.outcome == "approve" else "closed")
                     if d.outcome == "queue_tier2" and mark_told(db, d.request_id, d.reason_code, stamp):
                         stats["told"] += 1
                 else:
@@ -1951,7 +2437,9 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         # Only when there is a write left to make: a plan of asks needs no admin env.
         writes = [d for d in decisions if d.outcome in WRITING_OUTCOMES]
         done = already_applied(db, [d.decision_key for d in writes])
-        problems = admin_preflight(args.admin_script) if len(done) < len(writes) else []
+        left = [d for d in writes if d.decision_key not in done]
+        problems = admin_preflight(
+            args.admin_script, approves=any(d.outcome == "approve" for d in left)) if left else []
         if problems:
             for failure_class, what in problems:
                 print(f"PREFLIGHT {failure_class}: {what}", file=sys.stderr)
@@ -1962,11 +2450,66 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     # The reconciler settles any intent an earlier run recorded and never confirmed. It
     # is a read, through the verifier's pinned admin source; it is not optional on a real
     # apply, because without it such a row can only be retried blind or left forever.
+    # The same read is the read-back: a write the API accepted is confirmed only once the
+    # live request holds the status.
+    live = None if args.no_write else live_reconciler()
+    rows: list[dict[str, Any]] = []
     stats = apply(decisions, db, shards=args.shards, write_pool=args.write_pool, writer=writer,
-                  commit_writes=not args.no_write,
-                  reconciler=None if args.no_write else live_reconciler())
+                  commit_writes=not args.no_write, reconciler=live, readback=live,
+                  max_writes=args.max_writes, redrive_refused=args.redrive_refused,
+                  breaker=args.breaker or None, report=rows.append if args.report else None)
+    if args.report:
+        rows.sort(key=lambda r: r["request_id"])
+        Path(args.report).write_text(
+            "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows), encoding="utf-8")
     print(json.dumps(stats, sort_keys=True))
-    return 0 if stats["errors"] == 0 else 1
+    # A held row is the drain working: the API judged the row and nothing was written, so
+    # re-sending it in this run would be a second attempt at the same answer. Held and
+    # ask-routed rows are PRINTED, never an incomplete run.
+    incomplete = bool(stats["errors"] or stats.get("stop_reason"))
+    if incomplete:
+        # A non-zero exit always says why, on stderr, in one line.
+        print("APPLY INCOMPLETE: " + json.dumps(
+            {k: stats[k] for k in ("errors", "failures", "refused_held", "refused_to_ask",
+                                   "held_by_core", "unreconciled", "stop_reason", "breaker")
+             if stats.get(k)},
+            sort_keys=True) + " - see `scale_drain.py failures`", file=sys.stderr)
+    return 1 if incomplete else 0
+
+
+def _cmd_asks(args: argparse.Namespace) -> int:
+    """The drain's ask selection: the ladder's ``ask`` rows plus the rows core refused
+    onto the ask path, in the one shape ``need_asks.py build --from-drain`` reads.
+
+    This selects and sends nothing. WHICH document each ask names, and the send itself,
+    stay with ``need_asks.py`` (the one reviewed ask path), never here.
+    """
+    rows = [{"decision_key": d.decision_key, "outcome": "ask",
+             "reason_code": d.reason_code, "request_id": d.request_id,
+             "user_id": d.user_id}
+            for d in parse_plan(Path(args.plan).read_bytes()) if d.outcome == "ask"]
+    ladder = len(rows)
+    rows.extend(refused_asks(open_ledger(args.ledger)))
+    merged = {(r["user_id"], str(r["request_id"]).lower()): r for r in rows}
+    payload = "".join(json.dumps(merged[k], sort_keys=True) + "\n"
+                      for k in sorted(merged, key=lambda k: (str(k[0]), k[1])))
+    if args.out:
+        Path(args.out).write_text(payload, encoding="utf-8")
+    else:
+        sys.stdout.write(payload)
+    print(json.dumps({"asks": len(merged), "from_ladder": ladder,
+                      "from_core_refusals": len(rows) - ladder}, sort_keys=True),
+          file=sys.stderr)
+    return 0
+
+
+def _cmd_failures(args: argparse.Namespace) -> int:
+    """What is not written, and why: the count per layer, API code and reasons."""
+    summary = failure_summary(open_ledger(args.ledger))
+    if not args.rows:
+        del summary["rows"]
+    print(json.dumps(summary, sort_keys=True))
+    return 0
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
@@ -2143,14 +2686,38 @@ def _main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-write", action="store_true",
                    help="ledger rehearsal: report writing outcomes as would_write, commit nothing")
     p.add_argument("--admin-script", default=None, help="override the reviewed wrapper path")
+    p.add_argument("--max-writes", type=int, default=None,
+                   help="the most API writes this run may attempt (a bounded batch)")
+    p.add_argument("--redrive-refused", type=int, default=0,
+                   help="how many rows the API already refused may be tried again; "
+                        "without it a refused row is held, not re-sent")
+    p.add_argument("--breaker", type=int, default=BREAKER,
+                   help="stop after this many failed writes in a row (0 disables)")
+    p.add_argument("--report", default=None,
+                   help="write one JSON line per row written, held or settled: request, "
+                        "user, result")
     common(p)
     p.set_defaults(fn=_cmd_apply)
+
+    p = sub.add_parser("failures", help="count the writes still not done, by reason")
+    p.add_argument("--ledger", default=DEFAULT_LEDGER)
+    p.add_argument("--rows", action="store_true", help="also list every row")
+    common(p)
+    p.set_defaults(fn=_cmd_failures)
 
     p = sub.add_parser("verify")
     p.add_argument("--plan", required=True)
     p.add_argument("--ledger", default=DEFAULT_LEDGER)
     common(p)
     p.set_defaults(fn=_cmd_verify)
+
+    p = sub.add_parser("asks", help="the ask audience: the ladder's ask rows plus the "
+                                     "rows core refused back onto the ask path")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--ledger", default=DEFAULT_LEDGER)
+    p.add_argument("--out", default=None, help="write the audience as JSONL (default stdout)")
+    common(p)
+    p.set_defaults(fn=_cmd_asks)
 
     p = sub.add_parser("chaos", help="scratch-ledger rehearsal; never takes your ledger")
     p.add_argument("--plan", required=True)

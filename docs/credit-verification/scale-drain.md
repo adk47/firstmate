@@ -489,6 +489,141 @@ somebody else moved to the same status after our intent, on a claim our anchor a
 supports, is indistinguishable from our own write and is recorded as ours. It is always
 recorded as `reconciled`, never `written`, so those rows can be listed and audited.
 
+#### A failed write names its layer, and a refusal is not sent twice
+
+The 11 November run left 3,326 approve intents `planned` and nothing else: one stderr
+line per row, an exit code of 1, and no record of why. Four layers were blamed in turn
+(the wrapper, `MUSO_API_URL`, the token file, "HTTP 400"). Every failed write is now a row
+in the ledger's append-only `write_failures` table:
+
+| `layer` | the write stopped |
+|---|---|
+| `local` | in the writer, before anything was spawned (a hand-edited plan row) |
+| `token` | at `/etc/hydra/scale-drain.token`: missing, unreadable or redirected |
+| `wrapper` | in the wrapper, before an HTTP answer (a gate refused, a setting is missing) |
+| `transport` | after the call left, with no HTTP answer: it may have landed |
+| `api` | at the API, which answered non-2xx; `http_status`, `error_code` and the row's `reasons` are kept verbatim |
+| `response` | at a 2xx that does not name the row in `updatedIds` |
+| `readback` | at a 2xx naming the row, when the live request does not hold the status |
+| `unknown` | nowhere nameable: any other exception in the writer, recorded rather than lost |
+
+Five bounds follow from that record:
+
+- **A 2xx is not a granted credit.** After a write the API accepted, `apply` reads the
+  live request through the same pinned read the reconciler uses and confirms the row only
+  when it holds the status. A read that does not show it leaves the intent open
+  (`readback`), and the next run reads again. `--report` says `granted` only for a row
+  that was read back.
+- **A row the API refused is held.** A 4xx carrying an `errorCode` that is the API's
+  answer to that exact call says nothing was written. Later runs skip the row with no read
+  and no write (`refused_held`). `--redrive-refused N` is the only way to send it again,
+  for at most N rows, and is for after whatever refused it has changed. A timeout, a 5xx,
+  a gate that could not run, and **`401`, `403`, `408`, `425` or `429`** prove nothing
+  about the row (the session lapsed, the credential rotated, or the API is throttling the
+  run) and keep the read-then-retry path: `429, 408, 425, 401, 403` are never held.
+- **A row core judged keeps core's reason as its outcome.** `core_row_refused` is
+  recorded in the append-only `core_refusals` table as `refused_by_core:<reason>`, never
+  left as `approve`: nothing downstream may read a refused approval as still in flight.
+  Where the reason is one an ask answers - `proof_required`, `no_sound_precedent` - the
+  row is routed to the ask path (`refused_to_ask`; `asks --plan P --out FILE` emits that
+  audience for `need_asks.py build --from-drain`, the one reviewed sender). `validator_hold`
+  and any reason not named there stay held (`refused_held`), never asked, never queued to
+  a person. No tier-2 or person queue exists for a refused approval.
+- **`--max-writes N`** is the most API writes one run may start. This is the bounded
+  batch: `--max-writes 25 --report batch.jsonl` gives 25 rows with request, user and result.
+- **The breaker** stops the run after 10 failed writes in a row with no success between
+  (`--breaker`, `stop_reason: breaker`). One layer failing every row is a broken path.
+  A row core judged and refused on its own facts (`core_row_refused`) does not count:
+  core answering "not this row" 20 times and granting 5 is the path working.
+
+`apply` exits 1 only when something is left undone by a failure: an error, a stop
+(`stop_reason`), or an unread intent. It always says why in one stderr line
+(`APPLY INCOMPLETE: {...}`). A **held** row is not an incomplete run - the API judged it
+and nothing was written - so it is printed in the stats and `apply` exits 0: `refused_held`,
+`refused_to_ask` (waiting on the ask path), and `held_by_core` (the run that met core's
+refusals; `errors` stays 0 for those, while a missing registration is still an error and
+still exits 1). `failures --ledger L` counts what is still not written by layer,
+status, error code and reasons, and separates the rows waiting on an ask from the held
+ones; `--rows` lists every row.
+
+#### Why the approve bucket never landed
+
+Measured 2026-11-13, not inferred:
+
+- **The 11 November run never reached the API.** The wrapper's result log for that day
+  holds no drain write. The intents were planned at 18:41Z and
+  `/etc/hydra/scale-drain.token` is dated 19:05Z, so the writer most likely stopped at the
+  `token` layer before spawning anything - but that run kept no record, which is the
+  defect above, so this is the reading that fits and not a measurement.
+- **With the token in place the API refuses.** The first real approve (00:38:08Z, requester
+  `scale-drain@hydra-ops`, anchor verified, wrapper gate passed):
+  `PUT /admin/credit-requests {"requestIds":["000decc0-…"],"status":"approved"}` →
+  **HTTP 400** `agent_cannot_approve_declined`, reasons
+  `validator_not_approved, no_registered_automation`, "nothing was written". A second row
+  answered `proof_required, validator_hold, high_risk_score, validator_band_hint`.
+- **Why.** core-backend `src/services/credit-requests/agentApprovalGuard.js` lets an agent
+  token approve a validator-declined or proof-required row only as a registered
+  automation: an `X-Credit-Automation-Id` header, listed in `AUTOMATION_APPROVAL_SCOPES`,
+  bound to the token's account, on a row inside that automation's scope. It registers
+  four (`uvn-under30`, `credit-trust-decide`, `credit-trust-score-approve`,
+  `fable-decider`). The drain was none of them and the wrapper sent no header for it. The
+  hydra registry row (`verification-scale-drain`, `approved: true`) is hydra's gate only.
+- **How many are approvable now: 0 of 3,326.** All 3,326 were still pending at 02:51Z
+  (683 users). Applying the guard's rules to each row's `verificationdata` on the replica:
+  2,775 need the claimant's own proof (risk at or above 100, a band hint other than A, a
+  `review_*` hold, or proof already requested), which no registered scope lifts except
+  for a validator-approved low-risk row; 551 are validator-declined with no proof flag
+  and need a registered automation. That count is this repo's re-read of the guard's
+  rules, not core's own answer for each row.
+
+So the fix was not in this repo. Ruled 2026-11-13 (firstmate `[key=drain-approve-core-guard]` = A):
+core registers the drain as its own automation, on its own account, under a scope the server
+judges for itself. Widening the claimant-proof rule was rejected.
+
+#### The precedent scope (core-backend #11378 on develop, #11379 on master)
+
+core registers `verification-scale-drain` with scope `precedent`, bound to
+`agent-scale-drain@muso.ai`. It admits a validator-declined row only when core itself finds:
+
+- the track is known small (server-read popularity 1 to 59, not client-sourced) and no
+  current `reject_*` rule fired;
+- the same user already holds an approved request for the same profile, track and role
+  set, and that approval is one core stands behind: it passes today's rule on its own
+  stored verdict, or it was approved before 2026-05-18, or a named human approved it since
+  the 2026-10-11 guard. An approval that rests only on the inverted batch rule (05-18 to
+  10-11) is not a precedent;
+- no removal is on record for that profile and track.
+
+The request names no precedent. core finds it, re-reads it inside the approving UPDATE
+(holding a row lock on it, so a take-back that commits mid-write is seen) and records the
+request it stood on in `metadata.approval.precedentRequestId`. A row that needs the
+claimant's own proof is refused before the scope is read.
+
+Measured against the replica 2026-11-13 14:09Z, by this repo's re-read of that rule and
+not by core's answer: **400 of the 3,326 (152 users)** would be admitted. The rest: 2,775
+claimant proof, 78 inverted-window precedents only, 42 big tracks, 36 popularity 0, 16
+no same-profile precedent, 1 removal (the last five overlap).
+
+**This repo's half.** An approve sets `MUSO_ADMIN_IDENTITY=scale-drain`, so the operations
+wrapper signs in with `/etc/openclaw/agents/scale-drain.env` and sends
+`X-Credit-Automation-Id: verification-scale-drain`. The header goes out only with
+`SCALE_DRAIN=1`, the drain's requester, that identity, and `PUT /admin/credit-requests`.
+A duplicate close takes neither. The `skills-all` wrapper copy has no identity loader and
+sends no automation header for anyone, so it is unchanged.
+
+**Order, and what does not exist yet.** Nothing approves until all of these are true:
+
+1. both core PRs are merged and deployed;
+2. the account `agent-scale-drain@muso.ai` exists in core with the `credit-automation` role;
+3. `/etc/openclaw/agents/scale-drain.env` is on node-8 (from Vault, as H-DevOps #4131 does
+   for the other three identities). On 2026-11-13 16:18Z that directory held
+   `credit-decider.env`, `fable.env` and `uvn-cron.env` only;
+4. this repo is deployed.
+
+Before step 3 the wrapper stops every approve at the identity file (layer `wrapper`, no
+request sent). Never point the drain at another automation's account or header: an
+approval borrowed that way is recorded under a scope that never judged it.
+
 ### 4. Read wide, write ordered
 
 The decision pass is read-only and safe to run 32 wide. The apply is a write: a bounded
@@ -506,9 +641,13 @@ python3 -m credit_review.scale_drain snapshot --out /var/lib/hydra/credit-review
 # the dry-run decision pass (read-only)
 python3 -m credit_review.scale_drain plan --snapshot snap.jsonl --out plan.jsonl
 
-# the apply (idempotent, resumable)
+# the apply (idempotent, resumable). Start with a bounded batch and read its report.
 python3 -m credit_review.scale_drain apply --plan plan.jsonl \
-  --ledger /var/lib/hydra/credit-review/drain.sqlite
+  --ledger /var/lib/hydra/credit-review/drain.sqlite \
+  --max-writes 25 --report batch.jsonl
+
+# what is still not written, and why (layer / HTTP status / API error code / reasons)
+python3 -m credit_review.scale_drain failures --ledger /var/lib/hydra/credit-review/drain.sqlite
 
 # prove it: zero duplicates, zero orphans
 python3 -m credit_review.scale_drain verify --plan plan.jsonl --ledger …
@@ -526,15 +665,18 @@ id, no shard number. That is what makes "run it twice, diff the bytes" a real te
 
 ### What `apply` needs, and what it says when a write fails
 
-`apply` writes through `muso-admin-api.sh`, and the wrapper refuses every call without
-`MUSO_API_URL`, `MUSO_ADMIN_EMAIL` and `MUSO_ADMIN_PASSWORD` (or `MUSO_ADMIN_IDENTITY`,
-which loads the account itself). A login shell on the host does not carry them. On
+`apply` writes through `muso-admin-api.sh`, and the wrapper refuses every `call`/`call-batch`
+without `MUSO_API_URL`, `MUSO_ADMIN_EMAIL` and `MUSO_ADMIN_PASSWORD`. `MUSO_ADMIN_IDENTITY`
+does not stand in for them: the wrapper loads that account only on `login|call|upload`, while
+the verifier's anchor read and the read-back both go through `call-batch`, which loads no
+identity. A login shell on the host does not carry the env. On
 2026-11-11 `apply` was started from such a shell: it recorded 3,326 approve intents, every
 write died in the wrapper's `check_env` before the gate ran, and the summary said only
 `errors`. Those intents are still `planned` in the ledger; none was granted.
 
 So `apply` now asks once, before it records an intent, whether this process can write at
-all (`admin_preflight`: the admin env, the token file, the kill file, the wrapper). A miss
+all (`admin_preflight`: the admin env, the approve's identity file when an approve is left,
+the token file, the kill file, the wrapper). A miss
 prints one `PREFLIGHT <class>: ...` line per cause and exits 2 with nothing recorded. It
 reads no secret and calls nothing, so it cannot tell a wrong credential from a right one;
 a wrong one fails at the first write, which stops the run instead of repeating itself.
@@ -546,7 +688,8 @@ Every failed write carries a class, and the summary counts them in `error_classe
 | `admin_script_missing`, `admin_env_missing`, `drain_token`, `drain_kill_file` | the run | preflight found it: `apply` exits 2 with nothing recorded |
 | `drain_registry` | the run | the wrapper's registry check refused mid-run; `apply` stops (`stopped_reason`) |
 | `anchor_unverified`, `drain_gate_refused`, `approve_gate_refused` | the row | the wrapper's gate refused this write; nothing reached core |
-| `core_automation_not_registered` | the row | the write passed hydra's gate and **core** refused it (`agent_cannot_approve_declined`) |
+| `core_automation_not_registered` | the row | the write passed hydra's gate and **core** refused it (`agent_cannot_approve_declined`) with the reason `no_registered_automation` |
+| `core_row_refused` | the row | the same code with the row's own reasons (`no_sound_precedent`, `not_known_small`, `proof_required`, ...): core judged the row. Recorded as `refused_by_core:<reason>`, counted in `held_by_core` (not in `errors`), never by the breaker, and routed by that reason: `proof_required` / `no_sound_precedent` go to the ask path (`refused_to_ask`), everything else (`validator_hold`, an unnamed reason) is held. The route has one source, the recorded `core_refusals` row: a refusal whose route could not be recorded is held, never reported as waiting on an ask, and STOPS the run (`stop_reason` `ledger`) so no later approval is sent while its refusals record nothing |
 | `http_error`, `wrapper_failed`, `writer_exception` | the row | any other non-2xx or crash |
 | `unreconciled`, `ledger_error` | the row | an open intent could not be read back, or the ledger refused |
 
@@ -555,11 +698,16 @@ its validator did not approve only for an automation registered in **core's own*
 (`AUTOMATION_APPROVAL_SCOPES` in core-backend `agentApprovalGuard.js`), bound to the admin
 account the call logged in as and named in the `X-Credit-Automation-Id` header. hydra's
 `verification-scale-drain` registry entry and `/etc/hydra/scale-drain.token` satisfy the
-wrapper's gate and are never sent to core. As of 2026-11-13 core registers no scale-drain
-automation and the wrapper sends no such header for the drain, so a precedent or
-proof-verdict approve of a row the validator declined is refused there. Closing that is a
-registration in core plus a decision on which admin account the drain logs in as; neither
-is a change this repo can make on its own.
+wrapper's gate and are never sent to core. The drain's half is in this repo: the approve
+signs in as `MUSO_ADMIN_IDENTITY=scale-drain` and the operations wrapper sends
+`X-Credit-Automation-Id: verification-scale-drain` for it. core's half is the `precedent`
+scope (core-backend #11378, with #11380 and the master twin #11379) and the account it is
+bound to; until both are deployed and the account exists, core answers
+`no_registered_automation`. The preflight also asks for
+`/etc/openclaw/agents/scale-drain.env` when an approve is left to make
+(`admin_env_missing`): the wrapper refuses a missing identity file before any request and
+there is no fallback account. The verifier's read and the read-back still sign in with the
+admin env, so an approving run needs both.
 
 A global flag goes **before** the command. `call PUT <path> '<body>' --evidence-excerpt X`
 was once read as a call with no excerpt, and the gate answered "--evidence-excerpt is
@@ -596,8 +744,10 @@ the user was already decided once. `apply` counts it and writes nothing.
 work touch different files in the same domain. The reconciliation is that there is
 **exactly one reviewed ask/notify path, and it is `need_asks.py`**:
 
-- the drain's ladder decides **who** is asked (its `ask` rows);
-- `need_asks.py build --from-drain PLAN` takes that audience and still decides **which
+- the drain decides **who** is asked: the ladder's `ask` rows plus the rows core refused
+  back onto the ask path, emitted together as one audience by
+  `scale_drain.py asks --plan PLAN --out FILE`;
+- `need_asks.py build --from-drain AUDIENCE` takes that audience and still decides **which
   document** each ask names, and still owns the send through
   `intercom-verify-request.sh --campaign proof-need-ask` (the copy lock, the go-live
   guards, the send-time `comm_state` read).

@@ -18,12 +18,14 @@ only decides WHO is listed and WHICH document each ask names.
   send:  one ask per user per run (the oldest document first), paid first, --max-users bounded, dry-run by default;
          a real run halts before any gate call while the gate's lock is 0.
 
-  --from-drain PLAN (the scale drain, data/verification-scale-plan.md): the drain's deterministic ladder decides WHO
-         is asked (rule `ask`); this module still decides WHICH document each ask names and still owns the send. That
-         is the reconciliation with verify-ask-wiring-h2 (PR #1845): there is ONE reviewed ask/notify path, and it is
-         this one. A drain ask with no sendable document is listed as `wait:no_sendable_document`, never dropped.
+  --from-drain AUDIENCE (the scale drain, data/verification-scale-plan.md): the drain decides WHO is asked - the
+         ladder's `ask` rows plus the rows core refused back onto the ask path, emitted together by
+         `scale_drain.py asks --plan PLAN --out FILE`; this module still decides WHICH document each ask names and
+         still owns the send. That is the reconciliation with verify-ask-wiring-h2 (PR #1845): there is ONE reviewed
+         ask/notify path, and it is this one. A drain ask with no sendable document is listed as
+         `wait:no_sendable_document`, never dropped.
 
-CLI:  need_asks.py build --out FILE [--from-drain PLAN]
+CLI:  need_asks.py build --out FILE [--from-drain AUDIENCE]
       need_asks.py send --list FILE --segment paid|free [--mode dry-run|apply] [--max-users N] [--preview DIR]
 """
 from __future__ import annotations
@@ -139,12 +141,13 @@ def stale_filing(received: Any, now: datetime) -> bool:
 
 
 def drain_asks(plan_path: str) -> set[tuple[int, str]]:
-    """The (user, request) pairs the scale drain's ladder decided to ASK.
+    """The (user, request) pairs the drain decided to ASK.
 
     The drain (scripts/credit_review/scale_drain.py) is the deterministic decider: duplicate -> close, precedent ->
     approve or tier-2 queue, proof verdict -> approve or tier-2 queue, expired -> tier-2 queue, otherwise ask. The
     audience is every row whose OUTCOME is `ask` - including a rule that wanted to approve but had no evidence anchor
-    and was downgraded to ask - so this module never re-decides it. A row with no user id cannot be asked by the
+    and was downgraded to ask, and a row core refused back onto the ask path (`scale_drain.py asks --plan P --out
+    FILE` emits both) - so this module never re-decides it. A row with no user id cannot be asked by the
     reviewed path and is refused loudly rather than silently dropped.
     """
     out: set[tuple[int, str]] = set()
@@ -760,9 +763,10 @@ def _main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("build")
     b.add_argument("--out", required=True)
     b.add_argument("--tray", default=None, help="b1's L11c tray JSON (the source of truth, Fable [key=l11c-plural])")
-    b.add_argument("--from-drain", default=None, metavar="PLAN",
-                   help="the scale drain's plan JSONL: its `ask` rows are the audience (the drain decides WHO, this "
-                        "module decides WHICH document and owns the send)")
+    b.add_argument("--from-drain", default=None, metavar="AUDIENCE",
+                   help="the ask audience `scale_drain.py asks --plan PLAN --out FILE` emits (the drain's `ask` rows "
+                        "plus the rows core refused back onto the ask path): the drain decides WHO, this "
+                        "module decides WHICH document and owns the send")
     v = sub.add_parser("verify-facts")
     v.add_argument("--list", required=True)
     s = sub.add_parser("send")

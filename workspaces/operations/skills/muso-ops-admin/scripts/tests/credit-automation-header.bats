@@ -144,3 +144,51 @@ anchor_header_count() {
     anchor_post 1 "dsp-evidence-verifier@hydra-ops" /admin/credit-requests/conditional-status
     [ "$(anchor_header_count)" -eq 0 ]
 }
+
+drain_put() {
+    # $1 = SCALE_DRAIN value, $2 = requester, $3 = MUSO_ADMIN_IDENTITY ("" = unset), $4 = method, $5 = path
+    mkdir -p "$TEST_ROOT/identities"
+    for id in scale-drain credit-decider; do
+        printf 'MUSO_ADMIN_EMAIL=%s@example.com\nMUSO_ADMIN_PASSWORD=unused\n' "$id" > "$TEST_ROOT/identities/$id.env"
+        printf '%s\ndummy-token\n' "$(date +%s)" > "$ADMIN_TOKEN_CACHE_PATH.$id"
+    done
+    local -a ident=()
+    [[ -n "$3" ]] && ident=(MUSO_ADMIN_IDENTITY="$3")
+    run --separate-stderr env SCALE_DRAIN="$1" MUSO_ADMIN_IDENTITY_DIR="$TEST_ROOT/identities" "${ident[@]}" \
+        bash "$SCRIPT" --requester "$2" call "$4" "$5" \
+        '{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved"}'
+}
+
+drain_header_count() {
+    grep -cx "X-Credit-Automation-Id: verification-scale-drain" "$CURL_ARGV" || true
+}
+
+any_automation_header_count() {
+    grep -c "^X-Credit-Automation-Id: " "$CURL_ARGV" || true
+}
+
+@test "the drain's approve carries its own X-Credit-Automation-Id on its own account" {
+    drain_put 1 "scale-drain@hydra-ops" scale-drain PUT /admin/credit-requests
+    [ "$status" -eq 0 ]
+    [ "$(drain_header_count)" -eq 1 ]
+    [ "$(any_automation_header_count)" -eq 1 ]
+    grep -qx "Requester: scale-drain@hydra-ops" "$CURL_ARGV"
+}
+
+@test "the drain header needs its flag, its requester, its OWN account and the approve route" {
+    drain_put 0 "scale-drain@hydra-ops" scale-drain PUT /admin/credit-requests
+    [ "$(drain_header_count)" -eq 0 ]
+    drain_put 1 "credit-trust-decide@hydra-ops" scale-drain PUT /admin/credit-requests
+    [ "$(drain_header_count)" -eq 0 ]
+    # Never under the shared login or another automation's account: no borrowed identity.
+    drain_put 1 "scale-drain@hydra-ops" "" PUT /admin/credit-requests
+    [ "$status" -eq 0 ]
+    [ "$(any_automation_header_count)" -eq 0 ]
+    drain_put 1 "scale-drain@hydra-ops" credit-decider PUT /admin/credit-requests
+    [ "$status" -eq 0 ]
+    [ "$(any_automation_header_count)" -eq 0 ]
+    drain_put 1 "scale-drain@hydra-ops" scale-drain PUT /admin/credit-requests/conditional-status
+    [ "$(drain_header_count)" -eq 0 ]
+    drain_put 1 "scale-drain@hydra-ops" scale-drain GET /admin/credit-requests
+    [ "$(drain_header_count)" -eq 0 ]
+}

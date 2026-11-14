@@ -13,7 +13,9 @@ plan's Definition of done names, on hermetic fixtures:
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -24,11 +26,14 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace as dataclasses_replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from credit_review import need_asks as na  # noqa: E402
 from credit_review import scale_drain as sd  # noqa: E402
 
 NOW = datetime(2026, 11, 11, 12, 0, 0, tzinfo=timezone.utc)
@@ -732,6 +737,25 @@ class ReviewedWritePathTests(unittest.TestCase):
         self.assertEqual(env["EVIDENCE_EXCERPT"],
                          f"drain-signal:precedent;precedent_match;v{sd.RULE_VERSION};{rid(9)};-")
         self.assertIn("--evidence-excerpt", calls[0]["argv"])
+
+    def test_approve_signs_in_as_the_drains_own_account(self):
+        """core binds verification-scale-drain to agent-scale-drain@ and to no other
+        account, so the approve names that identity whatever the caller's env says. A
+        duplicate close is not an approval and does not take it."""
+        w, calls = self._writer()
+        with mock.patch.dict(os.environ, {"MUSO_ADMIN_IDENTITY": "credit-decider"}):
+            w(sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                          sd.decision_key(rid(1), "precedent", "approve"),
+                          evidence_anchor=rid(9)))
+        self.assertEqual(sd.ADMIN_IDENTITY, "scale-drain")
+        self.assertEqual(calls[0]["env"]["MUSO_ADMIN_IDENTITY"], "scale-drain")
+        w, calls = self._writer()
+        with mock.patch.dict(os.environ):
+            os.environ.pop("MUSO_ADMIN_IDENTITY", None)
+            w(sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
+                          sd.decision_key(rid(1), "duplicate", "close_duplicate"),
+                          status="unverified", duplicate_of=rid(9)))
+        self.assertNotIn("MUSO_ADMIN_IDENTITY", calls[0]["env"])
 
     def test_an_approve_without_an_anchor_is_refused(self):
         """A row the ladder could not anchor is not auto-approvable - never approve blind."""
@@ -2241,7 +2265,7 @@ class FailureClassTests(unittest.TestCase):
                     self.assertEqual([c for c, _ in problems], ["admin_env_missing"])
                     self.assertIn(name, problems[0][1])
 
-    def _preflight(self, env, *, token=True, kill=False):
+    def _preflight(self, env, *, token=True, kill=False, identity=True, approves=True):
         td = Path(tempfile.mkdtemp())
         script = td / "wrapper.sh"
         script.write_text("#!/bin/sh\n")
@@ -2251,8 +2275,12 @@ class FailureClassTests(unittest.TestCase):
         kill_file = td / "scale-drain.disabled"
         if kill:
             kill_file.write_text("")
+        if identity:
+            (td / "scale-drain.env").write_text(
+                "MUSO_ADMIN_EMAIL=agent-scale-drain@example.com\nMUSO_ADMIN_PASSWORD=x\n")
+        env = {**env, sd.ADMIN_IDENTITY_DIR_ENV: str(td)}
         return sd.admin_preflight(str(script), token_file=str(token_file),
-                                  kill_file=str(kill_file), environ=env)
+                                  kill_file=str(kill_file), environ=env, approves=approves)
 
     GOOD_ENV = {"MUSO_API_URL": "https://example.invalid", "MUSO_ADMIN_EMAIL": "a@b.c",
                 "MUSO_ADMIN_PASSWORD": "x"}
@@ -2273,14 +2301,22 @@ class FailureClassTests(unittest.TestCase):
         self.assertIn("MUSO_API_URL", problems[0][1])
         self.assertNotIn("MUSO_ADMIN_EMAIL", problems[0][1])
 
-    def test_a_named_identity_supplies_the_account_but_not_the_url(self):
-        """The wrapper loads email + password from the identity file itself."""
-        self.assertEqual(self._preflight(
-            {"MUSO_API_URL": "https://example.invalid", "MUSO_ADMIN_IDENTITY": "fable"}), [])
-        problems = self._preflight({"MUSO_ADMIN_IDENTITY": "fable"})
+    def test_a_named_identity_does_not_supply_the_admin_env(self):
+        """The wrapper loads that account for ``login|call|upload`` only. The verifier's
+        anchor read and the read-back go through ``call-batch``, which loads no identity
+        and dies in its own env check, so the admin env is still needed - otherwise the
+        preflight passes a run that records intents and then fails every row."""
+        env = {"MUSO_API_URL": "https://example.invalid", "MUSO_ADMIN_IDENTITY": "fable"}
+        problems = self._preflight(env)
         self.assertEqual([c for c, _ in problems], ["admin_env_missing"])
-        self.assertIn("MUSO_API_URL", problems[0][1])
-        self.assertNotIn("MUSO_ADMIN_PASSWORD", problems[0][1])
+        for name in ("MUSO_ADMIN_EMAIL", "MUSO_ADMIN_PASSWORD"):
+            self.assertIn(name, problems[0][1])
+        self.assertNotIn("MUSO_API_URL", problems[0][1])
+        partial = self._preflight({**env, "MUSO_ADMIN_EMAIL": "a@b.c"})
+        self.assertEqual([c for c, _ in partial], ["admin_env_missing"])
+        self.assertIn("MUSO_ADMIN_PASSWORD", partial[0][1])
+        self.assertEqual(self._preflight({"MUSO_ADMIN_IDENTITY": "fable"})[0][0],
+                         "admin_env_missing")
 
     def test_no_token_an_empty_token_and_a_redirected_token_all_fail(self):
         self.assertEqual([c for c, _ in self._preflight(dict(self.GOOD_ENV), token=False)],
@@ -2289,7 +2325,8 @@ class FailureClassTests(unittest.TestCase):
         (td / "w.sh").write_text("")
         (td / "t").write_text("\n")
         problems = sd.admin_preflight(str(td / "w.sh"), token_file=str(td / "t"),
-                                      kill_file=str(td / "nope"), environ=dict(self.GOOD_ENV))
+                                      kill_file=str(td / "nope"), environ=dict(self.GOOD_ENV),
+                                      approves=False)
         self.assertEqual([c for c, _ in problems], ["drain_token"])
         problems = self._preflight({**self.GOOD_ENV, sd.DRAIN_TOKEN_FILE_ENV: "/tmp/mine"})
         self.assertEqual([c for c, _ in problems], ["drain_token"])
@@ -2301,8 +2338,34 @@ class FailureClassTests(unittest.TestCase):
     def test_a_missing_wrapper_fails_the_preflight(self):
         problems = sd.admin_preflight("/nonexistent/muso-admin-api.sh",
                                       token_file="/nonexistent/t", kill_file="/nonexistent/k",
-                                      environ=dict(self.GOOD_ENV))
+                                      environ=dict(self.GOOD_ENV), approves=False)
         self.assertEqual([c for c, _ in problems], ["admin_script_missing", "drain_token"])
+
+    def test_an_approve_without_the_drains_own_identity_file_fails_the_preflight(self):
+        """node-8 on 2026-11-13: credit-decider.env, fable.env and uvn-cron.env exist and
+        scale-drain.env does not. The wrapper refuses that before any request, for every
+        approve alike, so it is asked once. A plan with only duplicate closes left signs
+        in with the admin env and needs no identity file."""
+        problems = self._preflight(dict(self.GOOD_ENV), identity=False)
+        self.assertEqual([c for c, _ in problems], ["admin_env_missing"])
+        self.assertIn("scale-drain.env", problems[0][1])
+        self.assertIn("no fallback account", problems[0][1])
+        self.assertEqual(self._preflight(dict(self.GOOD_ENV), identity=False, approves=False), [])
+
+    def test_the_identity_file_the_preflight_names_is_the_one_the_wrapper_refuses(self):
+        """Held to the real wrapper's words, so a renamed directory or identity cannot
+        leave the preflight passing a run whose every approve dies in the wrapper."""
+        td = Path(tempfile.mkdtemp())
+        # only the operations copy loads an identity; the skills-all copy has no loader
+        (operations,) = [w for w in self.WRAPPERS if w.startswith("workspaces/operations/")]
+        env = {**self.GOOD_ENV, "PATH": os.environ["PATH"], "HOME": str(td),
+               "MUSO_ADMIN_IDENTITY": sd.ADMIN_IDENTITY, sd.ADMIN_IDENTITY_DIR_ENV: str(td)}
+        proc = subprocess.run(["bash", str(SCRIPTS.parent / operations), "login"],
+                              capture_output=True, text=True, env=env, check=False)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        said = proc.stdout + proc.stderr
+        self.assertIn(f"admin identity '{sd.ADMIN_IDENTITY}': {td}/scale-drain.env is missing", said)
+        self.assertEqual(sd.classify_refusal(said), ("admin_env_missing", True))
 
     # -- apply(): what a classified failure does to the run -------------------------
 
@@ -2470,16 +2533,32 @@ class _FakeApi:
             'printf \'%s\\n\' "$*" >> "$FAKE_API_LOG"\n'
             'case "$*" in\n'
             '    *"/admin/user/login"*) printf \'{"data":{"authentication":{"accessToken":"t"}}}\' ;;\n'
-            '    *"-X GET"*"/admin/credit-requests?"*) cat "$FAKE_API_ITEMS"; printf \'\\n200\' ;;\n'
+            '    *"-X GET"*"/admin/credit-requests?"*)\n'
+            '        if [ -f "$FAKE_API_ITEMS.after-put" ] && grep -q -- "-X PUT" "$FAKE_API_LOG"; then\n'
+            '            cat "$FAKE_API_ITEMS.after-put"\n'
+            '        else cat "$FAKE_API_ITEMS"; fi; printf \'\\n200\' ;;\n'
             '    *"-X PUT"*) cat "$FAKE_API_PUT"; printf \'\\n%s\' "${FAKE_API_PUT_STATUS:-200}" ;;\n'
             '    *) printf \'{"error":"unexpected request"}\\n500\' ;;\n'
             "esac\n")
         stub.chmod(0o755)
         (root / "codex-health.sh").write_text("codex_health_gate() { return 0; }\n")
         (root / "token-cache").write_text(f"{int(time.time())}\ndummy-token\n")
+        # The approve signs in as the drain's own account (MUSO_ADMIN_IDENTITY=scale-drain).
+        (root / "identities").mkdir()
+        (root / "identities/scale-drain.env").write_text(
+            "MUSO_ADMIN_EMAIL=agent-scale-drain@example.com\nMUSO_ADMIN_PASSWORD=unused\n")
 
-    def serve(self, items: list[dict], updated: list[str]) -> None:
+    def serve(self, items: list[dict], updated: list[str],
+              after_put: list[dict] | None = None) -> None:
+        """``after_put`` is what a GET answers once a PUT has been made: the row as core
+        holds it after the write. Without it the GET keeps answering ``items``, which is
+        a core that said 200 and changed nothing."""
         self.items.write_text(json.dumps({"data": {"items": items}}))
+        after = Path(f"{self.items}.after-put")
+        if after_put is None:
+            after.unlink(missing_ok=True)
+        else:
+            after.write_text(json.dumps({"data": {"items": after_put}}))
         self.put_body.write_text(json.dumps({"data": {"updatedIds": updated}}))
         self.log.write_text("")
 
@@ -2504,6 +2583,7 @@ class _FakeApi:
             "OPS_RUNLOG_DIR": str(self.root / "runlogs"),
             "CV_RESULTS_PATH": str(self.root / "results.jsonl"),
             "ADMIN_TOKEN_CACHE_PATH": str(self.root / "token-cache"),
+            "MUSO_ADMIN_IDENTITY_DIR": str(self.root / "identities"),
             "CODEX_HEALTH_LIB": str(self.root / "codex-health.sh"),
             "CREDIT_APPROVAL_REGISTRY": str(registry),
         }
@@ -2681,6 +2761,15 @@ class RealEntrypointTests(unittest.TestCase):
                 self.assertEqual(len(writes), 1, writes)
                 self.assertIn("/admin/credit-requests", writes[0])
                 self.assertIn(rid(1), writes[0])
+                # The wrapper the drain runs in production (the operations copy) names
+                # the drain's automation to core, on the drain's own login. The
+                # skills-all copy has no automation identities and sends no such header.
+                header = "X-Credit-Automation-Id: verification-scale-drain"
+                if wrapper == Path(sd.ADMIN_WRITER_SCRIPT).relative_to("/opt/hydra").as_posix():
+                    self.assertIn(header, writes[0])
+                    self.assertEqual(writes[0].count("X-Credit-Automation-Id:"), 1)
+                else:
+                    self.assertNotIn("X-Credit-Automation-Id:", writes[0])
 
     def test_an_approve_whose_anchor_is_not_approved_never_reaches_the_api(self):
         """The twin that keeps the test above honest: the same call, an anchor the API
@@ -3264,7 +3353,15 @@ sd.apply(sd.parse_plan(open(plan, "rb").read()), sd.open_ledger(ledger),
                    "account, on a row inside its scope, may) \u2014 nothing was written; "
                    "route them to a credit case or a named human",
         "refusedRequestIds": [rid(1)],
-        "refused": [{"id": rid(1), "band": "C", "reasons": ["band_not_a_or_b"]}],
+        "refused": [{"id": rid(1), "band": "A_auto",
+                     "reasons": ["validator_not_approved", "no_registered_automation"]}],
+    }
+    #: The same code for a row core JUDGED: the account is registered, the row is outside
+    #: its scope. core names the row's facts and never ``no_registered_automation``.
+    CORE_ROW_REFUSAL = {
+        **CORE_REFUSAL,
+        "refused": [{"id": rid(1), "band": "B_request_info",
+                     "reasons": ["no_sound_precedent", "tier_t1_needs_evidence"]}],
     }
 
     def _core_answers(self, body, status):
@@ -3288,15 +3385,32 @@ sd.apply(sd.parse_plan(open(plan, "rb").read()), sd.open_ledger(ledger),
                 said = str(exc)
                 self.assertIn(rid(1), said)
                 self.assertIn("agent_cannot_approve_declined", said)
-                self.assertIn("band=C reasons=band_not_a_or_b", said)
-                # who to register, and where: the account the wrapper logged in as, and
+                self.assertIn("band=A_auto reasons=validator_not_approved,no_registered_automation",
+                              said)
+                # who to register, and where: the identity the approve signed in as, and
                 # the hydra half that is already in place
-                self.assertIn("test@example.com", said)
+                self.assertIn("MUSO_ADMIN_IDENTITY=scale-drain", said)
                 self.assertIn("verification-scale-drain", said)
                 self.assertIn("core-backend", said)
                 self.assertIn("nothing written", said)
                 # the gate let it through: this is the one refusal that costs a PUT
                 self.assertEqual(len(self.api.requests("PUT")), 1)
+
+    def test_a_row_core_judged_and_refused_is_not_called_a_registration_gap(self):
+        """Once the account IS registered, core still answers this code for a row outside
+        the scope (no sound precedent, a big track, claimant proof owed). Calling that
+        "register the automation" sends a person to do something already done."""
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                exc = self._refusal(wrapper, self._core_answers(self.CORE_ROW_REFUSAL, 400))
+                self.assertIsInstance(exc, sd.DrainRowRefusedByCore)
+                self.assertEqual(exc.failure_class, "core_row_refused")
+                self.assertNotIsInstance(exc, sd.DrainConfigError)
+                said = str(exc)
+                self.assertIn("reasons=no_sound_precedent,tier_t1_needs_evidence", said)
+                self.assertIn("nothing written", said)
+                self.assertNotIn("needs a registration", said)
+                self.assertEqual(exc.reasons, ("no_sound_precedent", "tier_t1_needs_evidence"))
 
     def test_the_refusal_names_the_identity_when_the_wrapper_logs_in_by_identity(self):
         exc = sd._refused_by_core(self.decision, 400, self.CORE_REFUSAL,
@@ -3421,8 +3535,8 @@ sd.apply(sd.parse_plan(open(plan, "rb").read()), sd.open_ledger(ledger),
 
     def test_the_cli_grants_the_approval_and_reads_it_back_from_the_ledger(self):
         """The acceptance, end to end: ``scale_drain apply`` from a shell that CAN write
-        lands the approve through the real wrapper and gate, and the run's own ledger
-        read-back - not the HTTP code - is what records it as granted.
+        lands the approve through the real wrapper and gate, and a read of the LIVE
+        request after the write - not the HTTP code - is what records it as granted.
 
         Same seam as the class: the network is the only stub (``_FakeApi``); the wrapper,
         its gate chain, the verifier and the batch client are the real files, and core
@@ -3436,7 +3550,12 @@ sd.apply(sd.parse_plan(open(plan, "rb").read()), sd.open_ledger(ledger),
         plan.write_bytes(sd.serialize([self.decision]))
         real_writer = sd.admin_writer
         real_preflight = sd.admin_preflight
-        self._serve_approvable()
+        granted_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        precedent = _api_request(rid(9), status="approved")
+        self.api.serve(
+            [_api_request(rid(1), status="user_verification_needed"), precedent], [rid(1)],
+            after_put=[{**_api_request(rid(1), status="approved"), "updatedAt": granted_at},
+                       precedent])
         saved = dict(os.environ)
         os.environ.clear()
         os.environ.update(self._env())
@@ -3446,8 +3565,8 @@ sd.apply(sd.parse_plan(open(plan, "rb").read()), sd.open_ledger(ledger),
                     lambda script=None: real_writer(script, token_file=str(self.token))), \
                     mock.patch.object(
                         sd, "admin_preflight",
-                        lambda script=None: real_preflight(
-                            script, token_file=str(self.token))):
+                        lambda script=None, **kw: real_preflight(
+                            script, token_file=str(self.token), **kw)):
                 import contextlib
                 import io
                 out = io.StringIO()
@@ -3462,6 +3581,7 @@ sd.apply(sd.parse_plan(open(plan, "rb").read()), sd.open_ledger(ledger),
         stats = json.loads(out.getvalue().splitlines()[-1])
         self.assertEqual((stats["applied"], stats["errors"], stats["stopped"]), (1, 0, False))
         self.assertEqual(stats["error_classes"], {})
+        self.assertEqual((stats["attempted"], stats["failures"]), (1, {}))
         writes = self.api.requests("PUT")
         self.assertEqual(len(writes), 1, writes)
         self.assertIn("requestIds", writes[0])
@@ -3482,6 +3602,560 @@ sd.apply(sd.parse_plan(open(plan, "rb").read()), sd.open_ledger(ledger),
                 proc = self._apply_cli(env, self.api.root / f"{flag.strip('-')}.sqlite", flag)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertNotIn("PREFLIGHT", proc.stderr)
+
+
+# The answer production gave on 2026-11-13 00:38:08Z to the drain's one real approve
+# (node-8 /var/log/openclaw/credit-batch-runs/2026-11-13/, requester scale-drain@hydra-ops),
+# verbatim. The wrapper exits 0 on it and wraps it in its envelope.
+CORE_REFUSAL = (
+    '{"result":"error","message":"an autonomous agent cannot approve 1 credit request(s) the '
+    'validator did not approve (only a registered automation bound to this token account, on '
+    'a row inside its scope, may) \u2014 nothing was written; route them to a credit case or a '
+    'named human","errorCode":"agent_cannot_approve_declined","refusedRequestIds":'
+    '["000decc0-43f8-4aec-bd6b-e03e7d0651f4"],"refused":[{"id":'
+    '"000decc0-43f8-4aec-bd6b-e03e7d0651f4","band":"A_auto","reasons":'
+    '["validator_not_approved","no_registered_automation"]}],"code":400}')
+REFUSED_ID = "000decc0-43f8-4aec-bd6b-e03e7d0651f4"
+
+
+def refusal_envelope(request_id: str = REFUSED_ID) -> str:
+    body = json.loads(CORE_REFUSAL.replace(REFUSED_ID, request_id))
+    return json.dumps({"http_status": 400, "body": body, "transport_attempts": 1,
+                       "transport_retry_exits": []})
+
+
+def approvals(n: int) -> list:
+    """``n`` approve decisions, each citing the same precedent."""
+    precedent = [{"precedent_key": "k", "outcome": "approve", "request_id": rid(9999)}]
+    return sd.plan(snapshot([row(i, precedent_key="k") for i in range(1, n + 1)],
+                            precedent=precedent), now=NOW)
+
+
+def refusing(calls: list):
+    """A writer that answers every call the way production answered the drain."""
+    def writer(d):
+        calls.append(d.request_id)
+        sd._assert_written(d, refusal_envelope(d.request_id))
+    return writer
+
+
+class WriteFailureTests(unittest.TestCase):
+    """A failed write names its layer, stays on the ledger, and is not sent again blind.
+
+    The 11 November run: 92,386 decisions applied, all 3,326 approvals failed, and what
+    survived was one stderr line per row and rc=1. Every later run would have sent the
+    same 3,326 refused calls again.
+    """
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.dir = Path(td.name)
+        self.db = sd.open_ledger(str(self.dir / "ledger.sqlite"))
+
+    def _failures(self):
+        return self.db.execute("SELECT request_id, layer, http_status, error_code, reasons"
+                               " FROM write_failures ORDER BY id").fetchall()
+
+    # ── the API's answer survives ────────────────────────────────────────────
+    def test_the_production_refusal_keeps_its_code_and_reasons(self):
+        d = dataclasses_replace(approvals(1)[0], request_id=REFUSED_ID)
+        with self.assertRaises(sd.DrainWriteError) as ctx:
+            sd._assert_written(d, refusal_envelope())
+        exc = ctx.exception
+        self.assertEqual((exc.layer, exc.http_status, exc.error_code),
+                         ("api", 400, "agent_cannot_approve_declined"))
+        self.assertEqual(exc.reasons, ("validator_not_approved", "no_registered_automation"))
+        self.assertIsInstance(exc, sd.DrainRefusedByCore)
+        self.assertEqual(exc.failure_class, "core_automation_not_registered")
+        self.assertIn("core refused the approve with agent_cannot_approve_declined "
+                      "(band=A_auto reasons=validator_not_approved,no_registered_automation)"
+                      ": HTTP 400, nothing written", str(exc))
+
+    def test_reasons_are_this_rows_not_a_neighbours(self):
+        d = approvals(1)[0]
+        with self.assertRaises(sd.DrainWriteError) as ctx:
+            sd._assert_written(d, refusal_envelope())    # the body names another request
+        self.assertEqual(ctx.exception.error_code, "agent_cannot_approve_declined")
+        self.assertEqual(ctx.exception.reasons, ())
+
+    def test_each_layer_is_named(self):
+        d = approvals(1)[0]
+        ok_other_row = json.dumps({"http_status": 200, "body": {"updatedIds": [rid(77)]}})
+        cases = [("", "wrapper"), ("not json", "wrapper"),
+                 (json.dumps({"http_status": 502, "raw": "<html>bad gateway</html>"}), "api"),
+                 (json.dumps({"http_status": None, "body": None,
+                              "transport_error": {"curl_exit": 28}}), "transport"),
+                 (json.dumps({"http_status": 200, "body": {}}), "response"),
+                 (ok_other_row, "response")]
+        for stdout, layer in cases:
+            with self.subTest(layer=layer, stdout=stdout[:30]):
+                with self.assertRaises(sd.DrainWriteError) as ctx:
+                    sd._assert_written(d, stdout)
+                self.assertEqual(ctx.exception.layer, layer)
+
+    def test_a_missing_token_file_is_the_token_layer(self):
+        """11 November, 18:41Z: the token file did not exist until 19:05Z."""
+        spawned = []
+        writer = sd.admin_writer("/nonexistent/wrapper.sh", runner=spawned.append,
+                                 token_file=str(self.dir / "no-such-token"))
+        with self.assertRaises(sd.DrainWriteError) as ctx:
+            writer(approvals(1)[0])
+        self.assertEqual(ctx.exception.layer, "token")
+        self.assertEqual(spawned, [])
+
+    def test_a_wrapper_exit_is_the_wrapper_layer_unless_the_call_left(self):
+        token = self.dir / "token"
+        token.write_text("t\n")
+        d = approvals(1)[0]
+        gate = subprocess.CompletedProcess([], 1, stdout="", stderr="MUSO_API_URL not set")
+        left = subprocess.CompletedProcess(
+            [], 28, stderr="", stdout='{"http_status":null,"body":null,'
+                                      '"transport_error":{"curl_exit":28}}')
+        for proc, layer in ((gate, "wrapper"), (left, "transport")):
+            with self.subTest(layer=layer):
+                writer = sd.admin_writer("w.sh", runner=lambda *a, proc=proc, **k: proc,
+                                         token_file=str(token))
+                with self.assertRaises(sd.DrainWriteError) as ctx:
+                    writer(d)
+                self.assertEqual(ctx.exception.layer, layer)
+
+    # ── the ledger keeps it ──────────────────────────────────────────────────
+    def test_a_refusal_is_recorded_with_what_the_api_said(self):
+        decisions = approvals(1)
+        stats = sd.apply(decisions, self.db, shards=1, write_pool=1, writer=refusing([]))
+        self.assertEqual(self._failures(), [
+            (rid(1), "api", 400, "agent_cannot_approve_declined",
+             '["validator_not_approved", "no_registered_automation"]')])
+        self.assertEqual(stats["failures"], {"api/agent_cannot_approve_declined": 1})
+        self.assertEqual((stats["errors"], stats["applied"]), (1, 0))
+        self.assertEqual(self.db.execute("SELECT state FROM intents").fetchall(), [("planned",)])
+
+    def test_the_failure_log_is_append_only(self):
+        sd.apply(approvals(1), self.db, shards=1, write_pool=1, writer=refusing([]))
+        for sql in ("UPDATE write_failures SET layer = 'x'", "DELETE FROM write_failures"):
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.db.execute(sql)
+
+    # ── and the next run does not send it again ──────────────────────────────
+    def test_a_refused_row_is_held_with_no_read_and_no_write(self):
+        decisions = approvals(3)
+        calls, reads = [], []
+
+        def reconciler(d, planned_at):
+            reads.append(d.request_id)
+            return sd.NOT_LANDED
+
+        sd.apply(decisions, self.db, shards=1, write_pool=1, writer=refusing(calls))
+        self.assertEqual(len(calls), 3)
+        again = sd.apply(decisions, self.db, shards=1, write_pool=1, writer=refusing(calls),
+                         reconciler=reconciler)
+        self.assertEqual((len(calls), reads), (3, []))
+        self.assertEqual((again["refused_held"], again["attempted"], again["errors"]), (3, 0, 0))
+        self.assertEqual(len(self._failures()), 3)
+
+    def test_a_redrive_is_bounded_by_its_number(self):
+        decisions = approvals(5)
+        calls = []
+        sd.apply(decisions, self.db, shards=1, write_pool=1, writer=refusing(calls))
+        del calls[:]
+        granted = []
+        stats = sd.apply(decisions, self.db, shards=1, write_pool=1, writer=granted.append,
+                         reconciler=lambda d, planned_at: sd.NOT_LANDED, redrive_refused=2)
+        self.assertEqual([d.request_id for d in granted], [rid(1), rid(2)])
+        self.assertEqual((stats["redriven"], stats["applied"], stats["refused_held"]), (2, 2, 3))
+        self.assertEqual(sd.failure_summary(self.db)["held_refusals"], 3)
+
+    def test_a_failure_that_is_not_a_verdict_keeps_the_read_then_retry_path(self):
+        """A timeout or a 5xx says nothing about the row: it is read, then retried."""
+        decisions = approvals(1)
+        outage = json.dumps({"http_status": 503, "body": {"errorCode": "unavailable"}})
+        calls = []
+
+        def writer(d):
+            calls.append(d.request_id)
+            if len(calls) == 1:
+                sd._assert_written(d, outage)
+
+        sd.apply(decisions, self.db, shards=1, write_pool=1, writer=writer)
+        self.assertEqual(self._failures()[0][1:4], ("api", 503, "unavailable"))
+        stats = sd.apply(decisions, self.db, shards=1, write_pool=1, writer=writer,
+                         reconciler=lambda d, planned_at: sd.NOT_LANDED)
+        self.assertEqual((len(calls), stats["applied"], stats["refused_held"]), (2, 1, 0))
+
+    def test_a_throttle_or_an_expired_session_is_never_a_durable_refusal(self):
+        """429/408/425 and 401/403 are the run's condition, not the row's. Held, a single
+        throttle would turn into a refusal to send that only ``--redrive-refused`` could
+        undo: the row keeps the read-then-retry path."""
+        for status in sd.NOT_A_ROW_VERDICT:
+            with self.subTest(status=status):
+                d = approvals(1)[0]
+                db = sd.open_ledger(str(self.dir / f"retry-{status}.sqlite"))
+                envelope = json.dumps({"http_status": status,
+                                       "body": {"errorCode": "rate_limited"}})
+                calls = []
+
+                def writer(decision, envelope=envelope, calls=calls):
+                    calls.append(decision.request_id)
+                    if len(calls) == 1:
+                        sd._assert_written(decision, envelope)
+
+                sd.apply([d], db, shards=1, write_pool=1, writer=writer)
+                self.assertFalse(sd.is_refusal(sd.last_failure(db, d.decision_key)))
+                again = sd.apply([d], db, shards=1, write_pool=1, writer=writer,
+                                 reconciler=lambda decision, at: sd.NOT_LANDED)
+                self.assertEqual((len(calls), again["applied"], again["refused_held"]),
+                                 (2, 1, 0))
+
+    # ── a row core judged is not an approve in flight ────────────────────────
+    def _row_refused(self, *reasons):
+        """A writer whose API refusal names core's own reasons for the row."""
+        def writer(d):
+            body = json.loads(refusal_envelope(d.request_id))
+            body["body"]["refused"][0]["reasons"] = list(reasons)
+            sd._assert_written(d, json.dumps(body))
+        return writer
+
+    def _core_refusals(self):
+        return self.db.execute("SELECT request_id, reason, outcome, route FROM core_refusals"
+                               " ORDER BY id").fetchall()
+
+    def test_an_approve_core_refused_keeps_cores_reason_as_its_outcome(self):
+        sd.apply(approvals(1), self.db, shards=1, write_pool=1,
+                 writer=self._row_refused("proof_required"))
+        self.assertEqual(self._core_refusals(),
+                         [(rid(1), "proof_required", "refused_by_core:proof_required", "ask")])
+
+    def test_a_proof_or_precedent_refusal_goes_to_the_ask_path_not_a_person(self):
+        """Core naming a document or an unsound precedent is answered by asking, and the
+        ONE reviewed ask path is what asks: the drain emits the selection, the customer
+        gets the ask, and no tier-2 queue grows for these rows."""
+        def writer(d):
+            reason = "proof_required" if d.request_id == rid(1) else "no_sound_precedent"
+            self._row_refused(reason)(d)
+
+        decisions = approvals(2)
+        sd.apply(decisions, self.db, shards=1, write_pool=1, writer=writer)
+        self.assertEqual([(r[0], r[3]) for r in self._core_refusals()],
+                         [(rid(1), "ask"), (rid(2), "ask")])
+        self.assertEqual([(a["request_id"], a["user_id"], a["outcome"])
+                          for a in sd.refused_asks(self.db)],
+                         [(rid(1), 1001, "ask"), (rid(2), 1002, "ask")])
+        plan = self.dir / "plan.jsonl"
+        plan.write_bytes(sd.serialize(decisions))
+        audience = self.dir / "asks.jsonl"
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            rc = sd._main(["asks", "--plan", str(plan), "--ledger",
+                           str(self.dir / "ledger.sqlite"), "--out", str(audience)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(na.drain_asks(str(audience)),
+                         {(1001, rid(1)), (1002, rid(2))})
+        # and the second run does not pretend they are held refusals
+        again = sd.apply(decisions, self.db, shards=1, write_pool=1, writer=writer)
+        self.assertEqual((again["refused_to_ask"], again["refused_held"], again["attempted"]),
+                         (2, 0, 0))
+
+    def test_a_validator_hold_stays_held_and_is_not_asked(self):
+        sd.apply(approvals(1), self.db, shards=1, write_pool=1,
+                 writer=self._row_refused("validator_hold", "proof_required"))
+        self.assertEqual(self._core_refusals()[0][1:], ("validator_hold",
+                                                        "refused_by_core:validator_hold",
+                                                        "hold"))
+        self.assertEqual(sd.refused_asks(self.db), [])
+        self.assertEqual(sd.failure_summary(self.db)["held_refusals"], 1)
+
+    def test_a_refusal_whose_route_could_not_be_recorded_is_never_called_an_ask(self):
+        """The route has ONE source: the recorded refusal. With no row saying "ask", the
+        row is held, because the ask selection would not name it."""
+        d = approvals(1)[0]
+        with mock.patch.object(sd, "_record_core_refusal",
+                               side_effect=sqlite3.Error("disk I/O error")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            first = sd.apply([d], self.db, shards=1, write_pool=1,
+                             writer=self._row_refused("proof_required"))
+        self.assertEqual((first["held_by_core"], first["errors"]), (1, 1))
+        self.assertEqual(first["stop_reason"], "ledger")
+        self.assertEqual(sd.refused_asks(self.db), [])
+        again = sd.apply([d], self.db, shards=1, write_pool=1,
+                         writer=self._row_refused("proof_required"))
+        self.assertEqual((again["refused_to_ask"], again["refused_held"],
+                          again["attempted"]), (0, 1, 0))
+        self.assertEqual(sd.failure_summary(self.db)["routed_to_ask"], 0)
+
+    def test_a_refusal_the_ledger_cannot_keep_stops_the_run_before_the_next_send(self):
+        """An unrecorded refusal has no ask route, so every later approve this run sends
+        is a grant whose refusal nobody will ever ask about. The run stops instead."""
+        calls = []
+
+        def writer(d):
+            calls.append(d.request_id)
+            self._row_refused("proof_required")(d)
+
+        with mock.patch.object(sd, "_record_core_refusal",
+                               side_effect=sqlite3.Error("disk I/O error")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            stats = sd.apply(approvals(3), self.db, shards=1, write_pool=1, writer=writer)
+        self.assertEqual((len(calls), stats["attempted"], stats["stopped"]), (1, 1, True))
+        self.assertEqual((stats["stop_reason"], stats["error_classes"]),
+                         ("ledger", {"core_row_refused": 1, "ledger_error": 1}))
+
+    def test_the_run_that_discovers_core_refusals_exits_zero(self):
+        """The pass that MEETS the refusals: expected refusals are not errors, and the
+        only thing this run did not write is rows held by design or waiting on an ask."""
+        plan = self.dir / "plan.jsonl"
+        plan.write_bytes(sd.serialize(approvals(3)))
+        ledger = str(self.dir / "discover.sqlite")
+
+        def writer(d):
+            reason = "proof_required" if d.request_id == rid(1) else "validator_hold"
+            self._row_refused(reason)(d)
+
+        rc, out, err = self._run_cli("apply", "--plan", str(plan), "--ledger", ledger,
+                                     "--write-pool", "1", writer=writer)
+        stats = json.loads(out)
+        self.assertEqual((rc, stats["errors"], stats["held_by_core"]), (0, 0, 3))
+        self.assertNotIn("APPLY INCOMPLETE", err)
+        rc, out, err = self._run_cli("apply", "--plan", str(plan), "--ledger", ledger,
+                                     "--write-pool", "1", writer=writer)
+        stats = json.loads(out)
+        self.assertEqual((rc, stats["attempted"], stats["refused_to_ask"],
+                          stats["refused_held"]), (0, 0, 1, 2))
+        self.assertNotIn("APPLY INCOMPLETE", err)
+
+    def test_a_missing_registration_is_still_an_incomplete_run(self):
+        plan = self.dir / "reg-plan.jsonl"
+        plan.write_bytes(sd.serialize(approvals(1)))
+        rc, out, err = self._run_cli("apply", "--plan", str(plan),
+                                     "--ledger", str(self.dir / "reg.sqlite"),
+                                     "--write-pool", "1", writer=refusing([]))
+        stats = json.loads(out)
+        self.assertEqual((rc, stats["errors"], stats["held_by_core"]), (1, 1, 0))
+        self.assertIn("APPLY INCOMPLETE", err)
+
+    # ── a path that only fails is stopped ────────────────────────────────────
+    def test_ten_failures_in_a_row_stop_the_run(self):
+        calls = []
+        stats = sd.apply(approvals(40), self.db, shards=4, write_pool=1, writer=refusing(calls))
+        self.assertEqual(len(calls), sd.BREAKER)
+        self.assertEqual(stats["stop_reason"], "breaker")
+        self.assertEqual(stats["breaker"], {"failures_in_a_row": 10,
+                                            "last": "api/agent_cannot_approve_declined"})
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM intents").fetchone()[0], 10)
+
+    def test_the_breaker_bounds_a_parallel_run_too(self):
+        calls = []
+        sd.apply(approvals(120), self.db, shards=16, write_pool=6, writer=refusing(calls))
+        self.assertGreaterEqual(len(calls), sd.BREAKER)
+        self.assertLess(len(calls), sd.BREAKER + 6)     # at most the calls already in flight
+
+    def test_a_success_resets_the_breaker(self):
+        calls = []
+
+        def writer(d):
+            calls.append(d.request_id)
+            if len(calls) % 5:                          # four failures, then a success
+                sd._assert_written(d, refusal_envelope(d.request_id))
+
+        stats = sd.apply(approvals(40), self.db, shards=1, write_pool=1, writer=writer)
+        self.assertEqual((len(calls), stats["applied"], stats["stopped"]), (40, 8, False))
+
+    def test_rows_core_judged_do_not_trip_the_breaker_and_are_not_sent_again(self):
+        """The registered drain against the real backlog: core refuses most rows on
+        their own facts and grants the rest. That is the path working, so it must not
+        stop a batch of 25 at the tenth refusal - and no refused row is sent twice."""
+        calls = []
+
+        def writer(d):
+            calls.append(d.request_id)
+            body = json.loads(refusal_envelope(d.request_id))
+            body["body"]["refused"][0]["reasons"] = ["validator_hold"]
+            sd._assert_written(d, json.dumps(body))
+
+        decisions = approvals(25)
+        stats = sd.apply(decisions, self.db, shards=1, write_pool=1, writer=writer)
+        self.assertEqual((len(calls), stats["applied"], stats["stopped"]), (25, 0, False))
+        self.assertEqual(stats["error_classes"], {"core_row_refused": 25})
+        self.assertNotIn("breaker", stats)
+        again = sd.apply(decisions, self.db, shards=1, write_pool=1, writer=writer)
+        self.assertEqual((len(calls), again["refused_held"]), (25, 25))   # no second call
+
+    # ── a bounded batch ──────────────────────────────────────────────────────
+    def test_max_writes_is_a_hard_bound_and_leaves_no_stray_intent(self):
+        decisions = approvals(40)
+        calls = []
+        stats = sd.apply(decisions, self.db, shards=4, write_pool=1, writer=calls.append,
+                         max_writes=25)
+        self.assertEqual((len(calls), stats["applied"], stats["stop_reason"]),
+                         (25, 25, "max_writes"))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM intents").fetchone()[0], 25)
+        rest = sd.apply(decisions, self.db, shards=4, write_pool=1, writer=calls.append)
+        self.assertEqual((len(calls), rest["applied"], rest["skipped"]), (40, 15, 25))
+
+    def test_max_writes_holds_under_a_parallel_pool(self):
+        """Six workers each read a slow open intent before writing: the bound is taken
+        when the call STARTS, so the ones still reading cannot carry it past 25."""
+        decisions = approvals(120)
+
+        def down(d):
+            raise sd.DrainWriteError("timeout", layer="transport")
+
+        sd.apply(decisions, self.db, shards=16, write_pool=6, writer=down, breaker=None)
+        calls = []
+
+        def slow_read(d, planned_at):
+            time.sleep(0.005)
+            return sd.NOT_LANDED
+
+        stats = sd.apply(decisions, self.db, shards=16, write_pool=6, writer=calls.append,
+                         reconciler=slow_read, max_writes=25)
+        self.assertEqual((len(calls), stats["attempted"], stats["applied"]), (25, 25, 25))
+
+    # ── a 2xx is not a granted credit ────────────────────────────────────────
+    def test_a_write_that_does_not_read_back_is_not_confirmed(self):
+        decisions = approvals(1)
+        told = []
+        for answer in (lambda d, at: sd.NOT_LANDED, lambda d, at: 1 / 0):
+            with self.subTest(answer=answer):
+                db = sd.open_ledger(str(self.dir / f"rb-{len(told)}.sqlite"))
+                stats = sd.apply(decisions, db, shards=1, write_pool=1,
+                                 writer=lambda d: None, readback=answer, report=told.append)
+                self.assertEqual((stats["applied"], stats["errors"]), (0, 1))
+                self.assertEqual(stats["failures"], {"readback/-": 1})
+                self.assertEqual(db.execute("SELECT state FROM intents").fetchall(),
+                                 [("planned",)])
+                self.assertEqual(told[-1]["result"], "failed")
+                # the next run reads the request again, and only then says it is done
+                later = sd.apply(decisions, db, shards=1, write_pool=1, writer=lambda d: 1 / 0,
+                                 reconciler=lambda d, at: sd.LANDED)
+                self.assertEqual((later["reconciled"], later["attempted"]), (1, 0))
+
+    def test_granted_means_read_back(self):
+        decisions = approvals(2)
+        seen, told = [], []
+
+        def readback(d, planned_at):
+            seen.append((d.request_id, planned_at))
+            return sd.LANDED
+
+        sd.apply(decisions, self.db, shards=1, write_pool=1, writer=lambda d: None,
+                 readback=readback, report=told.append)
+        planned = dict(self.db.execute("SELECT request_id, planned_at FROM intents"))
+        self.assertEqual(seen, [(rid(1), planned[rid(1)]), (rid(2), planned[rid(2)])])
+        self.assertEqual([(t["request_id"], t["user_id"], t["result"]) for t in told],
+                         [(rid(1), 1001, "granted"), (rid(2), 1002, "granted")])
+        unread = []
+        sd.apply(approvals(1), sd.open_ledger(str(self.dir / "u.sqlite")), shards=1,
+                 write_pool=1, writer=lambda d: None, report=unread.append)
+        self.assertEqual(unread[0]["result"], "written_unread")
+
+    # ── one grant per request, whatever is run again ─────────────────────────
+    def test_a_granted_request_is_never_written_twice(self):
+        decisions = approvals(30)
+        calls = []
+        kw = dict(shards=4, write_pool=6, writer=lambda d: calls.append(d.request_id),
+                  readback=lambda d, at: sd.LANDED, reconciler=lambda d, at: sd.NOT_LANDED)
+        sd.apply(decisions, self.db, max_writes=25, **kw)
+        for _ in range(3):      # the same plan again, with every re-drive lever pulled
+            sd.apply(decisions, self.db, redrive_refused=1000, **kw)
+        self.assertEqual(sorted(calls), sorted(d.request_id for d in decisions))
+        self.assertEqual(len(set(calls)), 30)
+        keys = self.db.execute("SELECT COUNT(*), COUNT(DISTINCT decision_key),"
+                               " COUNT(DISTINCT request_id) FROM applied").fetchone()
+        self.assertEqual(keys, (30, 30, 30))
+        self.assertTrue(sd.verify(decisions, self.db)["ok"])
+
+    # ── how many, and why ────────────────────────────────────────────────────
+    def test_the_summary_counts_what_is_still_not_done_by_reason(self):
+        decisions = approvals(4)
+        calls = []
+
+        def writer(d):
+            calls.append(d.request_id)
+            if d.request_id == rid(4):
+                raise sd.DrainWriteError("no token", layer="token")
+            sd._assert_written(d, refusal_envelope(d.request_id))
+
+        sd.apply(decisions, self.db, shards=1, write_pool=1, writer=writer)
+        sd.apply(decisions, self.db, shards=1, write_pool=1, writer=lambda d: None,
+                 reconciler=lambda d, at: sd.NOT_LANDED, redrive_refused=1)
+        summary = sd.failure_summary(self.db)
+        self.assertEqual(summary["by_reason"], {
+            "api/400/agent_cannot_approve_declined/"
+            "validator_not_approved+no_registered_automation": 2})
+        self.assertEqual((summary["open_with_a_recorded_failure"], summary["held_refusals"],
+                          summary["open_with_no_recorded_failure"]), (2, 2, 0))
+        self.assertEqual([r["request_id"] for r in summary["rows"]], [rid(2), rid(3)])
+
+    def test_an_intent_from_before_the_failure_log_is_counted_as_never_tried(self):
+        """The 3,326 on node-8: planned on 11 November, with no failure row at all."""
+        d = approvals(1)[0]
+        sd._record_intent(self.db, d, 0, NOW)
+        summary = sd.failure_summary(self.db)
+        self.assertEqual((summary["open_with_no_recorded_failure"],
+                          summary["open_with_a_recorded_failure"]), (1, 0))
+
+    # ── the CLI never exits 1 in silence ─────────────────────────────────────
+    def _run_cli(self, *argv, writer):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sd, "admin_writer", lambda script: writer), \
+                mock.patch.object(sd, "admin_preflight", lambda script=None, **kw: []), \
+                mock.patch.object(sd, "live_reconciler", lambda: (lambda d, at: sd.NOT_LANDED)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = sd._main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_apply_says_why_it_failed_and_lists_each_user(self):
+        plan = self.dir / "plan.jsonl"
+        plan.write_bytes(sd.serialize(approvals(12)))
+        ledger, report = str(self.dir / "cli.sqlite"), self.dir / "report.jsonl"
+        rc, out, err = self._run_cli("apply", "--plan", str(plan), "--ledger", ledger,
+                                     "--write-pool", "1", "--report", str(report),
+                                     writer=refusing([]))
+        self.assertEqual(rc, 1)
+        stats = json.loads(out)
+        self.assertEqual((stats["attempted"], stats["stop_reason"]), (10, "breaker"))
+        line = [ln for ln in err.splitlines() if ln.startswith("APPLY INCOMPLETE: ")]
+        self.assertEqual(len(line), 1)
+        self.assertIn('"api/agent_cannot_approve_declined": 10', line[0])
+        rows = [json.loads(ln) for ln in report.read_text().splitlines()]
+        self.assertEqual([(r["user_id"], r["result"], r["error_code"]) for r in rows],
+                         [(1000 + i, "failed", "agent_cannot_approve_declined")
+                          for i in range(1, 11)])
+        # a held row is the drain working: printed in the stats, not an incomplete run
+        held_plan = self.dir / "held.jsonl"
+        held_plan.write_bytes(sd.serialize(approvals(10)))
+        held_ledger = str(self.dir / "held.sqlite")
+        first, out, _ = self._run_cli("apply", "--plan", str(held_plan), "--ledger",
+                                      held_ledger, "--write-pool", "1", writer=refusing([]))
+        self.assertEqual((first, json.loads(out)["refused_held"]), (1, 0))
+        rc, out, err = self._run_cli("apply", "--plan", str(held_plan), "--ledger",
+                                     held_ledger, "--write-pool", "1", writer=refusing([]))
+        self.assertEqual((rc, json.loads(out)["refused_held"], json.loads(out)["attempted"]),
+                         (0, 10, 0))
+        self.assertNotIn("APPLY INCOMPLETE", err)
+        rc, out, _ = self._run_cli("failures", "--ledger", held_ledger, writer=None)
+        self.assertEqual((rc, json.loads(out)["held_refusals"]), (0, 10))
+        self.assertNotIn("rows", json.loads(out))
+
+    def test_a_clean_bounded_batch_exits_zero_only_when_nothing_is_left(self):
+        plan = self.dir / "plan.jsonl"
+        plan.write_bytes(sd.serialize(approvals(3)))
+        ledger = str(self.dir / "cli.sqlite")
+        ok = lambda d: None                                      # noqa: E731
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sd, "admin_writer", lambda script: ok), \
+                mock.patch.object(sd, "admin_preflight", lambda script=None, **kw: []), \
+                mock.patch.object(sd, "live_reconciler", lambda: (lambda d, at: sd.LANDED)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            bounded = sd._main(["apply", "--plan", str(plan), "--ledger", ledger,
+                                "--write-pool", "1", "--max-writes", "2"])
+            rest = sd._main(["apply", "--plan", str(plan), "--ledger", ledger,
+                             "--write-pool", "1"])
+        self.assertEqual((bounded, rest), (1, 0))
+        first, second = (json.loads(ln) for ln in out.getvalue().splitlines())
+        self.assertEqual((first["applied"], first["stop_reason"], second["applied"]),
+                         (2, "max_writes", 1))
 
 
 if __name__ == "__main__":

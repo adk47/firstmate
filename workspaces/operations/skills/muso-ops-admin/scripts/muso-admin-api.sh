@@ -623,8 +623,10 @@ load_admin_identity() {
     case "$identity" in
         # fable = agent-fable@muso.ai: the L12 executor's APPROVALS only (core binds fable-decider approvals to
         # Fable's own account; the decider's account writes the anchor records, so the two never coincide).
-        credit-decider|uvn-cron|fable) ;;
-        *) die "MUSO_ADMIN_IDENTITY '$identity' is not a known automation identity (credit-decider, uvn-cron, fable)" ;;
+        # scale-drain = agent-scale-drain@muso.ai: the verification drain's precedent approvals only (core binds
+        # verification-scale-drain to that account and to no other; core-backend #11378 / #11379).
+        credit-decider|uvn-cron|fable|scale-drain) ;;
+        *) die "MUSO_ADMIN_IDENTITY '$identity' is not a known automation identity (credit-decider, uvn-cron, fable, scale-drain)" ;;
     esac
     local file="$MUSO_ADMIN_IDENTITY_DIR/$identity.env"
     [[ -f "$file" && -r "$file" ]] || die "admin identity '$identity': $file is missing or unreadable (no fallback)"
@@ -3701,6 +3703,15 @@ EOF
     # Same contract for score-approve: its own id on the same decider account.
     if [[ "${CREDIT_TRUST_SCORE_APPROVE:-0}" == "1" && "$REQUESTER_EMAIL" == "credit-trust-score-approve@hydra-ops" ]]; then
         curl_args+=(-H "X-Credit-Automation-Id: credit-trust-score-approve")
+    fi
+    # The verification drain's approve: its own id, and ONLY on its own account (identity scale-drain =
+    # agent-scale-drain@muso.ai) and on the one approve route. core judges the precedent itself
+    # (agentApprovalGuard precedent scope); this header is the claim, never the proof. Sent under any other
+    # login it would name an account core does not bind, so it is not sent at all.
+    if [[ "${SCALE_DRAIN:-0}" == "1" && "$REQUESTER_EMAIL" == "scale-drain@hydra-ops" \
+          && "${MUSO_ADMIN_IDENTITY:-}" == "scale-drain" \
+          && "$method" == "PUT" && "$path" == "/admin/credit-requests" ]]; then
+        curl_args+=(-H "X-Credit-Automation-Id: verification-scale-drain")
     fi
 
     # Actor headers (audit trail — approver + Slack ts of the in-thread approval);

@@ -1192,6 +1192,30 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   request (`verify_anchor.reconcile`) and records `reconciled`, retries a still-pending
   one through the gate, or abandons with a reason code. The gate still refuses a decided
   request; write-then-commit could not recover that row at all (QA review 5).
+- **The approve bucket has never landed, and it lands only through core's `precedent`
+  scope.** 0 of the 3,326 approve intents are written (measured 2026-11-13): core answered
+  HTTP 400 `agent_cannot_approve_declined` because the drain was no registered automation.
+  Ruled A the same day: core-backend #11378 / #11379 register `verification-scale-drain`
+  on its own account `agent-scale-drain@muso.ai`; core finds the precedent itself and
+  admits about 400 of the 3,326 (the rest need the claimant's proof or fail the scope).
+  An approve sets `MUSO_ADMIN_IDENTITY=scale-drain` and the operations wrapper sends
+  `X-Credit-Automation-Id: verification-scale-drain`. It writes nothing until the core
+  PRs are deployed, the account holds the `credit-automation` role, and
+  `/etc/openclaw/agents/scale-drain.env` is on node-8. Never borrow another automation's
+  account or header. `apply` records each failed write with its layer and core's reasons
+  (`write_failures`, `scale_drain.py failures`), holds a refused row instead of re-sending
+  it (`--redrive-refused N`), stops after 10 failures in a row, bounds a batch with
+  `--max-writes`, and confirms an approval only after reading the request back. A
+  retryable or session status (401/403/408/425/429) is never held as a refusal.
+- **A refused approval is never left as `approve`.** `core_row_refused` is recorded in the
+  append-only `core_refusals` table as `refused_by_core:<reason>`, and the reason routes it:
+  `proof_required` / `no_sound_precedent` go to the ask path (`refused_to_ask`, emitted by
+  `asks --plan P --out FILE` for `need_asks.py build --from-drain`, the one reviewed ask
+  path), `validator_hold` and any unnamed reason stay held. The route has one source, the
+  recorded `core_refusals` row, so a refusal whose route could not be recorded is held and
+  never reported as waiting on an ask. No tier-2 or person queue for a refused approval,
+  the run that meets those refusals is not an error (`held_by_core`, `errors` 0, exit 0),
+  and a held row is never an incomplete run: `apply` exits 0 with the held counts printed.
 - **The pass is small, and an `ask` is not a decision.** Measured on the live snapshot
   2026-11-11: 3,294 approve, 1,324 queued for a human, 856 `already_on_profile`
   (unmatched), 91,229 ask of 96,703. Never describe it as deciding the backlog; the table
@@ -1209,6 +1233,7 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   reject with the original as the approval reference. Expired-with-no-proof and a
   `refuse` verdict are customer-facing denials: they get `queue_tier2`, write nothing, and
   `tier2-queue` lists them for a human who supplies `--confirmed-by`/`--approval-msg-id`.
+  That queue is for the ladder's own refusals only, never for a row core refused.
   The drain never supplies those. Never lower a served number, never deny a customer
   autonomously.
 - **The drain never sets `CV_APPROVE_GATE_DISABLED`.** That variable skips every evidence
@@ -1255,10 +1280,12 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
 - **hydra's gate is half of an approve; core keeps its own register, and `apply` needs the
   admin env.** The registry entry and `/etc/hydra/scale-drain.token` only satisfy the
   wrapper's gate. core approves a validator-declined row only for an automation in ITS
-  table, bound to the logged-in account and named in `X-Credit-Automation-Id`, which no
-  drain call carries: that approve fails as `core_automation_not_registered`, a
-  registration in core and never a retry. `apply` also preflights the admin env before it
-  records an intent and counts every failure by cause (`error_classes`). Causes, and what
+  table, bound to the logged-in account and named in `X-Credit-Automation-Id`. Read the
+  refusal's REASONS, not its code: `no_registered_automation` is
+  `core_automation_not_registered` (a registration in core, never a retry); any other
+  reason is `core_row_refused` (core judged the row; held, and not counted by the
+  breaker). `apply` also preflights the admin env, and the approve's identity file,
+  before it records an intent and counts every failure by cause (`error_classes`). Causes, and what
   a caller can do about each: `docs/credit-verification/scale-drain.md` §"What `apply`
   needs".
 - **`scripts/credit_review/batch_admin.py`** is the hoist: `muso-admin-api.sh call-batch`
@@ -1267,7 +1294,9 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   tier-2/pace/merge-reverse/enrich-link/bulk-destructive gates. The route call is NOT in
   the decision path: the sender is the tail.
 - **There is exactly ONE reviewed ask/notify path, and it is `need_asks.py`.** The drain
-  decides WHO is asked (its `ask` rows); `need_asks.py build --from-drain PLAN` takes that
+  decides WHO is asked - the ladder's `ask` rows plus the rows core refused back onto the
+  ask path, emitted together by `scale_drain.py asks --plan PLAN --out FILE`;
+  `need_asks.py build --from-drain AUDIENCE` takes that
   audience and still decides WHICH document and owns the send through
   `intercom-verify-request.sh --campaign proof-need-ask`. This is the reconciliation with
   verify-ask-wiring-h2 (PR #1845). A drain ask with no sendable document is listed as
