@@ -115,7 +115,19 @@ ak47_cache_age() {
 # fallback is fine or the tree is now permanently too big to measure.
 ak47_tmp_gb() {
   local ttl=${AK47_DU_TTL:-1800} budget=${AK47_DU_BUDGET:-90} v
+  local retry=${AK47_DU_RETRY:-900} marker="$AK47_STATE/.tmp-gb-walk-failed"
   if v=$(ak47_cache_get tmp_gb "$ttl"); then printf '%s' "$v"; return 0; fi
+  # A failed walk is remembered for a while. Retrying a 90 s timeout on every
+  # call is how the tick spent its whole interval failing to measure: the retry
+  # interval is deliberate, not a sigh of relief.
+  if [ -r "$marker" ]; then
+    local failed_at
+    failed_at=$(tr -dc 0-9 <"$marker" 2>/dev/null)
+    if [ -n "$failed_at" ] && [ $(( $(ak47_epoch) - failed_at )) -lt "$retry" ]; then
+      if v=$(ak47_cache_get tmp_gb 345600); then printf '%s' "$v"; else printf '0'; fi
+      return 0
+    fi
+  fi
   v=$(timeout "$budget" du -sx --block-size=1G "${AK47_TMP_ROOT:-/tmp}" 2>/dev/null | cut -f1)
   case "${v:-}" in
     ''|*[!0-9]*)
@@ -125,6 +137,8 @@ ak47_tmp_gb() {
       # `tmp_gb_ok` records when the tree was last measured for real, which is
       # the number that tells a reader whether the value is merely old or the
       # tree has grown past measuring.
+      mkdir -p "$AK47_STATE" 2>/dev/null || true
+      ak47_epoch >"$marker" 2>/dev/null || true
       if v=$(ak47_cache_get tmp_gb 345600); then
         ak47_cache_put tmp_gb "$v"
         printf '%s' "$v"
@@ -133,6 +147,7 @@ ak47_tmp_gb() {
       fi
       return 0 ;;
   esac
+  rm -f "$marker" 2>/dev/null || true
   ak47_cache_put tmp_gb "$v"
   ak47_cache_put tmp_gb_ok "$(ak47_epoch)"
   printf '%s' "$v"
