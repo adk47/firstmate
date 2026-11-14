@@ -54,9 +54,11 @@ PAYLOAD_FILES=(
   guards/guard-producers.sh
   lib/classify.py
   lib/common.sh
+  lib/protected.sh
   lib/safe-delete.sh
   status.sh
   tick.sh
+  tmp-takedown.sh
   weekly-review.sh
 )
 
@@ -111,9 +113,11 @@ OWNED=(
   ansible/playbooks/files/ak47/guards/guard-producers.sh
   ansible/playbooks/files/ak47/lib/classify.py
   ansible/playbooks/files/ak47/lib/common.sh
+  ansible/playbooks/files/ak47/lib/protected.sh
   ansible/playbooks/files/ak47/lib/safe-delete.sh
   ansible/playbooks/files/ak47/status.sh
   ansible/playbooks/files/ak47/tick.sh
+  ansible/playbooks/files/ak47/tmp-takedown.sh
   ansible/playbooks/files/ak47/weekly-review.sh
   ansible/playbooks/templates/60-ak47-inotify.conf
   ansible/playbooks/templates/60-ak47-swap.conf

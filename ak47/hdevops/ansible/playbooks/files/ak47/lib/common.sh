@@ -17,6 +17,8 @@
 #   $AK47_STATE/reap.log       one line per action, with its revert (tick.sh)
 #   $AK47_STATE/findings.log   one line per finding the table cannot settle
 #   $AK47_STATE/sample.cache   cached slow samples (du of /tmp) with a TTL
+#   $AK47_STATE/inuse.set      the tick's one /proc pass; trust it only when
+#                              its last line is `ak47-inuse-complete`
 #   $AK47_STATE/quarantine/    moved-not-deleted scratch, dated by move day
 #   $AK47_CONFIG/devops.conf   operator arming switches (absent = safe defaults)
 set -u
