@@ -1,0 +1,15 @@
+# live ak47 box, 2026-11-14T09:24:51Z
+
+slice: /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service
+pids.current / pids.max: 4625 / 12000  (38% -> below the 80% page, no page raised)
+live TasksMax: 12000
+
+## real leaf holders the page would name (top 8, from the shipped find)
+372 app.slice/orca-daemon-b167daea-a77a-4ea2-8b4f-460e52610a3a.scope
+171 app.slice/no-mistakes-daemon-c44bb145.service
+74 orca_ptys_orca_daemon_377d1ed8_8dfc_4e76_ad24_81d50a92ae70.slice/orca_pty_orca_daemon_377d1ed8_8dfc_4e76_ad24_81d50a92ae70_1.scope
+66 app.slice/orca-serve.service
+62 app.slice/orca-relay-desktop.service
+60 app.slice/app-orca-301096.scope
+58 app.slice/orca-daemon-377d1ed8-8dfc-4e76-ad24-81d50a92ae70.scope
+52 app.slice/tmux-spawn-147b10fb-ef30-4000-ad07-1ea02746d49d.scope
