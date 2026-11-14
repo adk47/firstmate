@@ -87,15 +87,20 @@ USLICE=${AK47_USER_SLICE:-"/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(
 pids_cur=$(cat "$USLICE/pids.current" 2>/dev/null | tr -dc 0-9)
 pids_max=$(cat "$USLICE/pids.max" 2>/dev/null | tr -d ' \n')
 case "${pids_max:-}" in ''|max|*[!0-9]*) pids_max=0 ;; esac
-PAGE_TASKS_PCT=${AK47_PAGE_TASKS_PCT:-80}
-# the scopes actually holding the tasks, so a page names who to look at
-# One readdir of app.slice's cgroup directories: pids.current per unit, top 5.
-tasks_heat() {
+# the leaf units actually holding the tasks, so a page names who to look at:
+# services and transient scopes under the slice's sub-cgroups, never an
+# aggregate *.slice that only repeats what its children already hold.
+tasks_units() {
   local d
-  for d in "$USLICE"/*.slice/*.slice "$USLICE"/*.slice "$USLICE"/*.scope "$USLICE"/*.service; do
+  find "$USLICE" -mindepth 2 -maxdepth 3 \( -name '*.scope' -o -name '*.service' \) -type d 2>/dev/null |
+  while IFS= read -r d; do
     [ -r "$d/pids.current" ] || continue
-    printf '%s|%s\n' "$(cat "$d/pids.current" 2>/dev/null)" "$(basename "$d" | sed 's/\.\(service\|scope\|slice\)$//')"
-  done | sort -t'|' -k1,1 -rn | head -5 | awk -F'|' '{printf "%s(%s) ",$2,$1}'
+    printf '%s|%s\n' "$(tr -dc 0-9 <"$d/pids.current" 2>/dev/null)" "${d#"$USLICE"/}"
+  done
+}
+tasks_heat() {
+  tasks_units | sort -t'|' -k1,1 -rn | head -5 |
+    awk -F'|' '{sub(/\.(service|scope)$/,"",$2); printf "%s(%s) ",$2,$1}'
 }
 
 echo "$now load=$l1/$l5 memavail=${mem_av}G swap=${sw_pct}% psi_cpu=$cpu_some mem_full=$mem_full io_full=$io_full inotify=$ino/$ino_max disk=${root_pct}% tmp=${tmp_g}G tctl=${tctl} nvme=${nvt} wifi=${freq}MHz/${rssi}dBm/${link} route=$route_if pi=$agents pids=${pids_cur:-0}/${pids_max:-0} beat=${beat}s" >>"$SD/samples.log"
@@ -155,10 +160,10 @@ awk -v v="$io_full" 'BEGIN{exit !(v>10)}' && find_ io-pressure "Disk pressure: t
 # fleet was silent. Page at 80%, before the cap, and name the scopes holding it.
 if [ "${pids_max:-0}" -gt 0 ] && [ -n "${pids_cur:-}" ]; then
   pids_pct=$(( pids_cur * 100 / pids_max ))
-  if [ "$pids_pct" -ge "$PAGE_TASKS_PCT" ]; then
+  if [ "$pids_pct" -ge 80 ]; then
     page_ tasks-sustain "user task cap ${pids_pct}% used (${pids_cur} of ${pids_max} tasks for uid $USER) - holders: $(tasks_heat | sed 's/ $//') - past 100% every fork fails EAGAIN and the fleet stops starting; the slice cap is tasksmax-slice.conf and the per-unit cap is /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf - find the lane that grew: ~/.local/state/ak47/tasks-latest.md"
     touch "$SD/.page-active"
-    { echo "# ak47 task cap $et ($now)"; echo; echo "${pids_cur} of ${pids_max} tasks (${pids_pct}%) for uid $USER"; echo; echo "by unit:"; tasks_heat | sed 's/ $//'; echo; echo "scopes and their largest task counts:"; for d in "$USLICE"/*.slice/*.slice "$USLICE"/*.slice/*.scope; do [ -r "$d/pids.current" ] && printf '%-10s %s\n' "$(cat "$d/pids.current")" "$(basename "$d")"; done | sort -rn | head -20; } >"$SD/tasks-latest.md"
+    { echo "# ak47 task cap $et ($now)"; echo; echo "${pids_cur} of ${pids_max} tasks (${pids_pct}%) for uid $USER"; echo; echo "by unit:"; tasks_heat | sed 's/ $//'; echo; echo "leaf units and their task counts:"; tasks_units | sort -t'|' -k1,1 -rn | head -20 | awk -F'|' '{printf "%-10s %s\n",$1,$2}'; } >"$SD/tasks-latest.md"
   fi
 fi
 [ "${tmp_g:-0}" -ge 60 ] && find_ tmp "/tmp holds ${tmp_g} GB (it is emptied at every boot)"

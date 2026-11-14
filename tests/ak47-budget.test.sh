@@ -172,9 +172,26 @@ test_pids_pct_reports_nothing_when_the_cgroup_is_unreadable() {
 }
 
 test_the_shipped_budget_watches_the_task_cap() {
-  grep -q '^pids_pct|' "$ROOT/ak47/budget.conf" \
-    || fail "budget.conf has no pids_pct ceiling; the 2026-11-14 starvation would be unwatched"
-  pass "the shipped budget watches the user task cap"
+  local rows key ceil dir _unit _reason found=0 out
+  rows=$(AK47_BUDGET=$ROOT/ak47/budget.conf ak47_budget_rows) \
+    || fail "ak47_budget_rows rejected the shipped budget"
+  while IFS=$'\t' read -r key ceil dir _unit _reason; do
+    [ "$key" = pids_pct ] || continue
+    found=1
+    [ "$ceil" = 80 ] \
+      || fail "the pids_pct ceiling is '$ceil'; the 2026-11-14 alert is fixed at 80%"
+    [ "$dir" = max ] \
+      || fail "the pids_pct row direction is '$dir'; a full cap is a breach above the ceiling"
+  done <<<"$rows"
+  [ "$found" = 1 ] \
+    || fail "the shipped budget has no pids_pct row; the 2026-11-14 starvation would be unwatched"
+  out=$(AK47_BUDGET=$ROOT/ak47/budget.conf "$STATUS" --print 2>/dev/null) \
+    || fail "status.sh --print failed"
+  case "$out" in
+    *pids_pct*) : ;;
+    *) fail "the board does not name pids_pct, so the task cap is unwatched" ;;
+  esac
+  pass "the shipped budget watches the user task cap at 80% and the board names it"
 }
 
 test_the_shipped_budget_loads

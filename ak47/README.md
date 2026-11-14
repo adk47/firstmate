@@ -339,10 +339,6 @@ A fat process that ignores `SIGTERM` is `SIGKILL`ed after five minutes. The
 escalation clock is `~/.local/state/ak47/fat.term`, so it survives across ticks,
 and a dry run neither kills nor consumes the record.
 
-A fat process that ignores `SIGTERM` is `SIGKILL`ed after five minutes. The
-escalation clock is `~/.local/state/ak47/fat.term`, so it survives across ticks,
-and a dry run neither kills nor consumes the record.
-
 The per-task `TMPDIR` and its `config/task-tmpdir` opt-out are firstmate
 configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-task-temporary-directory-configtask-tmpdir).
 
@@ -352,7 +348,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-83 tests across six files: the budget, the census, the guards, the guarded
+86 tests across six files: the budget, the census, the guards, the guarded
 delete, the tick, and the weekly review. They are hermetic — no tmux, no
 network, no live fleet state — and registered as `pure-contract-unit` in
 `bin/fm-test-run.sh`.
