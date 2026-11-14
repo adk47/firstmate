@@ -278,8 +278,105 @@ def _original_supports_duplicate(original: dict[str, Any], target: dict[str, Any
     _same_claim(original, target, original_id)
 
 
+#: What ``uncovered_holds`` returns for a verdict it cannot read. Unreadable is a hold:
+#: "could not read the holds" must never come out as "there are none".
+HOLD_UNREADABLE = "verdict_unreadable"
+
+# The three facts core's guard holds an agent approval on (core-backend
+# ``agentApprovalGuard.validatorConflict``; ``policy.validator_conflict`` is hydra's mirror).
+# They are written again here because this file runs as a script (``python3 -I
+# verify_anchor.py``) and ``policy.py`` has relative imports it cannot satisfy that way.
+# ``test_verify_anchor.GuardReaderTests`` holds this reader and these numbers to policy's.
+GUARD_HOLD_RULE_PREFIX = "review_"
+GUARD_HOLD_RULE_MIN_SCORE = 30
+GUARD_HOLD_ON_ERROR_KEY = "_hold_on_error"
+GUARD_CLASS_C_TRACK_CREDIT = 70
+GUARD_CLASS_C_COLLABORATIONS = 90
+
+
+def _score(value: Any) -> float | None:
+    """A rule score as the guard reads it: only a JSON number counts."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def guard_holds(vd: Any) -> bool:
+    """Does core's guard hold an agent approval of a request carrying this verdict?
+
+    True on any of: a ``review_*`` rule at 30 or more, the class C signature
+    (``track_credit`` at 70 or more with ``collaborations`` at 90 or more), or
+    ``rule_errors._hold_on_error``. A verdict the guard cannot read holds nothing there,
+    so it is False here.
+    """
+    if not isinstance(vd, dict):
+        return False
+    errors = vd.get("rule_errors")
+    if isinstance(errors, dict) and GUARD_HOLD_ON_ERROR_KEY in errors:
+        return True
+    rules = vd.get("rule_risk_percent")
+    if not isinstance(rules, dict):
+        return False
+    track_credit = _score(rules.get("track_credit"))
+    collaborations = _score(rules.get("collaborations"))
+    if (track_credit is not None and collaborations is not None
+            and track_credit >= GUARD_CLASS_C_TRACK_CREDIT
+            and collaborations >= GUARD_CLASS_C_COLLABORATIONS):
+        return True
+    for name, value in rules.items():
+        score = _score(value)
+        if (str(name).startswith(GUARD_HOLD_RULE_PREFIX) and score is not None
+                and score >= GUARD_HOLD_RULE_MIN_SCORE):
+            return True
+    return False
+
+
+def uncovered_holds(vd: Any) -> list[str]:
+    """The hold codes on a verdict that core's guard would NOT stop an approval on.
+
+    Empty when the verdict lists no hold, and empty when the guard itself holds
+    (``guard_holds``): core refuses that approval with ``validator_hold`` and
+    ``scale_drain`` routes the refusal, so this code stays out of its way. Otherwise every
+    listed code counts, whatever it is called and whatever it scored: on 2026-11-13 two
+    requests carrying ``track_pending_capture`` at risk 100 were approved 17 minutes after
+    the hold was set, because that verdict had none of the guard's three facts. A list
+    that cannot be read is a hold (``HOLD_UNREADABLE``), under the same condition. A
+    request with no verdict at all (``None``) carries no hold.
+    """
+    if vd is None:
+        return []
+    if not isinstance(vd, dict):
+        return [HOLD_UNREADABLE]
+    codes = vd.get("hold_reason_codes")
+    if codes is None:
+        return []
+    held = sorted({str(c) for c in codes}) if isinstance(codes, list) else [HOLD_UNREADABLE]
+    if not held or guard_holds(vd):
+        return []
+    return held
+
+
+def _no_uncovered_hold(target: dict[str, Any], request_id: str) -> None:
+    """An approve is refused while the request, as the API reports it NOW, carries a hold
+    core's guard would not stop.
+
+    The plan is built from a snapshot and already leaves out every such row the snapshot
+    shows, so what this meets is a hold set after the snapshot. The admin list carries
+    ``verificationData`` on every item (200 of 200 on 2026-11-13); an item without the
+    field is a read this gate cannot make, not a request with no hold.
+    """
+    if "verificationData" not in target:
+        raise Unavailable(f"request {request_id} was listed without verificationData, so "
+                          "its holds cannot be read")
+    codes = uncovered_holds(target["verificationData"])
+    if codes:
+        raise Refused(f"request {request_id} is on hold ({', '.join(codes)}) and core's "
+                      "guard does not stop that hold: this drain does not approve it")
+
+
 def verify_precedent(admin: Any, request_id: str, anchor_id: str, profile_id: str) -> None:
     target, anchor = _pair(admin, request_id, anchor_id, profile_id, "precedent")
+    _no_uncovered_hold(target, request_id)
     _anchor_supports_precedent(anchor, target, anchor_id)
 
 
@@ -391,6 +488,7 @@ def verify_proof_live(admin: Any, request_id: str, proof_id: str, profile_id: st
                       "request claims cannot be read")
     target = _pending_target(_profile_requests(admin, profile_id), request_id, profile_id,
                              "proof_verdict")
+    _no_uncovered_hold(target, request_id)
     verify_proof(request_id, proof_id, store_path, _norm_roles(target.get("credits")))
 
 

@@ -577,6 +577,161 @@ class PrecedentOutcomeTests(unittest.TestCase):
         self.assertEqual(d.reason_code, "unmatched_precedent")
 
 
+class HeldRowTests(unittest.TestCase):
+    """A request on a hold core's guard does not act on is never an ``approve`` in the plan.
+
+    2026-11-13: two requests carrying ``track_pending_capture`` at risk 100 were approved on
+    precedent 17 minutes after the hold was set. The ladder read no hold code, and the
+    guard holds only on a ``review_*`` rule at 30 or more, class C, or ``_hold_on_error``.
+    A hold the guard does act on is not this stop's: that row stays ``approve``.
+    """
+
+    PRECEDENT = [{"precedent_key": "k", "outcome": "approve", "request_id": rid(9)}]
+
+    def _plan(self, **kw):
+        return sd.plan(snapshot([row(1, precedent_key="k", **kw)],
+                                precedent=self.PRECEDENT), now=NOW)[0]
+
+    def test_a_held_request_with_an_approve_precedent_is_not_approved(self):
+        d = self._plan(uncovered_holds=["track_pending_capture"])
+        self.assertEqual(d.rule, "precedent")
+        self.assertEqual(d.outcome, sd.UNMATCHED)
+        self.assertEqual(d.reason_code, "held_by_validator")
+        # ...and the same request without the hold is the approve this test is about
+        self.assertEqual(self._plan().outcome, "approve")
+        self.assertEqual(self._plan(uncovered_holds=[]).outcome, "approve")
+
+    def test_every_uncovered_code_blocks_whatever_its_name(self):
+        for code in ("track_pending_capture", "review_hourly_velocity_profile",
+                     "score:track_credit", "a_code_nobody_has_written_yet",
+                     sd_va().HOLD_UNREADABLE):
+            with self.subTest(code=code):
+                self.assertEqual(self._plan(uncovered_holds=[code]).outcome, sd.UNMATCHED)
+
+    def test_a_hold_the_guard_covers_stays_an_approve_and_carries_its_cause(self):
+        """Main's route, unchanged: the row goes to core, which refuses it."""
+        d = self._plan(hold_causes=["review_big_track_without_trusted_credit"])
+        self.assertEqual(d.outcome, "approve")
+        self.assertEqual(d.hold_causes, ("review_big_track_without_trusted_credit",))
+
+    def test_from_the_stored_verdict_to_the_plan(self):
+        """The replica read, the load and the ladder together: the 2026-11-13 verdict is
+        left out of the plan, and the same hold code beside a rule the guard holds on is
+        planned as the approve core will refuse."""
+        def pending(n, vd):
+            return (rid(n), "1001", rid(7), "user_verification_needed", "2026-11-01T00:00:00Z",
+                    json.dumps(vd), "{}", f"trk-{n}", "{Mastering}")
+        uncovered = {"is_approved": False, "hold_reason_codes": ["track_pending_capture"],
+                     "rule_risk_percent": {"track_pending_capture": 100},
+                     "total_risk_percent": 100}
+        covered = {"is_approved": False,
+                   "hold_reason_codes": ["track_pending_capture",
+                                         "review_big_track_without_trusted_credit"],
+                   "rule_risk_percent": {"track_pending_capture": 100,
+                                         "review_big_track_without_trusted_credit": 40}}
+        rows = sd.snapshot_from_replica(
+            lambda sql: [pending(1, uncovered), pending(2, covered)],
+            ledger_path="/nonexistent/ledger.sqlite", proof_store_path="/nonexistent/proof.sqlite")
+        for r in rows:
+            r["precedent_key"] = "k"
+        first, second = sd.plan(snapshot(rows, precedent=self.PRECEDENT), now=NOW)
+        self.assertEqual((first.outcome, first.reason_code), (sd.UNMATCHED, "held_by_validator"))
+        self.assertEqual(second.outcome, "approve")
+        self.assertEqual(second.hold_causes, ("review_big_track_without_trusted_credit",))
+
+    def test_a_held_request_with_an_approve_proof_verdict_is_not_approved(self):
+        db = snapshot([row(1, proof_verdict="approve", proof_id="a" * 64,
+                           uncovered_holds=["track_pending_capture"]),
+                       row(2, proof_verdict="approve", proof_id="b" * 64)])
+        held, free = sd.plan(db, now=NOW)
+        self.assertEqual((held.outcome, held.reason_code), (sd.UNMATCHED, "held_by_validator"))
+        self.assertEqual(free.outcome, "approve")
+
+    def test_a_held_request_is_never_written(self):
+        db = snapshot([row(1, precedent_key="k", uncovered_holds=["track_pending_capture"])],
+                      precedent=self.PRECEDENT)
+        decisions = sd.plan(db, now=NOW)
+        self.assertEqual([d for d in decisions if d.outcome in sd.WRITING_OUTCOMES], [])
+
+    def test_through_apply_it_is_counted_never_written_and_never_asked(self):
+        """The whole path after the plan: ``apply`` calls no writer for the held row and
+        counts it, the run still verifies, and neither ask source hands it on - not the
+        ladder's ask rows, not the rows core refused onto the ask path."""
+        from credit_review import need_asks  # noqa: PLC0415
+
+        decisions = sd.plan(
+            snapshot([row(1, precedent_key="k", uncovered_holds=["track_pending_capture"]),
+                      row(2)], precedent=self.PRECEDENT), now=NOW)
+        calls = []
+        with tempfile.TemporaryDirectory() as td:
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            stats = sd.apply(decisions, db, shards=1, write_pool=1, writer=calls.append, now=NOW)
+            self.assertEqual(calls, [])
+            self.assertEqual(stats["unmatched"], 1)
+            self.assertEqual([r[0] for r in db.execute("SELECT request_id FROM applied")], [rid(2)])
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM intents").fetchone()[0], 0)
+            self.assertTrue(sd.verify(decisions, db)["ok"])
+            plan_path = Path(td) / "plan.jsonl"
+            plan_path.write_bytes(sd.serialize(decisions))
+            self.assertEqual(need_asks.drain_asks(str(plan_path)), {(1002, rid(2))})
+            self.assertEqual(sd.refused_asks(db), [])
+
+    def test_the_hold_changes_only_an_approve(self):
+        """A refusal queue, a duplicate close and an ask are not approvals: unchanged."""
+        held = {"uncovered_holds": ["track_pending_capture"]}
+        db = snapshot(
+            [row(1, precedent_key="no", **held), row(2, duplicate_of=rid(8), **held),
+             row(3, **held)],
+            decided=[{"request_id": rid(8), "decision": "approved"}],
+            precedent=[{"precedent_key": "no", "outcome": "refuse"}])
+        self.assertEqual([d.outcome for d in sd.plan(db, now=NOW)],
+                         ["queue_tier2", "close_duplicate", "ask"])
+
+    def test_a_snapshot_made_before_the_column_gains_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "snap.sqlite")
+            old = sqlite3.connect(path)
+            old.executescript(sd.SNAPSHOT_SCHEMA.replace("  uncovered_holds   TEXT,\n", ""))
+            self.assertNotIn("uncovered_holds",
+                             {r[1] for r in old.execute("PRAGMA table_info(requests)")})
+            old.close()
+            db = sd.open_snapshot(path)
+            sd.load_snapshot(db, [row(1, uncovered_holds=["track_pending_capture"])])
+            self.assertEqual(db.execute("SELECT uncovered_holds FROM requests").fetchone()[0],
+                             '["track_pending_capture"]')
+
+    def test_the_replica_read_carries_the_uncovered_codes_and_an_unreadable_verdict_is_one(self):
+        def pending(n, vd_json):
+            return (f"r{n}", "1001", "p1", "user_verification_needed", "2026-11-01T00:00:00Z",
+                    vd_json, "{}", f"trk-{n}", "{Mastering}")
+        rows = sd.snapshot_from_replica(
+            lambda sql: [
+                pending(1, '{"is_approved": false, "hold_reason_codes": ["track_pending_capture"],'
+                           ' "total_risk_percent": 100}'),
+                pending(2, '{"is_approved": true, "hold_reason_codes": []}'),
+                pending(3, None),
+                pending(4, "{not json"),
+                pending(5, '{"hold_reason_codes": "track_pending_capture"}'),
+                pending(6, '"a string"'),
+                # The guard holds on this one (a review_* rule at 30): core's to refuse.
+                pending(7, '{"hold_reason_codes": ["track_pending_capture"],'
+                           ' "rule_risk_percent": {"review_role_cardinality": 30}}'),
+                # A review_* code under the guard's 30 is not one the guard holds on.
+                pending(8, '{"hold_reason_codes": ["review_role_cardinality"],'
+                           ' "rule_risk_percent": {"review_role_cardinality": 29}}'),
+            ],
+            ledger_path="/nonexistent/ledger.sqlite", proof_store_path="/nonexistent/proof.sqlite")
+        unreadable = [sd_va().HOLD_UNREADABLE]
+        self.assertEqual([r["uncovered_holds"] for r in rows],
+                         [["track_pending_capture"], [], [], unreadable, unreadable, unreadable,
+                          [], ["review_role_cardinality"]])
+
+
+def sd_va():
+    from credit_review import verify_anchor  # noqa: PLC0415
+    return verify_anchor
+
+
 class ReviewedWritePathTests(unittest.TestCase):
     """Firstmate decision: apply performs a REAL API side effect through the reviewed path.
 
@@ -2693,10 +2848,14 @@ class _FakeApi:
         }
 
 
+#: A verdict with no hold, as the admin list carries it on every item.
+NO_HOLD = {"is_approved": False, "hold_reason_codes": []}
+
+
 def _api_request(request_id: str, *, status: str, user: str = "u1", track: str = "t1",
-                 roles: tuple[str, ...] = ("Mixing Engineer",)) -> dict:
+                 roles: tuple[str, ...] = ("Mixing Engineer",), vd: object = NO_HOLD) -> dict:
     return {"id": request_id, "status": status, "userId": user, "trackId": track,
-            "credits": list(roles), "profileId": rid(7)}
+            "credits": list(roles), "profileId": rid(7), "verificationData": vd}
 
 
 class RealEntrypointTests(unittest.TestCase):
@@ -2874,6 +3033,34 @@ class RealEntrypointTests(unittest.TestCase):
                     self.assertEqual(writes[0].count("X-Credit-Automation-Id:"), 1)
                 else:
                     self.assertNotIn("X-Credit-Automation-Id:", writes[0])
+
+    def test_an_approve_of_a_request_on_hold_never_reaches_the_api(self):
+        """The real wrapper, end to end: a good anchor, and the request went on hold after
+        the plan was made. The hold of 2026-11-13 (``track_pending_capture``, risk 100) is
+        the fixture; the PUT must not happen."""
+        vd = {"is_approved": False, "hold_reason_codes": ["track_pending_capture"],
+              "rule_risk_percent": {"track_pending_capture": 100}, "total_risk_percent": 100}
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                self.api.serve([_api_request(rid(1), status="user_verification_needed", vd=vd),
+                                _api_request(rid(9), status="approved")], [rid(1)])
+                with self.assertRaises(sd.DrainWriteError) as ctx:
+                    self._write(wrapper)
+                self.assertIn("on hold (track_pending_capture)", str(ctx.exception))
+                self.assertEqual(self.api.requests("PUT"), [])
+
+    def test_an_approve_of_a_request_on_a_hold_the_guard_covers_reaches_the_api(self):
+        """The same hold code beside a rule core's guard holds on: this gate stands aside
+        and the approve goes to core, whose refusal is the one ``apply`` routes."""
+        vd = {"is_approved": False,
+              "hold_reason_codes": ["track_pending_capture", "review_role_cardinality"],
+              "rule_risk_percent": {"track_pending_capture": 100, "review_role_cardinality": 30}}
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                self.api.serve([_api_request(rid(1), status="user_verification_needed", vd=vd),
+                                _api_request(rid(9), status="approved")], [rid(1)])
+                self._write(wrapper)
+                self.assertEqual(len(self.api.requests("PUT")), 1)
 
     def test_an_approve_whose_anchor_is_not_approved_never_reaches_the_api(self):
         """The twin that keeps the test above honest: the same call, an anchor the API

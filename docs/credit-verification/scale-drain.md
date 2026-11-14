@@ -165,6 +165,30 @@ into a fresh "please verify" ask to that user. Such a row gets the `unmatched` o
 The two rules are separate on purpose: `ask` means "no fact, and asking is the right
 action"; `unmatched` means "a fact is present but unreadable, so this needs a human".
 
+**An approve for a request on a hold core's guard does not act on is `unmatched` /
+`held_by_validator`.** Core's guard holds an agent approval on three facts of the
+validator's stored verdict: a `review_*` rule at 30 or more, the class C signature, and
+`rule_errors._hold_on_error`. A request can list a hold with none of them: on 2026-11-13
+two requests listing `track_pending_capture` at risk 100 were approved 17 minutes after
+the hold was set. `verify_anchor.uncovered_holds(verdict)` returns the verdict's hold
+codes in that case (every code counts, and a list that cannot be read is
+`verdict_unreadable`), and nothing when the guard itself holds. It is used twice:
+
+- **At plan time**, from the replica snapshot (`requests.uncovered_holds`): the row is
+  counted, never written and never asked.
+- **At the write gate**, from the live request: the approve is refused, and a request
+  listed without `verificationData` is refused as unreadable. The plan already leaves out
+  every such row the snapshot shows, so the gate meets only a hold set after the snapshot.
+  Its refusal is a wrapper-layer failure in `apply`, not a core refusal: it is never
+  routed to an ask, the row is retried on the next run, and it counts toward the breaker.
+
+Where the guard does hold, nothing here applies: the row stays `approve`, carries
+`hold_causes`, goes to core, and core's `validator_hold` refusal is routed as described
+under "The write path". The gate runs as a script and cannot import `policy.py`, so it
+reads the guard's three facts itself; `GuardReaderTests` holds that reader to
+`policy.validator_conflict`. `snapshot --source admin` does not carry `uncovered_holds`,
+so a plan built from it has the gate's stop only.
+
 **Expiry may only refuse a request we actually asked.** A never-asked request falls
 through to `ask`, because the 23,247 OPEN_UNASKED rows are the drain's population, not
 its refuse pile, and refusing a customer we never asked is a customer-facing denial we

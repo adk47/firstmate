@@ -35,10 +35,14 @@ CLAIM = f"{TARGET}#{ROLE}"
 BOTH = ("Composer", "Producer")
 
 
+#: A verdict with no hold, as the admin list carries it on every item.
+NO_HOLD = {"is_approved": False, "hold_reason_codes": []}
+
+
 def request(rid, *, status="user_verification_needed", user="u1", track="t1",
-            roles=("Mixing Engineer",)):
+            roles=("Mixing Engineer",), vd=NO_HOLD):
     return {"id": rid, "status": status, "userId": user, "trackId": track,
-            "credits": list(roles), "profileId": PROFILE}
+            "credits": list(roles), "profileId": PROFILE, "verificationData": vd}
 
 
 class FakeAdmin:
@@ -141,6 +145,110 @@ class PrecedentTests(unittest.TestCase):
                 return {"nope": True}
         with self.assertRaises(va.Unavailable):
             va.verify_precedent(Broken(), TARGET, ANCHOR, PROFILE)
+
+
+#: The hold the two requests of 2026-11-13 carried when they were approved.
+PENDING_CAPTURE = {"hold_reason": "The track is still being imported from the streaming service.",
+                   "is_approved": False, "hold_reason_codes": ["track_pending_capture"],
+                   "rule_risk_percent": {"track_pending_capture": 100},
+                   "total_risk_percent": 100}
+
+
+class HoldTests(unittest.TestCase):
+    """A request on a hold core's guard does not act on is never approved through this gate.
+
+    On 2026-11-13 two requests carrying ``track_pending_capture`` at risk 100 were approved
+    17 minutes after the hold was set. No approver read ``hold_reason_codes``, and the
+    server guard holds only on a ``review_*`` rule at 30 or more, class C, or
+    ``_hold_on_error``. Where the guard does hold, this gate stands aside: core refuses.
+    """
+
+    def _precedent(self, vd):
+        va.verify_precedent(FakeAdmin([request(TARGET, vd=vd),
+                                       request(ANCHOR, status="approved")]),
+                            TARGET, ANCHOR, PROFILE)
+
+    def test_a_request_on_hold_is_refused_and_the_refusal_names_the_code(self):
+        with self.assertRaises(va.Refused) as ctx:
+            self._precedent(PENDING_CAPTURE)
+        self.assertIn("on hold (track_pending_capture)", str(ctx.exception))
+
+    def test_a_hold_the_guard_covers_is_left_to_core(self):
+        for name, extra in (
+                ("review rule at 30", {"rule_risk_percent": {"review_role_cardinality": 30}}),
+                ("class C", {"rule_risk_percent": {"track_credit": 70, "collaborations": 90}}),
+                ("hold on error", {"rule_errors": {"_hold_on_error": "rule crashed"}}),
+                ("hold on error, rules unreadable",
+                 {"rule_errors": {"_hold_on_error": "x"}, "rule_risk_percent": "n/a"})):
+            with self.subTest(name):
+                self._precedent({"hold_reason_codes": ["track_pending_capture"], **extra})
+
+    def test_a_guard_fact_that_falls_short_covers_nothing(self):
+        for name, extra in (
+                ("review rule at 29", {"rule_risk_percent": {"review_role_cardinality": 29}}),
+                ("review rule scored as a string",
+                 {"rule_risk_percent": {"review_role_cardinality": "80"}}),
+                ("review rule scored true", {"rule_risk_percent": {"review_role_cardinality": True}}),
+                ("half of class C", {"rule_risk_percent": {"track_credit": 100, "collaborations": 89}}),
+                ("rule errors without the hold key", {"rule_errors": {"other": "x"}}),
+                ("rule errors not a mapping", {"rule_errors": ["_hold_on_error"]})):
+            with self.subTest(name):
+                with self.assertRaises(va.Refused):
+                    self._precedent({"hold_reason_codes": ["track_pending_capture"], **extra})
+
+    def test_every_uncovered_code_blocks_whatever_its_name_or_score(self):
+        for codes, risk in ((["track_pending_capture"], {}),
+                            (["review_hourly_velocity_profile"],
+                             {"review_hourly_velocity_profile": 5}),
+                            (["score:track_credit"], {"track_credit": 10}),
+                            (["a_code_nobody_has_written_yet"], {}),
+                            ([""], {})):
+            with self.subTest(codes=codes):
+                with self.assertRaises(va.Refused):
+                    self._precedent({"is_approved": True, "hold_reason_codes": codes,
+                                     "rule_risk_percent": risk, "total_risk_percent": 0})
+
+    def test_no_hold_and_no_verdict_still_verify(self):
+        for vd in (NO_HOLD, {"is_approved": True}, {"hold_reason_codes": None}, None):
+            with self.subTest(vd=vd):
+                self._precedent(vd)
+
+    def test_a_verdict_that_cannot_be_read_is_a_hold(self):
+        for vd in ("{}", [], 7, {"hold_reason_codes": "track_pending_capture"},
+                   {"hold_reason_codes": {"track_pending_capture": 100}}):
+            with self.subTest(vd=vd):
+                with self.assertRaises(va.Refused) as ctx:
+                    self._precedent(vd)
+                self.assertIn(va.HOLD_UNREADABLE, str(ctx.exception))
+
+    def test_an_item_listed_without_the_field_is_unavailable_not_unheld(self):
+        target = request(TARGET)
+        del target["verificationData"]
+        with self.assertRaises(va.Unavailable):
+            va.verify_precedent(FakeAdmin([target, request(ANCHOR, status="approved")]),
+                                TARGET, ANCHOR, PROFILE)
+
+    def test_a_hold_on_the_anchor_does_not_matter(self):
+        """The anchor is a decision already made; only the request being approved counts."""
+        va.verify_precedent(FakeAdmin([request(TARGET),
+                                       request(ANCHOR, status="approved", vd=PENDING_CAPTURE)]),
+                            TARGET, ANCHOR, PROFILE)
+
+    def test_a_duplicate_close_is_not_an_approval_and_is_not_held(self):
+        va.verify_duplicate(FakeAdmin([request(TARGET, vd=PENDING_CAPTURE),
+                                       request(ANCHOR, status="approved")]),
+                            TARGET, ANCHOR, PROFILE)
+
+    def test_the_refusal_says_the_guard_does_not_stop_it(self):
+        with self.assertRaises(va.Refused) as ctx:
+            self._precedent(PENDING_CAPTURE)
+        self.assertIn("core's guard does not stop that hold", str(ctx.exception))
+
+    def test_the_dispatch_refuses_a_held_precedent(self):
+        with self.assertRaises(va.Refused):
+            va.verify("precedent", ANCHOR, TARGET, PROFILE,
+                      admin=FakeAdmin([request(TARGET, vd=PENDING_CAPTURE),
+                                       request(ANCHOR, status="approved")]))
 
 
 class ProofTests(unittest.TestCase):
@@ -363,6 +471,15 @@ class LiveProofTests(ProofTests):
         with self.assertRaises(va.Refused):
             va.verify("proof_verdict", PROOF, "", PROFILE, admin=FakeAdmin([]),
                       store_path=self.store)
+
+    def test_a_genuine_proof_does_not_approve_a_request_on_hold(self):
+        """The proof is good and covers the role; the uncovered hold still stops the approve."""
+        self._add("GENUINE")
+        self._vp()
+        with self.assertRaises(va.Refused) as ctx:
+            va.verify("proof_verdict", PROOF, TARGET, PROFILE, store_path=self.store,
+                      admin=FakeAdmin([request(TARGET, vd=PENDING_CAPTURE)]))
+        self.assertIn("on hold (track_pending_capture)", str(ctx.exception))
 
     def test_another_requests_claims_are_not_read(self):
         """Through the live path an id that is not on the profile never reaches the
@@ -899,6 +1016,76 @@ class ScriptEntrypointTests(unittest.TestCase):
         self.assertEqual(Path(proc.stdout.strip()).resolve(),
                          SCRIPTS / "credit_review" / "batch_admin.py")
         self.assertFalse(hostile.exists())
+
+
+class GuardReaderTests(unittest.TestCase):
+    """The gate's own reader of the guard's three facts answers as ``policy`` does.
+
+    ``verify_anchor.py`` runs as a script and cannot import ``policy.py``, so it reads the
+    three facts itself. Two readers of one rule drift; this holds them together.
+    """
+
+    VERDICTS = (
+        None, "{}", [], 7, {},
+        {"rule_risk_percent": {}},
+        {"rule_risk_percent": None},
+        {"rule_risk_percent": "n/a"},
+        {"rule_risk_percent": {"review_x": 29}},
+        {"rule_risk_percent": {"review_x": 29.99}},
+        {"rule_risk_percent": {"review_x": 30}},
+        {"rule_risk_percent": {"review_x": 30.0}},
+        {"rule_risk_percent": {"review_x": "30"}},
+        {"rule_risk_percent": {"review_x": True}},
+        {"rule_risk_percent": {"review_x": None}},
+        {"rule_risk_percent": {"Review_x": 90}},
+        {"rule_risk_percent": {"x_review_": 90}},
+        {"rule_risk_percent": {"reject_x": 90}},
+        {"rule_risk_percent": {"track_pending_capture": 100}},
+        {"rule_risk_percent": {"track_credit": 70, "collaborations": 90}},
+        {"rule_risk_percent": {"track_credit": 69, "collaborations": 90}},
+        {"rule_risk_percent": {"track_credit": 70, "collaborations": 89}},
+        {"rule_risk_percent": {"track_credit": 70}},
+        {"rule_risk_percent": {"collaborations": 90}},
+        {"rule_risk_percent": {"track_credit": "70", "collaborations": 90}},
+        {"rule_risk_percent": {"track_credit": True, "collaborations": True}},
+        {"rule_errors": {"_hold_on_error": "x"}},
+        {"rule_errors": {"_hold_on_error": None}},
+        {"rule_errors": {"other": "x"}},
+        {"rule_errors": ["_hold_on_error"]},
+        {"rule_errors": "_hold_on_error"},
+        {"rule_errors": {"_hold_on_error": "x"}, "rule_risk_percent": "n/a"},
+        {"rule_errors": {"_hold_on_error": "x"}, "rule_risk_percent": {"review_x": 5}},
+        {"hold_reason_codes": ["track_pending_capture"],
+         "rule_risk_percent": {"track_pending_capture": 100}},
+    )
+
+    def test_the_gate_reads_the_guard_as_policy_does(self):
+        from credit_review import policy  # noqa: PLC0415
+        for vd in self.VERDICTS:
+            with self.subTest(vd=vd):
+                self.assertEqual(va.guard_holds(vd), policy.validator_conflict(vd) is not None)
+
+    def test_the_gates_numbers_are_policys(self):
+        from credit_review import policy  # noqa: PLC0415
+        self.assertEqual(
+            (va.GUARD_HOLD_RULE_PREFIX, va.GUARD_HOLD_RULE_MIN_SCORE, va.GUARD_HOLD_ON_ERROR_KEY,
+             va.GUARD_CLASS_C_TRACK_CREDIT, va.GUARD_CLASS_C_COLLABORATIONS),
+            (policy.HOLD_RULE_PREFIX, policy.HOLD_RULE_MIN_SCORE, policy.HOLD_ON_ERROR_KEY,
+             policy.CONFLICT_TRACK_CREDIT, policy.CONFLICT_COLLABORATIONS))
+
+    def test_uncovered_holds(self):
+        held = {"hold_reason_codes": ["b_code", "a_code", "a_code"]}
+        self.assertEqual(va.uncovered_holds(held), ["a_code", "b_code"])
+        self.assertEqual(va.uncovered_holds({**held, "rule_risk_percent": {"review_x": 30}}), [])
+        self.assertEqual(va.uncovered_holds({"rule_risk_percent": {"review_x": 30}}), [])
+        self.assertEqual(va.uncovered_holds({"hold_reason_codes": []}), [])
+        self.assertEqual(va.uncovered_holds({"hold_reason_codes": None}), [])
+        self.assertEqual(va.uncovered_holds(None), [])
+        self.assertEqual(va.uncovered_holds({"hold_reason_codes": "a_code"}), [va.HOLD_UNREADABLE])
+        self.assertEqual(va.uncovered_holds("{}"), [va.HOLD_UNREADABLE])
+        # an unreadable list beside a fact the guard holds on is still core's to refuse
+        self.assertEqual(va.uncovered_holds({"hold_reason_codes": "a_code",
+                                             "rule_errors": {"_hold_on_error": "x"}}), [])
 
 
 if __name__ == "__main__":

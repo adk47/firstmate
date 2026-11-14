@@ -147,6 +147,11 @@ REASON_CODES: dict[str, str] = {
     # the row waits - but named, so "rows nobody has heard from" and "rows that already
     # sent something" are never one number.
     "proof_on_file_undecided": "proof_on_file_undecided",
+    # The ladder found an approve (a precedent, or a proof verdict) for a request the
+    # validator has on hold with a hold core's guard does not act on
+    # (``verify_anchor.uncovered_holds``). Counted, never written, never asked. A hold the
+    # guard does act on is not this: that row stays ``approve`` and core refuses it.
+    "held_by_validator": "held_by_validator",
 }
 
 #: The outcome for a fact-carrying row whose fact could not be resolved. Not a write and
@@ -466,6 +471,9 @@ CREATE TABLE IF NOT EXISTS requests (
   -- 'profile_credit' (core's {track|role: credit id} map) or 'other'. Only 'request' can
   -- be closed; the other two are a duplicate FACT with nothing for the gate to verify.
   duplicate_kind    TEXT,
+  -- JSON list from ``verify_anchor.uncovered_holds``: the verdict's hold codes when core's
+  -- guard holds on none of its three facts; NULL = none. Such a row is never an ``approve``.
+  uncovered_holds   TEXT,
   precedent_key     TEXT,          -- the precedent class this request falls in
   proof_verdict     TEXT,          -- approve | refuse | NULL (no verdict computed)
   proof_received_at TEXT,
@@ -540,6 +548,9 @@ def open_snapshot(path: str | None = None) -> sqlite3.Connection:
     # ... and one made before ``hold_causes`` existed reads as "not measured" (NULL).
     if "hold_causes" not in {r[1] for r in db.execute("PRAGMA table_info(requests)")}:
         db.execute("ALTER TABLE requests ADD COLUMN hold_causes TEXT")
+    # ... and one made before ``uncovered_holds`` existed gains that one.
+    if "uncovered_holds" not in {r[1] for r in db.execute("PRAGMA table_info(requests)")}:
+        db.execute("ALTER TABLE requests ADD COLUMN uncovered_holds TEXT")
     return db
 
 
@@ -657,11 +668,13 @@ def load_snapshot(db: sqlite3.Connection, rows: Iterable[dict[str, Any]], *,
             raise DrainError("snapshot row has no request_id")
         expires = r.get("expires_at") or derive_expires_at(r.get("created_at") or r.get("createdAt"), window_days)
         duplicate_of, duplicate_kind = classify_duplicate(r.get("duplicate_of"))
+        uncovered = sorted({str(c) for c in (r.get("uncovered_holds") or [])})
         db.execute(
             "INSERT INTO requests (request_id, profile_id, user_id, status, created_at, expires_at,"
             " duplicate_of, duplicate_kind, precedent_key, proof_verdict, proof_received_at, proof_id,"
-            " asked_at, precedent_request_id, track_id, claimed_roles, hold_causes)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            " asked_at, precedent_request_id, track_id, claimed_roles, hold_causes,"
+            " uncovered_holds)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(request_id) DO UPDATE SET profile_id=excluded.profile_id, user_id=excluded.user_id,"
             " status=excluded.status, created_at=excluded.created_at, expires_at=excluded.expires_at,"
             " duplicate_of=excluded.duplicate_of, duplicate_kind=excluded.duplicate_kind,"
@@ -669,7 +682,8 @@ def load_snapshot(db: sqlite3.Connection, rows: Iterable[dict[str, Any]], *,
             " proof_verdict=excluded.proof_verdict, proof_received_at=excluded.proof_received_at,"
             " proof_id=excluded.proof_id, asked_at=excluded.asked_at,"
             " precedent_request_id=excluded.precedent_request_id, track_id=excluded.track_id,"
-            " claimed_roles=excluded.claimed_roles, hold_causes=excluded.hold_causes",
+            " claimed_roles=excluded.claimed_roles, hold_causes=excluded.hold_causes,"
+            " uncovered_holds=excluded.uncovered_holds",
             (rid, r.get("profile_id"), r.get("user_id"), str(r.get("status") or ""),
              r.get("created_at") or r.get("createdAt"), expires,
              duplicate_of, duplicate_kind, r.get("precedent_key"), r.get("proof_verdict"),
@@ -678,7 +692,8 @@ def load_snapshot(db: sqlite3.Connection, rows: Iterable[dict[str, Any]], *,
              r.get("precedent_request_id") or r.get("precedentRequestId"),
              r.get("track_id") or r.get("trackId"),
              json.dumps(list(r.get("claimed_roles") or []), sort_keys=True),
-             _causes_json(r.get("hold_causes"))))
+             _causes_json(r.get("hold_causes")),
+             json.dumps(uncovered) if uncovered else None))
         n += 1
     db.commit()
     return n
@@ -777,7 +792,8 @@ SELECT
   r.duplicate_kind,
   r.proof_received_at,
   r.hold_causes,
-  r.claimed_roles
+  r.claimed_roles,
+  r.uncovered_holds
 FROM requests r
 LEFT JOIN decided   d ON d.request_id = r.duplicate_of
 LEFT JOIN precedent p ON p.precedent_key = r.precedent_key
@@ -894,11 +910,16 @@ def plan(db: sqlite3.Connection, *, now: datetime | None = None) -> list[Decisio
     out: list[Decision] = []
     for (rid, profile_id, user_id, _status, expires_at, proof_verdict,
          rule, duplicate_decision, duplicate_of, precedent_outcome, precedent_request_id,
-         proof_id, duplicate_kind, proof_received_at, causes, roles) in db.execute(LADDER_SQL, {"now": stamp}):
+         proof_id, duplicate_kind, proof_received_at, causes, roles,
+         uncovered) in db.execute(LADDER_SQL, {"now": stamp}):
         anchor = precedent_request_id if rule == "precedent" else (
             proof_id if rule == "proof_verdict" else None)
         outcome, reason = _resolve(rule, proof_verdict, precedent_outcome, anchor,
                                    duplicate_decision, duplicate_kind, proof_received_at)
+        if outcome == "approve" and uncovered:
+            # On hold, and core's guard would not stop it: never approved here, whichever
+            # rule found the approve. A hold the guard covers is left to core, below.
+            outcome, reason = UNMATCHED, REASON_CODES["held_by_validator"]
         held = _causes_tuple(causes) if outcome == "approve" else None
         burst = (editing_burst(_roles_tuple(roles))
                  if held and velocity_hold_causes().intersection(held) else None)
@@ -2544,13 +2565,18 @@ def snapshot_from_replica(query: Callable[[str], list[list[Any]]], *,
     verdicts are joined from the proof store per CLAIM (``proof_claims``), against the
     roles this request claims.
     """
+    from . import verify_anchor as va  # noqa: PLC0415 - the one home of uncovered_holds
+
     asked = asked_at_by_request(ledger_path)
     proofs = proof_claims(proof_store_path)
     rows: list[dict[str, Any]] = []
     for rid, uid, pid, status, created, vd_json, _meta, track_id, credits in query(SNAPSHOT_SQL):
+        # A verdict that does not parse is carried as an uncovered hold, never as "no hold".
         try:
+            uncovered = va.uncovered_holds(json.loads(vd_json) if vd_json else None)
             vd = json.loads(vd_json or "{}")
         except ValueError:
+            uncovered = [va.HOLD_UNREADABLE]
             vd = None
         causes = hold_causes(vd)        # before the coercion below: unreadable stays unmeasured
         if not isinstance(vd, dict):
@@ -2567,6 +2593,7 @@ def snapshot_from_replica(query: Callable[[str], list[list[Any]]], *,
             "track_id": str(track_id or ""),
             "claimed_roles": roles,
             "duplicate_of": vd.get("duplicate_of"),
+            "uncovered_holds": uncovered,
             "precedent_key": claim_key(uid, track_id, roles),
             "proof_verdict": fact.get("proof_verdict"),
             "proof_received_at": fact.get("proof_received_at"),
