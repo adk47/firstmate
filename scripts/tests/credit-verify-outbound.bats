@@ -200,12 +200,16 @@ import json, sys
 open(_o.environ["CALLS"] + ".owing", "a").write(" ".join(sys.argv[1:]) + "\n")
 users = [{"user_id": "1", "paid": True, "class": "uvn"}, {"user_id": "2", "paid": False, "class": "uvn"},
          {"user_id": "8", "paid": True, "class": "review_hold"}, {"user_id": "9", "paid": False, "class": "account_hold"}]
+# uvn-reminder-14: nobody is due unless the test says so (STUB_REMINDER_USERS="<paid n> <free n>")
+_rp, _rf = (int(x) for x in (_o.environ.get("STUB_REMINDER_USERS") or "0 0").split())
+users += [{"user_id": str(300 + i), "paid": i < _rp, "class": "uvn_reminder_14"} for i in range(_rp + _rf)]
 json.dump({"users": users}, open(sys.argv[sys.argv.index("--out") + 1], "w"))
 for i, a in enumerate(sys.argv):                        # the builder writes the one-class list itself (r5 776)
     if a == "--class-out" and not _o.environ.get("STUB_NO_CLASS_OUT"):
         cls, _, path = sys.argv[i + 1].partition("=")
         json.dump({"users": [u for u in users if u["class"] == cls], "split_of": {"class": cls}}, open(path, "w"))
-print('{"counts": {}, "classes": {"uvn": 2, "review_hold": 1, "account_hold": 1}}')
+print(json.dumps({"counts": {"reminder_skip_not_due": 4, "reminder_skip_replied": 1} if _rp + _rf else {},
+                  "classes": {"uvn": 2, "review_hold": 1, "account_hold": 1}}))
 PY
   cat > "$TEST_TMPDIR/receipts.py" <<'PY'
 import json, os, sys
@@ -238,7 +242,18 @@ if a and a[0] == "build":
 sys.exit(subprocess.run([sys.executable, os.environ["CVO_RUNNER"], *a]).returncode)
 PY
   export CVO_NEED_RUNNER="$TEST_TMPDIR/need.py" CVO_UNSIGNED_ALL=1
-  export CVO_POLICY="$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json"
+  # The shipped policy carries node-8's OPERATING values (which families are armed, the per-tick and daily caps): they
+  # are data, changed by PR whenever operations change them. These tests are about the tick's logic, so they run on the
+  # shipped file with those values set back to fixed ones - every other key, and every row a PR adds, comes through.
+  # The shipped file itself is read by the "shipped policy" test below.
+  SHIPPED_POLICY="$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json"
+  BASE_POLICY="$TEST_TMPDIR/base-policy.json"
+  jq 'del(.armed_families)
+      | .tick_cap = {"uvn-status": {"free": 60}}
+      | .daily_cap["uvn-status"] = {"paid": 2500, "free": 2500}
+      | .daily_cap["proof-need-ask"] = {"paid": 2500, "free": 2500}
+      | .shared_daily_cap.claim = 500' "$SHIPPED_POLICY" > "$BASE_POLICY"
+  export CVO_POLICY="$BASE_POLICY"
   export CVO_SCRIPTS="$BATS_TEST_DIRNAME/.."
   # QA #1574: with reply_due_scan.py in the tree the tick runs the REAL scan (Intercom + replica) - the harness default is
   # a scan path that does not exist (the tick's "not deployed" branch); the reply_due tests set their own stub
@@ -343,6 +358,8 @@ CLAIM_CAP=250
 REFUSAL_SPIKE=0.20
 NEED_RUNNER=/opt/hydra/scripts/credit_review/need_asks.py
 FIRST_CAP=100
+R14_CAP=50
+R14_ENTRIES=100
 UNSIGNED_ALL=0
 JUDGE=/opt/hydra/scripts/credit-batch-judge.py
 DEPLOYED_SHA_FILE=/opt/hydra/.deployed-sha
@@ -1214,7 +1231,7 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   # l1 ruling 2026-11-02 (ruling-never-a-bottleneck-1102.md): the defect was that two GLOBAL files made arming one
   # decision for six families, so moving a proven class along needed everything else armed too.
   jq '.armed_families = {"uvn-status": {"live": true, "paid": false}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
   export CVO_POLICY="$TEST_TMPDIR/p.json"
   run -0 "$SCRIPT"
   out="$(ls -d "$CVO_OUT_ROOT"/*)"
@@ -1232,7 +1249,7 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
 @test "[key=arm-per-family] live and paid are per family, and the unsigned date rides the same row - a future date keeps that family SIGNED-only while a reached one applies" {
   jq '.armed_families = {"uvn-status": {"live": true, "paid": true, "unsigned_from": "2099-01-01T00:00Z"},
                          "r1": {"live": true, "paid": true}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
   export CVO_POLICY="$TEST_TMPDIR/p.json" CVO_UNSIGNED_ALL=0      # let the dates decide, as production does
   run -0 "$SCRIPT"
   out="$(ls -d "$CVO_OUT_ROOT"/*)"
@@ -1249,7 +1266,7 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   # the guard exists because a send with no zero-read reader can only auto-kill. It was gated on LIVE, which under policy
   # arming can be 0 with no legacy flag file at all - so an armed row applied with the guard never evaluated.
   jq '.armed_families = {"uvn-status": {"live": true, "paid": false, "unsigned_from": "2020-01-01T00:00Z"}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
   export CVO_POLICY="$TEST_TMPDIR/p.json" CVO_UNSIGNED_ALL=0
   [ ! -e "$CVO_ETC/credit-verify-outbound.live" ]     # policy mode: the legacy flag file need not exist
   CVO_ZERO_READ="$TEST_TMPDIR/not-deployed.py" run -0 "$SCRIPT"
@@ -1267,7 +1284,7 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   # family_armed is asked for "r1"; UNSIGNED_FROM is read as "status-doc-received". A row using one spelling armed
   # nothing and dated nothing: a silent miss with no log line to blame.
   jq '.armed_families = {"status-doc-received": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
   export CVO_POLICY="$TEST_TMPDIR/p.json" CVO_UNSIGNED_ALL=0
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
   run -0 "$SCRIPT"
@@ -1277,7 +1294,7 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   # and the same row spelled with the tick's own name behaves identically
   : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
   jq '.armed_families = {"r1": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
   run -0 "$SCRIPT"
   grep -q -- "--campaign status-doc-received .*--mode apply" "$CALLS"
 }
@@ -1286,7 +1303,7 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   # "live:true and no date" must mean SIGNED-only: inheriting the code date would apply on a date the reviewer never saw
   # in the row they signed - the opposite of what the row says.
   jq '.armed_families = {"uvn-status": {"live": true, "paid": true}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
   export CVO_POLICY="$TEST_TMPDIR/p.json" CVO_UNSIGNED_ALL=0      # production: the dates decide
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
   run -0 "$SCRIPT"
@@ -1299,7 +1316,7 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   # "policy mode, that row ignored" while the family the operator meant stays dry for ever
   rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
   jq '.armed_families = {"uvn-status": {"live": true, "paid": true}, "uvn_status": {"live": true, "paid": true}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
   run -0 "$SCRIPT"
   out="$(ls -d "$CVO_OUT_ROOT"/*)"
   grep -q "arming=malformed" "$out/tick.log"
@@ -1310,7 +1327,7 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   # "tomorrow" is a string, so the type check passed; reached() then failed, the family stayed dry for ever, and the
   # malformed page the operator was promised never fired. A typo must be loud on an unattended tick.
   jq '.armed_families = {"r1": {"live": true, "paid": true, "unsigned_from": "tomorrow"}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
   export CVO_POLICY="$TEST_TMPDIR/p.json"
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
   run -0 "$SCRIPT"
@@ -1322,7 +1339,7 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   for bad in "2026-02-30T00:00Z" "2026-11-03T25:00Z" "2026-13-01T00:00Z"; do
     rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
     jq --arg d "$bad" '.armed_families = {"r1": {"live": true, "paid": true, "unsigned_from": $d}}' \
-      "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+      "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
     run -0 "$SCRIPT"
     out="$(ls -d "$CVO_OUT_ROOT"/*)"
     grep -q "arming=malformed" "$out/tick.log"
@@ -1331,14 +1348,14 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   # and a well-formed instant still arms: the check rejects typos, not dates
   rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
   jq '.armed_families = {"r1": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
   run -0 "$SCRIPT"
   grep -q -- "--campaign status-doc-received .*--mode apply" "$CALLS"
 }
 
 @test "[key=arm-per-family] a malformed armed_families block arms NOTHING (fail closed, paged, tick continues) while an unreadable policy FILE stops and kills" {
   jq '.armed_families = {"uvn-status": {"live": true}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"   # no "paid"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p.json"   # no "paid"
   export CVO_POLICY="$TEST_TMPDIR/p.json"
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"  # must not matter
   run -0 "$SCRIPT"
@@ -1359,7 +1376,7 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   # minute form. So a seconds-dated row validated, logged "armed ... from 2020-01-01T00:00:30Z", and then never applied -
   # a silent SIGNED-only with no malformed page, which is the exact failure the semantic checks were added to prevent.
   jq '.armed_families = {"uvn-status": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00:30Z"}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p-sec.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p-sec.json"
   export CVO_POLICY="$TEST_TMPDIR/p-sec.json" CVO_UNSIGNED_ALL=0   # the harness default forces unsigned; the DATE is the question here
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
   run -0 "$SCRIPT"
@@ -1368,14 +1385,14 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   grep -q -- "--mode apply" "$CALLS"        # a date in 2020 is past: the row must APPLY, not sit dry forever
   # and the minute form still works - the fix is a wider reader, not a different one
   jq '.armed_families = {"uvn-status": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p-min.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p-min.json"
   rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
   export CVO_POLICY="$TEST_TMPDIR/p-min.json"
   run -0 "$SCRIPT"
   grep -q -- "--mode apply" "$CALLS"
   # a FUTURE seconds-form date is still SIGNED-only: the widening must not turn every date into "reached"
   jq '.armed_families = {"uvn-status": {"live": true, "paid": true, "unsigned_from": "2099-01-01T00:00:30Z"}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p-fut.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p-fut.json"
   rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
   export CVO_POLICY="$TEST_TMPDIR/p-fut.json"
   run -0 "$SCRIPT"
@@ -1391,7 +1408,7 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   # re-armed a family a human had explicitly disarmed, decided by STRING ORDER of two names for one thing.
   jq '.armed_families = {"r1": {"live": false, "paid": false},
                          "status-doc-received": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p-dupe.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p-dupe.json"
   export CVO_POLICY="$TEST_TMPDIR/p-dupe.json"
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
   run -0 "$SCRIPT"
@@ -1402,7 +1419,7 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   # order-independence: the other way round is the SAME policy with the same outcome, so the test cannot encode one order
   jq '.armed_families = {"status-doc-received": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"},
                          "r1": {"live": false, "paid": false}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p-dupe2.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p-dupe2.json"
   rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
   export CVO_POLICY="$TEST_TMPDIR/p-dupe2.json"
   run -0 "$SCRIPT"
@@ -1412,7 +1429,7 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   # a policy naming each family ONCE still arms: this is a rejection of ambiguity, not of the alias
   jq '.armed_families = {"status-doc-received": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"},
                          "uvn-status": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p-one.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p-one.json"
   rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
   export CVO_POLICY="$TEST_TMPDIR/p-one.json"
   run -0 "$SCRIPT"
@@ -1424,7 +1441,7 @@ c2_policy() {   # <jq object for the "uvn-status:c2" row | "" for no row>: uvn-s
   local row="${1:-}"
   jq --argjson c2 "${row:-null}" '.armed_families = ({"uvn-status": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}
         + (if $c2 == null then {} else {"uvn-status:c2": $c2} end))' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
   export CVO_POLICY="$TEST_TMPDIR/p.json" CVO_UNSIGNED_ALL=0      # production: the rows and their dates decide
 }
 uvn_calls() { grep -- "--segment $1 --campaign uvn-status " "$CALLS" | grep -c -- "$2" || true; }   # <segment> <pattern>
@@ -1485,7 +1502,7 @@ uvn_calls() { grep -- "--segment $1 --campaign uvn-status " "$CALLS" | grep -c -
 
 @test "[key=class-c-is-a-row] the uvn-status:c2 row never arms the family: with no uvn-status row nothing applies" {
   jq '.armed_families = {"uvn-status:c2": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
   export CVO_POLICY="$TEST_TMPDIR/p.json" CVO_UNSIGNED_ALL=0
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"   # legacy files change nothing
   run -0 "$SCRIPT"
@@ -1515,7 +1532,7 @@ uvn_calls() { grep -- "--segment $1 --campaign uvn-status " "$CALLS" | grep -c -
   : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
   jq '.armed_families = {"uvn-status": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"},
                          "uvn-status:c3": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
-    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+    "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
   run -0 "$SCRIPT"
   out="$(ls -d "$CVO_OUT_ROOT"/*)"
   grep -q "ARMING MALFORMED" "$out/tick.log"
@@ -1983,16 +2000,157 @@ PY
   grep -q '"family":"uvn-status-free","ledger_ids":"1-2"' "$CVO_STATE/samples.jsonl"
 }
 
-@test "outbound tick (Fable 10-30): the shipped policy carries CAPACITY caps under m2's shared caps (credit 2,500 / claim 500)" {
-  python3 - "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" <<'PY'
+@test "outbound tick (Fable 10-30): the shipped policy carries CAPACITY caps under m2's shared caps (credit 2,500 / claim at most 500)" {
+  # The shipped file carries node-8's operating values (reconciled 2026-11-13, see its _doc): m2's shared caps are the
+  # CEILINGS. The credit cap is at the ceiling; the claim cap is run lower by operations and may never be above it.
+  python3 - "$SHIPPED_POLICY" <<'PY'
 import json, sys
 p = json.load(open(sys.argv[1]))
-assert p["shared_daily_cap"] == {"credit": 2500, "claim": 500}, p["shared_daily_cap"]
+assert p["shared_daily_cap"]["credit"] == 2500, p["shared_daily_cap"]
+assert 0 < p["shared_daily_cap"]["claim"] <= 500, p["shared_daily_cap"]
+groups = p["groups"]
 for c, segs in p["daily_cap"].items():
-    g = next(g for g, cs in p["groups"].items() if c in cs)
-    assert all(v <= p["shared_daily_cap"][g] for v in segs.values()), c
+    assert sum(1 for cs in groups.values() if c in cs) == 1, c            # one group each: no row applies without one
+    ceiling = {"credit": 2500, "claim": 500}[next(g for g, cs in groups.items() if c in cs)]
+    assert all(0 < v <= ceiling for v in segs.values()), c
 assert min(p["daily_cap"]["uvn-status"].values()) >= 250   # no small fixed cap any more
 PY
+}
+
+@test "outbound tick (uvn-reminder-14): the shipped policy arms the reminder by its own row, under a 50-per-tick cap, and every row in it is one the tick reads" {
+  python3 - "$SHIPPED_POLICY" <<'PY'
+import json, sys
+p = json.load(open(sys.argv[1]))
+r = "uvn-reminder-14"
+assert p["armed_families"][r] == {"live": True, "paid": True, "unsigned_from": "2026-11-13T15:08Z"}, p["armed_families"].get(r)
+assert r in p["groups"]["credit"] and r not in p["groups"]["claim"]
+assert p["daily_cap"][r] == {"paid": 1200, "free": 1200}, p["daily_cap"].get(r)      # 24 hourly ticks x 50
+assert all(0 < v <= 50 for v in p["tick_cap"][r].values()) and set(p["tick_cap"][r]) == {"paid", "free"}
+# the values that were live on node-8 when this file was reconciled ride along unchanged (nothing is raised by a deploy)
+assert p["tick_cap"]["uvn-status"] == {"free": 50, "paid": 50}
+assert p["tick_cap"]["proof-need-ask"] == {"free": 5, "paid": 50}
+assert p["tick_cap"]["claim-proof-ask"] == {"paid": 25, "free": 25}
+assert p["daily_cap"]["uvn-status"] == {"paid": 2000, "free": 2000}
+assert p["daily_cap"]["proof-need-ask"] == {"paid": 400, "free": 400}
+assert p["shared_daily_cap"] == {"credit": 2500, "claim": 25}
+assert {k: v["unsigned_from"] for k, v in p["armed_families"].items() if k != r} == {
+    "uvn-status": "2026-10-31T18:02Z", "status-doc-received": "2026-11-03T12:56Z",
+    "claim-proof-ask": "2026-11-03T18:58Z", "proof-need-ask": "2026-11-10T02:17Z"}
+PY
+  # the tick itself reads the shipped file as POLICY arming: no row is malformed or ignored, and the reminder's row is its own
+  export CVO_POLICY="$SHIPPED_POLICY" CVO_UNSIGNED_ALL=0
+  STUB_REMINDER_USERS="2 3" run -0 "$SCRIPT"
+  t="$(newest_tick)"
+  if grep -qiE "malformed|ARMING ROW IGNORED" "$t"; then false; fi
+  grep -q -- "^uvn-status --list .*owing-reminder-14.json --segment paid --campaign uvn-reminder-14 .*--mode apply" "$CALLS"
+  grep -q -- "^uvn-status --list .*owing-reminder-14.json --segment free --campaign uvn-reminder-14 .*--mode apply" "$CALLS"
+  # a family with no row in the shipped file stays dry: checked, never applied
+  if grep -q -- "^claim-status .*--mode apply" "$CALLS"; then false; fi
+}
+
+r14_cap() { # <segment> <dry-run|apply>: the --max-users the reminder's check / apply was handed (empty = not run)
+  grep -- "owing-reminder-14.json --segment $1 --campaign uvn-reminder-14 .*--mode $2" "$CALLS" | grep -o -- "--max-users [0-9]*" | head -1 | awk '{print $2}'
+}
+
+@test "outbound tick (uvn-reminder-14): the reminder runs as its own family from its own built list - paid then free, 50 per tick, a 100-entry page, between the paid and the free ask" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  STUB_REMINDER_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  t="$(newest_tick)"
+  # the builder is asked for the reminder class on every build, and the family reads only that file
+  grep -q -- "--class-out uvn=.*/owing-uvn.json --class-out uvn_reminder_14=.*/owing-reminder-14.json" "$CALLS.owing"
+  jq -e '.split_of.class == "uvn_reminder_14" and (.users | length) == 5' "$(newest_out)owing-reminder-14.json" >/dev/null
+  grep -q "uvn-reminder-14 paid: audience 5 listed (2 paid, 3 free); the ledger left out: not_due=4, replied=1" "$t"
+  # checked like every family (read-only recipients check), then applied: its date is the captain's order
+  [ "$(r14_cap paid dry-run)" = 50 ]
+  [ "$(r14_cap paid apply)" = 50 ]
+  grep -q -- "owing-reminder-14.json --segment paid --campaign uvn-reminder-14 --max-entries 100 --start-entry 0 --mode dry-run --max-users 50 --check-recipients" "$CALLS"
+  grep -qE -- "owing-reminder-14.json --segment free --campaign uvn-reminder-14 .*--mode apply .*--signed-accepted [^ ]*/uvn-reminder-14-free-check.json" "$CALLS"
+  # it never rides the ask's flags: no /c2 switch, no other campaign
+  if grep -- "--campaign uvn-reminder-14" "$CALLS" | grep -q -- "--no-correction"; then false; fi
+  # order: after the paid ask and the paid receipts, before the free ask's walk; rebuilt right before it
+  n() { grep -n -- "$1" "$CALLS" | head -1 | cut -d: -f1; }
+  [ "$(n "owing-uvn.json --segment paid .*--mode apply")" -lt "$(n "owing-reminder-14.json --segment paid")" ]
+  [ "$(n "owing-reminder-14.json --segment paid .*--mode apply")" -lt "$(n "owing-reminder-14.json --segment free")" ]
+  [ "$(n "owing-reminder-14.json --segment free .*--mode apply")" -lt "$(n "owing-uvn.json --segment free")" ]
+  grep -q "owing list rebuilt immediately before uvn-reminder-14" "$t"
+  # the ask's own families are untouched by it
+  grep -q "^uvn-status --list .*owing-uvn.json --segment free --campaign uvn-status .*--mode apply" "$CALLS"
+}
+
+@test "outbound tick (uvn-reminder-14): 50 per tick is ONE budget across paid and free - free gets what paid left, and nothing when paid used it" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # the paid apply writes 30 ledger rows: free may send 20
+  STUB_REMINDER_USERS="2 3" STUB_ROWS=30 CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(r14_cap paid apply)" = 50 ]
+  [ "$(r14_cap free dry-run)" = 20 ]
+  [ "$(r14_cap free apply)" = 20 ]
+  grep -q "uvn-reminder-14-free: per-tick budget for uvn-reminder-14: 20 of 50 left this tick (30 sent by earlier segments); cap 20" "$(newest_tick)"
+  # the paid apply writes 50: the free segment is not started at all (no check, no bodies, no apply)
+  : > "$CALLS"
+  STUB_REMINDER_USERS="2 3" STUB_ROWS=50 CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(r14_cap paid apply)" = 50 ]
+  if grep -q -- "owing-reminder-14.json --segment free" "$CALLS"; then false; fi
+  grep -q "uvn-reminder-14-free: the per-tick budget for uvn-reminder-14 (50/tick across all segments) was spent by an earlier segment (50 sent); this segment waits for the next tick" "$(newest_tick)"
+  # the next tick starts with the whole budget again
+  : > "$CALLS"
+  STUB_REMINDER_USERS="2 3" STUB_ROWS=1 CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(r14_cap paid apply)" = 50 ]
+  [ "$(r14_cap free apply)" = 49 ]
+  # a policy tick_cap row can only LOWER it, per segment
+  : > "$CALLS"
+  jq '.tick_cap["uvn-reminder-14"] = {"paid": 10, "free": 500}' "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
+  CVO_POLICY="$TEST_TMPDIR/p.json" STUB_REMINDER_USERS="2 3" STUB_ROWS=1 CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(r14_cap paid apply)" = 10 ]
+  [ "$(r14_cap free apply)" = 49 ]
+}
+
+@test "outbound tick (uvn-reminder-14): nobody due, no list, or no policy row starts no family - and none of them stops the tick or the ask" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # nobody is due (the usual state after the first cohort): no runner call, no extra build
+  CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  if grep -q -- "uvn-reminder-14" "$CALLS"; then false; fi
+  grep -q "uvn-reminder-14 paid: nobody is due a reminder (0 listed); skipped" "$(newest_tick)"
+  if grep -q "rebuilt immediately before uvn-reminder-14" "$(newest_tick)"; then false; fi
+  grep -q "^uvn-status --list .*owing-uvn.json --segment free --campaign uvn-status .*--mode apply" "$CALLS"
+  # a builder that wrote no class list (an older builder): skipped, never a guessed audience
+  : > "$CALLS"
+  STUB_NO_CLASS_OUT=1 STUB_REMINDER_USERS="2 3" CVO_UNSIGNED_ALL=0 run "$SCRIPT"
+  if grep -q -- "--campaign uvn-reminder-14" "$CALLS"; then false; fi
+  # a policy with no row for the reminder (a restored older copy): the reminder is skipped, the kill file is NOT
+  # written, and the ask still goes
+  : > "$CALLS"
+  jq 'del(.daily_cap["uvn-reminder-14"]) | .groups.credit -= ["uvn-reminder-14"]' "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
+  CVO_POLICY="$TEST_TMPDIR/p.json" STUB_REMINDER_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  if grep -q -- "--campaign uvn-reminder-14" "$CALLS"; then false; fi
+  grep -q "uvn-reminder-14 paid: the policy has no daily_cap row or no group for uvn-reminder-14; skipped" "$(newest_tick)"
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  grep -q "^uvn-status --list .*owing-uvn.json --segment free --campaign uvn-status .*--mode apply" "$CALLS"
+}
+
+@test "outbound tick (uvn-reminder-14): in policy arming only its OWN row arms it - no row, live:false or a row with no date checks and never applies" {
+  # no row for the reminder: checked, never applied; uvn-status (its own row) still applies
+  jq '.armed_families = {"uvn-status": {"live": true, "paid": true, "unsigned_from": "2026-10-31T18:02Z"}}' "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
+  CVO_POLICY="$TEST_TMPDIR/p.json" STUB_REMINDER_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(r14_cap paid dry-run)" = 50 ]
+  [ -z "$(r14_cap paid apply)" ] && [ -z "$(r14_cap free apply)" ]
+  grep -q -- "--segment free .*--campaign uvn-status .*--mode apply" "$CALLS"
+  # live:false: the same
+  : > "$CALLS"
+  jq '.armed_families = {"uvn-reminder-14": {"live": false, "paid": false, "unsigned_from": "2026-11-13T15:08Z"}}' "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
+  CVO_POLICY="$TEST_TMPDIR/p.json" STUB_REMINDER_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ -z "$(r14_cap paid apply)" ] && [ -z "$(r14_cap free apply)" ]
+  # a row with no date clears the built-in one: signed-only (checked, not applied)
+  : > "$CALLS"
+  jq '.armed_families = {"uvn-reminder-14": {"live": true, "paid": true}}' "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
+  CVO_POLICY="$TEST_TMPDIR/p.json" STUB_REMINDER_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(r14_cap free dry-run)" = 50 ]
+  [ -z "$(r14_cap paid apply)" ] && [ -z "$(r14_cap free apply)" ]
+  # its own dated row: applies, free only when paid is false
+  : > "$CALLS"
+  jq '.armed_families = {"uvn-reminder-14": {"live": true, "paid": false, "unsigned_from": "2026-11-13T15:08Z"}}' "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
+  CVO_POLICY="$TEST_TMPDIR/p.json" STUB_REMINDER_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ -z "$(r14_cap paid apply)" ]
+  [ "$(r14_cap free apply)" = 50 ]
 }
 
 @test "outbound tick (Fable 10-30): the SHARED group cap - credit rows already sent today use up the credit room; claims have their own 500" {

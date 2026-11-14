@@ -4,12 +4,14 @@
   "default": "observe",
   "enforce": [
     "decline",
-    "credit-approved-elsewhere"
+    "credit-approved-elsewhere",
+    "uvn-reminder-14"
   ],
   "observe": [],
   "_enforce_why": {
     "credit-approved-elsewhere": "A new line (a credit already verified for another person, and what to send if the requester shares it) that no reviewer has read. It is enforced from its first byte so it can never go out in observe mode on a review nobody approved. The campaign is send-locked in the sender (APPROVED_ELSEWHERE_COPY_APPROVED=0), so enforcing it stops no message that is sent today.",
-    "decline": "captain 2026-11-12: the denial says the credit is denied for now, no reason, never fraud, and that the person can resubmit. The reviewer approved 4 of 4 rendered denial bodies (first measurement, 2026-11-12). The campaign is also locked off in production (DECLINE_CORE_ROUTE_OFF=0), so enforcing it stops no message that is sent today."
+    "decline": "captain 2026-11-12: the denial says the credit is denied for now, no reason, never fraud, and that the person can resubmit. The reviewer approved 4 of 4 rendered denial bodies (first measurement, 2026-11-12). The campaign is also locked off in production (DECLINE_CORE_ROUTE_OFF=0), so enforcing it stops no message that is sent today.",
+    "uvn-reminder-14": "captain 2026-11-13 15:08Z: one reminder to a verification non-responder after 14 days. Enforced from its first body because the copy is new and has no standing approval: no reminder is sent without a signed approve of its exact bytes. It had sent nothing before this line, so enforcing it stops no message that was going out (there is no `gate.py report` to cite for a campaign with no sends). scripts/intercom-verify-request.sh holds an observed pass for this campaign as well, so removing this line does not send it unreviewed."
   },
   "retired": [
     {

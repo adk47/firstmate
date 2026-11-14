@@ -268,5 +268,124 @@ class OpenStatusPushdownTest(OwingProofTest):
             self.build(query=down)
 
 
+class UvnReminder14ClassTest(unittest.TestCase):
+    """uvn-reminder-14 (captain 2026-11-13 15:08Z): the builder's own class for the one reminder of a sent uvn-status
+    ask. Listed: a told user whose ASKED rows are still owed and whom the ledger rule (verify_ledger.reminder14_why)
+    says is due. Every user the rule leaves out is counted by reason, so each build logs its own funnel."""
+
+    def setUp(self):
+        from datetime import datetime, timedelta, timezone
+        from credit_review import verify_ledger
+        self.vl, self.now, self.td = verify_ledger, datetime.now(timezone.utc).replace(microsecond=0), timedelta
+        d = Path(tempfile.mkdtemp())
+        self.ledger = str(d / "ledger.sqlite3")
+        self.holds = str(d / "holds.jsonl"); Path(self.holds).write_text("")
+        self.risk = str(d / "risk.csv"); Path(self.risk).write_text("userid,teamid,churn_signal\n")
+        self.rows = []
+
+    def ask(self, uid, rids, days, *, paid=True, owed=True, campaign="uvn-status", sent=True, **cols):
+        """A ledger ask `days` ago naming `rids`, and (owed) those rows still waiting on the user in the replica."""
+        db = self.vl.connect(self.ledger)
+        try:
+            when = self.now - self.td(days=days)
+            c = self.vl.claim(db, campaign=campaign, user_key=f"u{uid}@x.com", day=when.strftime("%Y-%m-%d"),
+                              request_ids=list(rids), message_type="email", approved_by="U", approval_ref="r", now=when,
+                              user_id=str(uid), enforce_cap=False)
+            if sent:
+                self.vl.finalize(db, message_row=c["message_row"], status="sent", message_id=f"m{uid}-{campaign}")
+            for col, val in cols.items():
+                db.execute(f"UPDATE verify_messages SET {col} = ? WHERE id = ?", (val, c["message_row"]))
+            db.commit()
+        finally:
+            db.close()
+        if owed:
+            self.rows += [[str(uid), r, "user_verification_needed", "2026-09-01", "1" if paid else "0", "0", "0", "0"]
+                          for r in rids]
+
+    def build(self, rows=None):
+        return op.build(query=q(self.rows if rows is None else rows), ledger_path=self.ledger, holds_path=self.holds,
+                        at_risk_path=self.risk, now=self.now)
+
+    def reminders(self, res):
+        return {u["user_id"]: u["request_ids"] for u in res["users"] if u["class"] == op.REMINDER}
+
+    def test_a_told_user_due_a_reminder_is_listed_with_the_rows_the_ask_named_and_nothing_else(self):
+        self.ask(4, ["t4", "t4x"], 20)
+        self.ask(5, ["t5"], 14, paid=False)
+        self.rows.append(["4", "t4b", "user_verification_needed", "2026-11-01", "1", "0", "0", "0"])   # opened since
+        res = self.build()
+        self.assertEqual(self.reminders(res), {"4": ["t4", "t4x"], "5": ["t5"]})
+        c = res["counts"]
+        self.assertEqual((c["list_uvn_reminder_14_paid"], c["list_uvn_reminder_14_free"]), (1, 1))
+        # the row no ask named is the follow-up class's, in its own entry; the first-ask list never carries either user
+        self.assertEqual({u["user_id"]: u["request_ids"] for u in res["users"] if u["class"] == op.NEW_ROWS},
+                         {"4": ["t4b"]})
+        self.assertEqual([u["user_id"] for u in op.class_list(res, "uvn")["users"]], [])
+        self.assertTrue(all(u["skip"] is None and u["paid"] == (u["user_id"] == "4")
+                            for u in res["users"] if u["class"] == op.REMINDER))
+
+    def test_everyone_the_ledger_rule_leaves_out_is_counted_by_reason_and_never_listed(self):
+        self.ask(1, ["a1"], 13)                                              # the ask is 13 days old
+        self.ask(2, ["a2"], 20, last_reply_at="2026-11-01T00:00:00Z")        # replied
+        self.ask(3, ["a3"], 20, proof_tagged_at="2026-11-01T00:00:00Z")      # sent a document
+        self.ask(4, ["a4"], 20, sent=False)                                  # the ask never confirmed sent
+        self.ask(5, ["a5"], 20)
+        self.ask(5, ["a5"], 2, campaign="uvn-reminder-14", owed=False)       # already reminded
+        self.ask(6, ["a6"], 20)
+        self.ask(6, ["z6"], 3, campaign="claim-status", owed=False)          # a claim note from us this week
+        self.ask(9, ["a9"], 20)
+        self.ask(9, ["z9"], 10, campaign="status-team-review", owed=False)   # another credit note followed the ask
+        self.ask(7, ["a7"], 20, owed=False)                                  # decided since: nothing named is owed
+        self.ask(8, ["a8"], 20)                                              # ... and the one who is due
+        res = self.build()
+        self.assertEqual(self.reminders(res), {"8": ["a8"]})
+        c = res["counts"]
+        self.assertEqual({k: v for k, v in c.items() if k.startswith("reminder_skip_")},
+                         {"reminder_skip_not_due": 1, "reminder_skip_replied": 1, "reminder_skip_proof_received": 1,
+                          "reminder_skip_already_sent": 1, "reminder_skip_messaged_7d": 1,
+                          "reminder_skip_noted_since_ask": 1})
+        # user 4 was never TOLD (no sent ask), so they are still the first ask's - never the reminder's
+        self.assertIn("4", [u["user_id"] for u in res["users"] if u["class"] == "uvn"])
+
+    def test_a_reminder_from_another_sender_keyed_by_email_only_counts(self):
+        # the 2026-11-09 `reminder-1` rows carry the account email and no account id
+        self.ask(9, ["a9"], 20)
+        db = self.vl.connect(self.ledger)
+        day = (self.now - self.td(days=4)).strftime("%Y-%m-%d")
+        db.execute("INSERT INTO verify_messages (campaign, kind, user_key, day, status, message_type, request_ids_json, "
+                   "n_credits, approved_by, approval_ref, created_at, updated_at) VALUES ('reminder-1', 'reminder-14', "
+                   "'u9@x.com', ?, 'sent', 'email', '[]', 1, 'system:reminder-driver', 'auto:reminder-1', ?, ?)",
+                   (day, day + "T00:00:00Z", day + "T00:00:00Z"))
+        db.commit(); db.close()
+        res = self.build()
+        self.assertEqual(self.reminders(res), {})
+        self.assertEqual(res["counts"]["reminder_skip_already_reminded"], 1)
+
+    def test_the_class_list_verifies_and_a_row_decided_since_the_build_is_a_change(self):
+        self.ask(4, ["t4", "t4x"], 20)
+        res = self.build()
+        lst = op.class_list(res, op.REMINDER)
+        self.assertEqual(lst["split_of"]["class"], "uvn_reminder_14")
+        vf = lambda rows: op.verify_facts(lst, q(rows), holds_path=self.holds, ledger_path=self.ledger)   # noqa: E731
+        # "an ask was sent" is this class's premise, never a change since the build
+        self.assertEqual(vf(self.rows), [])
+        # a NEW row since the build is the follow-up class's: the reminder's owed set (the asked rows) did not change
+        self.assertEqual(vf(self.rows + [["4", "new", "user_verification_needed", "2026-11-12", "1", "0", "0", "0"]]), [])
+        decided = [r for r in self.rows if r[1] != "t4x"]                    # one asked row was decided since
+        self.assertTrue(any(d.startswith("4:") for d in vf(decided)))
+
+    def test_a_ledger_that_cannot_say_who_replied_lists_nobody(self):
+        # an old-shape ledger (no reply / proof columns): the rule cannot be read, so the class is empty - never guessed
+        db = sqlite3.connect(self.ledger)
+        db.execute("CREATE TABLE verify_messages (account_id TEXT, status TEXT, campaign TEXT DEFAULT 'uvn-status', "
+                   "request_ids_json TEXT DEFAULT '[]')")
+        db.execute("CREATE TABLE verify_refusal_holds (user_id TEXT, reason TEXT, flagged_at TEXT)")
+        db.execute("INSERT INTO verify_messages (account_id, status, request_ids_json) VALUES ('4', 'sent', '[\"t4\"]')")
+        db.commit(); db.close()
+        res = self.build([["4", "t4", "user_verification_needed", "2026-07-01", "1", "0", "0", "0"]])
+        self.assertEqual(self.reminders(res), {})
+        self.assertEqual(res["counts"]["reminder_skip_no_prior_ask"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -128,15 +128,22 @@ NEW_ROWS = "uvn-new-rows"
 # no document exclusion and no ask cap - the fact sentence is what the live state decides, and a state outside F1/F2/F3
 # refuses that user (the gate refuses on a missing fact too).
 WAIT_APOLOGY = "wait-apology"
-CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", GAP_ASK, CREDIT_HOLD, NEW_ROWS, WAIT_APOLOGY)
+# uvn-reminder-14 (captain 2026-11-13 15:08Z): the ONE reminder of a sent uvn-status ask, 14 days on, over the rows that
+# ask named and that are still owed (owing_proof class uvn_reminder_14). The uvn ask in every runner rule (statuses,
+# proof_required rows, the fraud lens, the documents-on-file exclusion); who may get it is
+# verify_ledger.reminder14_user_done, the same function the gate reads.
+REMINDER = verify_ledger.UVN_REMINDER
+CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", GAP_ASK, CREDIT_HOLD, NEW_ROWS, WAIT_APOLOGY,
+             REMINDER)
 # The campaigns that ASK (documents-on-file exclusion, the ask cap, closing asks).
-ASKS = ("uvn-status", GAP_ASK, NEW_ROWS)
+ASKS = ("uvn-status", GAP_ASK, NEW_ROWS, REMINDER)
 # The replica re-check per campaign (firstmate 076): uvn-status needs requests still waiting on
 # the user; the status notes need requests still pending with us. A status-note user with none
 # left is `not_pending`: counted, never closed in the ledger.
 PENDING_STATUSES = {
     "uvn-status": ("user_verification_needed",),
     NEW_ROWS: ("user_verification_needed",),
+    REMINDER: ("user_verification_needed",),
     "status-doc-received": ("user_verification_needed", "unverified", "processing"),
     "status-team-review": ("user_verification_needed", "unverified", "processing"),
     # gap-ask: the decider's held rows; only stage-2 need_more ones are ever kept (run()).
@@ -310,6 +317,7 @@ class UvnReport(verify_notify.Report):
     count_copy: int = 0                # status-team-review users sent the count-only note (not held)
     stage2_released: int = 0           # documented users let through by a stage-2 verdict
     not_walked: int = 0                # p1 599: list entries outside this run's --max-entries page (other runs')
+    copy_review_waiting: int = 0       # reminder users whose body waits for its copy verdict; the page ends at them
     page: dict = field(default_factory=dict)   # QA #1612: {start, end, listed} - the list entries this run walked
     campaign: str = ""
     fraud_held: int = 0
@@ -815,7 +823,7 @@ def pending_rows(user_ids: list[int], campaign: str, released: set[str],
     if campaign == GAP_ASK or with_released:
         reqs = {u: kept for u, rows in reqs.items()
                 if (kept := [r for r in rows if r["request_id"].lower() in released])}
-    if campaign in (CAMPAIGN, NEW_ROWS) and not with_released:
+    if campaign in (CAMPAIGN, NEW_ROWS, REMINDER) and not with_released:
         for u, rows in uvn_requests(user_ids, query, PROOF_REQUIRED_STATUSES).items():
             have = {r["request_id"].lower() for r in reqs.get(u, [])}
             add = [r for r in rows if r.get("_proof_required") and r["request_id"].lower() not in have]
@@ -1065,6 +1073,17 @@ def note_payload(acct: dict[str, str], uid: int, credits: list[dict[str, Any]], 
     return {"user": user, "credits": credits}
 
 
+COPY_VERDICT_PENDING = "copy_review_pending"
+
+
+def copy_verdict_pending(outcomes: list[dict[str, Any]]) -> bool:
+    """Whether the gate deferred this user because their body has no copy verdict YET (the gate's own first word:
+    `DEFERRED copy_review_pending ...`). Any other copy answer (refuse, rewrite, a lint hit, a gate that could not
+    run) is not `pending`."""
+    return any(o.get("result") == "deferred" and str(o.get("reason") or "").split(" ", 1)[0] == COPY_VERDICT_PENDING
+               for o in outcomes)
+
+
 def asked_ids(path: str | None, campaign: str, listed: set[str], pending: list[dict[str, Any]]) -> set[str]:
     """QA #1625 finding 1: the request ids of this user's rows that a PREVIOUS note already asked about.
 
@@ -1073,6 +1092,11 @@ def asked_ids(path: str | None, campaign: str, listed: set[str], pending: list[d
     and it is exactly why the n1 class exists ("over new rows only"). Without this set the prior row (absent from the
     new-row list by construction) held the user as `unlisted_request` on every run and the NEW row never reached the
     gate, which is per-row - the follow-up could never be sent to anyone who had been asked before."""
+    if campaign == REMINDER:
+        # The reminder is over the rows its ASK named, and only those: a row opened since is not "left out of a
+        # one-ever note", it is the uvn-new-rows class and gets its own note. So every row outside the list is
+        # accounted for here, and none of them holds the user as `unlisted_request`.
+        return {r["request_id"] for r in pending} - set(listed)
     ids = sorted({r["request_id"] for r in pending} | set(listed))
     if not path or not ids:
         return set()
@@ -1454,7 +1478,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         report.fraud_held += 1
                         report.note("fraud_held")
                         continue
-                    if v.ask_only and campaign not in (CAMPAIGN, NEW_ROWS):
+                    if v.ask_only and campaign not in (CAMPAIGN, NEW_ROWS, REMINDER):
                         # Fable Ruling B.2: big-track single-signal rows get the document ask only,
                         # never Copy A / B0 (nothing we send may imply approval). Not closed either.
                         report.ask_only += 1
@@ -1494,6 +1518,15 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         if why == "no_prior_ask":
                             # QA #1625: a DEFERRAL, never a close - the user's first uvn-status ask may still be sent,
                             # and then these rows are exactly the class (the gate leaves this reason unclosed too)
+                            report.deferred_users += 1
+                            report.note(why)
+                            continue
+                    elif campaign == REMINDER:
+                        # the gate's own rule (peek and claim read the same function): no SENT uvn-status ask to
+                        # follow, an ask younger than 14 days or a note in the last 7 days is a DEFERRAL, never a
+                        # close; a reply, a document, or a reminder already sent closes the rows for this campaign
+                        why = verify_ledger.reminder14_user_done(db, acct["email"], now=now, user_id=str(u["user_id"]))
+                        if why == "no_prior_ask" or why in verify_ledger.REMINDER_DEFER_REASONS:
                             report.deferred_users += 1
                             report.note(why)
                             continue
@@ -1957,6 +1990,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
 
             walk = verify_notify.ApplyPipeline(admit=admit, prepare=prepare, settle=settle)
             before_budget = report.budget_deferred_users
+            o0 = len(report.outcomes)
             verify_notify.send_all([p for _, p, _ in todo], report, mode=mode, wrapper=wrapper, runner=runner,
                                    extra=["--campaign", campaign] + (["--copy", wording] if wording else [])
                                    + (["--gmail-fallback-o"] if gmail_fallback_o else [])
@@ -1974,6 +2008,17 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             # ([key=note-step-budget], QA #1756: a budget-deferred user must wait for the next TICK, never a whole
             # rotation of the list; send_all wrote their `apply_budget` rows) and a systemic stop alike.
             examined.difference_update(walk.unstarted)
+            if campaign == REMINDER:
+                # The outbound copy gate holds a reminder's exact body until its reviewer rules on it (an `enforce`
+                # campaign: no signed approve, no send). The body is queued and the verdict lands between ticks, so
+                # such a user is NOT "got to": the page ends at the first of them and the next run starts there,
+                # instead of the cursor stepping past and the user waiting a whole rotation of the list for a message
+                # that is already approved. Only `pending` pins the page - a refusal, a rewrite or a lint hit is an
+                # answer, and waiting on it would hold everyone behind it. REMINDER only: the review decision for this
+                # change was to pin this campaign's page and leave every other family's cursor behaviour as it was.
+                waiting = {str(o.get("user")) for o in report.outcomes[o0:] if copy_verdict_pending([o])}
+                examined.difference_update(waiting)
+                report.copy_review_waiting += len(waiting)
             if report.budget_deferred_users > before_budget:
                 budget_stop = True
             if walk.unstarted:

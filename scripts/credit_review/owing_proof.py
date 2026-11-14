@@ -191,6 +191,35 @@ def new_rows(owe: dict[str, list[str]], asked: set[str]) -> dict[str, list[str]]
     return {rid: r for rid, r in owe.items() if rid not in asked and r[6] != "1"}
 
 
+# uvn-reminder-14 (captain 2026-11-13 15:08Z): a told user whose ASKED rows are still owed, 14 days after the ask, with
+# no reply, no document and no reminder on the ledger. Listed with ONLY the rows a sent ask named (a row no ask named
+# is the uvn_new_rows class, and gets that note). A user can be in both classes: one entry each, different rows.
+REMINDER = "uvn_reminder_14"
+
+
+def named_rows(owe: dict[str, list[str]], asked: set[str]) -> dict[str, list[str]]:
+    """The owed rows a SENT uvn-status ask named: what its one reminder is about, and nothing else."""
+    return {rid: r for rid, r in owe.items() if rid in asked}
+
+
+def reminder_states(ledger_path: str, now: datetime | None = None) -> dict[int, dict[str, Any]]:
+    """{account id: verify_ledger.reminder14_bulk's answer}: who the ledger says may get the reminder now. The rule
+    is the ledger's own function (the gate's peek and claim read the same one); this is one read-only pass."""
+    from credit_review import verify_ledger  # noqa: PLC0415
+    try:
+        db = sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True)
+        try:
+            have = {r[1] for r in db.execute("PRAGMA table_info(verify_messages)")}
+            if not set(verify_ledger._REMINDER_COLS) <= have:
+                # a ledger that cannot say who replied or sent a document lists NOBODY for the reminder (fail closed)
+                return {}
+            return verify_ledger.reminder14_bulk(db, now=now)
+        finally:
+            db.close()
+    except (sqlite3.Error, ValueError) as exc:
+        raise OwingProofError(f"verify ledger unreadable: {exc}") from exc
+
+
 def held_accounts(holds_path: str, ledger_path: str) -> set[int]:
     held: set[int] = set()
     try:
@@ -226,6 +255,7 @@ def build(*, query: Query | None = None, ledger_path: str = LEDGER, holds_path: 
     told = told_users(ledger_path)
     asked = asked_rows(ledger_path)
     held = held_accounts(holds_path, ledger_path)
+    reminders = reminder_states(ledger_path, now)
     risky, risk_src = at_risk_users(at_risk_path)
     by_user: dict[int, list[list[str]]] = defaultdict(list)
     for r in rows:
@@ -248,6 +278,20 @@ def build(*, query: Query | None = None, ledger_path: str = LEDGER, holds_path: 
                               "request_ids": sorted(fresh), "class": NEW_ROWS, "oldest": min(r[3] for r in fresh.values()),
                               "_tier": 0 if (paid and uid in risky) else 1 if paid else 2, "facts": _facts_of(fresh)})
                 counts[f"list_{NEW_ROWS}_{'paid' if paid else 'free'}"] += 1
+            # uvn-reminder-14: the rows a sent ask named and that are still owed. The ledger decides who is due
+            # (reminder_states); every reason it gives for leaving a user out is counted, so each build logs the funnel.
+            named = named_rows(owe, asked.get(uid, set())) if (cls == "uvn" and uid in told) else {}
+            if named:
+                why = (reminders.get(uid) or {}).get("why", "no_prior_ask")
+                if why:
+                    counts[f"reminder_skip_{why}"] += 1
+                else:
+                    paid = any(r[4] == "1" for r in rs)
+                    users.append({"user_id": str(uid), "paid": paid, "skip": None, "at_risk": uid in risky,
+                                  "request_ids": sorted(named), "class": REMINDER,
+                                  "oldest": min(r[3] for r in named.values()),
+                                  "_tier": 0 if (paid and uid in risky) else 1 if paid else 2, "facts": _facts_of(named)})
+                    counts[f"list_{REMINDER}_{'paid' if paid else 'free'}"] += 1
             continue
         paid = any(r[4] == "1" for r in rs)
         tier = 0 if (paid and uid in risky) else 1 if paid else 2
@@ -322,6 +366,10 @@ def local_diffs(lst: dict[str, Any], held: set[int], asked: dict[int, set[str]])
         if u.get("class") == "account_hold" and uid not in held:
             diffs.append(f"{uid}: the account hold was released since the build")
         named = {str(i).lower() for i in u.get("request_ids") or []}
+        if u.get("class") == REMINDER:
+            # the reminder class is BUILT from a sent ask, so "an ask was sent" is its premise, not a change; whether
+            # a reminder (or anything else) went since the build is the ledger rule the runner and the gate re-read
+            continue
         if (named & asked.get(uid, set())) if u.get("class") == NEW_ROWS else (uid in asked):
             diffs.append(f"{uid}: an ask was sent since the build")
     return diffs
@@ -346,6 +394,8 @@ def verify_facts(lst: dict[str, Any], query: Query, *, holds_path: str = ACCOUNT
         owe, _ = owed(now.get(str(u["user_id"]), []), int(u["user_id"]) in held)
         if u.get("class") == NEW_ROWS:          # the follow-up class: only the rows no ask named (as build lists them)
             owe = new_rows(owe, asked.get(int(u["user_id"]), set()))
+        elif u.get("class") == REMINDER:        # the reminder class: only the rows a sent ask named (as build lists them)
+            owe = named_rows(owe, asked.get(int(u["user_id"]), set()))
         cur = _facts_of(owe)
         if cur != u.get("facts") or sorted(owe) != sorted(u.get("request_ids") or []):
             diffs.append(f"{u['user_id']}: listed {u.get('facts')} ids {sorted(u.get('request_ids') or [])} -> now {cur}")
@@ -358,7 +408,8 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--verify-facts", default="", help="a built list: re-read the replica and print the users whose "
                     "facts changed since it was built (r5 signing rule); exit 1 when any did")
     ap.add_argument("--class-out", action="append", default=[], metavar="CLASS=PATH",
-                    help="also write the one-class list (uvn / review_hold / account_hold) from this build, with its own "
+                    help="also write the one-class list (uvn / review_hold / account_hold / uvn_new_rows / "
+                         "uvn_reminder_14) from this build, with its own "
                          "facts header (r5 776: the tick never edits a built list)")
     ap.add_argument("--at-risk", default=AT_RISK)
     ap.add_argument("--ledger", default=LEDGER)
@@ -379,8 +430,9 @@ def _main(argv: list[str] | None = None) -> int:
     outs = []
     for spec in a.class_out:
         cls, _, path = spec.partition("=")
-        if cls not in ("uvn", "review_hold", "account_hold", NEW_ROWS) or not path:
-            ap.error(f"--class-out {spec!r}: want CLASS=PATH with CLASS uvn / review_hold / account_hold / {NEW_ROWS}")
+        if cls not in ("uvn", "review_hold", "account_hold", NEW_ROWS, REMINDER) or not path:
+            ap.error(f"--class-out {spec!r}: want CLASS=PATH with CLASS uvn / review_hold / account_hold / {NEW_ROWS} / "
+                     f"{REMINDER}")
         outs.append((cls, path))
     try:
         res = build(ledger_path=a.ledger, holds_path=a.account_holds, at_risk_path=a.at_risk)

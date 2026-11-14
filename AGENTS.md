@@ -1520,6 +1520,29 @@ runs it, and the builder that fills its `people` table does not exist yet.
   from the gate's stdout. It changes no cap, audience, copy or tick, and `verify_notify`'s report is identical
   with it on. Add a campaign only after the one before passed `apply_queue.py verify` on its first 100 sends.
 
+## The day-14 verification reminder: one rule, one follow-up, a signed verdict per body
+
+`uvn-reminder-14` (captain 2026-11-13) is the ONE follow-up of a sent uvn-status ask, from day 14. Doc and the
+measured audience: `docs/credit-verification/verify-request-notes.md` §"The day-14 reminder",
+`data/verif-reask-14d-r1/report.md`.
+
+- **Who may get it is `verify_ledger.reminder14_why` and nothing else** (builder, peek and claim read it). Change the
+  rule there; never filter the audience in the tick or the runner.
+- **It is one follow-up, not an ask.** Never add it to `ASK_CAMPAIGNS`: `REASK_LOCK_DAYS` stays 90 for every first ask.
+- **One reminder per user per ask**: the reminder row's `parent_row` names the ask it follows, and only a live
+  reminder of THAT ask closes the user as `already_sent` (a row with no readable reference closes too). `uvn-status`
+  asks a user once, so today one-per-ask and one-per-user select the same people; a second ask is not reachable
+  through `claim()` today, so the ledger test writes one directly.
+- **Never to someone who replied or sent a document**: `comm_state --reminder` holds on any customer message after
+  the ask, text included. Do not relax that to the wait line's "a text reply is not replied" rule.
+- **It sends only on a signed approve of the exact bytes**, so the first tick after a deploy sends none, and a
+  pending body pins the runner's page. Do not move it to `observe`.
+- **`policies/credit-verify-outbound.json` on node-8 is edited by hand and by `credit-outbound-watchdog.py` (which
+  is not in this repo), and the file carries the delta gate's git-wins marker**, so a deploy of a PR that touches it
+  writes the repo copy over the live one without stopping (without the marker the same deploy halts as a conflict).
+  Diff the live file against the repo before merging a change to it and carry the live values, or the deploy
+  changes caps and arming, a watchdog clamp included.
+
 ## The standing review reads; it never steers
 
 `scripts/standing_review/review.py` (tick `scripts/standing-review-tick.sh`, every 2 h on ak47, the only box that

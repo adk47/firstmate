@@ -502,6 +502,12 @@ readonly CORRECTION_C2_REF="fable-copy-1030-r5/c2"
 readonly NEW_ROWS_N1_ONE="Since we last wrote about your credit requests, another request of yours needs the same thing."
 readonly NEW_ROWS_N1_MANY="Since we last wrote about your credit requests, other requests of yours need the same thing."
 readonly NEW_ROWS_N1_REF="fable-copy-1101-r5/n1"
+# uvn-reminder-14 (captain 2026-11-13 15:08Z, "fix it scale it now" / "see it through": yes on re-asking verification
+# non-responders after 14 days). This copy has NO standing approval: the campaign is `enforce` in
+# policies/outbound-copy-enforce.json, and this script additionally refuses any answer but a signed `approved`
+# for the exact bytes (an `observed` pass is a hold for this campaign), so every sent row carries its own verdict
+# (copy_verdict_id + copy_verdict_sha256 + body_sha256).
+readonly APPROVAL_REF_UVN_REMINDER="captain 2026-11-13 15:08Z order (re-ask verification non-responders after 14 days; one reminder per user per ask); copy uvn-reminder-14 v1, sent only on a signed outbound-copy verdict for these exact bytes (see copy_verdict_id on this row)"
 readonly UVN_NEW_ROWS_COPY_APPROVED=0
 readonly APPROVAL_REF_WITHDRAWAL="$APPROVAL_REF_STANDING_ORDER; withdrawal-confirm copy approved by firstmate under it 2026-10-19 21:21Z (inbox 061, confirmed in 064), sent only for a request the requester withdrew (metadata.withdrawal.by = requester)"
 readonly APPROVAL_REF_STATUS="$APPROVAL_REF_STANDING_ORDER; status notes approved by firstmate under it 2026-10-20 (inbox 070: team-review verbatim; 071: doc-received as credit-trust-llm-t01 drafted it). Not asks."
@@ -1111,6 +1117,16 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live."
     [ "$KIND" = "initial" ] || refuse "uvn-status has no follow-ups: one message per user, ever."
     ;;
+  uvn-reminder-14)
+    # The ONE reminder of a sent uvn-status ask, 14 days on, to a user who neither replied nor sent a document.
+    # Who may get it is the ledger's rule (verify_ledger.reminder14_user_done), read at the peek and inside the claim;
+    # the day the copy states is the ledger's too (ASKED_DAY below), never the payload's.
+    MAX_CREDITS=1000; MAX_LISTED=3; COPY="uvnrem14"; APPROVAL_REF="$APPROVAL_REF_UVN_REMINDER"
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live."
+    [ "$KIND" = "initial" ] || refuse "uvn-reminder-14 is the one follow-up of an ask and has none of its own."
+    [ -z "$REPLY_DUE" ] || refuse "uvn-reminder-14 is an unsolicited reminder, never a reply_due answer."
+    [ -z "$CHANNEL" ] || refuse "uvn-reminder-14 goes in the user's open thread or by email; --channel does not apply."
+    ;;
   uvn-new-rows)
     # fable-copy-1101-r5/n1: the follow-up ask to a TOLD user (a SENT uvn-status ask) about owed rows NO ask named -
     # the approved uvn ask body over those rows only, the n1 opener first. One message per ROW ever (any ask blocks a
@@ -1298,7 +1314,7 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live; wait-apology has one copy, d2's file verbatim."
     [ "$KIND" = "initial" ] || refuse "wait-apology has no follow-ups: one message per user, ever."
     ;;
-  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, decline, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask, wait-apology or credit-approved-elsewhere (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
+  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, decline, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask, wait-apology, uvn-new-rows, uvn-reminder-14 or credit-approved-elsewhere (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
 esac
 # C11 (p1 223): --check-recipient is the dry run that equals the send. It runs every send-time check a real send runs
 # up to the claim (the ledger peek, core_notice, the go-live guards, comm_state, the status-note Intercom reads, the
@@ -1336,7 +1352,7 @@ if [ "$GMO" = 1 ]; then
 fi
 if [ -n "$THREAD" ]; then
   case "$CAMPAIGN" in
-    uvn-status|uvn-new-rows|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask|reply-ref) ;;
+    uvn-status|uvn-new-rows|uvn-reminder-14|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask|reply-ref) ;;
     *) refuse "--conversation (in-thread delivery) applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed, gap-ask, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending and proof-need-ask only." ;;
   esac
   printf '%s' "$THREAD" | grep -qE '^[0-9]{1,24}$' \
@@ -2010,6 +2026,9 @@ if [ "$LIVE" = "1" ]; then
     if [ "$CAMPAIGN" = "uvn-new-rows" ] && [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.prior_uvn_ask // false')" != "true" ]; then
       refuse "n1_no_prior_ask: uvn-new-rows follows a SENT uvn-status ask, and this user has none (the opener would be false); nothing was sent or claimed."
     fi
+    if [ "$CAMPAIGN" = "uvn-reminder-14" ] && [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.prior_uvn_ask // false')" != "true" ]; then
+      refuse "r14_no_prior_ask: uvn-reminder-14 follows a SENT uvn-status ask that is this user's last ask, and the ledger has none (the reminder would be false); nothing was sent or claimed."
+    fi
     if [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.hold.flagged // false')" = "true" ]; then
       printf 'SKIPPED refused-flagged credits=%s (refused %s times; with a human)\n' "$N" "3"; exit 0
     fi
@@ -2029,6 +2048,10 @@ if [ "$LIVE" = "1" ]; then
        && { [ -z "$REPLY_DUE" ] || [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.recent_why // empty')" = "recently_asked" ]; }; then
       if [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.recent_why // empty')" = "recently_asked" ]; then
         printf 'DEFERRED recently-asked credits=%s (this user got an ask in the last 90 days; the credits wait)\n' \
+          "$(printf '%s' "$pending" | "$JQ_BIN" -r 'length')"; exit 3
+      fi
+      if [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.recent_why // empty')" = "not_due" ]; then
+        printf 'DEFERRED not_due credits=%s (the ask this reminder follows is under 14 days old)\n' \
           "$(printf '%s' "$pending" | "$JQ_BIN" -r 'length')"; exit 3
       fi
       printf 'DEFERRED messaged_7d credits=%s (a note from this gate in the last 7 days)\n' "$(printf '%s' "$pending" | "$JQ_BIN" -r 'length')"; exit 3
@@ -2097,7 +2120,7 @@ if [ "$LIVE" = "1" ] && [ -n "$GATE_FACTS_HELPER" ] && [ -r "$GATE_FACTS_HELPER"
   if GATE_FACTS_FILE="$(mktemp "$GATE_FACTS_DIR/facts.XXXXXXXXXX" 2>/dev/null)"; then
     trap 'rm -f "$GATE_FACTS_FILE"' EXIT
     "$PY_BIN" -I "$GATE_FACTS_HELPER" read \
-        --campaign "$(if [ "$CAMPAIGN" = "uvn-new-rows" ]; then echo uvn-status; else printf '%s' "$CAMPAIGN"; fi)" \
+        --campaign "$(if [ "$CAMPAIGN" = "uvn-new-rows" ] || [ "$CAMPAIGN" = "uvn-reminder-14" ]; then echo uvn-status; else printf '%s' "$CAMPAIGN"; fi)" \
         --copy "$COPY" --user-id "$USER_ID" --request-ids "$(ids_csv "$INPUT")" --reply-due "${REPLY_DUE:-}" \
         >"$GATE_FACTS_FILE" 2>/dev/null \
       || : >"$GATE_FACTS_FILE"
@@ -2168,6 +2191,21 @@ DUE_LABEL=""
 if [ -n "$DUE_DAY" ]; then
   DUE_LABEL="$(due_label "$DUE_DAY")"
 fi
+# uvn-reminder-14 states the day we asked ("On October 24 we asked ..."). That day is the LEDGER's: the day of the
+# sent uvn-status ask this reminder follows (verify_ledger.reminder14_ask), read here on every path that renders - a
+# preview included - and never taken from the payload or the caller. No ask on the ledger: nothing is rendered.
+ASKED_DAY="" ASKED_LABEL=""
+if [ "$CAMPAIGN" = "uvn-reminder-14" ]; then
+  [ -f "$LEDGER" ] || refuse "r14_no_ledger: uvn-reminder-14 states the day of the ask, which only the ledger ($LEDGER) knows; nothing was rendered, sent or claimed."
+  r14="$(ledger pending --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" --request-ids "$(ids_csv "$INPUT")")" \
+    || die "the ledger read failed; refusing to render a reminder without the day of its ask."
+  ASKED_DAY="$(printf '%s' "$r14" | "$JQ_BIN" -r '.asked_day // empty')"
+  printf '%s' "$ASKED_DAY" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
+    || refuse "r14_no_prior_ask: uvn-reminder-14 follows a SENT uvn-status ask that is this user's last ask, and the ledger has none (the reminder would be false); nothing was rendered, sent or claimed."
+  ASKED_LABEL="$(day_label "$ASKED_DAY")" || die "the ask day '$ASKED_DAY' could not be rendered."
+  [ -n "$ASKED_LABEL" ] || die "the ask day '$ASKED_DAY' could not be rendered."
+fi
+readonly ASKED_DAY ASKED_LABEL
 # NO after-rejection note exists any more (Fable ruling 79 denial, 2026-11-04; dispatch
 # decline-copy.md; Aaron 2026-10-29 wording rule). The deleted copy named ONE of five reasons
 # ("it doesn't name you", "it is for a different track", "it is for a different role", "we
@@ -2415,6 +2453,26 @@ def uvn_status($fn; $c; $maxl):
       | ([ $u[0:$maxl][] | qt ]) as $t
       | { subject: "Your Muso credit requests: one thing we still need",
           segs: ([ {p: "Hi \($fn), a quick status update on your credit requests for \($t | andjoin)\(if ($u | length) > $maxl then " (and \(($u | length) - $maxl) more)" else "" end): they're waiting on one thing from you, something that shows your role on each."},
+                  {p: "Any one of these works (a link, photo or PDF is fine):"}, {ul: uvn_list},
+                  {p: "Just reply to this message with it. You will see each credit on your profile as soon as it is approved, and we will let you know here if anything else is needed."} ] + sig) }
+    end;
+# uvn-reminder-14 v1 (captain 2026-11-13 15:08Z): the one reminder of a sent uvn-status ask. It says when we asked
+# ($asked, the ledger's day), that we have not received it, and repeats the ask's own list and closing word for word
+# (uvn_list, so Caroline's ask-once guard reads it as the ask). No deadline, no consequence, nothing promised.
+# Singular/plural keys on DISTINCT TRACKS, as uvn_status does.
+def uvn_reminder14($fn; $c; $maxl; $asked):
+  (utitles($c) | length) as $n
+  | if $n == 1 then
+      ($c[0] + {role: ([ $c[].role | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0) ] | reduce .[] as $r ([]; if index([$r]) then . else . + [$r] end) | join(", "))}) as $x
+      | { subject: "Reminder: your Muso credit request still needs one thing",
+          segs: ([ {p: "Hi \($fn), on \($asked) we asked for something that shows your \($x.role | role_credits) on \($x.track_title | qt) by \($x.artist_name). We haven't received it yet, so your credit request is still waiting."},
+                  {p: "Any one of these works (a link, photo or PDF is fine):"}, {ul: uvn_list},
+                  {p: "Just reply to this message with it. You will see the credit on your profile as soon as it is approved, and we will let you know here if anything else is needed."} ] + sig) }
+    else
+      utitles($c) as $u
+      | ([ $u[0:$maxl][] | qt ]) as $t
+      | { subject: "Reminder: your Muso credit requests still need one thing",
+          segs: ([ {p: "Hi \($fn), on \($asked) we asked for something that shows your role on your credit requests for \($t | andjoin)\(if ($u | length) > $maxl then " (and \(($u | length) - $maxl) more)" else "" end). We haven't received it yet, so they are still waiting."},
                   {p: "Any one of these works (a link, photo or PDF is fine):"}, {ul: uvn_list},
                   {p: "Just reply to this message with it. You will see each credit on your profile as soon as it is approved, and we will let you know here if anything else is needed."} ] + sig) }
     end;
@@ -2740,6 +2798,7 @@ def gap_ask($fn; $c; $maxl):
    elif $copy == "withdrawal" then withdrawal_confirm(.credits)
    elif $copy == "refundconfirm" then refund_confirm($fn; .refund)
    elif $copy == "uvn" then uvn_status($fn; .credits; $maxl)
+   elif $copy == "uvnrem14" then uvn_reminder14($fn; .credits; $maxl; $asked)
    elif $copy == "gap" then gap_ask($fn; .credits; $maxl)
    elif $copy == "waitapol" then wait_apology($fn; .credits; $maxl; (.apology // {}))
    elif $copy == "proofneed" then proof_need_ask($fn; .credits; .need; $maxl)
@@ -2765,7 +2824,7 @@ render() { # <input-json> -> {subject, text, html}
   printf '%s' "$1" | "$JQ_BIN" -c --argjson maxl "$MAX_LISTED" --arg copy "$COPY" --arg kind "$KIND" \
     --argjson decline_claim "$DECLINE_CLAIM" \
     --arg ack "$MERGE_CLAIM_FIRST_PROOF_ACK" --argjson mcfproof "${MCF_PROOF:-null}" \
-    --arg due "$DUE_LABEL" --arg mtype "$MESSAGE_TYPE" --arg day "$DAY" "$RENDER_JQ"
+    --arg due "$DUE_LABEL" --arg mtype "$MESSAGE_TYPE" --arg day "$DAY" --arg asked "${ASKED_LABEL:-}" "$RENDER_JQ"
 }
 
 # leak_reason <rendered-json>: empty when clean. Same patterns as a customer-facing
@@ -3154,7 +3213,7 @@ for_each_account_contact() { # <fn>: the first non-empty answer of <fn> over thi
 # The clock G1 reads; the test copy pins it (INTERCOM_VERIFY_TEST_NOW, epoch) so the 24h rule is testable.
 g1_now() { if [ "$TESTABLE" = "1" ] && [ -n "${INTERCOM_VERIFY_TEST_NOW:-}" ]; then printf '%s' "$INTERCOM_VERIFY_TEST_NOW"; else date -u +%s; fi; }
 GOLIVE=0
-case "$CAMPAIGN:$COPY" in merge-pending:*|merge-claim-first:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*|uvn-new-rows:*|proof-need-ask:*|credit-approved-elsewhere:*) GOLIVE=1 ;; esac
+case "$CAMPAIGN:$COPY" in merge-pending:*|merge-claim-first:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*|uvn-new-rows:*|uvn-reminder-14:*|proof-need-ask:*|credit-approved-elsewhere:*) GOLIVE=1 ;; esac
 # QA #1517: every reply_due answer, whatever its class, passes the go-live recipient gates (G1-G5; G2's opener rule is
 # replaced by the verified trigger for reply_due only)
 [ -z "$REPLY_DUE" ] || GOLIVE=1
@@ -3349,6 +3408,9 @@ if [ "$MCF_SET" = "1" ] && [ -n "${CONTACT_ID:-}" ] && [ "$CONTACT_ID" != "$MCF_
 fi
 NIE_ARGS=(); [ "$NIE_BODY" = "1" ] && NIE_ARGS=(--nothing-needed-body)
 C2_ARGS=(); [ -n "${C2:-}" ] && C2_ARGS=(--correction)
+# uvn-reminder-14: for comm_state it IS the uvn ask (every wait-line hold applies), plus --reminder: ANY customer
+# message after the ask, a text reply included, holds it (never re-ask someone who replied)
+R14_ARGS=(); [ "$CAMPAIGN" = "uvn-reminder-14" ] && R14_ARGS=(--reminder)
 if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
   # The user's communication state, read from the live stores RIGHT NOW (captain 18:2xZ; comm_state.py): the
   # "wait for our message" lines never go to anyone with a document or reply on file (they get R1 or nothing), R1
@@ -3357,10 +3419,10 @@ if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
   [ -r "$COMM_STATE_HELPER" ] || { echo "COMM STATE CHECK NOT POSSIBLE: $COMM_STATE_HELPER is missing; nothing was sent or claimed" >&2; exit 4; }
   set +e
   # uvn-new-rows IS the uvn ask for comm_state (the same owes / documents / decision rules)
-  CS="$(with_gate_facts "$PY_BIN" -I "$COMM_STATE_HELPER" check --campaign "$(if [ "$CAMPAIGN" = "uvn-new-rows" ]; then echo uvn-status; else printf '%s' "$CAMPAIGN"; fi)" --copy "$COPY" --user-id "$USER_ID" \
+  CS="$(with_gate_facts "$PY_BIN" -I "$COMM_STATE_HELPER" check --campaign "$(if [ "$CAMPAIGN" = "uvn-new-rows" ] || [ "$CAMPAIGN" = "uvn-reminder-14" ]; then echo uvn-status; else printf '%s' "$CAMPAIGN"; fi)" --copy "$COPY" --user-id "$USER_ID" \
         --request-ids "$ALL_IDS" --contact-id "$CONTACT_ID" \
         --conversation "$(if [ "$R1LIKE" = "1" ] || [ "$COPY" = "proofneed" ]; then printf '%s' "${fconv:-}"; else printf '%s' "${THREAD:-}"; fi)" \
-        --reply-due "${REPLY_DUE:-}" ${NIE_ARGS[@]+"${NIE_ARGS[@]}"} ${C2_ARGS[@]+"${C2_ARGS[@]}"} \
+        --reply-due "${REPLY_DUE:-}" ${NIE_ARGS[@]+"${NIE_ARGS[@]}"} ${C2_ARGS[@]+"${C2_ARGS[@]}"} ${R14_ARGS[@]+"${R14_ARGS[@]}"} \
         --doc-sha "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '([.need.doc_sha // empty] + (.need.doc_shas // [])) | unique | join(",")')" \
         --doc-at "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.need.doc_received_at // ""')" \
         --need "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.need.code // ""')" \
@@ -3499,7 +3561,7 @@ recently_messaged() { # <contact-id> -> prints the reason when we wrote to them 
   done
   return 0
 }
-case "$CAMPAIGN" in uvn-status|uvn-new-rows|status-doc-received|status-team-review|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask|credit-approved-elsewhere) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
+case "$CAMPAIGN" in uvn-status|uvn-new-rows|uvn-reminder-14|status-doc-received|status-team-review|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask|credit-approved-elsewhere) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
 # A claim ask never crosses a person: any admin or Caroline reply to this user in the last 7
 # days defers the note AND its reminder (nothing closed; the next run looks again; a reminder
 # deferred past the day before the close day is never sent).
@@ -3521,7 +3583,9 @@ if [ "$STATUSLIKE" = "1" ] && [ "$LIVE" = "1" ]; then
     s2n="$("$PY_BIN" -I "$STAGE2_HELPER" --db "$PROOF_DB" gap-credits --outcome no_document --request-ids "$ALL_IDS" --user-id "$USER_ID" 2>/dev/null || true)"
     [ "$(printf '%s' "$s2n" | "$JQ_BIN" -r '.eligible // false' 2>/dev/null || echo false)" != "true" ] || S2_NODOC=1
   fi
-  if { [ "$CAMPAIGN" = "uvn-status" ] || [ "$CAMPAIGN" = "uvn-new-rows" ]; } && [ "$S2_NODOC" != "1" ]; then
+  # uvn-reminder-14 ALWAYS takes the attachment scan: "never re-ask someone who sent documents" has no stage-2
+  # shortcut - an attachment we judged unreadable is still a person who answered, and a person reads that thread
+  if { { [ "$CAMPAIGN" = "uvn-status" ] || [ "$CAMPAIGN" = "uvn-new-rows" ]; } && [ "$S2_NODOC" != "1" ]; } || [ "$CAMPAIGN" = "uvn-reminder-14" ]; then
     DOCS_WHY="$(for_each_account_contact docs_submitted)"
     if [ -n "$DOCS_WHY" ]; then
       [ "$ACTION" != "post" ] || ledger skip --campaign "$CAMPAIGN" --request-ids "$ALL_IDS" >/dev/null || die "the ledger write failed."
@@ -3954,10 +4018,15 @@ case "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r 'if .result == "recent" and .reason 
     printf 'HELD reply_ref_pick_changed credits=%s; nothing was sent or claimed\n' "$N"
     printf '  (at the claim: %s)\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.reason // ""')"; exit 3 ;;
   no_prior_ask)
+    [ "$CAMPAIGN" != "uvn-reminder-14" ] \
+      || refuse "r14_no_prior_ask: uvn-reminder-14 follows a SENT uvn-status ask that is this user's last ask, and the ledger has none; nothing was sent or claimed."
     refuse "n1_no_prior_ask: uvn-new-rows follows a SENT uvn-status ask, and this user has none; nothing was sent or claimed." ;;
   user_done)
     printf 'SKIPPED %s credits=%s\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.reason')" "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')"; exit 0 ;;
   recent)
+    if [ "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.reason // ""')" = "not_due" ]; then
+      printf 'DEFERRED not_due credits=%s (the ask this reminder follows is under 14 days old)\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')"; exit 3
+    fi
     printf 'DEFERRED messaged_7d credits=%s (a note from this gate in the last 7 days)\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')"; exit 3 ;;
   no_channel)
     printf 'HELD no_channel credits=%s (%s); nothing was sent\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')" \
@@ -4041,10 +4110,18 @@ elif [ "$cg_rc" = 4 ] && [ "$CG_RESULT" = "observed" ] && [ "$CG_MODE" = "observ
   [[ "$COPY_VERDICT_ID" =~ ^ocv-[0-9a-f]{16}$ ]] && [[ "$COPY_VERDICT_SHA" =~ ^[0-9a-f]{64}$ ]] || { COPY_VERDICT_ID=""; COPY_VERDICT_SHA=""; }
   COPY_REVIEW="observed:$CG_REVIEW"
 fi
+# uvn-reminder-14 has no standing copy approval, so only a SIGNED approve of these bytes sends it. The policy lists it
+# under `enforce`; this is the belt for the day that file is edited or replaced: an `observed` pass is a hold here.
+R14_OBSERVED=0
+if [ "$CAMPAIGN" = "uvn-reminder-14" ] && [ "$COPY_REVIEW" != "approved" ]; then
+  [ -z "$COPY_REVIEW" ] || R14_OBSERVED=1
+  COPY_REVIEW=""
+fi
 if [ -z "$COPY_REVIEW" ]; then
   cg_why="$(printf '%s' "$CG" | "$JQ_BIN" -r '.reason // ""' 2>/dev/null || true)"
   [ -n "$cg_why" ] || cg_why="copy_gate_error:the gate gave no readable answer (rc=$cg_rc)"
   if { [ "$cg_rc" = 0 ] && [ "$CG_RESULT" = "approved" ]; } || [ "$cg_rc" = 4 ]; then cg_why="copy_gate_error:the gate's answer does not name this body or a verdict"; fi
+  [ "$R14_OBSERVED" != "1" ] || cg_why="copy_review_required:uvn-reminder-14 sends only on a signed approve, and the gate answered in observe mode"
   ledger hold-copy-review --message-row "$ROW_ID" --reason "copy_review_hold: ${cg_why:0:300}" --body-sha256 "$COPY_SHA_LOCAL" >/dev/null \
     || die "the copy gate did not approve this message and the hold could not be ledgered; nothing was sent (row $ROW_ID stays claimed for a human)."
   printf 'DEFERRED %s credits=%s (the outbound copy gate has not approved this exact message; nothing was sent)\n' "${cg_why%%:*}" "$NC"

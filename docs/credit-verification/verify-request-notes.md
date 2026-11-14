@@ -743,17 +743,18 @@ its 600-entry page, so whenever it starts more than 1,800 s into the tick it wal
 entries instead of 600 (329 at the 3,963 s above). A 200-entry family's estimate is 1,900 s (2,300 s at the full 250
 cap), so it is cut only when it starts past 5,000 s (4,600 s).
 
-## Two pages: 200 entries for every paged family, 600 for the one that sends (`[key=walk-size]`, `[key=send-page-per-family]`, 2026-11-13)
+## Three pages: 200 entries for every paged family, 600 for the one that sends, 100 for the reminder (`[key=walk-size]`, `[key=send-page-per-family]`, 2026-11-13)
 
-A paged family (wait-apology, reply-due, uvn-status, r1, proof-need-ask) walks one page per tick, counted in list
-entries that still need a live-gate check. `scripts/credit-verify-outbound.sh` has two page sizes:
+A paged family (wait-apology, reply-due, uvn-status, r1, proof-need-ask, uvn-reminder-14) walks one page per tick,
+counted in list entries that still need a live-gate check. `scripts/credit-verify-outbound.sh` has three page sizes:
 
 | knob | default | who walks it |
 |---|---|---|
 | `CHECK_ENTRIES` | 200 | every paged family |
 | `CHECK_ENTRIES_SEND` | 600 | **uvn-status free only** - the family that sends the notes |
+| `R14_ENTRIES` | 100 | **uvn-reminder-14 paid and free** - its list is already cut to the people the ledger says are due |
 
-Both are code constants in production (`cfg()`), and `page_entries()` picks one from the family's own name, segment
+All three are code constants in production (`cfg()`), and `page_entries()` picks one from the family's own name, segment
 and subcommand - the same arguments that key its cursor and its policy `tick_cap` - never from where the call sits in
 `credit_families()`. `uvn-status paid` stays on 200, and so does `reply-due free`, which runs the same subcommand on
 the same segment.
@@ -765,20 +766,25 @@ the same segment.
   free (reply-due paid and free, uvn-status paid, r1 paid). Each of them then walked up to 600 entries a pass
   (~2,400 s at 4 s an entry) where it had walked 200 (~800 s), and every second they spent started the sending
   family later, where the section above cuts its page. The raise slowed four families and shrank the page of the one
-  it was for. This change corrects that: the larger page is the sending family's alone.
+  it was for. This change corrects that: the larger page is the sending family's alone. The reminder's own 100-entry
+  page is the third size for the opposite reason - the ledger has already cut its list to the people who are due, so
+  a short page fills its 50-a-tick cap and it does not need one.
 - **The deadline arithmetic, one family at a time.** The tick's own guard computes `SEND_WORST_S = 2 x
   max(CHECK_ENTRIES_SEND, CAP) x CHECK_S_PER_USER + RESERVE_PAD_S` = `2 x 600 x 4 + 300` = 5,100 s against
   `TICK_HARD_S` 6,900 s: 1,800 s to spare. The largest send page that fits a tick alone is 825. A 200-entry family's
   worst case is `2 x 200 x 4 + 300` = 1,900 s, or 2,300 s where its cap is the full 250 (the walk is
   `max(page, cap)`).
-- **The deadline arithmetic, the mixed case. It does not fit.** The four families that always run ahead
-  (reply-due paid and free, uvn-status paid, r1 paid) at their worst cost `4 x (2 x 200 x 4)` = 6,400 s, and the
-  sending family's own check and bodies cost `2 x 600 x 4` = 4,800 s: 11,200 s against 6,900 s. wait-apology paid
-  and free run ahead too whenever a paid-status plan exists for the day, so it is up to six: `6 x 1,600` = 9,600 s
-  ahead and 14,400 s mixed - worse, never better. It did not fit with every family on 200 either (`5 x 1,600` =
-  8,000 s). After the four always-present worst-case families the send page that still fits is
-  `(6,900 - 6,400 - 300) / 8` = 25 entries; after six it is negative, so the cut floors at `PAGE_FLOOR` and the
-  family waits. The worst case is
+- **The deadline arithmetic, the mixed case. It does not fit.** The families that always run ahead
+  (reply-due paid and free, uvn-status paid, r1 paid at their 200-entry page; uvn-reminder-14 paid and free, which runs
+  between the paid families and the free ask at 100, and starts no family at all when nobody is due) cost
+  `4 x (2 x 200 x 4) + 2 x (2 x 100 x 4)` = 8,000 s, and the sending family's own check and bodies cost
+  `2 x 600 x 4` = 4,800 s: 12,800 s against 6,900 s. wait-apology paid and free run ahead too whenever a paid-status
+  plan exists for the day, adding `2 x (2 x 200 x 4)` = 3,200 s, so the
+  mixed case is up to eight families, 11,200 s ahead and 16,000 s mixed - worse, never better. It did not fit with
+  every family on 200 either (`5 x 1,600` = 8,000 s). With the always-present families ahead,
+  `6,900 - 8,000 - 300` is already negative, so the cut floors at `PAGE_FLOOR` and the family waits; while the four
+  200-entry families were the only ones ahead the send page that still fit was `(6,900 - 6,400 - 300) / 8` = 25
+  entries. The worst case is
   an estimate of 4 s for every entry, twice, in every family; the tick does not rely on it holding, it measures
   `elapsed` when each family starts and cuts the page then. `TICK_HARD_S` is not raised for this.
 - **600 is the most the sending family walks, not what it is promised.** It gets the whole page only when it starts
@@ -786,15 +792,18 @@ the same segment.
   600-entry pages; it does not make them faster than they were at 200. How many notes a tick sends is measured from
   `run.log` after deploy, not derived from a ratio.
 - **Nothing else moved.** `CVO_CAP`, the tick budget and deadline, the per-user estimates and every stop rule are as
-  they were. Accepts are still bounded by the cap and by the policy `tick_cap` (uvn-status free: 60 a tick).
+  they were. Accepts are still bounded by the cap and by the policy `tick_cap` (uvn-status: 50 a tick per segment,
+  paid and free).
 - **What it costs, on the sending family.** The check and the bodies each walk the page, so its read-only gate calls
   go from at most 400 to at most 1,200 a tick. And the runner's unmeasured stop is a share of the page
   (`max(5, 10%)`): on a full 600-entry page it stops at **60** unmeasured users where a 200-entry page stops at 20.
   A slow gate is therefore noticed three times later on the sending family - up to 60 users timed out before the run
-  fails loudly instead of 20. Every other paged family keeps the 20-user bar.
+  fails loudly instead of 20. Every other 200-entry paged family keeps the 20-user bar; the reminder's 100-entry page
+  stops at 10 (`max(5, 10%)` of what it walks).
 - **Tests.** `scripts/tests/credit-verify-outbound.bats`: the `[key=send-page-per-family]` cases pin 200 / 600, that
   only uvn-status free is handed the larger page, and the mixed-case numbers above; the `[key=walk-size]` cases pin
-  the fit and what happens one entry past 825. A global raise, or a send page that does not fit, fails in CI.
+  the fit and what happens one entry past 825, and the reminder's own `R14_ENTRIES=100` page (`uvn-reminder-14` row).
+  A global raise, a send page that does not fit, or a page moved onto another family fails in CI.
 - **Revert.** Set `CHECK_ENTRIES_SEND` to 200 in the script and in the bats cases that name 600 as the shipped send
   page (the `--print-config` expectation, the `[key=walk-size]` shipped-page case and the two
   `[key=send-page-per-family]` cases).
@@ -882,6 +891,60 @@ your documents") opens with the approved correction `fable-copy-1030-r5/c2`. Tha
 - **A corrected ask goes by email, as its own message** (the gate refuses `--conversation` with /c2).
 - **Disarm.** Remove the row, or set `live` to false. The tick reads the policy at every start; no deploy.
 - This is not the first send of the class: 390 corrected asks went on 2026-11-01 (ledger 6338-6994).
+
+## The day-14 reminder (`--campaign uvn-reminder-14`, captain 2026-11-13 15:08Z)
+
+One reminder of a SENT uvn-status ask, from day 14, to a user who has not replied, has not sent a document and has
+had no other credit note from us since the ask. One per user per ask: the reminder row names the ask it follows, so
+only a reminder of THAT ask closes it (uvn-status asks a user once, so today one-per-ask and one-per-user select the
+same people). Why: the 90-day one-ask lock
+(`verify_ledger.REASK_LOCK_DAYS`) held every asked user out of every later tick, so sends fell to what the day's new
+users allowed. The lock is unchanged for every first ask. The reminder is not in `ASK_CAMPAIGNS`: it never restarts
+or shortens the lock, and `asked_within()` never counts it.
+
+- **Who.** Measured read-only on node-8 on 2026-11-13 (`data/verif-reask-14d-r1/report.md`): 1,359 users whose last
+  ask was 14 or more days old, with a request still waiting in core, no document and no reply; 1,353 of them were
+  last asked by uvn-status, and 1,110 of those had no follow-up from any sender.
+- **The rule is one function**, `verify_ledger.reminder14_why`, read by the audience builder
+  (`owing_proof.py`, class `uvn_reminder_14`, written to `owing-reminder-14.json`), by the gate's peek and inside
+  `claim()`. The reasons it gives, by name, are in its docstring. Deferrals: `no_prior_ask` (the user's last ask is
+  not a sent uvn-status ask), `not_due`, `messaged_7d`. Closed for good: `already_sent`, `proof_received` (a
+  tagged document, or one that was: an attachment counted on the note or a document review on record, since a
+  rejected review clears the tag), `replied`,
+  `already_reminded` (a follow-up of any kind from any sender, matched by account email too: the 2026-11-09
+  `reminder-1` emails carry no account id), `noted_since_ask` (any other credit note on or after the ask day). Each
+  build logs how many users each reason left out.
+- **It lists only the rows the ask named.** A row opened since is the `uvn-new-rows` class and never holds or enters
+  the reminder.
+- **At the send**, for `comm_state` it is the uvn ask (documents on file, an acknowledgement, a decision already
+  told and the 7-day rule all hold it) with `--reminder`: ANY customer message after the earliest ask on record holds
+  it, a text reply included. No ask on record or an unreadable thread sends nothing. The attachment scan always
+  runs; a stage-2 `no_document` verdict does not skip it.
+- **Copy.** `uvn_reminder14` in the gate: "on <day> we asked for something that shows your <role> credit on
+  <title> by <artist>. We haven't received it yet, so your credit request is still waiting.", then the ask's own
+  list and closing. The day is the ledger's ask day, never the payload's. No deadline and no consequence. The
+  campaign is `ask` in `gate.py`'s `CAMPAIGN_STAGE` (it is an ask), and the reviewer host must be running a tree
+  with that row: `gate.review()` skips as `skipped_bad_request` any pending body whose recorded stage differs from
+  its own `stage_of(campaign)`, so a host still on the old tree reviews nothing and no reminder is approved or sent.
+  Deploy order: merge, deploy node-8, then re-run `scripts/outbound_copy/install-reviewer-host.sh` on the reviewer
+  host from a tree containing the change.
+- **No send without a signed verdict on the exact bytes.** The campaign is `enforce` in
+  `policies/outbound-copy-enforce.json`, and the gate also holds an observe-mode pass for this campaign, so removing
+  that line does not send it unreviewed. Each user's body is its own review. A body waiting on its verdict pins the
+  page for THIS campaign only (`uvn_status.copy_verdict_pending`, applied when `campaign == REMINDER`): the next run
+  starts at that user, where every other family's cursor still steps past a waiting body. So the first tick after a
+  deploy queues bodies and sends none, and a tick that walks only unreviewed users sends none.
+- **Caps.** 50 per tick, ONE budget across paid and free, paid first (`R14_CAP`, the policy's `tick_cap` can only
+  lower it); each segment walks up to 100 list entries a tick (`R14_ENTRIES`, the page sizes are owned by §"Three
+  pages"); 1,200 per segment per UTC day under the shared credit cap; one message per user per UTC day as for
+  every campaign. Raise `R14_CAP` by PR after three clean ticks.
+- **Arming.** Its own row, `armed_families["uvn-reminder-14"]`. No row, `live: false` or no date: it checks and
+  never applies. A policy with no `daily_cap` row or no group for it skips the family and does not stop the tick.
+- **Disarm.** Remove the row or set `live` to false; the tick reads the policy at every start.
+- **The policy file on node-8 was hand-edited** (lower caps, `armed_families`) and a deploy replaces it whenever a
+  PR touches it. The PR that added this family carried every value live on 2026-11-13 unchanged (sha256
+  `4321089f...`, read 18:22Z and again 22:26Z); the file's `_doc` itemises each one old -> new. Diff the live file
+  against the repo before deploying any change to it.
 
 ## What bounds a tick's sends: order, the claim slice, the not-reached page, class C, the gate's reads (`[key=claims-never-starved]`, `[key=class-c-precheck]`, `[key=gate-reads-beside]`, 2026-11-12)
 

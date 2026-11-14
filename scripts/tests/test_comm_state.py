@@ -2165,6 +2165,103 @@ class CorrectionCooldownTest(unittest.TestCase):
         self.assertTrue(any(r.startswith("messaged_7d") for r in other["reasons"]), other)       # uvn-status only
 
 
+class UvnReminder14Test(CommStateTest):
+    """uvn-reminder-14 (captain 2026-11-13 15:08Z): the one reminder of an unanswered uvn-status ask. For comm_state it
+    IS the uvn ask (every wait-line hold applies) plus `reminder=True`: ANY customer message after the ask holds it."""
+    ASK = (datetime.now(timezone.utc) - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    EPOCH = datetime.fromisoformat(ASK.replace("Z", "+00:00")).timestamp()
+
+    def remind(self, reminder=True):
+        return cs.check("uvn-status", "uvnrem14", UID, ["r1"], "c1", ic=self.ic, fraud=lambda uid, q: [],
+                        query=lambda sql: [["0", "0"]] if "proof_required_owed" in sql
+                        else ([list(r) for r in self.core] if "credit_requests" in sql else []),
+                        reminder=reminder)
+
+    def asked(self):
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        self.note("uvn-status", at=self.ASK)
+
+    def text(self, dt, body="is there anything I have to provide?", author="user"):
+        self.ic.convs["9"] = {"id": "9", "source": {"author": {"type": "admin"}},
+                              "conversation_parts": {"conversation_parts": [
+                                  {"id": "2", "part_type": "comment", "author": {"type": author}, "body": body,
+                                   "created_at": self.EPOCH + dt}]}}
+
+    def test_an_unanswered_ask_may_be_reminded(self):
+        self.asked()
+        res = self.remind()
+        self.assertFalse(res["hold"], res)
+
+    def test_a_text_reply_after_the_ask_holds_the_reminder_and_only_the_reminder(self):
+        self.asked()
+        self.text(3600)
+        res = self.remind()
+        self.assertTrue(res["hold"], res)
+        self.assertTrue(any(r.startswith("replied_since_ask:") for r in res["reasons"]), res)
+        # Fable 199 stands for the wait line itself: the same thread does not hold a plain uvn-status check
+        self.assertFalse(any(r.startswith("replied_since_ask:") for r in self.remind(reminder=False)["reasons"]))
+
+    def test_a_message_before_the_ask_or_from_us_is_not_a_reply(self):
+        self.asked()
+        self.text(-3600)                                         # the customer wrote BEFORE we asked
+        self.assertFalse(self.remind()["hold"], self.remind())
+        self.text(3600, body="Hi, just checking in", author="admin")     # our own comment
+        self.assertFalse(any(r.startswith("replied_since_ask:") for r in self.remind()["reasons"]))
+
+    def test_the_window_opens_at_the_EARLIEST_ask_on_record(self):
+        # core's own proof-request stamp is 5 days NEWER than the ledger's ask; a reply between the two is still a reply
+        self.core = [["r1", "user_verification_needed", "",
+                      (datetime.now(timezone.utc) - timedelta(days=15)).strftime("%Y-%m-%dT%H:%M:%SZ")]]
+        self.note("uvn-status", at=self.ASK)
+        self.text(86400)                                         # one day after the ledger's ask, 4 before core's
+        res = self.remind()
+        self.assertTrue(any(r.startswith("replied_since_ask:") for r in res["reasons"]), res)
+
+    def test_a_document_holds_it_like_any_wait_line(self):
+        self.asked()
+        self.ic.convs["9"] = {"id": "9", "source": {"author": {"type": "user"}, "attachments": [{"name": "split.pdf"}],
+                                                    "created_at": self.EPOCH + 60}}
+        res = self.remind()
+        self.assertTrue(res["hold"], res)
+        self.assertTrue(any(r.startswith("proof_on_file:") for r in res["reasons"]), res)
+
+    def test_no_ask_on_record_or_an_unreadable_thread_is_unknown_never_a_send(self):
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        with self.assertRaises(cs.Unknown):                      # nothing to remind of
+            self.remind()
+        self.asked()
+
+        def down(method, path, body=None):
+            raise cs.Unknown("intercom unreadable")
+        self.ic = down
+        with self.assertRaises(cs.Unknown):
+            self.remind()
+
+    def cli(self, *extra):
+        out = io.StringIO()
+        def query(sql):
+            return [["0", "0"]] if "proof_required_owed" in sql else (
+                [list(r) for r in self.core] if "credit_requests" in sql else [])
+        with unittest.mock.patch.object(cs, "trino", query), \
+                unittest.mock.patch.object(cs, "intercom", self.ic), \
+                unittest.mock.patch.object(cs, "fraud_facts", lambda uid, q: []), \
+                contextlib.redirect_stdout(out):
+            rc = cs._main(["check", "--campaign", "uvn-status", "--user-id", str(UID), "--request-ids", "r1",
+                           "--contact-id", "c1", *extra])
+        return rc, json.loads(out.getvalue())
+
+    def test_the_cli_carries_the_flag(self):
+        self.asked()
+        self.text(3600)
+        rc, res = self.cli("--reminder")
+        self.assertEqual(rc, 3, res)
+        self.assertTrue(res["hold"], res)
+        self.assertTrue(any(r.startswith("replied_since_ask:") for r in res["reasons"]), res)
+        rc, plain = self.cli()
+        self.assertNotEqual(rc, 3, plain)
+        self.assertFalse(any(r.startswith("replied_since_ask:") for r in plain["reasons"]), plain)
+
+
 class ReadsBesideTest(unittest.TestCase):
     """[key=gate-reads-beside]: the fraud lens is read BESIDE the request / store / Intercom reads, not after them. On
     node-8 a check() was 12.7 s serial and 7.0 s with the lens beside (user 98255, 2026-11-12), which is the difference

@@ -1367,7 +1367,11 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
           doc_map: dict[str, str] | None = None, doc_intakes: dict[str, str] | None = None,
           query: Query = trino, ic: Intercom = intercom,
           fraud: Callable[[int, Query], list[str]] | None = None, reply_due_part: str = "",
-          nothing_needed_body: bool = False, correction: bool = False) -> dict[str, Any]:
+          nothing_needed_body: bool = False, correction: bool = False, reminder: bool = False) -> dict[str, Any]:
+    # `reminder` (uvn-reminder-14, captain 2026-11-13 15:08Z): this note REMINDS the user of an ask they have not
+    # answered, so for it ANY customer message after that ask holds the send - a text reply included. Fable 199 ("a
+    # text reply is never 'replied'") is about whether a wait line may still go; a reminder says "we have not heard
+    # from you", which a text reply makes false. No ask on record, or an unreadable Intercom, is Unknown: nothing goes.
     # QA #1517 (critical): a reply_due answer ALWAYS takes the full path below (trigger, class, thread, assignee); the
     # 'nothing is needed' fast path is for unsolicited notes only. answer_class keeps that family from owes-proof users.
     if nothing_else(campaign, copy) and not reply_due_part:
@@ -1379,7 +1383,7 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
         # campaign outside the family above - the owes-nothing rule (captain 12:55Z) applies by body, not by name:
         # every other check runs AND a user who owes proof is held
         res = check(campaign, copy, uid, keys, contact_id, conversation=conversation, query=query, ic=ic, fraud=fraud,
-                    reply_due_part=reply_due_part)
+                    reply_due_part=reply_due_part, reminder=reminder)
         owe = owes_proof(uid, query)
         return {**res, "hold": bool(res["hold"] or owe), "reasons": list(res["reasons"]) + [f"nothing_needed_body:{w}" for w in owe]}
     # [key=gate-reads-beside]: the lens reads nothing the reads below produce; it is collected where it always was
@@ -1387,7 +1391,16 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
     core = core_facts(uid, keys, query)
     st = store_facts(uid, keys, core["created"])
     need = None
-    if campaign in WAIT_LINES:
+    replies: list[str] = []
+    if campaign in WAIT_LINES and reminder:
+        # the EARLIEST ask on record (ours or core's): the longer window is the stricter one
+        asks = [a for a in (st["last_ask"], core["last_ask"]) if a]
+        if not asks:
+            raise Unknown("a reminder needs the ask it follows, and no ask is on record for this user")
+        found = intercom_facts(contact_id, min(asks), ic, core["created"], text_after_ask=True)
+        replies = sorted({f for f in found if f.startswith("intercom_reply_after_ask:")})
+        ic_found = [f for f in found if not f.startswith("intercom_reply_after_ask:")]
+    elif campaign in WAIT_LINES:
         ic_found = intercom_facts(contact_id, max(st["last_ask"], core["last_ask"]), ic, core["created"])
         # (documents_on_file() is the same pair of reads, for the render-time caller)
     elif campaign == NEED_ASK:
@@ -1421,6 +1434,8 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
     proof_on_file = bool(docs_all)
     proof_note = (["intercom_only_proof"] if campaign == MERGE_CLAIM_FIRST and ic_found and not st["docs"] else [])
     state, why = decide(campaign, copy, st, core, ic_found, thread, fr, need, last_part.get("last_part"))
+    if replies:
+        why.append("replied_since_ask:" + ",".join(replies)[:300])
     if reply_due_part:
         # [key=reply-due]: answering a user who wrote to us is not an unsolicited note - the 7-day cooldowns do not
         # apply to EXACTLY this one answer; every other rule (decided/told, documents, fraud, thread, identity) does
@@ -1506,6 +1521,9 @@ def _main(argv: list[str] | None = None) -> int:
     c.add_argument("--reply-due", default="", help="[key=reply-due]: the customer part this note answers")
     c.add_argument("--correction", action="store_true",
                    help="uvn-status /c2: this ask corrects our earlier status line (our 7-day cooldown does not apply)")
+    c.add_argument("--reminder", action="store_true",
+                   help="uvn-reminder-14: the note reminds of an unanswered ask, so ANY customer message after that "
+                        "ask (text included) holds it")
     c.add_argument("--nothing-needed-body", action="store_true",
                    help="the rendered note says nothing (else) is needed: hold anyone who still owes proof")
     c.add_argument("--doc-sha", default="", help="proof-need-ask: the checked document's sha256")
@@ -1549,7 +1567,8 @@ def _main(argv: list[str] | None = None) -> int:
                     need_code=a.need, filing_conversation=a.filing_conversation,
                     doc_map=dict(x.split("=", 1) for x in a.doc_map.split(",") if "=" in x),
                     doc_intakes=dict(x.split("=", 1) for x in a.doc_intakes.split(",") if "=" in x),
-                    nothing_needed_body=a.nothing_needed_body, correction=a.correction)
+                    nothing_needed_body=a.nothing_needed_body, correction=a.correction, reminder=a.reminder,
+                    query=trino, ic=intercom)
     except Unknown as exc:
         print(json.dumps({"hold": None, "reasons": [f"unknown: {exc}"]}))
         return 2

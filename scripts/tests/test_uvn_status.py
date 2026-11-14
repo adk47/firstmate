@@ -3572,6 +3572,156 @@ class PerRolePartialAskTests(unittest.TestCase):
         self.assertEqual(rep.no_longer_uvn, 1, rep.note)
 
 
+class UvnReminder14RunnerTest(unittest.TestCase):
+    """uvn-reminder-14 (captain 2026-11-13 15:08Z): the one reminder of a sent uvn-status ask, run by this runner over
+    the owing builder's reminder list. Who may get it is the ledger's rule; the runner defers what the rule defers."""
+
+    # the base class's fixtures only: inheriting UvnStatusTests would re-run every one of its tests in this class
+    setUp, write_list, run_, gate_file = (UvnStatusTests.setUp, UvnStatusTests.write_list, UvnStatusTests.run_,
+                                          UvnStatusTests.gate_file)
+
+    CAMPAIGN = "uvn-reminder-14"
+
+    def ask(self, uid, rid, days, *, sent=True, campaign="uvn-status"):
+        db = verify_ledger.connect(self.ledger)
+        try:
+            when = NOW - timedelta(days=days)
+            c = verify_ledger.claim(db, campaign=campaign, user_key=f"u{uid}@x.com", day=when.strftime("%Y-%m-%d"),
+                                    request_ids=[rid], message_type="email", approved_by="U", approval_ref="r",
+                                    now=when, user_id=str(uid), enforce_cap=False)
+            if sent:
+                verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=f"m{uid}")
+        finally:
+            db.close()
+
+    def listed(self, uids):
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"], "class": "uvn_reminder_14"}
+                      for u in uids]
+        self.write_list()
+
+    def test_it_is_a_runner_campaign_that_asks_and_reads_the_uvn_rows(self):
+        self.assertEqual(uvn_status.REMINDER, self.CAMPAIGN)
+        self.assertIn(self.CAMPAIGN, uvn_status.CAMPAIGNS)
+        self.assertIn(self.CAMPAIGN, uvn_status.ASKS, "documents on file exclude a user from the reminder as from the ask")
+        self.assertEqual(uvn_status.PENDING_STATUSES[self.CAMPAIGN], uvn_status.PENDING_STATUSES["uvn-status"])
+
+    def test_a_user_asked_14_days_ago_reaches_the_gate_under_the_reminder_campaign_over_the_asked_rows_only(self):
+        self.listed([4])
+        self.ask(4, "r4", 14)
+        # r9 opened since the ask: it is the uvn-new-rows class, never a reason to hold the reminder, never in its body
+        rep, gate = self.run_(mode="dry-run", campaign=self.CAMPAIGN, query=replica([4], requests={4: ["r4", "r9"]}))
+        self.assertEqual((rep.unlisted, rep.deferred_users), (0, 0))
+        self.assertEqual([[c["request_id"] for c in p["credits"]] for _, p in gate.calls], [["r4"]])
+        argv = gate.calls[0][0]
+        self.assertEqual(argv[argv.index("--campaign") + 1], self.CAMPAIGN)
+
+    def test_no_sent_ask_an_ask_under_14_days_or_a_note_this_week_defers_before_the_gate_and_closes_nothing(self):
+        for uid, setup, why in ((4, lambda: None, "no_prior_ask"),
+                                (5, lambda: self.ask(5, "r5", 14, sent=False), "no_prior_ask"),
+                                (6, lambda: self.ask(6, "r6", 13), "not_due"),
+                                (7, lambda: (self.ask(7, "r7", 20), self.ask(7, "x7", 3, campaign="claim-status")),
+                                 "messaged_7d")):
+            with self.subTest(why=why, user=uid):
+                self.listed([uid])
+                setup()
+                for mode in ("dry-run", "apply"):
+                    rep, gate = self.run_(mode=mode, campaign=self.CAMPAIGN, query=replica([uid]))
+                    self.assertEqual((gate.calls, rep.deferred_users), ([], 1), (mode, rep.by_reason))
+                    self.assertIn(why, rep.by_reason)
+                db = verify_ledger.connect(self.ledger)
+                try:    # a deferral is never a close: the rows are still this campaign's to send
+                    self.assertEqual(set(verify_ledger.blocked_ids(db, [f"r{uid}"], self.CAMPAIGN)), set())
+                finally:
+                    db.close()
+
+    def test_a_user_with_a_document_on_file_is_never_reminded(self):
+        self.listed([4])
+        self.ask(4, "r4", 20)
+        proof(self.proof, [{"user_id": 4, "request_id": "r4", "kind": "document", "source": "intercom", "ref": "c1",
+                            "proof_at": iso(48)}])
+        rep, gate = self.run_(mode="dry-run", campaign=self.CAMPAIGN, query=replica([4]))
+        self.assertEqual(gate.calls, [])
+
+
+class CopyVerdictPendingPageTest(unittest.TestCase):
+    """An `enforce` campaign's body is held until its reviewer rules on those exact bytes, and the verdict lands between
+    ticks. The one-ever reminder pins its page AT the first user still waiting (a stepped-past user waits a whole
+    rotation of the list for a message already approved); every other family's cursor still steps past."""
+
+    # the base class's fixtures only: inheriting UvnStatusTests would re-run every one of its tests in this class
+    setUp, write_list, run_, gate_file = (UvnStatusTests.setUp, UvnStatusTests.write_list, UvnStatusTests.run_,
+                                          UvnStatusTests.gate_file)
+    ask = UvnReminder14RunnerTest.ask
+
+    CAMPAIGN = "uvn-reminder-14"
+
+    PENDING = "DEFERRED copy_review_pending credits=1 (the outbound copy gate has not approved this exact message; nothing was sent)"
+
+    def gate(self, answers):
+        class Scripted(FakeGate):
+            def __call__(self, argv):
+                res = super().__call__(argv)
+                out = answers.get(str(self.calls[-1][1]["user"]["id"]))
+                return subprocess.CompletedProcess(argv, 3, out, "") if out else res
+        return Scripted(out="POSTED email message=1 credits=1")
+
+    def six(self, campaign=CAMPAIGN):
+        cls = {"class": "uvn_reminder_14"} if campaign == self.CAMPAIGN else {}
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"], **cls}
+                      for u in range(1, 7)]
+        self.write_list()
+        if campaign == self.CAMPAIGN and not getattr(self, "asked_uids", None):
+            self.asked_uids = set(range(1, 7))
+            for u in range(1, 7):
+                self.ask(u, f"r{u}", 20)
+
+    def test_the_reminders_page_ends_at_the_first_user_whose_body_waits_for_its_verdict(self):
+        self.six()
+        rep, gate = self.run_(gate=self.gate({"2": self.PENDING, "4": self.PENDING}), mode="apply", max_users=10,
+                              max_entries=6, campaign=self.CAMPAIGN, query=replica(range(1, 7)))
+        self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["1", "2", "3", "4", "5", "6"],
+                         "a waiting body never stops the walk: everyone behind it is still offered")
+        self.assertEqual((rep.sent_notes, rep.deferred_users, rep.copy_review_waiting), (4, 2, 2))
+        self.assertEqual(rep.page["end"], 1, "raw index of user 2: the next run starts AT them")
+        # the verdict landed: the next run, started at that cursor, sends the two who waited
+        rep2, gate2 = self.run_(gate=self.gate({}), mode="apply", max_users=10, max_entries=6,
+                                start_entry=rep.page["end"], campaign=self.CAMPAIGN, query=replica(range(1, 7)))
+        self.assertEqual([p["user"]["id"] for _, p in gate2.calls][:1], ["2"])
+        self.assertEqual(rep2.copy_review_waiting, 0)
+
+    def test_the_other_families_step_past_a_body_that_waits_for_its_verdict(self):
+        # the pin is the reminder's alone: an ask or a status note re-plans its own rows on the next tick, so ending
+        # their page here would hold every user behind one body for a rotation they do not need to wait
+        for campaign in ("uvn-status", "status-team-review"):
+            with self.subTest(campaign=campaign):
+                self.six(campaign=campaign)
+                rep, gate = self.run_(gate=self.gate({"2": self.PENDING}), mode="apply", max_users=10, max_entries=6,
+                                      campaign=campaign, query=replica(range(1, 7)))
+                self.assertTrue(gate.calls)
+                self.assertEqual((rep.copy_review_waiting, rep.page["end"]), (0, 6))
+
+    def test_an_ANSWER_from_the_copy_gate_never_pins_the_page(self):
+        # a refusal, a rewrite, a lint hit or a gate that could not run is an answer (or a fault), not a wait: pinning
+        # the page on it would hold every user behind one body nobody will ever approve
+        for why in ("copy_review_refuse", "copy_review_rewrite", "copy_lint", "copy_gate_error", "copy_review_required",
+                    "messaged_7d"):
+            with self.subTest(why=why):
+                self.six()
+                rep, _ = self.run_(gate=self.gate({"2": f"DEFERRED {why} credits=1 (held)"}), mode="apply",
+                                   max_users=10, max_entries=6, campaign=self.CAMPAIGN, query=replica(range(1, 7)))
+                self.assertEqual((rep.copy_review_waiting, rep.page["end"]), (0, 6))
+        self.assertTrue(uvn_status.copy_verdict_pending([{"result": "deferred", "reason": "copy_review_pending credits=2 (x)"}]))
+        self.assertFalse(uvn_status.copy_verdict_pending([{"result": "refused", "reason": "copy_review_pending"}]))
+        self.assertFalse(uvn_status.copy_verdict_pending([{"result": "deferred", "reason": "copy_review_pending_x"}]))
+        self.assertFalse(uvn_status.copy_verdict_pending([]))
+
+    def test_a_dry_run_never_reads_a_wait_into_its_page(self):
+        self.six()
+        rep, _ = self.run_(gate=self.gate({"2": self.PENDING}), mode="dry-run", check_recipients=True, max_users=10,
+                           max_entries=6, campaign=self.CAMPAIGN, query=replica(range(1, 7)))
+        self.assertEqual(rep.copy_review_waiting, 0)
+
+
 class ClassCPrecheckTest(unittest.TestCase):
     """[key=class-c-precheck]: on the timer (--no-correction) a class C user - one whose every request in the ask was
     already named by a status line of ours - is set aside by the runner and costs no gate call. On node-8 2026-11-12

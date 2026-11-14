@@ -1,9 +1,36 @@
 {
-  "_doc": "credit-verify-outbound.sh CAPACITY caps (Fable 10-30 23:4xZ: the fixed small daily caps go; the safety is the auto-kill: bounce / spam / unsub > 2 %, any fraud hit, the zero-read, v1's 2 h sample). daily_cap = users messaged per campaign per UTC day by segment (credit: the runner's own segment record; claim: ledger rows of the campaign). shared_daily_cap = every campaign of the group together per UTC day (m2's shared send cap inside notify: credit 2,500 / claim 500; messaging-monitoring-m2, H-DevOps #4598). A campaign with no row or no group never applies (fail closed). Raising a cap is a PR. holds = the Gmail-side DATED WINDOWS [key=dated-windows-are-data] (l1 ruling 2026-11-02, ruling-o-retire-1102.md): a code literal with a date in it is a CI red with a countdown on it. holds.gmail is the /o promise clause (an extra sentence in a uvn-status ask) and the hold on gmail-vouched users: clause_open=false retires it, due_at closes it on the clock. The gate re-reads this file on every run, so closing needs no deploy.",
+  "_doc": "credit-verify-outbound.sh CAPACITY caps (Fable 10-30 23:4xZ: the fixed small daily caps go; the safety is the auto-kill: bounce / spam / unsub > 2 %, any fraud hit, the zero-read, v1's 2 h sample). daily_cap = users messaged per campaign per UTC day by segment (credit: the runner's own segment record; claim: ledger rows of the campaign). shared_daily_cap = every campaign of the group together per UTC day (m2's shared send CEILINGS inside notify: credit 2,500 / claim 500; messaging-monitoring-m2, H-DevOps #4598 - this file's claim cap is the live 25, under that ceiling). A campaign with no row or no group never applies (fail closed). Raising a cap is a PR. holds = the Gmail-side DATED WINDOWS [key=dated-windows-are-data] (l1 ruling 2026-11-02, ruling-o-retire-1102.md): a code literal with a date in it is a CI red with a countdown on it. holds.gmail is the /o promise clause (an extra sentence in a uvn-status ask) and the hold on gmail-vouched users: clause_open=false retires it, due_at closes it on the clock. The gate re-reads this file on every run, so closing needs no deploy. Reviewed baseline: deploy overwrites - 2026-11-13 (verif-reask-14d-r1): node-8 holds a copy of this file edited in place (sha256 4321089f93b3a4422925f468e794bd4ef7c7395b6ba7587d133e9d2b4e5fb3d9, mtime 2026-11-13T07:01Z, read 18:22Z and again 22:26Z), which the deploy's delta gate would otherwise stop on. Repo aligned to the live node-8 values - these are NOT new decisions, they are the values node-8 already runs, carried so the deploy changes none of them: daily_cap.uvn-status paid/free 2500/2500 -> 2000/2000; daily_cap.proof-need-ask paid/free 2500/2500 -> 400/400; shared_daily_cap.claim 500 -> 25; tick_cap.uvn-status {free: 60} -> {paid: 50, free: 50}; and the rows absent from the repo copy and live on node-8: tick_cap.proof-need-ask {paid: 50, free: 5}, tick_cap.claim-proof-ask {paid: 25, free: 25}, and the four armed_families rows (uvn-status 2026-10-31T18:02Z, status-doc-received 2026-11-03T12:56Z, claim-proof-ask 2026-11-03T18:58Z, proof-need-ask 2026-11-10T02:17Z) with their live unsigned_from values. Nothing is raised. That copy is also written outside a deploy (an operator's edit; the node-8 watchdog that sets tick_cap.uvn-status to 0/0 on a hard stop), and with the marker above a deploy writes this file over whatever is there: compare the live copy with this one before deploying a change to it. The only additions are the uvn-reminder-14 rows (captain 2026-11-13 15:08Z: one reminder to a verification non-responder after 14 days; 50 per tick across paid + free to start). armed_families = which family may APPLY on the unattended tick, and from when (credit-verify-outbound.sh read_arming: present = only a family's own row arms it).",
+  "armed_families": {
+    "uvn-status": {
+      "live": true,
+      "paid": true,
+      "unsigned_from": "2026-10-31T18:02Z"
+    },
+    "status-doc-received": {
+      "live": true,
+      "paid": true,
+      "unsigned_from": "2026-11-03T12:56Z"
+    },
+    "claim-proof-ask": {
+      "live": true,
+      "paid": true,
+      "unsigned_from": "2026-11-03T18:58Z"
+    },
+    "proof-need-ask": {
+      "live": true,
+      "paid": true,
+      "unsigned_from": "2026-11-10T02:17Z"
+    },
+    "uvn-reminder-14": {
+      "live": true,
+      "paid": true,
+      "unsigned_from": "2026-11-13T15:08Z"
+    }
+  },
   "daily_cap": {
     "uvn-status": {
-      "paid": 2500,
-      "free": 2500
+      "paid": 2000,
+      "free": 2000
     },
     "status-doc-received": {
       "paid": 2500,
@@ -18,12 +45,16 @@
       "free": 500
     },
     "proof-need-ask": {
-      "paid": 2500,
-      "free": 2500
+      "paid": 400,
+      "free": 400
     },
     "wait-apology": {
       "paid": 2500,
       "free": 2500
+    },
+    "uvn-reminder-14": {
+      "paid": 1200,
+      "free": 1200
     }
   },
   "groups": {
@@ -31,7 +62,8 @@
       "uvn-status",
       "status-doc-received",
       "proof-need-ask",
-      "wait-apology"
+      "wait-apology",
+      "uvn-reminder-14"
     ],
     "claim": [
       "claim-status",
@@ -40,12 +72,25 @@
   },
   "shared_daily_cap": {
     "credit": 2500,
-    "claim": 500
+    "claim": 25
   },
   "tick_cap": {
     "_doc": "Per-family per-tick cap. A family+segment listed here may ACCEPT at most this many users in ONE tick, whatever its daily row, its FIRST_CAP line or the global CVO_CAP says. The clamp only ever LOWERS a cap - a value above the family's own cap changes nothing, so this key can never widen a blast radius. Absent family/segment = exactly the behavior before this key existed. Added 2026-11-04 on the Fable driver's ruling: the free uvn-status apply sends until its Intercom-note step hits the subprocess timeout at ~55-60 min / ~80 users and then loses its outcomes artefact entirely (#1756, twice in one afternoon: 39 sends at 15:05Z, 79 at 17:24Z). A per-FAMILY cap was needed rather than CVO_CAP because that knob is ONE global value: setting it to 60 would also have narrowed r1, claim-status and the approved 70-send claim install.",
     "uvn-status": {
-      "free": 60
+      "free": 50,
+      "paid": 50
+    },
+    "proof-need-ask": {
+      "free": 5,
+      "paid": 50
+    },
+    "claim-proof-ask": {
+      "paid": 25,
+      "free": 25
+    },
+    "uvn-reminder-14": {
+      "paid": 50,
+      "free": 50
     }
   },
   "holds": {

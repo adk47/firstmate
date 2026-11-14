@@ -101,6 +101,7 @@ CAMPAIGN_STAGE = {
     "claim-proof-pending": "verifying",
     "merge-pending": "verifying",
     "uvn-status": "ask",
+    "uvn-reminder-14": "ask",
     "uvn-new-rows": "ask",
     "verify-live": "ask",
     "retro-past": "ask",

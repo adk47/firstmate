@@ -119,7 +119,7 @@ PY
   mkdir -p "$INTERCOM_VERIFY_TEST_LOG_DIR"
   # THE OUTBOUND COPY GATE (captain 2026-11-12). Every send asks scripts/outbound_copy/gate.py whether the exact body
   # has a signed reviewer verdict. This suite pins the SENDER's other rules, so its default gate is a stand-in that
-  # approves the body it is handed (STUB_COPY_GATE=pending|refuse|fail|wrongbody|noverdict changes its answer) and
+  # approves the body it is handed (STUB_COPY_GATE=pending|refuse|fail|wrongbody|noverdict|observe changes its answer) and
   # logs each call. The gate's own rules are test_outbound_copy_gate.py; the tests at the end of this file run the
   # REAL gate.py and pin that a body with no verdict is never POSTed.
   cat > "$TEST_TMPDIR/copy_gate.py" <<'COPYGATE'
@@ -142,6 +142,8 @@ if mode == "pending":
     print(json.dumps({**base, "result": "pending", "reason": "copy_review_pending"})); sys.exit(3)
 if mode == "refuse":
     print(json.dumps({**base, "result": "refused", "reason": "copy_review_refuse:ocv-0123456789abcdef"})); sys.exit(1)
+if mode == "observe":                                         # an observe-mode campaign: sent unreviewed, recorded
+    print(json.dumps({**base, "result": "observed", "mode": "observe", "review": "pending"})); sys.exit(4)
 sys.exit(2)
 COPYGATE
   export INTERCOM_VERIFY_TEST_COPY_GATE="$TEST_TMPDIR/copy_gate.py"
@@ -2025,6 +2027,133 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   # a reply_due answer is never this class
   run -1 "$NR" send --campaign uvn-new-rows --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$output" == *"never a reply_due answer"* ]]
+}
+
+# uvn-reminder-14 (captain 2026-11-13 15:08Z): the one reminder of a sent uvn-status ask.
+r14_sql() { python3 -c 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute(sys.argv[2]); db.commit()' "$INTERCOM_VERIFY_TEST_LEDGER" "$1"; }
+r14_ask() { # a SENT uvn-status ask about u1 on 2026-10-20
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-10-20 run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message=1001 credits=1" ]]
+}
+r14() { "$UVN" send --campaign uvn-reminder-14 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ "$@"; }
+
+@test "uvn-reminder-14: one reminder of a SENT uvn-status ask, from day 14, naming the ledger's ask day; never before, never twice, never with no ask" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  # no ask on the ledger: nothing is rendered (a preview included), sent or claimed, and Intercom is never read
+  run -1 r14 --dry-run
+  [[ "$output" == *"r14_no_"* ]]
+  before="$(calls)"
+  run -1 r14
+  [[ "$output" == *"r14_no_prior_ask"* ]]
+  [ "$(calls)" -eq "$before" ]
+  [ -z "$(sql "SELECT * FROM verify_requests WHERE campaign='uvn-reminder-14'")" ]
+  r14_ask
+  # day 13: not due (a deferral: nothing closed, nothing posted)
+  INTERCOM_VERIFY_TEST_DAY=2026-11-02 run -3 r14
+  [[ "$output" == "DEFERRED not_due credits=1"* ]]
+  [ "$(posts)" -eq 1 ]
+  # day 14: the preview and the send carry the same copy, and the day in it is the LEDGER's ask day
+  INTERCOM_VERIFY_TEST_DAY=2026-11-03 run -0 r14 --dry-run
+  [ "$(rendered .subject)" = "Reminder: your Muso credit request still needs one thing" ]
+  [[ "$(rendered .body | plain | head -1)" == 'Hi Jane, on October 20 we asked for something that shows your Mixing credit on "Song A" by Big Star. We haven'"'"'t received it yet, so your credit request is still waiting.' ]]
+  [[ "$(rendered .body | plain)" == *"A public link where the credit is listed: Tidal, Genius, Discogs, AllMusic, ASCAP or BMI."* ]]
+  [[ "$(rendered .body | plain)" == *"Just reply to this message with it."* ]]
+  # no deadline, no consequence, nothing promised
+  [[ "$(rendered .body | plain)" != *"removed"* ]]; [[ "$(rendered .body | plain)" != *" by November"* ]]
+  [[ "$(rendered .body | plain)" != *"othing else is needed"* ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-11-03 run -0 r14
+  [[ "$output" == "POSTED email message=1002 credits=1" ]]
+  [[ "$(msg .body | plain | head -1)" == 'Hi Jane, on October 20 we asked for something that shows your Mixing credit on "Song A" by Big Star.'* ]]
+  # its own campaign and kind, the captain's order as the approval, and the signed verdict for these bytes on the row
+  [[ "$(sql "SELECT campaign || '|' || kind || '|' || status || '|' || copy_review || '|' || approval_ref FROM verify_messages WHERE message_id='1002'")" == "uvn-reminder-14|initial|sent|approved|captain 2026-11-13 15:08Z order"* ]]
+  [[ "$(sql "SELECT copy_verdict_id FROM verify_messages WHERE message_id='1002'")" == ocv-* ]]
+  [ -n "$(sql "SELECT body_sha256 FROM verify_messages WHERE message_id='1002'")" ]
+  # comm_state reads it as the uvn ask (every wait-line hold) AND as a reminder (a text reply holds it)
+  grep -q -- "--campaign uvn-status" "$TEST_TMPDIR/comm-state-args"
+  grep -q -- "--reminder" "$TEST_TMPDIR/comm-state-args"
+  # one reminder per ask: the same rows, or other rows, weeks later
+  INTERCOM_VERIFY_TEST_DAY=2026-12-20 run -0 r14
+  [[ "$output" == "SKIPPED already-notified credits=1" ]]
+  credits "$TEST_TMPDIR/c.json" Jane "u2:Mixing:Song B:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-12-20 run -0 r14
+  [[ "$output" == "SKIPPED already_sent credits=1" ]]
+  [ "$(posts)" -eq 2 ]
+  # it is the follow-up of an ask and has none of its own; never a reply_due answer; never a channel override
+  run -1 r14 --kind reminder-14 --parent-message-id 1002 --dry-run
+  [[ "$output" == *"has none of its own"* ]]
+  run -1 r14 --conversation 777 --reply-due 57000000001 --dry-run
+  [[ "$output" == *"never a reply_due answer"* ]]
+  run -1 r14 --channel inapp --dry-run
+  [[ "$output" == *"--channel does not apply"* ]]
+}
+
+@test "uvn-reminder-14: plural keys on distinct tracks, as the ask does" {
+  r14_ask
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star" "u2:Mastering:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-03 run -0 r14 --dry-run
+  [ "$(rendered .subject)" = "Reminder: your Muso credit request still needs one thing" ]
+  [[ "$(rendered .body | plain | head -1)" == 'Hi Jane, on October 20 we asked for something that shows your Mixing and Mastering credits on "Song A" by Big Star.'* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star" "u2:Mixing:Song B:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-03 run -0 r14 --dry-run
+  [ "$(rendered .subject)" = "Reminder: your Muso credit requests still need one thing" ]
+  [[ "$(rendered .body | plain | head -1)" == 'Hi Jane, on October 20 we asked for something that shows your role on your credit requests for "Song A" and "Song B". We haven'"'"'t received it yet, so they are still waiting.' ]]
+}
+
+@test "uvn-reminder-14: never to someone who replied, sent a document, or was already reminded by any sender" {
+  r14_ask
+  # a reply recorded on the ask: closed, never offered again
+  r14_sql "UPDATE verify_messages SET last_reply_at='2026-10-25T10:00:00Z' WHERE message_id='1001'"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-03 run -0 r14
+  [[ "$output" == "SKIPPED replied credits=1" ]]
+  r14_sql "UPDATE verify_messages SET last_reply_at=NULL WHERE message_id='1001'"
+  r14_sql "DELETE FROM verify_requests WHERE campaign='uvn-reminder-14'"
+  # a credit-proof reply tagged on the ask
+  r14_sql "UPDATE verify_messages SET proof_tagged_at='2026-10-25T10:00:00Z' WHERE message_id='1001'"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-03 run -0 r14
+  [[ "$output" == "SKIPPED proof_received credits=1" ]]
+  r14_sql "UPDATE verify_messages SET proof_tagged_at=NULL WHERE message_id='1001'"
+  r14_sql "DELETE FROM verify_requests WHERE campaign='uvn-reminder-14'"
+  # a document in the user's Intercom threads (the attachment scan, which this campaign always takes)
+  STUB_CONTACT_CONVS='{"conversations":[{"id":"6","source":{"author":{"type":"user"},"attachments":[{"name":"split.pdf"}]}}],"pages":{}}' \
+    INTERCOM_VERIFY_TEST_DAY=2026-11-03 run -0 r14 --check-recipient
+  [[ "$output" == "SKIPPED docs_submitted"* ]]
+  # comm_state holds (a document, a decision, or - with --reminder - any reply after the ask)
+  STUB_COMM_STATE=hold INTERCOM_VERIFY_TEST_DAY=2026-11-03 run -3 r14 --check-recipient
+  [[ "$output" == "HELD comm_state"* ]]
+  [ "$(posts)" -eq 1 ]
+  # a reminder from a sender OUTSIDE this gate (the 2026-11-09 `reminder-1` rows: account email only, no account id)
+  r14_sql "INSERT INTO verify_messages (campaign, kind, user_key, day, status, message_type, request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at) VALUES ('reminder-1','reminder-14','jane.doe@example.com','2026-10-28','sent','email','[]',1,'system:reminder-driver','auto:reminder-1','2026-10-28T13:00:00Z','2026-10-28T13:00:00Z')"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-13 run -0 r14
+  [[ "$output" == "SKIPPED already_reminded credits=1" ]]
+  [ "$(posts)" -eq 1 ]
+  [ -z "$(sql "SELECT id FROM verify_messages WHERE campaign='uvn-reminder-14' AND status IN ('sent','attempted')")" ]
+}
+
+@test "uvn-reminder-14: sends only on a SIGNED approve of the exact bytes - pending, refused and an observe-mode pass all hold, and the hold is not a lock" {
+  r14_ask
+  STUB_COPY_GATE=pending INTERCOM_VERIFY_TEST_DAY=2026-11-03 run -3 r14
+  [[ "$output" == "DEFERRED copy_review_pending credits=1"* ]]
+  STUB_COPY_GATE=refuse INTERCOM_VERIFY_TEST_DAY=2026-11-03 run -3 r14
+  [[ "$output" == "DEFERRED copy_review_refuse credits=1"* ]]
+  # the policy file observing this campaign must not send it: an observed pass is a hold here
+  STUB_COPY_GATE=observe INTERCOM_VERIFY_TEST_DAY=2026-11-03 run -3 r14
+  [[ "$output" == "DEFERRED copy_review_required credits=1"* ]]
+  [ "$(posts)" -eq 1 ]
+  [ -z "$(sql "SELECT id FROM verify_messages WHERE campaign='uvn-reminder-14' AND status='sent'")" ]
+  # a hold is a deferred log, never a lock: once the verdict is signed the same note goes
+  INTERCOM_VERIFY_TEST_DAY=2026-11-03 run -0 r14
+  [[ "$output" == "POSTED email message=1002 credits=1" ]]
+  [ "$(sql "SELECT copy_review FROM verify_messages WHERE message_id='1002'")" = "approved" ]
+  [ "$(posts)" -eq 2 ]
+  # the belt is this campaign's alone: an OBSERVED status note still sends
+  credits "$TEST_TMPDIR/c.json" Jane "r5:Mixing:Song A:Big Star"
+  decider_approved r5 catalog_confirmed
+  STUB_COPY_GATE=observe INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 "$UVN" send --campaign status-team-review \
+    --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED"* ]]
+  [ "$(posts)" -eq 3 ]
+  [ "$(sql "SELECT copy_review FROM verify_messages WHERE campaign='status-team-review' AND status='sent'")" = "observed:pending" ]
 }
 
 @test "uvn-new-rows (n1): rows a status line of ours named would need /c2 AND n1 - that pair is not approved: refused n1_c2_uncoded" {

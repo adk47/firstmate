@@ -94,6 +94,12 @@ POLICY="$(cfg CVO_POLICY "$HYDRA_ROOT/policies/credit-verify-outbound.json")"
 CLAIM_LIST="$(cfg CVO_CLAIM_LIST "$STATE/claim-list.json")"
 CAP="$(cfg CVO_CAP 250)"                 # users per family+segment per tick (l1: 250/run)
 R1_CAP="$(cfg CVO_R1_CAP 250)"
+# uvn-reminder-14 (captain 2026-11-13 15:08Z): the one reminder of a sent uvn-status ask. R14_CAP is the family's cap
+# per TICK across paid + free together (SHARED_TICK_CAP below), paid first; R14_ENTRIES is the page it walks per
+# segment (its list is already cut to the people the ledger says are due, so a short page fills the cap).
+# The cap rises only by PR, on evidence (three clean ticks): constants, never env or a state file.
+R14_CAP="$(cfg CVO_R14_CAP 50)"
+R14_ENTRIES="$(cfg CVO_R14_ENTRIES 100)"
 CLAIM_CAP="$(cfg CVO_CLAIM_CAP 250)"
 REFUSAL_SPIKE="$(cfg CVO_REFUSAL_SPIKE 0.20)"
 FIRST_CAP=100                          # [key=scale-now]: a family's first unsigned ticks, until v1's 10-sample line
@@ -153,15 +159,19 @@ read -r -a APPLY_RETRY_SLEEPS <<<"$(cfg CVO_APPLY_RETRY_SLEEPS '15 30 60 60 120'
 APPLY_RETRY_CAP_S="$(cfg CVO_APPLY_RETRY_CAP_S 600)"   # hard cap from the first transient rc, whatever the budget
 read -r -a TRANSIENT_RETRY_SLEEPS <<<"$(cfg CVO_TRANSIENT_RETRY_SLEEPS '30 60 120')"  # 4 read-only attempts
 DEFERRED=0                             # 1 once any family deferred: the tick then exits 2, never 0
-# [key=walk-size] (2026-11-13): the page a PAGED family (uvn-status, reply-due, r1, wait-apology, proof-need-ask) walks
+# [key=walk-size] (2026-11-13): the page a PAGED family (uvn-status, reply-due, r1, wait-apology, proof-need-ask,
+# uvn-reminder-14) walks
 # per tick, in LIST ENTRIES that still need a live-gate check (p1 599 / r5 598). The page is what sets how many notes a
 # tick sends, and CVO_CAP is not: the cap bounds ACCEPTS (250, and the policy tick_cap holds uvn-status free at 60),
 # but a tick can only accept from the entries it walked. Reported from run.log 2026-11-13 01:10:23Z: 200 walked, 15
 # sendable, 15 notes sent, 2,319 not walked - about 7.5% of a page is sendable, so "15-17 a run" was the page size,
 # never a ceiling.
-# TWO knobs, because the families are not alike ([key=send-page-per-family], 2026-11-13, corrects #1928):
+# THREE knobs, because the families are not alike ([key=send-page-per-family], 2026-11-13, corrects #1928):
 #   CHECK_ENTRIES      (200) - every paged family.
 #   CHECK_ENTRIES_SEND (600) - the ONE family that sends the notes: uvn-status free (see page_entries()).
+#   R14_ENTRIES        (100) - uvn-reminder-14 paid and free (verif-reask-14d-r1): its list is already cut to the
+#                              people the ledger says are due, so a short page fills its 50-a-tick cap. It runs
+#                              BEFORE the sending family, i.e. ahead of it, like the four below.
 # #1928 raised the one global knob 200 -> 600. Four paged families run AHEAD of uvn-status free (reply-due paid and
 # free, uvn-status paid, r1 paid), so each of them walked up to three times as far, and each second they spent started
 # the sending family later - where [key=tick-budget-page-fit] cuts its page. The larger page made the family it was
@@ -170,22 +180,24 @@ DEFERRED=0                             # 1 once any family deferred: the tick th
 #     the sending family: 2 x 600 x 4 + 300 = 5,100 s against TICK_HARD_S 6,900 s (SEND_WORST_S below): 1,800 s to
 #       spare. The largest send page that fits a tick ALONE is 825 (2 x 825 x 4 + 300 = 6,900).
 #     a 200-entry family: 2 x 200 x 4 + 300 = 1,900 s (2,300 s where its cap is the full 250, since the walk is
-#       max(page, cap)).
-#   Deadline, the mixed case: the four families that ALWAYS run ahead (reply-due paid and free, uvn-status paid, r1
-#   paid) at their 200-page worst cost 4 x (2 x 200 x 4) = 6,400 s, and the sending family's own check + bodies
-#   2 x 600 x 4 = 4,800 s: 11,200 s against 6,900 s. wait-apology paid and free run ahead too whenever a paid-status
-#   plan exists for the day, so it is UP TO SIX: 6 x 1,600 = 9,600 s ahead and 14,400 s mixed - worse, never better.
-#   THAT DOES NOT FIT, and it did not fit at 200 either (5 x 1,600 = 8,000 s). After the four always-present
-#   worst-case families the send page that still fits is (6,900 - 6,400 - 300) / 8 = 25 entries; after six it is
-#   negative, so the cut floors at PAGE_FLOOR and the family waits. So 600 is the most the sending family walks, never
-#   what it is promised:
+#       max(page, cap)); a 100-entry one (the reminder): 2 x 100 x 4 + 300 = 1,100 s.
+#   Deadline, the mixed case: the families that ALWAYS run ahead (reply-due paid and free, uvn-status paid, r1 paid at
+#   200; uvn-reminder-14 paid and free at 100, and it starts no family at all when nobody is due) at their worst cost
+#   4 x (2 x 200 x 4) + 2 x (2 x 100 x 4) = 8,000 s, and the sending family's own check + bodies
+#   2 x 600 x 4 = 4,800 s: 12,800 s against 6,900 s. wait-apology paid and free
+#   run ahead too whenever a paid-status plan exists for the day, so it is UP TO EIGHT: 11,200 s ahead and 16,000 s
+#   mixed - worse, never better.
+#   THAT DOES NOT FIT, and it did not fit at 200 either (5 x 1,600 = 8,000 s). With those always-present families ahead
+#   (6,900 - 8,000 - 300) is already negative, so the send page cuts to PAGE_FLOOR and the family waits; it was 25
+#   entries while the four 200-entry families were the only ones ahead. So 600 is the most the sending family walks,
+#   never what it is promised:
 #   family() CUTS its page to (TICK_HARD_S - elapsed - RESERVE_PAD_S) / (2 x CHECK_S_PER_USER) whenever it starts
 #   more than 1,800 s into the tick. What this knob changes is that the families ahead no longer start it later than
 #   they did at 200. How many notes a tick sends is read from run.log after deploy, not derived from a ratio.
 #   Cost, on the sending family only: the check and the bodies each walk the page, so its read-only gate calls go from
 #   at most 400 to at most 1,200 a tick; and the runner's unmeasured stop is a SHARE of the page (max(5, 10%)), so a
 #   full page stops at 60 unmeasured users where it stopped at 20 - a slow gate is noticed three times later there.
-#   No deadline, budget, cap or stop RULE moves with either number.
+#   No deadline, budget, cap or stop RULE moves with any of the three numbers.
 #   Revert: set CHECK_ENTRIES_SEND to 200 here, and in the bats cases that name 600 as the shipped send page.
 CHECK_ENTRIES="$(cfg CVO_CHECK_ENTRIES 200)"
 CHECK_ENTRIES_SEND="$(cfg CVO_CHECK_ENTRIES_SEND 600)"
@@ -195,6 +207,7 @@ CHECK_ENTRIES_SEND="$(cfg CVO_CHECK_ENTRIES_SEND 600)"
 # reply-due also runs the uvn-status subcommand on the free segment; it is not the sending family, so the NAME decides.
 page_entries() {
   if [ "$1" = uvn-status ] && [ "$2" = free ] && [ "$3" = uvn-status ]; then echo "$CHECK_ENTRIES_SEND"
+  elif [ "$1" = uvn-reminder-14 ]; then echo "$R14_ENTRIES"
   else echo "$CHECK_ENTRIES"; fi
 }
 # [key=tick-budget-page-fit] (2026-11-11): the smallest page a paged family will still run with. A page that does not
@@ -243,6 +256,16 @@ declare -A UNSIGNED_FROM=(
   # wait-apology (fable d2 2026-11-05 / firstmate 772): a NEW customer-facing family. It stays SIGNED-only (checked,
   # never applied) until fable d2's GO is stamped here as the read-back date - the same ladder every family walked.
   [wait-apology]=""
+  # uvn-reminder-14: the one reminder of a sent uvn-status ask, 14 days on, to a user who neither replied nor sent a
+  # document. Dated by the captain's order itself (2026-11-13 15:08Z, "urgent!!! fix it scale it now" / "see it
+  # through": yes on re-asking verification non-responders after 14 days), NOT by a read-back batch: that is the one
+  # way this family differs from the ladder above, and it is why the three rails below are code rather than a date -
+  #   1. no body of this campaign is sent without a SIGNED approve of its exact bytes (intercom-verify-request.sh
+  #      holds an `observed` pass for this campaign; policies/outbound-copy-enforce.json lists it under `enforce`);
+  #   2. R14_CAP (50) is ONE budget per tick across paid + free (SHARED_TICK_CAP), and policy tick_cap can only lower it;
+  #   3. the audience is the ledger's rule (verify_ledger.reminder14_user_done), re-read at the peek and in the claim.
+  # On node-8 the policy's armed_families row is what arms it (a row with no date clears this one).
+  [uvn-reminder-14]="2026-11-13T15:08Z"
   [uvn-status]="2026-10-31T18:02Z"     # AE-send-3: 3/3 = would-send 3, health + zero-read clean (h2 18:05Z, n1 465)
   [status-team-review]="2026-10-31T08:20Z"   # /k-ap 7: 7/7 = the signed set, health + zero-read clean (not a timer family yet)
   [claim-status]="2026-10-31T17:55Z"   # c2 batch 5 FREE 250: ledger 5763-6052 == the checked/signed 250, health + zero-read clean (p1 488)
@@ -329,6 +352,11 @@ declare -A PER_SEGMENT_FROM=(
 PER_SEGMENT_FROM_TEST="$(cfg CVO_PER_SEGMENT_FROM_TEST "")"
 [ -z "$PER_SEGMENT_FROM_TEST" ] || PER_SEGMENT_FROM["${PER_SEGMENT_FROM_TEST%%=*}"]="${PER_SEGMENT_FROM_TEST#*=}"
 declare -A FIRST_SPENT=()   # this tick's sends per shared-first family (the ledger's count, never a runner's prose)
+# A family listed here has ONE budget per tick across all of its segments, for as long as it is listed (FIRST_CAP's
+# shape, with the family's own number and no ramp): charged by the ledger's count of each apply's sends (TICK_SPENT),
+# in the order credit_families() calls the segments - paid first, free takes what is left.
+declare -A SHARED_TICK_CAP=( [uvn-reminder-14]="$R14_CAP" )
+declare -A TICK_SPENT=()
 # the bats harness only (cfg's seam): every family unsigned at its full cap, so the family tests exercise the applies
 UNSIGNED_ALL="$(cfg CVO_UNSIGNED_ALL 0)"
 NOW_EPOCH="$(cfg CVO_NOW_EPOCH "$(date -u +%s)")"   # harness-only clock for the date boundaries
@@ -361,7 +389,7 @@ PY
 }
 if [ "${1:-}" = "--print-config" ]; then
   for v in CVO_HARNESS HYDRA_ROOT KILL KILL2 LIVE_FLAG PAID_FLAG EXCLUDE STATE PY RUNNER OWING RECEIPTS HEALTH ZERO_READ \
-           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP RD_CHECKS RD_BUDGET POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES CHECK_ENTRIES_SEND PAGE_FLOOR TICK_BUDGET_S TICK_HARD_S CLAIM_GROUP_BUDGET_S STARVED_PAGE_AT STARVED_REPAGE_EVERY CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER APPLY_USER_WORST_S APPLY_WORKERS TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
+           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP RD_CHECKS RD_BUDGET POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP REFUSAL_SPIKE NEED_RUNNER FIRST_CAP R14_CAP R14_ENTRIES UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES CHECK_ENTRIES_SEND PAGE_FLOOR TICK_BUDGET_S TICK_HARD_S CLAIM_GROUP_BUDGET_S STARVED_PAGE_AT STARVED_REPAGE_EVERY CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER APPLY_USER_WORST_S APPLY_WORKERS TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
            CLAIM_PROOF_STATE CLAIM_PROOF_LIMIT_H CLAIM_PROOF_UNREAD_H CLAIM_PROOF_REPEAT_MIN; do
     printf '%s=%s\n' "$v" "${!v}"
   done
@@ -1076,6 +1104,17 @@ family_run() {
     log "$tag: per-family tick cap: policy tick_cap[$fam][$seg] holds this segment at $tc (it would otherwise have taken $cap)"
     cap="$tc"
   fi
+  if [[ -v SHARED_TICK_CAP[$fam] ]]; then
+    local tleft=$(( ${SHARED_TICK_CAP[$fam]} - ${TICK_SPENT[$fam]:-0} ))
+    if [ "$tleft" -le 0 ]; then
+      log "$tag: the per-tick budget for $fam (${SHARED_TICK_CAP[$fam]}/tick across all segments) was spent by an earlier segment (${TICK_SPENT[$fam]:-0} sent); this segment waits for the next tick"
+      return 0
+    fi
+    if [ "$tleft" -lt "$cap" ]; then
+      log "$tag: per-tick budget for $fam: $tleft of ${SHARED_TICK_CAP[$fam]} left this tick (${TICK_SPENT[$fam]:-0} sent by earlier segments); cap $tleft"
+      cap="$tleft"
+    fi
+  fi
   local shared=0
   if shared_first "$fam"; then
     shared=1
@@ -1316,6 +1355,7 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
   # r5 19:06Z: charge the shared first-batch budget with the LEDGER's count (sent + attempted), before any rail below
   # can return - a later segment must see every row this apply wrote, whatever the verdicts on it
   [ "$shared" = 1 ] && FIRST_SPENT[$fam]=$(( ${FIRST_SPENT[$fam]:-0} + nsent ))
+  [[ -v SHARED_TICK_CAP[$fam] ]] && TICK_SPENT[$fam]=$(( ${TICK_SPENT[$fam]:-0} + nsent ))
   # QA #1541 (claim runners print 'sent N', credit runners 'N sent'): the spike reads the LEDGER's own count of this
   # apply's sends - never a grep on a runner's prose, which read 0 for claims and wrote the permanent kill file
   # Two different facts, two different sentences. A SPIKE is a measurement of the run and says so with its numbers.
@@ -1418,7 +1458,7 @@ census_unmeasured() { # <why>: a census read that failed is UNMEASURED, never a 
   CENSUS_UNMEASURED=$((CENSUS_UNMEASURED + 1))
   log "census UNMEASURED ($CENSUS_UNMEASURED): $1; the tick continues into the families (a census read never cancels the run)"
 }
-py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1; rc=$?
+py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" --class-out "uvn_reminder_14=$OUT/owing-reminder-14.json" > "$OUT/owing.out" 2>&1; rc=$?
 if [ "$rc" = 0 ]; then
   [ -s "$OUT/owing-uvn.json" ] || census_unmeasured "owing builder wrote no uvn-class list"
 elif builder_deadline "$rc" "owing census builder"; then
@@ -1442,7 +1482,7 @@ log "audiences: owing $(head -c 300 "$OUT/owing.out"); receipts $(head -c 300 "$
 # the builder right before its own check, so the facts header the check signs is minutes old, not 25.
 rebuild_owing_uvn() { # <for>
   local t0 rc; t0=$(date +%s)
-  py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1; rc=$?
+  py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" --class-out "uvn_reminder_14=$OUT/owing-reminder-14.json" > "$OUT/owing.out" 2>&1; rc=$?
   if [ "$rc" != 0 ]; then
     builder_deadline "$rc" "owing builder on the rebuild before $1" && return 1
     log "owing builder failed on the rebuild before $1 (rc=$rc): $(tail -c 300 "$OUT/owing.out")"; return 1
@@ -1487,7 +1527,7 @@ import datetime as _dt
 # "uvn-status:c2" is a SUB-class of uvn-status, not a family ([key=class-c-is-a-row]): its row arms the /c2 corrected
 # ask and nothing else, and the uvn-status row still decides whether the family applies at all
 KNOWN = {"r1", "status-doc-received", "uvn-status", "claim-status", "claim-proof-ask", "proof-need-ask", "reply-due",
-         "uvn-status:c2"}
+         "uvn-status:c2", "uvn-reminder-14"}
 def _instant(v):
     for fmt in ("%Y-%m-%dT%H:%MZ", "%Y-%m-%dT%H:%M:%SZ"):
         try:
@@ -1540,8 +1580,8 @@ if [ "$ARMING" = "policy" ]; then
     _key="$_fam"; _datekey="$_fam"
     case "$_fam" in
       r1|status-doc-received) _key="r1"; _datekey="status-doc-received" ;;
-      uvn-status|claim-status|claim-proof-ask|proof-need-ask|reply-due|uvn-status:c2) ;;
-      *) log "ARMING ROW IGNORED: '$_fam' is not a family this tick runs (r1|status-doc-received, uvn-status, claim-status, claim-proof-ask, proof-need-ask); it arms nothing"
+      uvn-status|claim-status|claim-proof-ask|proof-need-ask|reply-due|uvn-status:c2|uvn-reminder-14) ;;
+      *) log "ARMING ROW IGNORED: '$_fam' is not a family this tick runs (r1|status-doc-received, uvn-status, claim-status, claim-proof-ask, proof-need-ask, uvn-reminder-14); it arms nothing"
          continue ;;   # read_arming() already fails such a row closed; this is the belt to its braces
     esac
     ARMED_LIVE["$_key"]="$_live"; ARMED_PAID["$_key"]="$_paid"
@@ -1599,7 +1639,8 @@ elif [ "$ARMING" = "malformed" ]; then
 fi
 
 # ---- the families, in p1's order (paid first; a family whose builder/runner is not deployed is logged) ---------
-log "uvn-reminder-7: no deployed audience builder/runner on this tree yet (rides its PR); skipped"
+# uvn-reminder-14 is the reminder family (reminder_family below). The day-7 reminder (hydra PR #1535) never merged:
+# the one follow-up of a uvn-status ask is the day-14 one, once per user per ask.
 # reply_due (h2 / firstmate 031): the ONE answer to a user who wrote to us, built by the DEPLOYED reply_due_scan.py
 # (open threads where the customer replied > 24 h ago and after us; comm_state.reply_due() per thread; one row per user;
 # paid first). It runs FIRST so answers go before unsolicited notes. It sends through the uvn-status runner, so it
@@ -1834,11 +1875,71 @@ credit_families() {
   mapfile -t c2 < <(c2_args paid)
   fam family uvn-status paid "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return $?
   fam family r1 paid "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return $?
+  # the reminder runs between the paid and the free ask: after every paid family (paid first, as everywhere), and
+  # BEFORE the free ask's 600-entry walk, which is the family that uses up the tick. Group rules are everyone's: a
+  # failure is remembered and walked past, a deferral or a failed rebuild stops the group.
+  # The list is rebuilt right before the family, as for the ask (a stale list is how a user is told twice) - but only
+  # when the build minutes ago listed somebody: once the first cohort is through, "nobody is due" is the usual answer
+  # and a rebuild for it would be a replica read per tick for nothing.
+  if [ "$(reminder_listed)" != 0 ]; then rebuild_owing_uvn "uvn-reminder-14" || return 1; fi
+  fam reminder_family paid || return $?
+  fam reminder_family free || return $?
   rebuild_owing_uvn "uvn-status free" || return 1
   mapfile -t c2 < <(c2_args free)
   fam family uvn-status free "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return $?
   fam family r1 free "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return $?
   return "$FAM_RC"
+}
+# uvn-reminder-14 (captain 2026-11-13 15:08Z): ONE reminder to a user whose last verification ask is a sent uvn-status
+# ask at least 14 days old, who neither replied nor sent a document, and whose asked requests still wait in core. The
+# audience is the owing builder's uvn_reminder_14 class (owing_proof.build: the rows the ask named and that are still
+# owed, for the users verify_ledger.reminder14_user_done says are due), rebuilt immediately before the family for the
+# reason every uvn-status family is (Defect B). It sends through the uvn-status runner under its own campaign, so every
+# gate of the ask applies, plus its own: any reply after the ask holds it, and no body goes without a signed approve.
+# reminder_listed: how many users the newest owing build listed for the reminder ("unreadable" when it cannot be read,
+# which is never 0: the caller then rebuilds and the family reads the list itself).
+reminder_listed() {
+  [ -s "$OUT/owing-reminder-14.json" ] || { echo 0; return 0; }
+  py -c 'import json,sys
+try:
+    print(len(json.load(open(sys.argv[1])).get("users") or []))
+except Exception:
+    print("unreadable")' "$OUT/owing-reminder-14.json" 2>/dev/null || echo unreadable
+}
+
+reminder_family() { # <segment>
+  local seg="$1" list="$OUT/owing-reminder-14.json"
+  if [ ! -s "$list" ]; then
+    log "uvn-reminder-14 $seg: the owing builder wrote no reminder list; skipped (never a guessed audience)"; return 0
+  fi
+  # A policy with no row for this campaign means it never applies - and it must mean ONLY that. family() reads a
+  # missing row as an unreadable cap source and kills the whole tick, which is right for a family that has always
+  # had its row and wrong for the newest one: node-8's policy file is also edited by hand and restored from .bak
+  # copies, and a restore to a copy older than this family must stop the reminder, not every verification send.
+  # An unreadable policy is not decided here: the family's own cap read fails it closed, as for every family.
+  if [ "$(py -c 'import json,sys
+try:
+    p = json.load(open(sys.argv[1])); c = sys.argv[2]; s = sys.argv[3]
+except Exception:
+    print("unreadable"); raise SystemExit(0)
+row = (p.get("daily_cap") or {}).get(c) if isinstance(p, dict) else None
+grp = [g for g, cs in ((p.get("groups") or {}) if isinstance(p, dict) else {}).items() if isinstance(cs, list) and c in cs]
+print("row" if isinstance(row, dict) and s in row and grp else "norow")' "$POLICY" uvn-reminder-14 "$seg" 2>/dev/null)" = norow ]; then
+    log "uvn-reminder-14 $seg: the policy has no daily_cap row or no group for uvn-reminder-14; skipped (a campaign with no row never applies)"; return 0
+  fi
+  # nobody due is the usual state once the first cohort is through: say so and start no family (no check, no page of
+  # the list, no cursor). An unreadable list is not "nobody": the family reads it and fails closed.
+  if [ "$(reminder_listed)" = 0 ]; then
+    log "uvn-reminder-14 $seg: nobody is due a reminder (0 listed); skipped"; return 0
+  fi
+  log "uvn-reminder-14 $seg: audience $(py -c 'import json,sys
+u = json.load(open(sys.argv[1])).get("users") or []
+c = (json.loads(open(sys.argv[2]).read().strip().splitlines()[-1]).get("counts") or {})
+print("%d listed (%d paid, %d free); the ledger left out: %s" % (
+    len(u), sum(1 for x in u if x.get("paid")), sum(1 for x in u if not x.get("paid")),
+    ", ".join("%s=%s" % (k[len("reminder_skip_"):], v) for k, v in sorted(c.items()) if k.startswith("reminder_skip_")) or "nobody"))' \
+    "$list" "$OUT/owing.out" 2>/dev/null || echo "(not readable here; the runner reads the list itself)")"
+  family uvn-reminder-14 "$seg" "$list" "$R14_CAP" uvn-status --campaign uvn-reminder-14
 }
 claim_families() {
   if [ ! -s "$CLAIM_LIST" ]; then log "claim families: no claim list at $CLAIM_LIST (the claim lane drops it); skipped"; return 0; fi

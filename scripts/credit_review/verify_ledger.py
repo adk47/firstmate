@@ -130,7 +130,10 @@ CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "
              # with no message from us. ONE per user, ever - and ledgered under ITS OWN campaign so every 7-day gate
              # (the ask families', the status notes', the core notice) sees it: nobody gets this and a status note in
              # the same week, and nobody gets it twice.
-             "wait-apology")
+             "wait-apology",
+             # uvn-reminder-14 (captain 2026-11-13 15:08Z): the ONE reminder of a sent uvn-status ask, 14 days on,
+             # to a user who neither replied nor sent a document. See UVN_REMINDER below.
+             "uvn-reminder-14")
 # backlog-reply (intercom-backlog-i1, hydra#1379; Fable review @092894d4): a reply in an Intercom
 # conversation where the customer spoke last, sent by scripts/intercom-backlog/send.py through
 # intercom-ops-write.sh. Its "request id" is "conv-<conversation id>" (one reply per conversation,
@@ -231,6 +234,17 @@ UVN_NEW_ROWS = "uvn-new-rows"
 # an uvn-new-rows note IS an ask (its rows are never asked again by any ask), but it is never the user's one-ask-ever:
 # it exists because the user was already asked (prior_uvn_ask)
 ASK_CAMPAIGNS = ("verify-live", "retro-past", "uvn-status", GAP_ASK, PROOF_NEED_ASK, UVN_NEW_ROWS, DECIDER_SUPPORT)
+# uvn-reminder-14 (captain 2026-11-13 15:08Z, "fix it scale it now" / "see it through": yes on re-asking verification
+# non-responders after 14 days). The ONE reminder of a SENT uvn-status ask: it names the same requests the ask named,
+# so only its own rows block it (blocked_ids), and it is ledgered under its own campaign with kind 'initial', its
+# parent_row naming the ask it follows - one per user per ask (reminder14_user_done). It is deliberately NOT in
+# ASK_CAMPAIGNS: a reminder is a follow-up of an
+# ask, never a new one, so it neither restarts nor shortens REASK_LOCK_DAYS (90, unchanged for every first ask) and
+# asked_within() never counts it. Who may get it is decided by reminder14_user_done alone.
+UVN_REMINDER = "uvn-reminder-14"
+UVN_REMINDER_AFTER_DAYS = 14
+# reminder14_user_done reasons that only DEFER (nothing closed, the user is offered again later)
+REMINDER_DEFER_REASONS = ("messaged_7d", "not_due")
 
 # Historical only (deleted from the sender 2026-11-04): rows of this kind stay readable in
 # the ledger, and `reminders_due` no longer offers it. Do not re-add it to a sender campaign
@@ -698,7 +712,8 @@ def blocked_ids(db: sqlite3.Connection, request_ids: list[str], campaign: str = 
                 f"SELECT 1 FROM verify_requests WHERE request_id=? AND campaign IN ({_marks(sib)}) "
                 "AND status IN ('attempted','sent') LIMIT 1", (rid, *sib)).fetchone()
         else:
-            other = None if campaign in NOTICE_CAMPAIGNS else db.execute(
+            # uvn-reminder-14 names the requests its ask named: the ask's own row must not block its one reminder
+            other = None if campaign in NOTICE_CAMPAIGNS or campaign == UVN_REMINDER else db.execute(
                 f"SELECT 1 FROM verify_requests WHERE request_id=? AND campaign<>? AND campaign IN ({asks}) "
                 "AND status IN ('attempted','sent') LIMIT 1", (rid, campaign, *ASK_CAMPAIGNS)).fetchone()
         if other is not None:
@@ -978,6 +993,156 @@ def new_rows_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime |
     return ""
 
 
+_REMINDER_COLS = ("id", "parent_row", "account_id", "user_key", "campaign", "kind", "status", "day", "message_id",
+                  "request_ids_json", "proof_tagged_at", "last_reply_at", "extension_requested_at", "proof_attachments")
+# What the reminder rule reads per row: the columns above plus `reviewed`, the number of document-review verdicts on
+# the row's family. A rejected review sets proof_tagged_at back to NULL (record_proof_review, settle_proof_tags), so
+# the tag alone forgets that a document arrived; the attachment count and the verdict rows do not.
+_REMINDER_KEYS = (*_REMINDER_COLS, "reviewed")
+
+
+def _reminder_select(alias: str = "") -> str:
+    a = f"{alias}." if alias else "verify_messages."
+    return (", ".join(f"{a}{c}" for c in _REMINDER_COLS)
+            + f", (SELECT COUNT(*) FROM verify_proof_reviews v WHERE v.family = COALESCE({a}parent_row, {a}id))")
+
+
+def _day_start(day: str | None) -> datetime | None:
+    """00:00 UTC of an ISO day, or None when it is empty or unreadable (the caller then uses the clock)."""
+    try:
+        return datetime.strptime(str(day or ""), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def reminder14_ask_of(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The ask an uvn-reminder-14 note would follow, from ONE user's ledger rows: their LATEST initial ask across the
+    ask campaigns (attempted or sent), or None. The day the copy states ("we asked on <date>") is this row's `day`:
+    read from the ledger, never taken from a payload."""
+    asks = [r for r in rows if r["kind"] == "initial" and r["status"] in ("attempted", "sent")
+            and r["campaign"] in ASK_CAMPAIGNS]
+    return max(asks, key=lambda r: (str(r["day"] or ""), int(r["id"]))) if asks else None
+
+
+def reminder14_why(rows: list[dict[str, Any]], *, now: datetime | None = None) -> str:
+    """uvn-reminder-14: why the user these ledger rows belong to must not get the reminder now ('' when they may).
+    THE rule: the audience builder (reminder14_bulk), the gate's peek and claim() (reminder14_user_done, inside its
+    transaction) all call this one function, so the three cannot disagree about a row they all see.
+
+    Not closed (the user may become eligible):
+      'no_prior_ask'  the user's LAST ask is not a SENT uvn-status ask (never asked, asked by another family, or the
+                      ask's delivery is unconfirmed): there is nothing this copy may truthfully remind them of.
+      'not_due'       the last ask is younger than UVN_REMINDER_AFTER_DAYS (a deferral).
+      'messaged_7d'   any note from this gate in the last 7 days (a deferral).
+    Closed (never offered again):
+      'already_sent'      one reminder per user per ask: a live uvn-reminder-14 row whose parent_row names THIS ask
+                          (uvn-status asks a user once, so today one-per-ask and one-per-user select the same people).
+                          A live reminder row whose reference is missing or unreadable also closes here: unknown
+                          never sends a second reminder.
+      'proof_received'    a credit-proof reply is tagged on any credit note, or was (an attachment was counted on
+                          it, or a document review of its family is on record - a rejected review clears the tag,
+                          and "we haven't received it" would then be false): never re-ask someone who sent documents.
+      'replied'           a reply is recorded on any credit note (last_reply_at / extension_requested_at): never
+                          re-ask someone who answered. Stricter than "since the ask" on purpose: unknown never asks.
+      'already_reminded'  a follow-up of ANY kind ('reminder%') was sent or attempted to this user on or after the
+                          ask day, by this gate or by a sender outside it (the 2026-11-09 `reminder-1` rows carry
+                          no account id, so a user's rows are matched by account email too): one reminder, whoever
+                          sent it.
+      'noted_since_ask'   any OTHER credit note was sent or attempted to this user on or after the ask day (a status
+                          line, a decline, a note of a sender outside this gate such as the 2026-11-09
+                          `first-ask-1` emails): the ask is no longer the last thing we told them, so "we asked
+                          and have not heard back" may contradict it. The reminder follows an ask nothing followed.
+    The per-day cap is claim()'s (capped). The 90-day one-ask lock is not read here: this is the follow-up of an
+    ask, not an ask."""
+    ask = reminder14_ask_of(rows)
+    if ask is None or ask["campaign"] != "uvn-status" or ask["status"] != "sent":
+        return "no_prior_ask"
+    live = [r for r in rows if r["status"] in ("attempted", "sent")]
+    for r in live:
+        if r["campaign"] != UVN_REMINDER:
+            continue
+        try:
+            ref = int(r.get("parent_row"))
+        except (TypeError, ValueError):
+            return "already_sent"      # no readable reference: fail closed, never a second reminder
+        if ref == int(ask["id"]):
+            return "already_sent"
+    credit = [r for r in rows if r["campaign"] not in CLAIM_CAMPAIGNS]
+    if any(r["proof_tagged_at"] or r.get("proof_attachments") or r.get("reviewed") for r in credit):
+        return "proof_received"
+    if any(r["last_reply_at"] or r["extension_requested_at"] for r in credit):
+        return "replied"
+    if any(str(r["kind"] or "").startswith("reminder") and str(r["day"] or "") >= str(ask["day"]) for r in live):
+        return "already_reminded"
+    if any(r["id"] != ask["id"] and r["campaign"] not in CLAIM_CAMPAIGNS and str(r["day"] or "") >= str(ask["day"])
+           for r in live):
+        return "noted_since_ask"
+    at = now or utcnow()
+    try:
+        due = _plus(str(ask["day"]), UVN_REMINDER_AFTER_DAYS)
+    except (TypeError, ValueError):
+        return "not_due"           # an unreadable ask day: the reminder waits (stricter, never looser)
+    if at.strftime("%Y-%m-%d") < due:
+        return "not_due"
+    since = (at - timedelta(days=7)).strftime("%Y-%m-%d")
+    if any(str(r["day"] or "") >= since for r in live):
+        return "messaged_7d"
+    return ""
+
+
+def _reminder14_rows(db: sqlite3.Connection, user_key: str, user_id: str = "") -> list[dict[str, Any]]:
+    if not (user_key or str(user_id or "").strip()):
+        return []
+    cond, params = _same_user(db, user_key, user_id)
+    return [dict(zip(_REMINDER_KEYS, r))
+            for r in db.execute(f"SELECT {_reminder_select('m')} FROM verify_messages m WHERE {cond}", params)]
+
+
+def reminder14_ask(db: sqlite3.Connection, user_key: str, user_id: str = "") -> dict[str, Any] | None:
+    """This user's ask a reminder would follow (reminder14_ask_of over every ledger row of theirs)."""
+    return reminder14_ask_of(_reminder14_rows(db, user_key, user_id))
+
+
+def reminder14_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None = None,
+                         user_id: str = "") -> str:
+    """reminder14_why over every ledger row of this user (the account id, the account email, and - where the
+    decisions table knows the user - a note sent under an earlier email of theirs)."""
+    return reminder14_why(_reminder14_rows(db, user_key, user_id), now=now)
+
+
+def reminder14_bulk(db: sqlite3.Connection, *, now: datetime | None = None) -> dict[int, dict[str, Any]]:
+    """{account id: {"why", "asked_day", "request_ids"}} for every account with a ledger row: reminder14_why in ONE
+    pass over the ledger, for the audience builder (a per-user read of ~3,500 accounts would be ~3,500 table scans).
+
+    A user's rows here are the rows carrying their account id plus the rows carrying an email any of those rows
+    carries - which is how the account-less `reminder-1` rows of 2026-11-09 are found. It does not follow the
+    decisions table across an email change, so it can see FEWER rows than the gate does: it is the audience
+    pre-filter, and reminder14_user_done (the runner, the peek and the claim) is the decision."""
+    rows = [dict(zip(_REMINDER_KEYS, r)) for r in db.execute(f"SELECT {_reminder_select()} FROM verify_messages")]
+    by_acct: dict[int, list[dict[str, Any]]] = {}
+    by_key: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        acct = str(r["account_id"] or "").strip()
+        if acct.isdigit():
+            by_acct.setdefault(int(acct), []).append(r)
+        if r["user_key"]:
+            by_key.setdefault(str(r["user_key"]), []).append(r)
+    out: dict[int, dict[str, Any]] = {}
+    for acct, own in by_acct.items():
+        mine = {int(r["id"]): r for r in own}
+        for key in {str(r["user_key"]) for r in own if r["user_key"]}:
+            mine.update({int(r["id"]): r for r in by_key.get(key, [])})
+        rs = list(mine.values())
+        why = reminder14_why(rs, now=now)
+        ask = reminder14_ask_of(rs) or {}
+        try:
+            ids = [str(i).lower() for i in json.loads(ask.get("request_ids_json") or "[]")]
+        except ValueError:
+            ids = []
+        out[acct] = {"why": why, "asked_day": str(ask.get("day") or ""), "request_ids": ids}
+    return out
+
+
 def claim_cross_check(db: sqlite3.Connection, campaign: str, request_ids: list[str], user_key: str, *,
                       day: str, user_id: str = "") -> str:
     """The claim notes never cross ('' when this one may go). A claim-status or claim-proof-pending
@@ -1160,6 +1325,21 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
                 _skip(db, campaign, fresh, ts)
                 db.execute("COMMIT")
                 return {"result": "user_done", "reason": why, "request_ids": fresh}
+        if campaign == UVN_REMINDER and enforce_cap:
+            # inside this transaction (the peek and the audience builder read the same function)
+            # "today" is the day this claim counts on (the caller's UTC day), so the 14-day and 7-day windows and
+            # the per-day cap read ONE clock
+            why = reminder14_user_done(db, user_key, now=_day_start(day) or now, user_id=user_id)
+            if why in REMINDER_DEFER_REASONS:
+                db.execute("COMMIT")
+                return {"result": "recent", "reason": why, "request_ids": fresh}
+            if why == "no_prior_ask":                # never closed: a first ask may still go, and be followed up
+                db.execute("COMMIT")
+                return {"result": "no_prior_ask", "request_ids": fresh}
+            if why:
+                _skip(db, campaign, fresh, ts)
+                db.execute("COMMIT")
+                return {"result": "user_done", "reason": why, "request_ids": fresh}
         if campaign == MERGE_PENDING and enforce_cap:
             cond, params = _same_user(db, user_key, user_id)
             since = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -1194,7 +1374,14 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
         due, removal = window(day) if windowed else (None, None)
         if campaign == CLAIM_CAMPAIGN:
             due = claim_close_day(day)
-        parent = _decline_family(db, fresh) if campaign == DECLINE_CAMPAIGN else None
+        if campaign == DECLINE_CAMPAIGN:
+            parent = _decline_family(db, fresh)
+        elif campaign == UVN_REMINDER:
+            # the ask this reminder follows, recorded so already_sent closes THIS ask and no other
+            followed = reminder14_ask(db, user_key, user_id)
+            parent = int(followed["id"]) if followed is not None else None
+        else:
+            parent = None
         cur = db.execute(
             "INSERT INTO verify_messages (campaign, kind, parent_row, user_key, account_id, day, due_day, removal_day, "
             "status, message_type, contact_id, request_ids_json, refs_json, n_credits, approved_by, approval_ref, "
@@ -2864,6 +3051,14 @@ def _main(argv: list[str] | None = None) -> int:
             out["prior_uvn_ask"] = why != "no_prior_ask"
             out["user_done"] = why if why == "proof_received" else ""
             out["recent"], out["recent_why"] = why == "messaged_7d", why if why == "messaged_7d" else ""
+        if a.campaign == UVN_REMINDER:
+            why = reminder14_user_done(db, a.user_key, now=_day_start(a.day), user_id=a.user_id)
+            ask = reminder14_ask(db, a.user_key, a.user_id) or {}
+            out["prior_uvn_ask"] = why != "no_prior_ask"
+            out["asked_day"] = str(ask.get("day") or "") if why != "no_prior_ask" else ""
+            out["user_done"] = "" if why in REMINDER_DEFER_REASONS or why == "no_prior_ask" else why
+            out["recent"] = why in REMINDER_DEFER_REASONS
+            out["recent_why"] = why if why in REMINDER_DEFER_REASONS else ""
     elif a.op == "clear-no-channel":
         clear_no_channel(db, user_key=a.user_key, user_id=a.user_id, cleared_by=a.cleared_by, ref=a.ref)
         out = {"result": "cleared"}
