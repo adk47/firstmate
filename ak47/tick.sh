@@ -455,6 +455,15 @@ while IFS=$'\t' read -r key ceil dir _unit _reason; do
 done < <(ak47_budget_rows)
 printf '%s %s\n' "$(ak47_epoch)" "$sample" >>"$AK47_STATE/samples.log" 2>/dev/null || true
 
+# A size the walk could not finish is itself a finding. The budget still scores
+# the last known value, which is the right call for a slow sample - but if that
+# value is old, the sweep is choosing entries from a picture of a tree that is
+# no longer the tree, and that is exactly how a hygiene loop goes wrong quietly.
+tmp_age=$(ak47_cache_age tmp_gb 2>/dev/null) || tmp_age=""
+if [ -n "$tmp_age" ] && [ "$tmp_age" -gt $(( 2 * ${AK47_DU_TTL:-1800} )) ]; then
+  finding tmp-gb-stale "/tmp has not been measured for $(( tmp_age / 60 )) min: the ${AK47_DU_BUDGET:-90}s size walk did not finish, so the budget is scoring a stale number. Measure by hand: find /tmp -maxdepth 1 -type d -printf '%p\\0' | xargs -0 du -sx --block-size=1M | sort -rn | head -20"
+fi
+
 # Per-class counts, so the line says what moved without reading reap.log.
 byclass=""
 for c in tmp-mktemp tmp-producer orphan-task-scratch quarantine-expire; do

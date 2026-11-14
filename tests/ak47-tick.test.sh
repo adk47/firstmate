@@ -63,6 +63,43 @@ reset_tree() {
 
 # --- the refusals ---------------------------------------------------------------
 
+
+# --- the sampler must be bounded -------------------------------------------------
+# 2026-11-14: `du` over 698 GB of /tmp stopped finishing, the cached value went
+# stale, and every run blocked until systemd TERMed the unit - hours of silence
+# with nothing in devops.log. A bounded tick may not call an unbounded sampler.
+
+test_a_size_walk_that_overruns_does_not_hang_the_tick() {
+  reset_tree
+  local slow=$SANDBOX/slowbin
+  mkdir -p "$slow"
+  printf '#!/bin/sh\nexec sleep 300\n' >"$slow/du"
+  chmod +x "$slow/du"
+  local start; start=$(date +%s)
+  PATH="$slow:$PATH" AK47_DU_BUDGET=2 "$TICK" --apply >/dev/null 2>&1 \
+    || fail "the tick exited non-zero when the size walk overran"
+  local took=$(( $(date +%s) - start ))
+  [ "$took" -lt 60 ] || fail "the tick blocked for ${took}s on a size walk that does not finish"
+  [ "$(wc -l <"$AK47_STATE/devops.log")" -eq 1 ] \
+    || fail "the tick did not write its line when the size walk overran"
+  pass "a size walk that overruns is cut off instead of hanging the tick"
+}
+
+test_an_unmeasurable_tree_is_a_finding_not_silence() {
+  reset_tree
+  local slow=$SANDBOX/slowbin2
+  mkdir -p "$slow"
+  printf '#!/bin/sh\nexec sleep 300\n' >"$slow/du"
+  chmod +x "$slow/du"
+  # A cache row from long ago stands in for "measured once, never again".
+  printf 'tmp_gb\t%s\t999\n' $(( $(date +%s) - 100000 )) >"$AK47_STATE/sample.cache"
+  PATH="$slow:$PATH" AK47_DU_BUDGET=2 AK47_DU_TTL=60 "$TICK" --apply >/dev/null 2>&1 \
+    || fail "the tick exited non-zero with a stale size cache"
+  grep -q tmp-gb-stale "$AK47_STATE/findings.log" 2>/dev/null \
+    || fail "an unmeasurable /tmp produced no finding; the sweep would choose from a stale picture"
+  pass "a tree that can no longer be measured is reported, not silently scored"
+}
+
 test_refuses_a_directory_a_live_process_is_sitting_in() {
   reset_tree
   local d=$AK47_TMP_ROOT/tmpa003ltt_
@@ -478,3 +515,5 @@ test_a_dry_run_does_not_consume_the_escalation
 test_commits_a_finding_key_only_after_delivery
 test_delivery_commits_the_key_so_the_next_tick_is_quiet
 test_reports_a_dry_run_that_outlived_its_24_hours
+test_a_size_walk_that_overruns_does_not_hang_the_tick
+test_an_unmeasurable_tree_is_a_finding_not_silence

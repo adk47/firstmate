@@ -92,13 +92,38 @@ ak47_tmp_entries() {
   find "$root" -mindepth 1 -maxdepth 1 -printf '.' 2>/dev/null | wc -c
 }
 
+# ak47_cache_age <key> - how many seconds old this key's cached value is, or
+# nothing when the key has never been written. Read by the callers that have to
+# say out loud that a value is old.
+ak47_cache_age() {
+  local key=$1 f="$AK47_STATE/sample.cache" ts
+  [ -r "$f" ] || return 1
+  ts=$(awk -F'\t' -v k="$key" '$1==k{print $2;exit}' "$f" 2>/dev/null)
+  [ -n "${ts:-}" ] || return 1
+  printf '%s' $(( $(ak47_epoch) - ts ))
+}
+
 # ak47_tmp_gb - /tmp size in whole GB. `du` over 950k entries takes ~30 s, so the
 # value is cached for AK47_DU_TTL seconds (default 1800) and refreshed by the tick.
+#
+# 2026-11-14: on 698 GB of /tmp `du` stopped finishing at all, and every tick was
+# killed by the unit's start timeout before it wrote its line - the loop went
+# silent for hours and nothing else noticed, because the tick IS the sampler. A
+# bounded tick may not call an unbounded sampler, so the walk is given its own
+# budget (AK47_DU_BUDGET, default 90 s) and a walk that overruns falls back to the
+# last known value. The age of that value is what tells a reader whether the
+# fallback is fine or the tree is now permanently too big to measure.
 ak47_tmp_gb() {
-  local ttl=${AK47_DU_TTL:-1800} v
+  local ttl=${AK47_DU_TTL:-1800} budget=${AK47_DU_BUDGET:-90} v
   if v=$(ak47_cache_get tmp_gb "$ttl"); then printf '%s' "$v"; return 0; fi
-  v=$(du -sx --block-size=1G "${AK47_TMP_ROOT:-/tmp}" 2>/dev/null | cut -f1)
-  [ -n "${v:-}" ] || v=0
+  v=$(timeout "$budget" du -sx --block-size=1G "${AK47_TMP_ROOT:-/tmp}" 2>/dev/null | cut -f1)
+  case "${v:-}" in
+    ''|*[!0-9]*)
+      # The walk did not finish. Say so with a number the budget can score, and
+      # keep the last real measurement rather than inventing one.
+      if v=$(ak47_cache_get tmp_gb 345600); then printf '%s' "$v"; else printf '0'; fi
+      return 0 ;;
+  esac
   ak47_cache_put tmp_gb "$v"
   printf '%s' "$v"
 }

@@ -116,6 +116,22 @@ sends `SIGTERM`, and sends `SIGKILL` if it survives five minutes.
 The agent wakes only for findings the table cannot settle, and at most once per
 six hours per finding key.
 
+### A bounded tick may not call an unbounded sampler
+
+`tmp_gb` needs `du`, and on 2026-11-14 `du` over 698 GB of `/tmp` stopped
+finishing at all. The value was cached, the cache went stale, and every run
+blocked inside the sampler until systemd killed the unit at its start timeout:
+five hours with no `devops.log` line, and nothing watching the tick's silence
+closely enough to notice. The tick is the sampler, so a sampler that can hang is
+a loop that can die.
+
+The walk now runs under `timeout` (`AK47_DU_BUDGET`, default 90 s). If it does
+not finish, the budget scores the last known size, and once that size is older
+than two refresh intervals the tick files `tmp-gb-stale` instead of letting a
+stale picture drive the sweep. The rule this leaves behind: **a budget metric
+whose sample is unbounded must return a number or say it could not measure** —
+never block, and never invent.
+
 ## 4. The guards
 
 ```
