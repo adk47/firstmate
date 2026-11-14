@@ -62,8 +62,9 @@ oomctl | sed -n '/Memory Pressure Monitored CGroups/,$p'      # expect the slice
 #         && sudo rm -f /etc/systemd/system/user@1000.service.d/60-ak47-oomd-mem.conf \
 #         && sudo systemctl daemon-reload
 
-# 4. Let the hygiene tick reclaim swap. swapoff/swapon are root-only and the tick
-#    is a user unit, so today it can only report `swap-unprivileged`.
+# 4. Let the reclaim unit the tick rings stop and start swap. swapoff/swapon are
+#    root-only and the unit runs as this user, so today the tick can only report
+#    `swap-unprivileged`.
 printf 'aaron ALL=(root) NOPASSWD: /sbin/swapoff -a, /sbin/swapon -a\n' \
   | sudo tee /etc/sudoers.d/60-ak47-swap
 sudo chmod 0440 /etc/sudoers.d/60-ak47-swap
@@ -162,7 +163,8 @@ The four classes in the table are armed by default. `dead-pane`,
 `stale-lock` and `disk` are report-only and never act. `swap-pressure` and
 `fat-process` are report-only until an operator sets `swap_pressure=1` or
 `fat_process=1` in `~/.config/ak47/devops.conf`; once armed, swap-pressure
-reclaims swap when RAM is free, and fat-process renices the process to 19,
+rings `ak47-swap-reclaim.service` when swap is at 70% or more with 20 GB RAM free,
+and fat-process renices the process to 19,
 sends `SIGTERM`, and sends `SIGKILL` if it survives five minutes.
 
 The agent wakes only for findings the table cannot settle, and at most once per
@@ -254,7 +256,8 @@ Without this, the source fix rots and the sweeper becomes load-bearing again.
 ## 5. Codification and self-monitoring
 
 `hdevops/apply.sh` lands the system in H-DevOps as a PR: the ak47 scripts,
-libraries, budget and producer table, the hygiene user timers, the two sysctls
+libraries, budget and producer table, the hygiene user timers, the on-demand
+swap-reclaim unit, the two sysctls
 that were hand-written on the box and recorded nowhere else, systemd-oomd
 with its swap and avoid drop-ins, the two task-cap drop-ins described in §5a,
 and the health beat that pages on swap and memory pressure as well as load and
@@ -350,8 +353,8 @@ by running one of the commands the sudoers rule actually grants, and files
 restore after a successful `swapoff` is reported as a failure rather than
 swallowed, because that leaves the box with no swap.
 The 2026-11-14 reclaim was run by hand and took swap from 31.9 GB of 31.9 GB to
-0 (RAM 69 GB used, 54 GB available). To let the tick do it, install the sudoers
-rule in item 4 of [The commands only Aaron can run](#the-commands-only-aaron-can-run).
+0 (RAM 69 GB used, 54 GB available). To let the tick's reclaim unit do it,
+install the sudoers rule in item 4 of [The commands only Aaron can run](#the-commands-only-aaron-can-run).
 
 Aaron's call, not the tick's — enabling the watch lets oomd kill the largest
 cgroup under the slice after 20 s at 50% pressure, and that cgroup can be a
@@ -527,7 +530,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-115 tests across seven files: the budget, the census, the guards, the guarded
+116 tests across seven files: the budget, the census, the guards, the guarded
 delete, the big-entry take-down, the tick, and the weekly review. They are
 hermetic — no tmux, no network, no live fleet state — and registered as
 `pure-contract-unit` in `bin/fm-test-run.sh`.

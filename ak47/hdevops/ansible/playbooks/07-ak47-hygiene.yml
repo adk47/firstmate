@@ -15,14 +15,15 @@
 #   files/ak47/guards/            a check per producer that fails when it stops cleaning up
 #   files/ak47/weekly-review.sh   proposes threshold diffs, never applies them
 #   files/ak47/tmp-takedown.sh    the manual, bounded take-down for a huge /tmp
+#   files/ak47/swap-reclaim.sh    the on-demand unit's bounded swap reclaim
 #   bin/fm-spawn.sh               exports a per-task TMPDIR so a leak lands in the
 #                                 task's own scratch root and teardown removes it
 #
 # What this playbook owns is everything that would be lost in a rebuild: the
-# scripts, the hygiene user timers, the two sysctls that were hand-written on
-# the box on 2026-11-03 and 2026-11-10 with no record anywhere else,
-# systemd-oomd with its swap and avoid drop-ins, the user task-cap drop-ins, and
-# the 10-minute health beat.
+# scripts, the hygiene user timers, the on-demand swap-reclaim unit, the two
+# sysctls that were hand-written on the box on 2026-11-03 and 2026-11-10 with no
+# record anywhere else, systemd-oomd with its swap and avoid drop-ins, the user
+# task-cap drop-ins, and the 10-minute health beat.
 # The installed units run from the payload copy under ~/.local/lib/ak47, not
 # from a firstmate checkout.
 #
@@ -33,6 +34,7 @@
 # Revert (<1 min, keeps every log and every quarantine directory):
 #   systemctl --user disable --now ak47-devops.timer ak47-devops-weekly.timer
 #   rm ~/.config/systemd/user/ak47-devops{,-weekly}.{service,timer}
+#   rm ~/.config/systemd/user/ak47-swap-reclaim.service
 #   systemctl --user daemon-reload
 #   sudo rm /etc/sysctl.d/60-ak47-swap.conf /etc/sysctl.d/60-ak47-inotify.conf
 #   sudo sysctl -w vm.swappiness=60 fs.inotify.max_user_instances=128
