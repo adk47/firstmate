@@ -1178,9 +1178,9 @@ triggers). Authoritative doc: `data/sentinel/README.md`; registry `policies/sent
 - **Ticks serialize on a host `flock`** across load → evaluate → save → mirror PR; a tick that cannot
   acquire within `SENTINEL_LOCK_TIMEOUT` exits 0 silently (the other tick is doing the same join).
 
-## The proof path: one feeder, one reader, one marker, and no armed decision
+## The proof path: one feeder, one reader, one marker, one reviewer, and no armed decision
 
-A customer's document goes file -> read -> decide -> mark -> tell, one owner per stage:
+A customer's document goes file -> read -> decide -> mark -> review -> tell, one owner per stage:
 `docs/credit-verification/proof-path.md` (what each named processor is, what retires and its replacement).
 Counts: `data/proof-processing-ovh-e1/tools/measure.py` on node-8.
 
@@ -1202,7 +1202,13 @@ Counts: `data/proof-processing-ovh-e1/tools/measure.py` on node-8.
   against (`verify_proof_reviews.request_id`, under that credit's own note): a review of another credit, or on
   another note, never leaves an answered note untagged. It leaves `conversation_id` alone: empty there means
   "sent by email".
-- **A tag is not a decision.** No job turns a read document into a decision: the document class is
+- **Proof review is `credit_review/proof_reviewer.py`, never a person** (captain 2026-11-13). It writes
+  `verify_proof_reviews` from doc-verify's recorded outcome (`reviewed_by` names the rule, the doc-verify
+  version and the model), sends nothing and approves nothing in core. A document doc-verify has not read, or
+  read only as `unknown`, gets no verdict at any age: the credit stays under review waiting on our reader
+  (every run's output carries `wait_reader` and `wait_reader_oldest_days`), never on a person and never removal-due; `credit-review.py --proof-review` is an ops
+  override. The cron ships unarmed (`enabled: false`): arming it is a decision, not a side effect of a merge.
+- **A tag is not a decision.** No job turns a read document into a core decision: the document class is
   `approved: false` in `policies/credit-approval-automation.json`, `doc_approvals` is empty and core's
   `credit_document_verdicts` has 0 rows. Report the stages separately (filed, read, answered, decided, told);
   never report "proof processed" from the first three.

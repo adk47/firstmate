@@ -258,17 +258,25 @@ def begin(db: sqlite3.Connection, key: str, worker: str, *, floor: int, lease_s:
     uncertain an earlier attempt has an unknown outcome
     busy      another worker holds it
     unsettled a dead worker's attempt has not been settled from the ledger yet
-    missing   no intent was written"""
+    missing   no intent was written
+
+    The floor is the ledger position when this intent was FIRST attempted, and no later attempt may raise it: a
+    worker whose lease ran out mid-gate can still write the note this intent owns after another process released
+    it, and a floor read at the retry would put that row below it, so the retry could never read the note it
+    wrote and the intent would sit `queued` forever."""
     now = time.time() if now is None else now
     with tx(db):
-        row = db.execute("SELECT state, worker, lease_until FROM intents WHERE idem_key = ?", (key,)).fetchone()
+        row = db.execute("SELECT state, worker, lease_until, attempts, ledger_floor FROM intents WHERE idem_key = ?",
+                         (key,)).fetchone()
         if row is None:
             return "missing", ""
-        state, holder, lease = row
+        state, holder, lease, attempts, first_floor = row
         if state in ("sent", "uncertain"):
             return state, ""
         if state == "attempted":
             return ("busy" if lease > now else "unsettled"), holder
+        if attempts:
+            floor = min(floor, first_floor)
         db.execute("UPDATE intents SET state = 'attempted', worker = ?, lease_until = ?, attempts = attempts + 1, "
                    "attempted_at = ?, ledger_floor = ?, reason = '' WHERE idem_key = ?",
                    (worker, now + lease_s, now, floor, key))

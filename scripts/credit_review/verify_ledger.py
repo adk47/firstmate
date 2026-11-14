@@ -2133,8 +2133,28 @@ def mark_tagged(db: sqlite3.Connection, *, message_id: str, conversation_id: str
         raise
 
 
+def settle_proof_tags(db: sqlite3.Connection, *, root: int, covered: list[str],
+                      now: datetime | None = None) -> None:
+    """Return a family to "no proof" once every credit its own notes name is reviewed and any was rejected.
+
+    Called ONCE after every verdict for a note is written, so which credit is written first cannot decide
+    whether another credit's verdict is accepted or refused. The census is read from the family's rows, not
+    from the caller's list, so a credit of the family the caller never looked at still holds the tag."""
+    ts = stamp(now)
+    for fam in sorted({_note_of(db, rid) or int(root) for rid in covered}):
+        reviews = _reviews(db, fam)
+        named = {x for r in db.execute("SELECT request_ids_json FROM verify_messages WHERE id=? OR parent_row=?",
+                                       (fam, fam)).fetchall() for x in _ids_of(r["request_ids_json"])}
+        fam_ids = [x for x in sorted(named) if (_note_of(db, x) or fam) == fam]
+        if fam_ids and all(x in reviews for x in fam_ids) and any(reviews[x] == "rejected" for x in fam_ids):
+            db.execute("UPDATE verify_messages SET proof_tagged_at=NULL, updated_at=? WHERE id=? OR parent_row=?",
+                       (ts, fam, fam))
+
+
 def record_proof_review(db: sqlite3.Connection, *, message_id: str, request_ids: list[str], outcome: str,
-                        reviewer: str, reason: str = "", now: datetime | None = None) -> dict[str, Any]:
+                        reviewer: str, reason: str = "", now: datetime | None = None,
+                        message_row: int | None = None, settle: bool = True,
+                        transaction: bool = True) -> dict[str, Any]:
     """The document review's verdict, PER CREDIT, on a note with a tagged proof or a user
     reply (Fable review of hydra#1239, F2; firstmate decision on review finding
     proof-review-is-all-or-nothing-per-note):
@@ -2147,7 +2167,12 @@ def record_proof_review(db: sqlite3.Connection, *, message_id: str, request_ids:
     Credits on the note not reviewed yet stay held while the proof awaits review. Once every
     credit on the note is reviewed and any was rejected, the note returns to "no proof" (the
     sweep watches for a NEW attachment beyond the ones already reviewed). A reviewed credit
-    never gets a day-14 / day-25 reminder."""
+    never gets a day-14 / day-25 reminder. `message_row` names the reviewed row by its ledger
+    id, for a note that carries no Intercom message id; `settle=False` leaves the "no proof"
+    reset to the caller, for one writing several verdicts for the same note. `transaction=False`
+    is for a caller that already holds a BEGIN IMMEDIATE and writes its own rows with the verdict:
+    this function then begins, commits and rolls back nothing, so the caller's commit lands the
+    verdict and those rows together or not at all."""
     if outcome not in PROOF_OUTCOMES:
         raise ValueError(f"outcome must be one of {PROOF_OUTCOMES}")
     reason = str(reason or "").strip()
@@ -2160,15 +2185,21 @@ def record_proof_review(db: sqlite3.Connection, *, message_id: str, request_ids:
     ids = list(dict.fromkeys(str(x).strip() for x in request_ids if str(x).strip()))
     if not ids:
         raise ValueError("a review names the credits (request ids) it covers")
-    root = _family(db, message_id)
+    root = _family(db, message_id) if message_row is None else None
+    if message_row is not None:
+        at = db.execute("SELECT id, parent_row FROM verify_messages WHERE id=?", (int(message_row),)).fetchone()
+        root = int(at["parent_row"] or at["id"]) if at is not None else None
     if root is None:
         return {"result": "no_message"}
     ts = stamp(now)
-    db.execute("BEGIN IMMEDIATE")
+    if transaction:
+        db.execute("BEGIN IMMEDIATE")
     try:
         note = db.execute("SELECT * FROM verify_messages WHERE id=?", (root,)).fetchone()
-        row = db.execute("SELECT * FROM verify_messages WHERE message_id=? ORDER BY id DESC LIMIT 1",
-                         (message_id,)).fetchone()
+        row = (db.execute("SELECT * FROM verify_messages WHERE id=?", (int(message_row),)).fetchone()
+               if message_row is not None else
+               db.execute("SELECT * FROM verify_messages WHERE message_id=? ORDER BY id DESC LIMIT 1",
+                          (message_id,)).fetchone())
         # what the reviewed row itself covered (a decline names its own credits) plus the family note's
         # credits: a review may name any credit the thread it arrives on actually asked about
         covered = list(dict.fromkeys(
@@ -2177,7 +2208,8 @@ def record_proof_review(db: sqlite3.Connection, *, message_id: str, request_ids:
         fams = sorted({_note_of(db, rid) or root for rid in ids})
         stray = [x for x in ids if x not in covered]
         if stray:
-            db.execute("COMMIT")
+            if transaction:
+                db.execute("COMMIT")
             return {"result": "not_on_note", "request_ids": stray}
         # the threads a document or a reply can have arrived on: every reviewed credit's own family, the row's
         # family, and the row the review is recorded against (a decline is its own message, filed under one note)
@@ -2189,7 +2221,8 @@ def record_proof_review(db: sqlite3.Connection, *, message_id: str, request_ids:
             f"SELECT 1 FROM verify_messages WHERE (id IN ({in_fams}) OR parent_row IN ({in_fams})) "
             "AND extension_requested_at IS NOT NULL LIMIT 1", (*cand, *cand)).fetchone() is not None
         if tagged is None and not replied_to:
-            db.execute("COMMIT")
+            if transaction:
+                db.execute("COMMIT")
             return {"result": "not_tagged"}
         document = tagged is not None or db.execute(
             f"SELECT 1 FROM verify_messages WHERE (id IN ({in_fams}) OR parent_row IN ({in_fams})) "
@@ -2208,15 +2241,18 @@ def record_proof_review(db: sqlite3.Connection, *, message_id: str, request_ids:
                        (_note_of(db, rid) or root, rid, outcome, reason or None, int(document), ts, reviewer))
         # the row returns to "no proof" PER FAMILY: once every credit of a family that this thread covered
         # is reviewed and any of them was rejected
-        for fam in fams:
-            reviews = _reviews(db, fam)
-            fam_ids = [x for x in covered if (_note_of(db, x) or root) == fam]
-            if fam_ids and all(x in reviews for x in fam_ids) and any(reviews[x] == "rejected" for x in fam_ids):
-                db.execute("UPDATE verify_messages SET proof_tagged_at=NULL, updated_at=? WHERE id=? OR parent_row=?",
-                           (ts, fam, fam))
-        db.execute("COMMIT")
+        if settle:
+            for fam in fams:
+                reviews = _reviews(db, fam)
+                fam_ids = [x for x in covered if (_note_of(db, x) or root) == fam]
+                if fam_ids and all(x in reviews for x in fam_ids) and any(reviews[x] == "rejected" for x in fam_ids):
+                    db.execute("UPDATE verify_messages SET proof_tagged_at=NULL, updated_at=? WHERE id=? OR parent_row=?",
+                               (ts, fam, fam))
+        if transaction:
+            db.execute("COMMIT")
     except Exception:
-        db.execute("ROLLBACK")
+        if transaction:
+            db.execute("ROLLBACK")
         raise
     return {"result": "ok", "outcome": outcome, "request_ids": ids}
 

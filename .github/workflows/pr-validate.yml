@@ -2785,6 +2785,10 @@ jobs:
           # The proof marker (credit_review/proof_marker.py): a sent note is tagged proof_tagged_at from the
           # documents on file (after the note, for its request); never judges, sends or approves; revertible.
           python3 scripts/tests/test_proof_marker.py
+          # The AI proof reviewer (credit_review/proof_reviewer.py): every tagged credit gets an accepted/rejected
+          # verdict in verify_proof_reviews with an AI reviewer name; a rejection carries the specific ask and
+          # never the internal reason; an unread or unknown read gets no verdict at all; bounded, idempotent, revertible.
+          python3 scripts/tests/test_proof_reviewer.py
           # Link replies (r5 r1-link): proof_link_intake only, never proof_intake; host class from
           # policies/proof-link-hosts.json; SSRF-safe fetch of allowlisted hosts only. Fakes only, no network.
           python3 scripts/tests/test_proof_links.py

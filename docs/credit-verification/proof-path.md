@@ -1,6 +1,6 @@
-# The proof path: one feeder, one reader, one decision step, one marker
+# The proof path: one feeder, one reader, one decision step, one marker, one reviewer
 
-A customer's document goes through five stages: **file, read, decide, mark, tell**. This page names the one
+A customer's document goes through six stages: **file, read, decide, mark, review, tell**. This page names the one
 job that owns each stage, what is still duplicated, and what is not armed. The measurements behind it are in
 `data/proof-processing-ovh-e1/report.md` (node-8, 2026-11-13).
 
@@ -12,9 +12,11 @@ job that owns each stage, what is still duplicated, and what is not armed. The m
 | read | `credit-doc-verify.py run` (cron `credit-doc-verify`) | hourly :50 | `proof_intake`, the document bytes, sources the customer does not control | `dv_outcomes` in `doc-verify.sqlite` (shadow) |
 | decide | credits: `credit_review/doc_approve.py` through `decide.py`. Claims: `claim-doc-ladder.py` | not armed; 4 h (shadow) | `dv_outcomes` | `doc_approvals`; `claim-doc-ladder/decisions.sqlite` |
 | mark | `credit_review/proof_marker.py apply` (cron `credit-proof-marker`) | hourly :45 | `proof_intake` (read-only), `verify_messages` | `verify_messages.proof_tagged_at`, one `proof_marks` row per tag |
+| review | `credit_review/proof_reviewer.py apply` (cron `credit-proof-reviewer`, ships unarmed: `enabled: false`) | hourly :55 once armed | `verify_messages` under review, `dv_outcomes`, `dv_llm_calls`, `proof_intake` (all read-only) | `verify_proof_reviews` through `verify_ledger.record_proof_review`, one `proof_review_decisions` row per credit |
 | tell | the existing senders, each behind the outbound copy gate | per campaign | the ledger | `verify_messages` |
 
-Nothing on this page sends a message or approves a credit. The file and mark stages never judge.
+Nothing on this page sends a message or approves a credit in core. The file and mark stages never judge. The
+review stage is an AI verdict in the verify ledger; no person reviews a document.
 
 ## The feeder (`file-recent`)
 
@@ -93,6 +95,63 @@ was retired on 2026-11-06, and it reads one conversation per note, which is not 
 never recorded a look on production (`proof_checked_at` is set on 0 rows). The 103 tags that existed before
 2026-11-13 were written in one second on 2026-11-09 by a backfill that is not in this repo.
 
+## The reviewer (`proof_reviewer.py`)
+
+Captain, 2026-11-13: "never should we ever use a person to evaluate this". `verify_proof_reviews` had no writer
+but a person typing `credit-review.py --proof-review`, and it had 0 rows. The reviewer is that writer. It runs
+over every credit on a credit note whose proof is tagged and not yet reviewed, and records one verdict per
+credit through `verify_ledger.record_proof_review`.
+
+It calls no model. The verdict is doc-verify's recorded outcome for that credit (latest row per document,
+request and role, for this account), and `reviewed_by` names the rule, the doc-verify version and the model
+that read the document: `ai:proof-reviewer/pr-1 doc-verify/dv-4 model=<model>`.
+
+| reading | verdict | what the customer is owed |
+| --- | --- | --- |
+| every document for the credit is read, every role the credit claims on the filing (`dv_intake_keys`, or the newest `dv_steps` `intake_keys` row when the table has none) has a `verified` read of its own and nothing is forged or contradicted | `accepted`: the credit is never removal-due. A verified read stands: an `unverifiable` document for the SAME role does not reopen it (a resubmission that verifies is accepted over the first document that did not), and a role with no verified read of its own is never carried by another role's. The ACCOUNT's hold does not change this: a verified document is true whether or not another document of that account was forged | nothing |
+| anything else doc-verify read | `rejected`, with one of `REJECTION_REASONS` kept internal | the reason-free decline, and the specific ask: the doc-verify need code (`readable_document`, `counterparty_signed_or_registered`, `distributor_dashboard_with_code`, `issuer_email_from_official_domain`); a `forged`/`contradicted` read records the need it would have asked for, on the `blocked:account_on_hold` route, with `ask_need` and `ask` left empty like every blocked route |
+| uncertain: a document for the credit is not read yet, its read is `unknown`, a claimed role was keyed and neither read nor cut by doc-verify (the per-run claim cap), the filing's keying was never recorded, or a note with no account id names a credit more than one account filed on (so the note cannot say which filing is its own) - even when another document already verified | no verdict at all, at any age: the credit stays under review waiting on our reader and is never removal-due | nothing: our reader's failure is ours to fix, so nothing is sent to the user about it, and every run writes how many credits wait on the reader and the age of the oldest (`wait_reader`, `oldest_days` in the file; the run's output prints them as `wait_reader` and `wait_reader_oldest_days`) to `--waiting-file`: our backlog is measured on our side (the queue report that will carry that file is a separate change, so until it lands the file itself is the report) |
+| `other_track`: the reader read another document of the account and found nothing for THIS credit, or its fan-out cut marked the credit's keys not matched (a read filing with no claim) | `rejected`, never `accepted` | the decline, and the ask the failing read names when a read named one (`proof-need-ask` with that need code); only when nothing was read for this credit is there no ask, and the audit row then carries `blocked:no_unverifiable_read` (`blocked:account_on_hold` on a held account) and no need code |
+
+An uncertain reading is never a pending state for a person and no staff queue exists. There is no clock on our
+reader either: a document we have not read, or read only as `unknown`, produces no rejection and no ask however
+long the backlog takes, so no timer can charge the user for our reader's delay. The internal reason
+never leaves the ledger: `plan --list` prints the outcome and the ask only.
+
+The reviewer sends nothing and approves nothing in core. Each audit row records the ask and the route it
+would take (`ask_route`):
+
+- `proof-need-ask`: the one reviewed ask path (`need_asks.py`), which sends on doc-verify's `unverifiable`
+  row with the same need code. An `unknown` read is never sent: it means our reader could not answer, so
+  the retry layer owns it and no message blames the user for our outage;
+- `blocked:account_on_hold` (the account is never messaged, and a read doc-verify ruled `forged`,
+  `forged_positive` or `contradicted` holds it), `blocked:verify_at_off` (the issuer-email ask is locked), and
+  `blocked:no_unverifiable_read` (that path has no row to send on). A blocked ask is counted in the run's
+  output, never dropped silently, and is not sent by anything today: so it is recorded as NO ask - `ask_need`
+  and `ask` stay empty on the audit row - because a row carrying an ask nothing can send would claim a customer
+  was told when they were not. The blocked route in the run's counters is our backlog, said plainly.
+
+The decline is not sent by the reviewer either. The `decline` campaign stays locked behind
+`DECLINE_CORE_ROUTE_OFF` and has no scheduled driver, so a rejected credit reads `HELD_NOT_TOLD` and is never
+removed until its decline is on record.
+
+| command | effect |
+| --- | --- |
+| `proof_reviewer.py plan [--list]` | counts only (`--list`: outcome and ask per credit), all stores read-only |
+| `proof_reviewer.py apply [--max-notes N]` | records the verdicts, oldest tag first, at most N notes (default 200), in one transaction, prints the `run_id` |
+| `proof_reviewer.py revert --run-id RUN` | deletes that run's verdicts nothing has rewritten since and puts the notes back under review |
+
+A second `apply` decides nothing twice: a reviewed credit is no longer under review, and both verdicts are final for
+that tag. Every verdict for a note's family is written before any tag is settled
+(`verify_ledger.settle_proof_tags`, called once after all of them), so the order credits are written in cannot
+decide whether another credit's verdict holds, and a family returns to "no proof" only once every credit its own
+rows name is reviewed and any was rejected. A run is one `BEGIN IMMEDIATE` transaction: every verdict, its
+`proof_review_decisions` row, the tags it settles and the record of which tags it cleared land together or not at
+all, so a run killed part-way leaves the ledger as it found it and the next run decides the same notes. A rejected credit is decided again only when a new document re-tags its note, which is
+`proof_marker.py`'s job, unchanged. The backlog is the same command with a larger bound. Kill file:
+`/etc/hydra/proof-reviewer.disabled`. An unreadable store is exit 2 and nothing is written. `proof_review_decisions` is created by the reviewer, not by `verify_ledger.SCHEMA`,
+for the reason `proof_marks` is. Claim notes are skipped: their documents are `claim-doc-ladder.py`'s.
+
 ## What the seven named processors are
 
 | processor | what it is | on the path? |
@@ -124,7 +183,8 @@ Two of the seven handle documents. Neither set the marker, and no job did.
 
 ## What is not armed
 
-No job turns a read document into a decision today, and this change does not convert a document into a decision.
+No job turns a read document into a core decision today. The reviewer's verdict lives in the verify ledger
+(removal reads it); it writes no credit-request status.
 Two later PRs do that, each on its own:
 
 1. **the doc-verify refusal fix**: `credit-doc-verify.py`'s standing verdict is `verified` for 25 of 8,644 documents

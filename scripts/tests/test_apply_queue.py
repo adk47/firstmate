@@ -184,6 +184,20 @@ class JournalTests(Base):
         self.assertEqual(self.finish(1, posted=True, worker="someone-else"), "")
         self.assertEqual(self.state(1)[0], "attempted")
 
+    def test_a_retry_reads_the_note_the_released_worker_wrote_after_the_release(self):
+        # The window the kill -9 run hit: the lease runs out while the worker is still inside the gate, so the
+        # intent is released as "no ledger row" before the note lands. The worker then writes it and its report
+        # is discarded (it no longer holds the intent). The retry must read that note, not call it queued again
+        # for ever.
+        self.assertEqual(self.attempt(1, lease_s=0.01), "go")
+        self.assertEqual(aq.settle(self.db, self.ledger, now=time.time() + 10)["queued"], 1)
+        g = LedgerGate(self.ledger)
+        g.finalize(g.claim(payload(1))["message_row"], "sent")       # the released worker's note, landing late
+        self.assertEqual(self.finish(1), "")                         # its own report changes nothing now
+        self.assertEqual(self.attempt(1, worker="w2"), "go")
+        self.assertEqual(self.finish(1, worker="w2"), "sent")
+        self.assertEqual(self.state(1)[0], "sent")
+
     def test_settle_reads_a_dead_workers_attempt_from_the_ledger(self):
         g = LedgerGate(self.ledger)
         for i in (1, 2, 3):
