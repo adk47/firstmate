@@ -343,47 +343,21 @@ by running one of the commands the sudoers rule actually grants, and files
 restore after a successful `swapoff` is reported as a failure rather than
 swallowed, because that leaves the box with no swap.
 The 2026-11-14 reclaim was run by hand and took swap from 31.9 GB of 31.9 GB to
-0 (RAM 69 GB used, 54 GB available). To let the tick do it, one sudoers rule:
-
-```
-printf 'aaron ALL=(root) NOPASSWD: /sbin/swapoff -a, /sbin/swapon -a\n' \
-  | sudo tee /etc/sudoers.d/60-ak47-swap
-sudo chmod 0440 /etc/sudoers.d/60-ak47-swap
-# revert: sudo rm /etc/sudoers.d/60-ak47-swap
-```
+0 (RAM 69 GB used, 54 GB available). To let the tick do it, install the sudoers
+rule in item 4 of [The commands only Aaron can run](#the-commands-only-aaron-can-run).
 
 Aaron's call, not the tick's — enabling the watch lets oomd kill the largest
 cgroup under the slice after 20 s at 50% pressure, and that cgroup can be a
-worker, a lane, or the chair:
-
-```
-# see it, immediately, without touching the running configuration:
-sudo systemctl set-property --runtime user@1000.service MemoryPressureWatch=on
-oomctl | sed -n '/Memory Pressure Monitored CGroups/,$p'
-
-# make it survive, with the revert:
-printf '[Service]\nMemoryPressureWatch=on\n' \
-  | sudo tee /etc/systemd/system/user@1000.service.d/60-ak47-oomd-mem.conf
-sudo systemctl daemon-reload
-# revert: sudo rm /etc/systemd/system/user@1000.service.d/60-ak47-oomd-mem.conf
-#         && sudo systemctl set-property --runtime user@1000.service MemoryPressureWatch=skip
-```
+worker, a lane, or the chair. The runtime opt-in, the persisted drop-in, and
+their reverts are item 3 of the same block.
 
 The per-unit default is read when the user manager starts, and restarting
 `user@1000.service` would restart every unit in the slice — the fleet-wide
 disruption this change exists to prevent. So it applies at the next login; the
-slice cap applies without one. Aaron's one-liner, if applying by hand:
-
-```
-sudo install -D -m644 ak47/hdevops/ansible/playbooks/templates/60-ak47-tasksmax-user.conf \
-  /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf
-sudo install -D -m644 ak47/hdevops/ansible/playbooks/templates/60-ak47-tasksmax-slice.conf \
-  /etc/systemd/system/user@1000.service.d/60-ak47-tasksmax-slice.conf
-sudo systemctl daemon-reload
-```
-
-Revert: remove both files and `sudo systemctl daemon-reload`. The bound returns
-to 12000 on the next unit start; nothing is restarted either way.
+slice cap applies without one. The install and revert lines, if applying by
+hand, are item 1 of [The commands only Aaron can run](#the-commands-only-aaron-can-run).
+The bound returns to 12000 on the next unit start; nothing is restarted either
+way.
 
 ## 6. The weekly review
 
@@ -546,10 +520,10 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-107 tests across seven files: the budget, the census, the guards, the guarded
-delete, the big-entry take-down, the tick, and the weekly review. They are hermetic — no tmux, no
-network, no live fleet state — and registered as `pure-contract-unit` in
-`bin/fm-test-run.sh`.
+114 tests across seven files: the budget, the census, the guards, the guarded
+delete, the big-entry take-down, the tick, and the weekly review. They are
+hermetic — no tmux, no network, no live fleet state — and registered as
+`pure-contract-unit` in `bin/fm-test-run.sh`.
 
 ## Acceptance, after 7 days
 

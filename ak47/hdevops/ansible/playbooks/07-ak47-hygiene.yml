@@ -14,6 +14,7 @@
 #   files/ak47/census.sh          which producer creates the growth
 #   files/ak47/guards/            a check per producer that fails when it stops cleaning up
 #   files/ak47/weekly-review.sh   proposes threshold diffs, never applies them
+#   files/ak47/tmp-takedown.sh    the manual, bounded take-down for a huge /tmp
 #   bin/fm-spawn.sh               exports a per-task TMPDIR so a leak lands in the
 #                                 task's own scratch root and teardown removes it
 #
