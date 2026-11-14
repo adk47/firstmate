@@ -119,12 +119,22 @@ ak47_tmp_gb() {
   v=$(timeout "$budget" du -sx --block-size=1G "${AK47_TMP_ROOT:-/tmp}" 2>/dev/null | cut -f1)
   case "${v:-}" in
     ''|*[!0-9]*)
-      # The walk did not finish. Say so with a number the budget can score, and
-      # keep the last real measurement rather than inventing one.
-      if v=$(ak47_cache_get tmp_gb 345600); then printf '%s' "$v"; else printf '0'; fi
+      # The walk did not finish. Keep the last real measurement rather than
+      # inventing one, and re-stamp it so the next run does not pay the same
+      # timeout again: at 698 GB the walk costs its whole budget every time.
+      # `tmp_gb_ok` records when the tree was last measured for real, which is
+      # the number that tells a reader whether the value is merely old or the
+      # tree has grown past measuring.
+      if v=$(ak47_cache_get tmp_gb 345600); then
+        ak47_cache_put tmp_gb "$v"
+        printf '%s' "$v"
+      else
+        printf '0'
+      fi
       return 0 ;;
   esac
   ak47_cache_put tmp_gb "$v"
+  ak47_cache_put tmp_gb_ok "$(ak47_epoch)"
   printf '%s' "$v"
 }
 

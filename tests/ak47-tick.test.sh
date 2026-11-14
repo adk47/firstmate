@@ -126,8 +126,9 @@ test_an_unmeasurable_tree_is_a_finding_not_silence() {
   mkdir -p "$slow"
   printf '#!/bin/sh\nexec sleep 300\n' >"$slow/du"
   chmod +x "$slow/du"
-  # A cache row from long ago stands in for "measured once, never again".
+  # A successful measurement from long ago, and a walk that no longer finishes.
   printf 'tmp_gb\t%s\t999\n' $(( $(date +%s) - 100000 )) >"$AK47_STATE/sample.cache"
+  printf 'tmp_gb_ok\t%s\t%s\n' $(( $(date +%s) - 100000 )) $(( $(date +%s) - 100000 )) >>"$AK47_STATE/sample.cache"
   PATH="$slow:$PATH" AK47_DU_BUDGET=2 AK47_DU_TTL=60 "$TICK" --apply >/dev/null 2>&1 \
     || fail "the tick exited non-zero with a stale size cache"
   grep -q tmp-gb-stale "$AK47_STATE/findings.log" 2>/dev/null \
