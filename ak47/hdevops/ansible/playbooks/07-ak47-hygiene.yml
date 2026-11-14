@@ -67,16 +67,22 @@
     # fail every five minutes and look installed.
     - name: The hygiene scripts must exist in the firstmate checkout
       ansible.builtin.stat:
-        path: "{{ ak47_repo }}/ak47/tick.sh"
-      register: ak47_tick
+        path: "{{ ak47_repo }}/ak47/{{ item }}"
+      loop:
+        - tick.sh
+        - swap-reclaim.sh
+      register: ak47_scripts
 
     - name: Refuse to install a timer whose unit cannot run
       ansible.builtin.assert:
-        that: ak47_tick.stat.exists and ak47_tick.stat.executable
+        that: item.stat.exists and item.stat.executable
         fail_msg: >-
-          {{ ak47_repo }}/ak47/tick.sh is missing or not executable. Update the
+          {{ item.stat.path }} is missing or not executable. Update the
           firstmate checkout first; the installed copy comes from this repo's
           payload, but the source tree must still be present.
+      loop: "{{ ak47_scripts.results }}"
+      loop_control:
+        label: "{{ item.item }}"
 
     # ---- the code, from the payload -----------------------------------------
     # The scripts are captured in this repo so a rebuild does not need a

@@ -30,6 +30,7 @@ AK47_CONFIG=${AK47_CONFIG:-$HOME/.config/ak47}
 FM_HOME=${FM_HOME:-$HOME/Projects/firstmate}
 AK47_BUDGET=${AK47_BUDGET:-$AK47_ROOT/budget.conf}
 AK47_PRODUCERS=${AK47_PRODUCERS:-$AK47_ROOT/census-producers.conf}
+AK47_SWAPOFF_BUDGET=${AK47_SWAPOFF_BUDGET:-1800}
 
 mkdir -p "$AK47_STATE" "$AK47_CACHE" "$AK47_CONFIG" 2>/dev/null || true
 
@@ -117,8 +118,7 @@ ak47_cache_age() {
 # fallback is fine or the tree is now permanently too big to measure.
 ak47_tmp_gb() {
   local ttl=${AK47_DU_TTL:-1800} budget=${AK47_DU_BUDGET:-90} v
-  local retry=${AK47_DU_RETRY:-900} marker="$AK47_STATE/.tmp-gb-walk-failed"
-  if v=$(ak47_cache_get tmp_gb "$ttl"); then printf '%s' "$v"; return 0; fi
+  local retry=${AK47_DU_RETRY:-900} marker="$AK47_STATE/.tmp-gb-walk-failed" retrying=0
   # A failed walk is remembered for a while. Retrying a 90 s timeout on every
   # call is how the tick spent its whole interval failing to measure: the retry
   # interval is deliberate, not a sigh of relief.
@@ -129,7 +129,11 @@ ak47_tmp_gb() {
       if v=$(ak47_cache_get tmp_gb 345600); then printf '%s' "$v"; else printf '0'; fi
       return 0
     fi
+    retrying=1
   fi
+  # The retry window owns the failed walk: once it has elapsed the walk is due
+  # even though the fallback value is still cached.
+  if [ "$retrying" -eq 0 ] && v=$(ak47_cache_get tmp_gb "$ttl"); then printf '%s' "$v"; return 0; fi
   v=$(timeout "$budget" du -sx --block-size=1G "${AK47_TMP_ROOT:-/tmp}" 2>/dev/null | cut -f1)
   case "${v:-}" in
     ''|*[!0-9]*)
@@ -343,7 +347,7 @@ swap_run() {
 swap_reclaim() {
   local before after rc=0 restore=0
   before=$(awk '/^SwapFree:/{printf "%d", ($2)/1048576}' /proc/meminfo 2>/dev/null || echo 0)
-  swap_run "${AK47_SWAPOFF_BUDGET:-600}" "${AK47_SWAPOFF:-/sbin/swapoff}" -a 2>/dev/null || rc=$?
+  swap_run "$AK47_SWAPOFF_BUDGET" "${AK47_SWAPOFF:-/sbin/swapoff}" -a 2>/dev/null || rc=$?
   swap_run - "${AK47_SWAPON:-/sbin/swapon}" -a >/dev/null 2>&1 || restore=1
   [ "$restore" -eq 1 ] && rc=1
   after=$(awk '/^SwapFree:/{printf "%d", ($2)/1048576}' /proc/meminfo 2>/dev/null || echo 0)

@@ -20,7 +20,7 @@ ROOT=${AK47_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}
 # shellcheck source=lib/common.sh
 . "$ROOT/lib/common.sh"
 
-budget=${AK47_SWAPOFF_BUDGET:-1800}
+budget=$AK47_SWAPOFF_BUDGET
 
 if ! swap_privileged; then
   ak47_log "$AK47_STATE/swap.log" "$(ak47_epoch) swap-reclaim skipped: no privilege to stop and start swap; see the sudoers rule in ak47/README.md"

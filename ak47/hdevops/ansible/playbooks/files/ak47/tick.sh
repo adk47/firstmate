@@ -138,9 +138,10 @@ ak47_busy_tmp_names >"$BUSY" 2>/dev/null || true
 # a quarantine directory big enough to be worth deleting is exactly the size at
 # which that scan outlives TimeoutStartSec, so the tick spent every run proving
 # something it never got to act on. The set is built once here and reused for
-# every candidate; without it, safe-delete falls back to lsof.
+# every candidate; a scan without its completion marker answers "could not
+# tell", so a failed scan refuses the delete instead of authorising it.
 AK47_INUSE_SET=$AK47_STATE/inuse.set
-ak47_inuse_scan "$AK47_INUSE_SET" || AK47_INUSE_SET=
+ak47_inuse_scan "$AK47_INUSE_SET" || true
 export AK47_INUSE_SET
 # Loaded into an associative array once: a grep fork per candidate is 5,000
 # processes per run for a set that never changes mid-run.

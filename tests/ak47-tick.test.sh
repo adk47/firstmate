@@ -196,19 +196,28 @@ SH
   pass "the swap privilege probe asks for a command the sudoers rule grants"
 }
 
-test_the_finding_class_is_one_the_inbox_accepts() {
+test_a_finding_is_delivered_to_the_real_inbox() {
   # Every ak47 finding went undelivered for days because the tick filed under a
   # class name fm-inbox does not have. The gate was honest - it logged
   # DELIVERY-FAILED every run - but nothing was reading the gate's own log. This
-  # test reads it from the other side: the class must exist in the vocabulary.
-  local inbox=$ROOT/bin/fm-inbox.sh
-  [ -r "$inbox" ] || { pass "no fm-inbox.sh in this checkout, class check skipped"; return; }
-  local cls
-  cls=$(grep -o 'AK47_INBOX_CLASS:-[a-z-]*' "$TICK" | head -1 | sed 's/.*:-//')
-  [ -n "$cls" ] || fail "the tick names no inbox class"
-  grep -Eq "^(CAPTAIN_CLASSES|AUTOMATED_CLASSES)=\"[^\"]*\b${cls}\b" "$inbox" \
-    || fail "the tick files findings as '$cls', which fm-inbox does not accept"
-  pass "the class the tick files findings under exists in the inbox vocabulary"
+  # drives the real inbox: a finding must land as a record in its queue and the
+  # tick must not report a delivery failure.
+  reset_tree
+  [ -r "$ROOT/bin/fm-inbox.sh" ] || { pass "no fm-inbox.sh in this checkout, delivery check skipped"; return; }
+  cp "$ROOT/bin/fm-inbox.sh" "$FM_HOME/bin/fm-inbox.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$FM_HOME/bin/fm-wake-lib.sh"
+  chmod +x "$FM_HOME/bin/fm-inbox.sh"
+  # A lock naming a pid that cannot be alive triggers the stale-lock finding.
+  printf '999999999\n' >"$FM_HOME/state/.lock"
+  "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero while filing a finding"
+  local note
+  note=$(find "$FM_HOME/state/inbox-auto" -maxdepth 1 -name '*.note' -print -quit 2>/dev/null)
+  [ -n "$note" ] || fail "the tick's finding never reached the inbox"
+  grep -qx 'source=health' "$note" || fail "the finding was filed under a class the inbox rewrote"
+  grep -q 'state/.lock names pid' "$note" || fail "the delivered note does not carry the finding"
+  ! grep -q 'DELIVERY-FAILED' "$AK47_STATE/findings.log" 2>/dev/null \
+    || fail "the tick reported a delivery failure for a class the inbox accepts"
+  pass "a finding is delivered to the real inbox under an accepted class"
 }
 
 # --- the refusals ---------------------------------------------------------------
@@ -249,6 +258,25 @@ test_an_unmeasurable_tree_is_a_finding_not_silence() {
   grep -q tmp-gb-stale "$AK47_STATE/findings.log" 2>/dev/null \
     || fail "an unmeasurable /tmp produced no finding; the sweep would choose from a stale picture"
   pass "a tree that can no longer be measured is reported, not silently scored"
+}
+
+test_a_failed_size_walk_is_retried_once_its_window_elapses() {
+  reset_tree
+  local slow=$SANDBOX/slowbin3
+  mkdir -p "$slow"
+  printf '#!/bin/sh\necho x >>"%s/du-calls"\nexit 1\n' "$slow" >"$slow/du"
+  chmod +x "$slow/du"
+  PATH="$slow:$PATH" AK47_DU_BUDGET=2 "$TICK" --apply >/dev/null 2>&1 \
+    || fail "the tick exited non-zero when the first size walk failed"
+  [ "$(wc -l <"$slow/du-calls")" -ge 1 ] || fail "the first failed walk was not attempted"
+  local calls; calls=$(wc -l <"$slow/du-calls")
+  # Inside the retry window the fallback is used; once it elapses the walk is
+  # due again even though the fallback value is still cached.
+  PATH="$slow:$PATH" AK47_DU_BUDGET=2 AK47_DU_RETRY=0 "$TICK" --apply >/dev/null 2>&1 \
+    || fail "the tick exited non-zero when retrying the size walk"
+  [ "$(wc -l <"$slow/du-calls")" -gt "$calls" ] \
+    || fail "the failed walk was never retried after its window elapsed"
+  pass "a failed size walk is retried once its window elapses"
 }
 
 test_refuses_a_directory_a_live_process_is_sitting_in() {
@@ -668,9 +696,10 @@ test_delivery_commits_the_key_so_the_next_tick_is_quiet
 test_reports_a_dry_run_that_outlived_its_24_hours
 test_a_size_walk_that_overruns_does_not_hang_the_tick
 test_an_unmeasurable_tree_is_a_finding_not_silence
+test_a_failed_size_walk_is_retried_once_its_window_elapses
 test_expiry_is_bounded_per_run_and_says_what_is_left
 test_expiry_does_not_run_lsof_per_entry
-test_the_finding_class_is_one_the_inbox_accepts
+test_a_finding_is_delivered_to_the_real_inbox
 test_swap_is_restored_even_when_the_reclaim_fails
 test_swap_privilege_probes_the_granted_command
 test_an_unprivileged_tick_says_so_instead_of_failing_to_swap

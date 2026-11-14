@@ -127,6 +127,7 @@ ak47_inuse_scan() {
   local out tmp
   out=${1:?outfile}
   tmp="$out.$$"
+  rm -f -- "$out" 2>/dev/null || true
   command -v python3 >/dev/null 2>&1 || return 1
   python3 - "$tmp" <<'PY' || return 1
 import os, sys
