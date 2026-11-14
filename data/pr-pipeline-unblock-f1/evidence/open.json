@@ -485,7 +485,7 @@
   "number": 1837,
   "draft": false,
   "base": "main",
-  "head_ref": "fm/jan-gdpr-hide-g1",
+  "head_ref": "fm/gdpr-tombstone-repair-21",
   "head_sha": "8d03e1af2dce7f3c88d12c8cacb36f5b245bb7a2",
   "mergeable": "CONFLICTING",
   "merge_state": "DIRTY",

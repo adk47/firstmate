@@ -1052,6 +1052,16 @@ jobs:
           bash scripts/check-credit-status-writes.sh
           echo "::endgroup::"
 
+      - name: Data evidence carries ids only, never a data subject's name
+        # Captain 2026-11-07: the jan-gdpr-hide-g1 evidence committed 24 full names
+        # next to their erasure requests. The doctrine already existed in prose
+        # (scripts/gdpr_pipeline/hide_batch.py:8, "Ids only in files and PR text: no
+        # requester names"); this gate makes it enforced rather than remembered.
+        run: |
+          echo "::group::Data evidence no-names check"
+          bash scripts/check-data-evidence-no-names.sh
+          echo "::endgroup::"
+
       - name: Analytics entitlement doctrine check — Caroline states no figures unless analytics.entitled is true
         # Caroline disclosed a customer's lifetime stream figures to a non-subscriber
         # on 2026-09-30. The rule lives in support/SOUL.md (entitlement is decided by
@@ -2299,6 +2309,18 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_ops_intake
+      - name: Run ops hide-intake tests
+        # scripts/ops_intake/hide.py is the ONE path an operations ask ("hide profile <ids>") may take. The
+        # 2026-11-04 incident was an ask with no path but `DELETE /admin/profile/<id>`: 21 tombstoned profiles
+        # and their served credits in 14 days. These lock: the ask text is data (ids + the requester's words
+        # only), a non-staff requester is tier R (nothing filed), the 10-per-ask / 30-per-requester-per-day
+        # caps HOLD rather than truncate, a verb alone is not a class (a DSP removal must never become a GDPR
+        # letter), an id that already has an open row attaches instead of duplicating, and the hide half only
+        # ever calls the pipeline's own planner and never opens a legal-threat (captain-owned) page.
+        # Stdlib unittest, targeted by name, hermetic (temp sqlite, no network/Trino/Intercom/git).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_ops_intake_hide
       - name: Run legal-unanswered watchdog tests
         # scripts/intercom-legal-unanswered-watchdog.py PAGES #cs_priority (Jan) when a
         # legal/privacy request has no HUMAN reply for 24h. These lock the watch set,

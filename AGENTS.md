@@ -1134,6 +1134,14 @@ A row stamp is not the record of a send: 23 open rows had a `sent` ask and 7 a `
 The Art. 15 copy (`gdpr_pipeline/access.py`, manifest `policies/gdpr-access-sources.json`) is built for the account
 the requester controls and sent only when COMPLETE, to the address on the account; an incomplete copy names its gaps
 and is never the answer. Only counts and hashes of a copy may reach a log, the trail or stdout.
+**A staff "hide this profile" ask is `scripts/ops_intake/hide.py`, and the soft-delete is refused at BOTH write
+surfaces.** Between 2026-10-22 and 11-04 the operations bot ran `muso … api DELETE /admin/profile/<id>` 24 times on
+a staff member's word (a workspace-only skill nobody reviewed as policy): each call tombstoned the profile AND every credit
+served on it (one profile went 431 credits -> 0; the 23 ids that had credits hold 717 of them on their
+admin tombstones and ZERO served associations today), with no list entry and no inverse. Both wrappers now refuse that endpoint (`MUSO_REMOVAL_NO_SELF_APPROVE` in `muso-admin-api.sh`, the same gate
+in `scripts/muso-prewrite-hook.sh` for every `muso` CLI caller), the skill is deleted. The ask intake files the register row, lets the
+pipeline decide identity, and prepares the reversible PR pair; `/cache` and the `/credits`/`/member`
+sub-resources are NOT the soft-delete and stay allowed. Evidence + the credit-restore question: "data/gdpr-tombstone-repair-21/repair-21.md".
 
 ## Sentinel demotion: three independent stops, and nothing promotes itself
 

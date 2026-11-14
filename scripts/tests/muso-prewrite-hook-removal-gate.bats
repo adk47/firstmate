@@ -4,9 +4,9 @@
 # The hook is the ONE surface every `muso` CLI write passes through (wired as
 # prewrite_hook in /root/.config/muso/config.json, rendered by deploy.sh). On
 # 2026-11-04 the operations bot ran `muso ... api DELETE /admin/profile/<id>` 21
-# times in 14 days off Jan's word — the workspace skill that told it to had never
+# times in 14 days off a staff member's word — the workspace skill that told it to had never
 # been reviewed as policy, and the hook let every one through. That endpoint
-# tombstones the profile AND every served credit on it (Gene Flores: 431 served
+# tombstones the profile AND every served credit on it (one profile: 431 served
 # credits -> 0); there is no inverse and legal hold 1350 means the data is never
 # destroyed.
 #

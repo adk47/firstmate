@@ -2381,7 +2381,7 @@ is_removal_endpoint() {
 refuse_removal_self_approve() {
     cat >&2 <<EOM
 MUSO_REMOVAL_NO_SELF_APPROVE: ${1} ${2} is a removal (whole-track tombstone, a credit removed from a profile, or the profile soft-delete). God-mode self-approve never covers removals, and core refuses agent removals (credit_removal_agent_refused). Do not retry through another wrapper or identity.
-Instead: read the entity back and tell the requester what removal would do (the track + its N credits, or the profile + its N served credits). Ask for the reason if none is recorded (DSP-removal proof or different-profile proof, plus a label check). Profile hides are not available to the agent; the request goes on the GDPR register for identity verification (verified claim or matching ID) and a person-approved takedown. A recorded removal goes to a named human from their own login.
+Instead: read the entity back and tell the requester what removal would do (the track + its N credits, or the profile + its N served credits). Ask for the reason if none is recorded (DSP-removal proof or different-profile proof, plus a label check). Profile hides are not available to the agent; the request goes on the GDPR register for identity verification (verified claim or matching ID) and a person-approved takedown -- file it with scripts/ops_intake/hide.py, which prepares the reversible hide-list PR a person merges. Never this endpoint. A recorded removal goes to a named human from their own login.
 EOM
 }
 

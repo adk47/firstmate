@@ -54,6 +54,7 @@ from ops_intake import store as store_mod, watcher  # noqa: E402
 FIXTURE = ROOT / "tests" / "fixtures" / "ops-intake-census-asks.json"
 CHANNEL = "C0APB2CMM7C"
 JAN = "U038BM16T7W"
+OTHER = "U0AL36NADEY"
 UUID_A = "0d898512-1111-2222-3333-444455556666"
 REQ_A = "8f14e45f-ceea-467a-9f0b-1a2b3c4d5e6f"
 NOW = datetime(2026, 11, 4, 18, 0, tzinfo=timezone.utc)
@@ -1958,6 +1959,34 @@ class SlackReads(Base):
         self.assertFalse(other, "another ask's contract line is not this ask's answer")
         self.assertTrue(mine)
 
+    def test_a_bot_reply_past_reply_200_is_still_a_completion(self):
+        # The completion signal had the same pagination hole as the ask read: conversations.replies returns OLDEST
+        # FIRST, so with one limit=200 request a bot reply that is reply 201+ was invisible and a thread the agent HAD
+        # answered looked unanswered forever (the watcher would keep escalating it). Same cursor walk, same fix.
+        from ops_intake import slack
+        page1 = [{"ts": f"1793800000.{i:06d}", "user": "U1", "text": f"chatter {i}"} for i in range(100, 300)]
+        payloads = [
+            {"ok": True, "messages": page1, "response_metadata": {"next_cursor": "c2"}},
+            {"ok": True, "messages": [{"ts": "1793800000.000400", "bot_id": "B1", "text": "the reply"}],
+             "response_metadata": {"next_cursor": ""}},
+        ]
+        seen = []
+
+        def fetch(req, timeout=None):
+            seen.append(req.full_url)
+            return self._Resp(payloads[min(len(seen) - 1, 1)])
+
+        real = slack.token_for
+        slack.token_for = lambda account="operations": "xoxb-test"
+        try:
+            answered = slack.thread_has_bot_reply(
+                channel=CHANNEL, thread_ts="1793800000.000100",
+                after_ts="1793800000.000100", fetch=fetch)
+        finally:
+            slack.token_for = real
+        self.assertTrue(answered, "the reply is on page 2, so the walk must ask for page 2")
+        self.assertTrue(any("cursor=c2" in u for u in seen), f"page 2 must be requested by cursor: {seen}")
+
     def test_a_thread_with_no_bot_reply_is_not_a_completion(self):
         self.assertFalse(self._read({"ok": True, "messages": [
             {"ts": "1793800000.000100", "text": "the ask"},
@@ -1966,6 +1995,151 @@ class SlackReads(Base):
     def test_an_unreadable_thread_raises_instead_of_reading_as_answered(self):
         with self.assertRaises(RuntimeError):
             self._read({"ok": False, "error": "ratelimited"})
+
+
+class MessageAuthor(Base):
+    """The intake's identity control AND its only source of ask text: who wrote the message an ask names, and what
+    that message says."""
+
+    class _Resp:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _author(self, payload, ts="1793800000.000100", token="xoxb-test"):
+        from ops_intake import slack
+        real = slack.token_for
+        slack.token_for = lambda account="operations": token
+        try:
+            return slack.message_author(channel=CHANNEL, ts=ts,
+                                        fetch=lambda req, timeout=None: self._Resp(payload))
+        finally:
+            slack.token_for = real
+
+    def test_the_author_and_the_body_of_the_named_message_are_returned(self):
+        self.assertEqual(self._author({"ok": True, "messages": [
+            {"ts": "1793800000.000100", "user": JAN, "text": "hide this"}]}), (JAN, "hide this"))
+
+    def test_a_message_with_no_text_raises_rather_than_returning_an_empty_ask(self):
+        with self.assertRaises(RuntimeError):
+            self._author({"ok": True, "messages": [{"ts": "1793800000.000100", "user": JAN}]})
+
+    def test_a_whitespace_only_body_raises(self):
+        with self.assertRaises(RuntimeError):
+            self._author({"ok": True, "messages": [
+                {"ts": "1793800000.000100", "user": JAN, "text": "   "}]})
+
+    def test_a_different_ts_is_not_the_message_the_ask_names(self):
+        with self.assertRaises(RuntimeError):
+            self._author({"ok": True, "messages": [
+                {"ts": "1793800000.000200", "user": JAN, "text": "hide this"}]})
+
+    def test_no_message_at_that_ts_raises(self):
+        with self.assertRaises(RuntimeError):
+            self._author({"ok": True, "messages": []})
+
+    def test_a_message_with_no_author_raises(self):
+        with self.assertRaises(RuntimeError):
+            self._author({"ok": True, "messages": [{"ts": "1793800000.000100", "text": "hide this"}]})
+
+    def test_an_ok_false_response_raises(self):
+        with self.assertRaises(RuntimeError):
+            self._author({"ok": False, "error": "ratelimited"})
+
+    def test_no_token_raises_instead_of_reading_as_verified(self):
+        with self.assertRaises(RuntimeError):
+            self._author({"ok": True, "messages": [
+                {"ts": "1793800000.000100", "user": JAN, "text": "hide this"}]}, token="")
+
+    def _author_by_api(self, by_api, ts="1793800000.000100", token="xoxb-test"):
+        from ops_intake import slack
+        real = slack.token_for
+        slack.token_for = lambda account="operations": token
+        seen = []
+
+        def fetch(req, timeout=None):
+            url = req.full_url
+            seen.append(url)
+            for api, payload in by_api.items():
+                if url.startswith(api):
+                    return self._Resp(payload)
+            return self._Resp({"ok": False, "error": "unknown_api"})
+        try:
+            return slack.message_author(channel=CHANNEL, ts=ts, fetch=fetch), seen
+        finally:
+            slack.token_for = real
+
+    def test_a_thread_reply_ask_is_read_from_the_thread(self):
+        # conversations.history returns only top-level messages, so the thread parent is all it can offer for a
+        # reply's ts. The ask is the reply, and it is only reachable through conversations.replies.
+        from ops_intake import slack
+        (author, body), seen = self._author_by_api({
+            slack.REPLIES_API: {"ok": True, "messages": [
+                {"ts": "1793800000.000001", "user": JAN, "text": "the thread parent"},
+                {"ts": "1793800000.000100", "user": JAN, "text": "hide this"}]},
+            slack.HISTORY_API: {"ok": True, "messages": [
+                {"ts": "1793800000.000001", "user": JAN, "text": "the thread parent"}]},
+        })
+        self.assertEqual((author, body), (JAN, "hide this"))
+        self.assertTrue(seen[0].startswith(slack.REPLIES_API), seen)
+
+    def test_an_ask_that_is_reply_201_is_found_by_following_the_cursor(self):
+        # QA review 5904456478 (Important). conversations.replies is cursor-paginated and returns OLDEST FIRST, so one
+        # limit=200 request for a long thread never contains its latest replies: the ask was absent, the ts was not
+        # found, and hide.py exited 6 filing nothing. Slack's documented answer is response_metadata.next_cursor.
+        from ops_intake import slack
+        page1 = [{"ts": f"1793800000.{i:06d}", "user": JAN, "text": f"chatter {i}"} for i in range(1, 201)]
+        target = {"ts": "1793800000.000201", "user": JAN, "text": "hide this"}
+        payloads = [
+            {"ok": True, "messages": page1, "response_metadata": {"next_cursor": "c2"}},
+            {"ok": True, "messages": [target], "response_metadata": {"next_cursor": ""}},
+        ]
+        seen = []
+
+        def fetch(req, timeout=None):
+            url = req.full_url
+            seen.append(url)
+            if url.startswith(slack.REPLIES_API):
+                return self._Resp(payloads[min(len(seen) - 1, 1)])
+            return self._Resp({"ok": True, "messages": []})
+
+        from ops_intake import slack as real
+        saved = real.token_for
+        real.token_for = lambda account="operations": "xoxb-test"
+        try:
+            author, body = slack.message_author(channel=CHANNEL, ts="1793800000.000201", fetch=fetch)
+        finally:
+            real.token_for = saved
+        self.assertEqual((author, body), (JAN, "hide this"))
+        self.assertTrue(any("cursor=c2" in u for u in seen), f"the second page must be asked for by cursor: {seen}")
+
+    def test_a_thread_reply_written_by_someone_else_is_not_the_requesters_ask(self):
+        from ops_intake import slack
+        (author, _body), _seen = self._author_by_api({
+            slack.REPLIES_API: {"ok": True, "messages": [
+                {"ts": "1793800000.000100", "user": OTHER, "text": "hide this"}]},
+            slack.HISTORY_API: {"ok": True, "messages": []},
+        })
+        self.assertEqual(author, OTHER, "the reply's own author is what the intake must compare")
+
+    def test_a_ts_in_neither_the_channel_nor_its_threads_refuses_with_a_named_reason(self):
+        from ops_intake import slack
+        with self.assertRaises(RuntimeError) as caught:
+            self._author_by_api({
+                slack.REPLIES_API: {"ok": True, "messages": [
+                    {"ts": "1793800000.000001", "user": JAN, "text": "the thread parent"}]},
+                slack.HISTORY_API: {"ok": True, "messages": [
+                    {"ts": "1793800000.000001", "user": JAN, "text": "the thread parent"}]},
+            })
+        self.assertIn("or in its threads", str(caught.exception))
 
 
 class Sources(Base):

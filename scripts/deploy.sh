@@ -1497,6 +1497,13 @@ RSYNC_EXCLUDES=(
   # is one-level deep (skills/*/SKILL.md), so depth-2 SKILL.md files under _archive/ are
   # never loaded. Tripped the Step 4a pre-flight on 2026-05-28 (deploy for #361 merge 2af7a65).
   --exclude='workspaces/*/skills/_archive/'
+  # workspaces/operations/skills/profile-visibility-management/ is deliberately
+  # NOT excluded. That skill taught the profile soft-delete as the hide path and
+  # is retired (gdpr-tombstone-repair-21); its node-8 copy was moved out of band on
+  # 2026-11-08 to /root/retired-skills/profile-visibility-management.20261108T015412Z,
+  # so `rsync --delete` has nothing to remove and the pre-flight has no deletion
+  # to attribute. Re-adding an exclude here would resurrect a retired soft-delete
+  # capability at openclaw rank 1, where the workspace copy shadows canonical.
   # Workspace tmp directories (agent scratch space — scripts, CSVs, etc.)
   --exclude='workspaces/*/tmp/'
   # Workspace state directories (send ledgers, cron run logs — runtime data)

@@ -262,6 +262,18 @@ def is_writer_refusal(detail: str) -> bool:
     return said.startswith(PRE_SEND_PREFIXES)
 
 
+PAGE_PREFIX_CHARS = 8
+
+
+def page_prefix(pid: str) -> str:
+    """The identity a page is compared on. The mail ledger keeps 8-char prefixes and Intercom keeps full uuids, so
+    the same page arrives spelled two ways: compared verbatim, a notice and the conversation about it never intersect
+    and one customer event became two rows (found live 2026-11-04: register #376 notices@ `fc31a861` and #377
+    Intercom `fc31a861-0297-...`, nine seconds apart, one person, one page). ONE definition, because a second copy of
+    an identity rule is how the two drift."""
+    return (pid or "")[:PAGE_PREFIX_CHARS].lower()
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -280,7 +292,15 @@ def due_from(received_at: str) -> tuple[str, str]:
 
 
 class Store:
-    def __init__(self, path: str = DEFAULT_PATH):
+    def __init__(self, path: str = DEFAULT_PATH, readonly: bool = False):
+        if readonly:
+            if path == ":memory:" or not os.path.exists(path):
+                path = ":memory:"
+            else:
+                self.db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+                self.path = path
+                self.db.row_factory = sqlite3.Row
+                return
         if path != ":memory:":
             os.makedirs(os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
             old = os.umask(0o077)
@@ -371,11 +391,8 @@ class Store:
 
     @staticmethod
     def _prefixes(pages) -> set[str]:
-        """The ids a MERGE compares on. The mail ledger keeps 8-char prefixes and Intercom keeps full uuids, so the
-        same page arrives spelled two ways: compared verbatim, a notice and the conversation about it never intersect
-        and one customer event became two rows (found live 2026-11-04: register #376 notices@ `fc31a861` and #377
-        Intercom `fc31a861-0297-...`, nine seconds apart, one person, one page)."""
-        return {(p.get("id") or "")[:8].lower() for p in pages if p.get("id")}
+        """The ids a MERGE compares on -- see `page_prefix` for why the comparison is a prefix."""
+        return {page_prefix(p.get("id")) for p in pages if p.get("id")}
 
     def _match(self, keys: list[str], email: str, page_ids: set[str], received_at: str = "",
                channel: str = "", obligation: str = "") -> dict | None:
@@ -407,7 +424,7 @@ class Store:
             hit = owns(self.by_key(k))
             if hit:
                 return hit
-        want = {(i or "")[:8].lower() for i in page_ids if i}
+        want = {page_prefix(i) for i in page_ids if i}
         if email and want and received_at:
             t = parse_iso(received_at)
             for r in self.all("open"):
@@ -1172,9 +1189,10 @@ def _dedupe_pages(pages: list[dict]) -> list[dict]:
         if not pid:
             continue
         ent = p.get("entity") or "profile"
-        if len(pid) == 8 and any(k.startswith(pid) and len(k) > 8 for k in out):
+        pre = page_prefix(pid)
+        if len(pid) == PAGE_PREFIX_CHARS and any(k.startswith(pre) and len(k) > PAGE_PREFIX_CHARS for k in out):
             continue
-        if len(pid) > 8 and pid[:8] in out:
-            out.pop(pid[:8])
+        if len(pid) > PAGE_PREFIX_CHARS and pre in out:
+            out.pop(pre)
         out.setdefault(pid, {"entity": ent, "id": pid})
     return sorted(out.values(), key=lambda x: (x["entity"], x["id"]))

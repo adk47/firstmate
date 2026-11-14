@@ -1,0 +1,8 @@
+{
+  "keys": ["slack-ops:U038BM16T7W:C0APB2CMM7C:1793376053796469:0d898512-1981-466a-885a-ca77b803ba37"],
+  "channel": "slack-ops",
+  "class": "dmca_takedown",
+  "received_at": "2026-10-30T16:00:53Z",
+  "pages": [{"entity": "profile", "id": "0d898512-1981-466a-885a-ca77b803ba37"}],
+  "note": "REPAIR (2026-11-04, gdpr-tombstone-repair-21): the 10-30 ask was answered with `muso api DELETE /admin/profile/<id>` at 16:01:52Z outside the register, so no row ever existed and nothing tracks a letter or a hide. The requester's own reason on that ask was 'tracks were removed from spotify' -> dmca_takedown (a catalog takedown), NOT a GDPR erasure. The page now answers 404 on the admin and public profile APIs; the tombstone keeps creditCount 20."
+}

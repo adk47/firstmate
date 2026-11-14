@@ -174,7 +174,12 @@ CANDIDATE_CLASSES = intake_core.ERASURE_CLASSES + ("privacy_access", "not_erasur
                                                    "cancel_intent_mentions_deletion")
 CANDIDATE_FIELDS = ("keys", "channel", "class", "received_at", "requester_name", "requester_email", "contact_id",
                     "conversation_id", "gmail_thread", "clickup_ids", "pages", "note")
-CANDIDATE_CHANNELS = ("intercom", "support", "notices", "legal", "register")
+# `slack-ops` is the OPERATIONS intake (scripts/ops_intake/hide.py): a staff member asked in a Slack thread, so the
+# request arrived on no customer-facing channel. Routing is unaffected - send.route() keys on the linked
+# conversation_id first, so a slack-ops row whose ask links an Intercom conversation still replies there - and a
+# slack-ops row with no conversation and no thread is REFUSED by route() with that reason, which is the honest answer
+# (there is nobody to write to until the customer is identified).
+CANDIDATE_CHANNELS = ("intercom", "support", "notices", "legal", "register", "slack-ops")
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 

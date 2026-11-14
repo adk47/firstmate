@@ -5,7 +5,7 @@
 #
 # WHY (2026-11-04). Between 10-21 and 11-04 the `operations` Slack bot performed
 # ~39 profile merges, 15 profile hides via `DELETE /admin/profile`, 134 ClickUp
-# writes and 420 credit rejections on Jan's word, self-approved through the
+# writes and 420 credit rejections on a staff member's word, self-approved through the
 # tier-2 god-mode allowlist, with no row anywhere carrying an inverse (hydra
 # #1702). The router that replaces it is only safer if its policy file stays
 # safe: a single line moved from W2 into W1, or a class pointed at a W2 action,

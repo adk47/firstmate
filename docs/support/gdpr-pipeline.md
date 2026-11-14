@@ -6,9 +6,9 @@ big-name / safety cases, and (with the captain) anything irreversible. Runs on n
 
 | step | what the code does | where |
 |---|---|---|
-| register | one `erasure_requests` row per request across Intercom (data-deletion tickets + conversation search), support@, notices@, legal@ and the markdown register's rows 1-39; `received_at`, `due_at` = received + 30 d, `hide_due_at` = received + 24 h, identity verdict + basis, hide PRs, `hidden_at`, `confirmed_at`; append-only `erasure_events` audit | `gdpr_pipeline/store.py`, `/var/lib/hydra-gdpr/erasure.sqlite` |
+| register | one `erasure_requests` row per request across Intercom (data-deletion tickets + conversation search), support@, notices@, legal@, the markdown register's rows 1-39 and the operations Slack intake (`slack-ops`, `scripts/ops_intake/hide.py`); `received_at`, `due_at` = received + 30 d, `hide_due_at` = received + 24 h, identity verdict + basis, hide PRs, `hidden_at`, `confirmed_at`; append-only `erasure_events` audit | `gdpr_pipeline/store.py`, `/var/lib/hydra-gdpr/erasure.sqlite` |
 | confirmation replay | once a row carries a written confirmation the row is closed: the open ClickUp ticket and the Intercom conversation keep being re-ingested, so a replay with nothing new opens NOTHING. New pages are judged against EVERY row of that conversation (a reply that already opened its own row is not re-registered by a later "thanks"), and the new request is dated at the FIRST customer message that names one of its pages (`introducing_part_at`), never at the latest message — carrying only the pages no row of this conversation already covers. Never the original deadline, never an already-confirmed page. | `run.intake_clickup`, `run.merge_reply` |
-| intake | row key per channel = the idempotence test (`intercom:<conv>`, `gmail:<alias>:<thread>`, `clickup:<task>`, `register:<n>`, `notice:<hash>`); ClickUp is a secondary index: a candidate joins a request on a shared key, or on a shared catalog id + requester email (never on ticket id alone); a merge only ever moves a due date earlier | `gdpr_pipeline/intake.py` |
+| intake | row key per channel = the idempotence test (`intercom:<conv>`, `gmail:<alias>:<thread>`, `clickup:<task>`, `register:<n>`, `notice:<hash>`, `<ask>:<page>` for `slack-ops`); ClickUp is a secondary index: a candidate joins a request on a shared key, or on a shared catalog id + requester email (never on ticket id alone); a merge only ever moves a due date earlier | `gdpr_pipeline/intake.py` |
 | class | the customer's own words through legal-intake's `RULES` (read from `scripts/legal-intake.py`'s AST, never copied); a `cancel_intent` escalation filed as data-deletion is `not_erasure` (or Jan when it mentions deletion); data-export tickets are Art. 15 `privacy_access` rows (due date tracked, no hide) | `intake.ticket_class` |
 | identity | **(2026-11-12: paths B and C below no longer pass. A name match is not a tie to the page; both answer `ASK_IDENTITY`. See the DSAR ladder.)** per page, from the core replica (claims, users), the admin catalog (name, claimed, popularity, credits, website) and the Intercom contact (identity_resolver r5 on `external_id`; the account email only when the address was delivered by mail or is an identified user): A claim · B account whose name matches · C unclaimed + name-fold match (sender name or email local part; at least two name tokens) **only for a VERIFIED sender — a ticket's requester-typed email is metadata, not proof, so an unverified ticket goes to ASK** unless popularity >= 60 or >= 50 credits (Jan) · D sender domain = the page's own website domain in our catalog (no freemail) · E representative -> ASK for authorisation · legal_threat -> hide first (captain) unless big-name · DMCA stays claim-first · a track / album passes only through its ONE catalog artist's profile on these same paths (`decide_item`; never an ASK, big item -> Jan). An 8-char prefix is resolved ONLY against the catalog (`resolve_prefixes`): a full id that happens to be in our rows/hide lists does not prove the prefix is unique, so an ambiguous prefix stays UNKNOWN and its pages are never attributed by guess | `gdpr_pipeline/identity.py`, `sources.resolve_prefixes` |
 | hide | `hide-batch` plans identity-PASS profile pages, most overdue first, skips ids already in an open PR, and opens ONE H-DevOps PR (`HIDDEN_ENTITY_IDS`, prod + dev: 410 + noindex) and ONE platform-data-processing PR (`LEGAL_HIDDEN_ENTITY_IDS` + the strict-equality test's `ERASURE_PROFILES`, ref `gdpr-erasure-register-<n>`). A person merges. Only the anonymous 410 + noindex read-back (`mark-hidden`, every tick) sets `hidden_at`, per ELIGIBLE page (`hidden_pages`): a row that carries a PASS page next to an ASK / Jan page records its hide as soon as the PASS page is down, while a letter still waits for the whole row | `gdpr_pipeline/hide_batch.py`, `checks.public_gone` |
@@ -27,6 +27,11 @@ big-name / safety cases, and (with the captain) anything irreversible. Runs on n
 - **No page reaches a hide PR without passing the hide guard** (`gdpr_pipeline/hide_guard.py`, section "The hide
   guard" below): the requester's ownership is read again from core, a name match or a legal request alone is held,
   and one requester or one day cannot take down a run of profiles.
+- **Ids only in files and PR text: never the requester's name** (`hide_batch.py` §"Ids only"; the legal_hidden list is
+  literally "Ids only; no names"). A committed evidence file under `data/` that talks about an erasure/hide request and
+  also carries a `name`/`display_name`/`full_name`/`legal_name`/`real_name` value, or a `name` / `full name` /
+  `display name` table column, fails `scripts/check-data-evidence-no-names.sh` in PR Validation — an id is
+  re-derivable from the live admin API, the name next to it is the thing the request is about.
 - **A page held for the captain's legal-threat call stays out of the routine batch**, even when a DIFFERENT register
   row decides that same page PASS. Rows share page ids in practice (register #126 and #246 both carry
   `7871c617-…`, withdrawn from an earlier batch for exactly this reason) and the batch dedups by page, so without this
@@ -702,5 +707,55 @@ one message); it is a report unless `--apply` is passed.
 person, `hidewait:<n>` for one that waits on the guard or the read-back, `confirm:<n>`), so an overdue-hide page never
 suppresses the statutory-date warning that becomes due later the same day, and a page held over the daily cap at 00:20Z
 still pages a person when the 06:20Z batch admits it.
+
+### The operations ask: `scripts/ops_intake/hide.py`
+
+A staff member asking in Slack ("hide profile <ids>, reason GDPR") is one more producer, and it goes through the SAME
+register. `hide.py` is that intake and nothing else: it does not decide identity, hide anything or send a letter.
+
+```
+scripts/ops_intake/hide.py --requester-id U038BM16T7W --channel C0OPS --message-ts 1793704998.000001 \
+    [--conversation 2154…] [--apply] [--open-prs]
+```
+
+- **The ask is DERIVED from the message, never accepted from the caller** (exit 6). There is no ask-text argument:
+  the intake reads the message named by `--channel`/`--message-ts` back from Slack, requires that message's `ts` to
+  be the named one, its `user` to be `--requester-id`, and its `text` to be non-empty — and that body is the only
+  text `parse_ids`/`classify` ever see. The message is looked for in the thread it belongs to first
+  (`conversations.replies`, which is the only way to see a reply) and in the channel's top-level messages second
+  (`conversations.history`), because an ask posted as a thread reply is the normal shape here. A caller-supplied
+  requester id proves only that the caller typed a staff id, and caller-supplied ask text proves nothing at all, so
+  "Jan said hide" pasted by anyone else is not Jan asking. Every unreadable case — no token, HTTP error, `ok:false`,
+  no message with that exact ts in the channel or its threads, no `user`, no `text` — REFUSES: an unmeasured
+  identity or ask is not a passed check. The lookup runs before any row is filed or PR opened, and in dry-run too, so a preview cannot claim
+  a pass the apply would refuse.
+
+- **Default is a dry run.** `--apply` files/attaches the rows and lets the pipeline decide; `--open-prs` also opens
+  the two hide-list PRs NOW (they carry the ask id in the body) instead of waiting for the next `hide-batch` tick.
+  A staff ask is run with BOTH: the PRs are the deliverable, so a run that files the row and opens nothing leaves the
+  ask waiting on the daily `gdpr-hide-batch` timer, and the output says so plainly rather than implying a PR exists.
+- **The ask text is data.** It names the pages and, in the requester's own words, the reason. It never establishes
+  identity and never selects a hide: the pipeline decides paths A-E from the linked Intercom conversation (or the row
+  the ask attaches to). It is the Slack message body, so an operator summarising a request is not this verb. `UNKNOWN`/`ASK_*` -> the thread says what the customer is being asked and nothing is hidden;
+  `LEGAL_HIDE_FIRST` / `JAN_BIGNAME` / `JAN_REVIEW` -> the captain owns it and no PR is opened here.
+- **The class comes from that reason, and a verb alone is refused** (exit 5): `privacy_erasure` (GDPR/Art. 17, a name
+  removal, an objection to a public listing), `dmca_takedown` (a rights complaint, "removed from Spotify" — a CATALOG
+  takedown, which gets a row and the track-removal human path and is **never** a profile hide), `legal_threat` (hide
+  first, identity after, captain's call).
+- **Bounds, held rather than truncated:** <= 10 ids per ask, <= 30 ids per requester per day (counted off the
+  register, not a second ledger), and only a staff id from the CLI's own `APPROVERS` may ask at all (tier R, exit 3).
+  The cap is charged to the VERIFIED author, so one staff member cannot spend another's budget: the requester is
+  the key segment immediately after the channel prefix, matched positionally, so a `--ask-id` label naming a
+  colleague is a label and never a charge against them.
+- **One row per id, and an id already on an open row ATTACHES to it** (an `ask_attached` event, never a second
+  deadline for one page, never a moved `received_at`). The comparison uses the store's `page_prefix` identity — the
+  8-char lower-cased prefix — so an ask naming the full uuid attaches to the row that holds the mail ledger's prefix.
+- **A reason is derived from facts, never from which entries survived `plan()`**, and the phrase "no page is still
+  missing a hide-list entry" is returned ONLY when every identity-PASS page of the ask is genuinely on both lists. A
+  page covered by another open row names that register number; a page whose hide PR from an earlier ask is still open
+  says that PR is already open (the in-flight lookup answers in page ids, not URLs, and the reason says so). Telling a
+  person their page is missing when a PR is open is a wrong statement about their own data.
+- The thread line is `gdpr-hide · <ask_id> · <n ids> · register #<rows> · PRs <urls> · hidden_at <ts|pending> ·
+  letter <sent|due>`.
 
 Kill switch: `/etc/hydra/gdpr-pipeline.disabled`.

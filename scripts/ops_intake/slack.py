@@ -36,7 +36,12 @@ from lib.slack_token import resolve_secret  # noqa: E402
 
 API = "https://slack.com/api/chat.postMessage"
 REPLIES_API = "https://slack.com/api/conversations.replies"
+HISTORY_API = "https://slack.com/api/conversations.history"
 TIMEOUT_S = 20
+# A bound on the cursor walk, not a budget: 50 pages x 200 is far beyond any operations thread we have, and a cursor
+# that loops or never empties must not hang the intake. Hitting it simply stops the walk, so the caller sees only the
+# pages it did read and fails closed on the rest (an ask read refuses; the completion signal reads as unanswered).
+MAX_PAGES = 50
 TOKEN_ENV = {
     "operations": "MUSO_SLACK_BOT_TOKEN_OPERATIONS",
     "devops": "MUSO_SLACK_BOT_TOKEN_DEVOPS",
@@ -89,27 +94,117 @@ def thread_has_bot_reply(*, channel: str, thread_ts: str, after_ts: str,
     token = token_for(account)
     if not token:
         raise RuntimeError(f"no Slack token resolved for account {account!r}")
-    query = urllib.parse.urlencode({"channel": channel, "ts": thread_ts, "limit": 200})
-    req = urllib.request.Request(
-        f"{REPLIES_API}?{query}",
-        headers={"Authorization": "Bearer " + token}, method="GET")
-    opener = fetch or urllib.request.urlopen
-    with opener(req, timeout=TIMEOUT_S) as resp:
-        payload = json.loads(resp.read() or b"{}")
-    if not payload.get("ok"):
-        raise RuntimeError(f"conversations.replies failed: {payload.get('error')}")
-    for message in payload.get("messages") or []:
-        if not isinstance(message, dict):
-            continue
-        if str(message.get("ts") or "") <= after_ts:
-            continue
-        if not (message.get("bot_id") or message.get("subtype") == "bot_message"):
-            continue
-        contract = CONTRACT_LINE.match(str(message.get("text") or ""))
-        if contract is not None and ask_id is not None and contract.group(1) != ask_id:
-            continue
-        return True
+    for messages in _iter_pages(fetch or urllib.request.urlopen, token, REPLIES_API, channel, {"ts": thread_ts}):
+        for message in messages:
+            if str(message.get("ts") or "") <= after_ts:
+                continue
+            if not (message.get("bot_id") or message.get("subtype") == "bot_message"):
+                continue
+            contract = CONTRACT_LINE.match(str(message.get("text") or ""))
+            if contract is not None and ask_id is not None and contract.group(1) != ask_id:
+                continue
+            return True
     return False
+
+
+def _find_message(opener, token: str, channel: str, ts: str) -> dict | None:
+    """The message whose ``ts`` is EXACTLY ``ts``, from the thread first and the channel second.
+
+    ``conversations.history`` returns only top-level channel messages, so an ask posted as a thread reply - the
+    normal shape for this bot - is invisible to it. ``conversations.replies`` walks the thread the ts belongs to
+    (Slack accepts any message ts in the thread, not just the parent). Both are asked for the whole window up to
+    ``ts`` and the exact ts is required, so a neighbouring message can never stand in for the ask.
+    """
+    for api, extra in ((REPLIES_API, {"ts": ts}), (HISTORY_API, {})):
+        message = _page_to_ts(opener, token, api, channel, ts, extra)
+        if message is not None:
+            return message
+    return None
+
+
+def _iter_pages(opener, token: str, api: str, channel: str, query_extra: dict):
+    """Yield each page's messages, following ``response_metadata.next_cursor``.
+
+    ``conversations.replies`` is CURSOR-PAGINATED and returns messages OLDEST FIRST, so a single ``limit=200`` request
+    for a long thread never contains its latest replies. Reading one page was wrong twice in this module: a staff ask
+    that was reply 201+ was absent, the ts was not found, and ``hide.py`` exited 6 filing nothing (QA review
+    5904456478, Important); and the completion signal had the same hole, where a bot reply past reply 200 would look
+    like an unanswered thread forever. Following the cursor is the documented way to read a whole thread
+    (https://docs.slack.dev/reference/methods/conversations.replies/).
+
+    The walk never short-circuits on the timestamps it has already seen: pages arrive OLDEST FIRST, so an early stop
+    keyed on "we have read back past the ask" would skip every LATER page - exactly where a bot reply or a staff ask
+    lives. ``MAX_PAGES`` bounds a broken or looping cursor; a walk that hits the bound simply stops yielding (the
+    caller fails closed on whatever it did not see).
+
+    Raises on a failed read: an unreadable thread is UNKNOWN, never "not there".
+    """
+    cursor = ""
+    for _ in range(MAX_PAGES):
+        query = {"channel": channel, **query_extra, "limit": 200}
+        if cursor:
+            query["cursor"] = cursor
+        req = urllib.request.Request(
+            f"{api}?{urllib.parse.urlencode(query)}",
+            headers={"Authorization": "Bearer " + token}, method="GET")
+        with opener(req, timeout=TIMEOUT_S) as resp:
+            payload = json.loads(resp.read() or b"{}")
+        if not payload.get("ok"):
+            raise RuntimeError(f"{api.rsplit('/', 1)[-1]} failed: {payload.get('error')}")
+        messages = [m for m in payload.get("messages") or [] if isinstance(m, dict)]
+        yield messages
+        cursor = str((payload.get("response_metadata") or {}).get("next_cursor") or "")
+        if not cursor:
+            return
+
+
+def _page_to_ts(opener, token: str, api: str, channel: str, ts: str, extra: dict) -> dict | None:
+    """The message whose ``ts`` is EXACTLY ``ts``, or None.
+
+    Walks every page (see ``_iter_pages``) because the ask may be reply 201+ of a long thread, and requires an exact
+    ts so a neighbour can never stand in for it. Returns None on any unreadable page rather than raising: the caller
+    reads "not found" as UNKNOWN and refuses, so a broken page must not be mistaken for a found message either."""
+    try:
+        for messages in _iter_pages(opener, token, api, channel,
+                                    {**extra, "latest": ts, "inclusive": "true"}):
+            for message in messages:
+                if str(message.get("ts") or "") == ts:
+                    return message
+    except (RuntimeError, OSError, ValueError):
+        return None
+    return None
+
+
+def message_author(*, channel: str, ts: str, account: str = "operations", fetch=None) -> tuple[str, str]:
+    """``(author, body)`` for the message at ``ts`` in ``channel``.
+
+    The intake's identity control AND its only source of ask text. A caller-supplied
+    requester id proves only that the caller typed a staff id, and caller-supplied
+    ask text proves nothing at all, so an ask is bound to the message it names: the
+    author must equal the requester and the body is what the parser reads. The message
+    is looked for in the thread it belongs to first and in the channel's top-level
+    messages second, so an ask posted as a thread reply resolves. Raises on EVERY
+    unreadable case - no token, a transport error, ``ok:false``, no message with that
+    exact ts in the channel or its threads, a message with no author, or a message
+    with no text - because an unreadable identity or ask is UNKNOWN, and UNKNOWN is a
+    refusal.
+    """
+    token = token_for(account)
+    if not token:
+        raise RuntimeError(f"no Slack token resolved for account {account!r}")
+    opener = fetch or urllib.request.urlopen
+    message = _find_message(opener, token, channel, ts)
+    if message is None:
+        raise RuntimeError(
+            f"no message at ts {ts} in {channel} or in its threads "
+            f"(conversations.replies and conversations.history both returned no message with that exact ts)")
+    user = str(message.get("user") or "")
+    if not user:
+        raise RuntimeError(f"the message at ts {ts} in {channel} has no author")
+    body = str(message.get("text") or "").strip()
+    if not body:
+        raise RuntimeError(f"the message at ts {ts} in {channel} has no text")
+    return user, body
 
 
 def page(text: str) -> bool:
