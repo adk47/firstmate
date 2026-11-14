@@ -119,6 +119,8 @@ OWNED=(
   ansible/playbooks/templates/60-ak47-swap.conf
   ansible/playbooks/templates/60-ak47-oomd-swap.conf
   ansible/playbooks/templates/60-ak47-oomd-avoid.conf
+  ansible/playbooks/templates/60-ak47-tasksmax-user.conf
+  ansible/playbooks/templates/60-ak47-tasksmax-slice.conf
   ansible/playbooks/templates/ak47-health.sh
   ansible/playbooks/templates/ak47-health.service
   ansible/playbooks/templates/ak47-health.timer

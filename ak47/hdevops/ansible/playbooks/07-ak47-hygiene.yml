@@ -35,6 +35,8 @@
 #   sudo rm /etc/sysctl.d/60-ak47-swap.conf /etc/sysctl.d/60-ak47-inotify.conf
 #   sudo sysctl -w vm.swappiness=60 fs.inotify.max_user_instances=128
 #   sudo rm /etc/systemd/system/user@1000.service.d/60-ak47-oomd-swap.conf
+#   sudo rm /etc/systemd/system/user@1000.service.d/60-ak47-tasksmax-slice.conf
+#   sudo rm /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf
 #   sudo rm -r /etc/systemd/system/{fm-tmux-anchor,orca-serve,cli-proxy-api,\
 #     kube-tunnel-node1,fm-chair,fm-fleet-revive}.service.d
 #   sudo systemctl daemon-reload && sudo systemctl restart systemd-oomd
@@ -177,6 +179,59 @@
     - name: Show the oomd policy
       ansible.builtin.debug:
         var: ak47_oomctl.stdout_lines
+
+    # ---- the user task cap --------------------------------------------------
+    # 2026-11-14: user@1000.service reached pids.max 12000 at 02:49Z and every
+    # fork in the uid returned EAGAIN until 08:04Z - the fleet's watcher, every
+    # worker shell and every check stopped for five hours. Two changes, and the
+    # first is the one that matters: a per-unit default so no single lane (one
+    # tmux pane scope peaked at 138,696 tasks) can take the whole slice, and a
+    # slice cap with room for several bursting lanes at once.
+    - name: Cap every user unit at a quarter of the slice
+      ansible.builtin.copy:
+        src: templates/60-ak47-tasksmax-user.conf
+        dest: /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      register: ak47_tasksmax_user
+
+    - name: Give the user slice headroom for several bursting lanes
+      ansible.builtin.copy:
+        src: templates/60-ak47-tasksmax-slice.conf
+        dest: /etc/systemd/system/user@1000.service.d/60-ak47-tasksmax-slice.conf
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      register: ak47_tasksmax_slice
+
+    - name: Reload the system manager for the slice cap
+      ansible.builtin.systemd:
+        daemon_reload: true
+      become: true
+      when: ak47_tasksmax_slice.changed
+
+    # user.conf is read when the user manager starts. A daemon-reload is not
+    # enough, and restarting user@1000.service would restart every unit in the
+    # slice - the fleet-wide disruption this change exists to prevent. So the
+    # default is installed and reported, and takes effect at the next login or
+    # the next deliberate restart; the slice cap applies without one.
+    - name: Read the live and configured bounds back
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - systemctl show -p TasksMax --value user@1000.service
+        - grep -h DefaultTasksMax /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf
+      register: ak47_tasksmax_read
+      changed_when: false
+
+    - name: Show the task bounds
+      ansible.builtin.debug:
+        msg:
+          - "live slice TasksMax: {{ ak47_tasksmax_read.results[0].stdout }}"
+          - "pending per-unit default: {{ ak47_tasksmax_read.results[1].stdout }}"
+          - "per-unit default applies at the next user-manager start (next login)"
 
     # ---- the health beat ----------------------------------------------------
     # ak47-health.sh is the 10-minute beat: it pages on load, swap and memory

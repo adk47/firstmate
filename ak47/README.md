@@ -42,6 +42,7 @@ $ ak47/status.sh --print
 | `root_disk_pct` | 85 | ext4 fragments badly past 85%; 540 GB of headroom remains |
 | `tmux_core_pct` | 100 | the tmux server idles at ~74% of one core with 81 panes |
 | `agent_count` | 160 | 160 agents is where per-agent CPU share crosses the load ceiling |
+| `pids_pct` | 80 | 2026-11-14 the uid hit 12000 of 12000 tasks and every fork failed for 5 h; 80% is where ordinary bursts still fit |
 
 A ceiling without a reason is a number nobody can defend, so `budget.conf`
 refuses to load a row that has none.
@@ -157,6 +158,52 @@ cannot be forgotten; it never arms itself.
 A finding's dedupe key is committed only after the chair-inbox note is actually
 delivered. A key touched before a failed send would silence the finding for six
 hours, so a failed delivery is logged as `DELIVERY-FAILED` and retried next tick.
+
+## 5a. The task cap that stopped the box
+
+On 2026-11-14 the uid reached `pids.max` 12000 at 02:49Z and stayed there until
+08:04Z. Every `fork()` returned `EAGAIN`, so the watcher, every worker shell and
+every check failed to start for five hours. Nothing paged: tasks are cheap, so
+load, swap and available RAM all stayed inside their ceilings while the uid was
+already unable to fork.
+
+The tasks were in tmux child-pane scopes, not in a service. Three scopes
+accounted for it (`tmux-spawn-c2f9b92f` peaked at 138,696 tasks, `-b4f3563c` at
+41,025, `-457529e5` at 7,758), and the frame was only the frame: the cap was the
+only bound, 12000 was barely above the ~4,600 the slice normally runs, and no
+unit inside the slice was capped at anything — each inherited 140,836 and shared
+nothing, so one lane could take the whole uid.
+
+Three changes, in `hdevops/ansible/playbooks/07-ak47-hygiene.yml`:
+
+1. **A per-unit default** — `/etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf`
+   sets `DefaultTasksMax=4096`. This is the change that matters: transient tmux
+   pane scopes have no drop-in path, and the user manager's default is the only
+   place a per-unit cap can reach them. 4096 is six times the largest legitimate
+   lane measured here, and a quarter of the slice cap.
+2. **A slice cap with room** — `/etc/systemd/system/user@1000.service.d/60-ak47-tasksmax-slice.conf`
+   sets `TasksMax=24576`, six times the per-unit default. Raising it alone would
+   have moved the cliff, not removed it, so both land together.
+3. **An alert at 80% of the cap** — `ak47-health.sh` pages at 80% and writes
+   `~/.local/state/ak47/tasks-latest.md` naming the scopes holding the tasks;
+   `pids_pct` is also a budget row, so the tick samples it every five minutes
+   and the weekly review can propose moving it.
+
+The per-unit default is read when the user manager starts, and restarting
+`user@1000.service` would restart every unit in the slice — the fleet-wide
+disruption this change exists to prevent. So it applies at the next login; the
+slice cap applies without one. Aaron's one-liner, if applying by hand:
+
+```
+sudo install -D -m644 ak47/hdevops/ansible/playbooks/templates/60-ak47-tasksmax-user.conf \
+  /etc/systemd/user.conf.d/60-ak47-tasksmax-user.conf
+sudo install -D -m644 ak47/hdevops/ansible/playbooks/templates/60-ak47-tasksmax-slice.conf \
+  /etc/systemd/system/user@1000.service.d/60-ak47-tasksmax-slice.conf
+sudo systemctl daemon-reload
+```
+
+Revert: remove both files and `sudo systemctl daemon-reload`. The bound returns
+to 12000 on the next unit start; nothing is restarted either way.
 
 ## 6. The weekly review
 
@@ -295,7 +342,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-82 tests across six files: the budget, the census, the guards, the guarded
+83 tests across six files: the budget, the census, the guards, the guarded
 delete, the tick, and the weekly review. They are hermetic — no tmux, no
 network, no live fleet state — and registered as `pure-contract-unit` in
 `bin/fm-test-run.sh`.

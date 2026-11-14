@@ -76,7 +76,29 @@ route_if=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="d
 agents=$(pgrep -c -x pi)
 beat=$(( $(date +%s) - $(stat -c %Y "$FM_HOME/state/.last-watcher-beat" 2>/dev/null || echo 0) ))
 failed=$(systemctl --user --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
-echo "$now load=$l1/$l5 memavail=${mem_av}G swap=${sw_pct}% psi_cpu=$cpu_some mem_full=$mem_full io_full=$io_full inotify=$ino/$ino_max disk=${root_pct}% tmp=${tmp_g}G tctl=${tctl} nvme=${nvt} wifi=${freq}MHz/${rssi}dBm/${link} route=$route_if pi=$agents beat=${beat}s" >>"$SD/samples.log"
+
+# ---- the user task cap, sampled and paged
+# 2026-11-14: user@1000.service reached pids.max 12000 at 02:49Z and every fork in
+# the uid returned EAGAIN until 08:04Z - the watcher, every worker shell and every
+# check failed to start for five hours, and this file had no threshold for it, so
+# nothing paged. Tasks are cheap, so load, swap and memory all stayed inside their
+# ceilings while the uid was already unable to fork.
+USLICE=${AK47_USER_SLICE:-"/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service"}
+pids_cur=$(cat "$USLICE/pids.current" 2>/dev/null | tr -dc 0-9)
+pids_max=$(cat "$USLICE/pids.max" 2>/dev/null | tr -d ' \n')
+case "${pids_max:-}" in ''|max|*[!0-9]*) pids_max=0 ;; esac
+PAGE_TASKS_PCT=${AK47_PAGE_TASKS_PCT:-80}
+# the scopes actually holding the tasks, so a page names who to look at
+# One readdir of app.slice's cgroup directories: pids.current per unit, top 5.
+tasks_heat() {
+  local d
+  for d in "$USLICE"/*.slice/*.slice "$USLICE"/*.slice "$USLICE"/*.scope "$USLICE"/*.service; do
+    [ -r "$d/pids.current" ] || continue
+    printf '%s|%s\n' "$(cat "$d/pids.current" 2>/dev/null)" "$(basename "$d" | sed 's/\.\(service\|scope\|slice\)$//')"
+  done | sort -t'|' -k1,1 -rn | head -5 | awk -F'|' '{printf "%s(%s) ",$2,$1}'
+}
+
+echo "$now load=$l1/$l5 memavail=${mem_av}G swap=${sw_pct}% psi_cpu=$cpu_some mem_full=$mem_full io_full=$io_full inotify=$ino/$ino_max disk=${root_pct}% tmp=${tmp_g}G tctl=${tctl} nvme=${nvt} wifi=${freq}MHz/${rssi}dBm/${link} route=$route_if pi=$agents pids=${pids_cur:-0}/${pids_max:-0} beat=${beat}s" >>"$SD/samples.log"
 
 # ---- safe fix: spike snapshot
 if [ "${l1%.*}" -ge "$SPIKE" ]; then  # bash needs integers; ${l1%.*} truncates
@@ -127,6 +149,18 @@ awk -v v="$mem_full" 'BEGIN{exit !(v>5)}' && find_ mem-pressure "Memory pressure
 awk -v v="$io_full" 'BEGIN{exit !(v>10)}' && find_ io-pressure "Disk pressure: tasks fully stalled on I/O ${io_full}% of the last 10 s"
 [ "$ino" -ge $((ino_max * 80 / 100)) ] && find_ inotify "File-watch handles at $ino of $ino_max; new agents may fail to start"
 [ "$root_pct" -ge 80 ] && find_ disk "Main disk ${root_pct}% full"
+# ---- the page: the uid is running out of things it can fork
+# A fork-starved box cannot heal itself: the fix was always outside it (systemd
+# drop-ins), and the previous occurrence was found only because Aaron noticed the
+# fleet was silent. Page at 80%, before the cap, and name the scopes holding it.
+if [ "${pids_max:-0}" -gt 0 ] && [ -n "${pids_cur:-}" ]; then
+  pids_pct=$(( pids_cur * 100 / pids_max ))
+  if [ "$pids_pct" -ge "$PAGE_TASKS_PCT" ]; then
+    page_ tasks-sustain "user task cap ${pids_pct}% used (${pids_cur} of ${pids_max} tasks for uid $USER) - holders: $(tasks_heat | sed 's/ $//') - past 100% every fork fails EAGAIN and the fleet stops starting; raise /etc/systemd/system/user@$(id -u).service.d/60-ak47-tasksmax.conf TasksMax, and find the lane that grew: ~/.local/state/ak47/tasks-latest.md"
+    touch "$SD/.page-active"
+    { echo "# ak47 task cap $et ($now)"; echo; echo "${pids_cur} of ${pids_max} tasks (${pids_pct}%) for uid $USER"; echo; echo "by unit:"; tasks_heat | sed 's/ $//'; echo; echo "scopes and their largest task counts:"; for d in "$USLICE"/*.slice/*.slice "$USLICE"/*.slice/*.scope; do [ -r "$d/pids.current" ] && printf '%-10s %s\n' "$(cat "$d/pids.current")" "$(basename "$d")"; done | sort -rn | head -20; } >"$SD/tasks-latest.md"
+  fi
+fi
 [ "${tmp_g:-0}" -ge 60 ] && find_ tmp "/tmp holds ${tmp_g} GB (it is emptied at every boot)"
 [ -n "$tctl" ] && [ "$tctl" -ge 95 ] && find_ cpu-hot "CPU at ${tctl}°C, near its throttle point"
 [ -n "$nvt" ] && [ "$nvt" -ge 70 ] && find_ nvme-hot "NVMe at ${nvt}°C"

@@ -130,6 +130,53 @@ test_no_write_leaves_the_board_alone() {
   pass "--no-write leaves the board on disk alone"
 }
 
+# --- the task cap -----------------------------------------------------------------
+# 2026-11-14: the uid reached pids.max and every fork failed for five hours. The
+# number that would have warned is a percentage of that cap, so it has to be
+# arithmetic this suite can prove without editing the running box.
+
+. "$ROOT/ak47/lib/common.sh"
+
+fake_slice() {  # fake_slice <current> <max>
+  local d=$SANDBOX/slice.$$
+  mkdir -p "$d" || return 1
+  printf '%s\n' "$1" >"$d/pids.current"
+  printf '%s\n' "$2" >"$d/pids.max"
+  printf '%s' "$d"
+}
+
+test_pids_pct_is_the_share_of_the_cap() {
+  AK47_USER_SLICE=$(fake_slice 6000 12000)
+  local got; got=$(ak47_pids_pct)
+  [ "$got" = 50 ] || fail "6000 of 12000 tasks should be 50%, got '$got'"
+  AK47_USER_SLICE=$(fake_slice 12000 12000)
+  got=$(ak47_pids_pct)
+  [ "$got" = 100 ] || fail "a full cap should read 100%, got '$got'"
+  pass "ak47_pids_pct reports tasks as a percentage of the cap"
+}
+
+test_pids_pct_refuses_to_score_an_uncapped_manager() {
+  AK47_USER_SLICE=$(fake_slice 400 400)
+  printf 'max\n' >"$AK47_USER_SLICE/pids.max"
+  local got; got=$(ak47_pids_pct)
+  # "max" is no cap at all: 0 is the honest answer, not a made-up 100%.
+  [ "$got" = 0 ] || fail "an uncapped manager should report 0, got '$got'"
+  pass "ak47_pids_pct does not invent a percentage for an uncapped manager"
+}
+
+test_pids_pct_reports_nothing_when_the_cgroup_is_unreadable() {
+  AK47_USER_SLICE=$SANDBOX/does-not-exist
+  ak47_pids_pct >/dev/null 2>&1 \
+    && fail "an unreadable cgroup produced a number instead of failing"
+  pass "an unreadable cgroup yields no value, so the budget row is skipped not scored"
+}
+
+test_the_shipped_budget_watches_the_task_cap() {
+  grep -q '^pids_pct|' "$ROOT/ak47/budget.conf" \
+    || fail "budget.conf has no pids_pct ceiling; the 2026-11-14 starvation would be unwatched"
+  pass "the shipped budget watches the user task cap"
+}
+
 test_the_shipped_budget_loads
 test_every_shipped_row_carries_a_reason
 test_every_shipped_row_has_a_numeric_ceiling
@@ -140,3 +187,7 @@ test_the_board_puts_the_verdict_first
 test_the_board_names_every_budget_metric
 test_the_board_writes_status_md
 test_no_write_leaves_the_board_alone
+test_pids_pct_is_the_share_of_the_cap
+test_pids_pct_refuses_to_score_an_uncapped_manager
+test_pids_pct_reports_nothing_when_the_cgroup_is_unreadable
+test_the_shipped_budget_watches_the_task_cap
