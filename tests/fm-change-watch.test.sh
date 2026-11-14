@@ -1985,6 +1985,25 @@ esac
   || fail "the beta baselines overwrote one another: $(cat "$HOME_B8/state/change-watch/b8-83/beta-baseline")"
 pass "each matched beta target keeps its own fingerprint and baseline"
 
+# Two keys can name the same beta target: here the built-in repository key and a
+# home path prefix both resolve to muso-dev/credits-gate. The target is one
+# deployment to fingerprint, wait for, and read, so it is read once.
+HOME_B11=$(seed_beta_world b11)
+seed_clean_beta "$HOME_B11"
+printf 'src/routes/credits muso-dev/credits-gate\n' > "$HOME_B11/config/change-watch-beta"
+out=$(run_beta "$HOME_B11" 1790000000 register b11 \
+  'https://github.com/Muso-AI/web-credits-next/pull/84') || fail "same-target beta register failed"
+case "$out" in
+  *"beta: beta clean: 5 metric(s) read on muso-dev/credits-gate, none crossed its bar"*)
+    pass "two keys resolving to one beta target read it once" ;;
+  *) fail "a beta target named by two keys was read twice: $out" ;;
+esac
+[ "$(awk -F'\t' 'NF { n++ } END { print n + 0 }' "$HOME_B11/state/change-watch/b11-84/beta-landed")" = 1 ] \
+  || fail "one beta target was fingerprinted more than once: $(cat "$HOME_B11/state/change-watch/b11-84/beta-landed")"
+[ "$(awk -F'\t' 'NF { n++ } END { print n + 0 }' "$HOME_B11/state/change-watch/b11-84/beta-baseline")" = 5 ] \
+  || fail "one beta target kept more than one baseline: $(cat "$HOME_B11/state/change-watch/b11-84/beta-baseline")"
+pass "one beta target keeps exactly one fingerprint and baseline"
+
 # A metric with no readable baseline is unmeasured, never scored against an
 # absolute bar, because an absolute bar is not evidence about the change.
 HOME_B7=$(seed_beta_world b7)

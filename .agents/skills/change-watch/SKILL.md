@@ -40,7 +40,7 @@ Registration reads the change against the pre-production copy of the service tha
 The beta map is the built-in `web-credits-next -> muso-dev/credits-gate` plus the home's own `config/change-watch-beta`; a key matches a changed path or the repository name.
 Registration runs seconds after the merge, so the beta target is still running the pre-change code: the stage records the target's pre-merge pod fingerprint, captures its baseline from that pre-change state, waits for the merged sha to reach the target, and only then reads.
 It scores against that beta baseline rather than an absolute bar, and a metric whose baseline could not be read is left unscored and named in the verdict rather than scored absolutely.
-The stage records its verdict in the watch's `beta` record, and `bin/fm-change-watch.sh status` states it beside the production verdict.
+The stage records its verdict in the watch's `beta` record, and `bin/fm-change-watch.sh status` states it beside the production verdict; `bin/fm-change-watch.sh verdict` exits non-zero on a beta regression, so a beta failure is never read as a pass.
 A change touching no beta-served path completes the stage clean with the reason stated, and the production watch arms as before.
 A beta failure is a beta failure: it is reported on its own `beta` wake and its own steer, records the merge's `regressed` row, and the production watch is never armed for it, so it is never read as a production regression and never upgraded to a production pass.
 The ordering is the contract, not an accident of layout: a test asserts it from the `FM_CW_TRACE` read record rather than inferring it from the outcome.

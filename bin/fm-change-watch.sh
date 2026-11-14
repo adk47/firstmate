@@ -90,8 +90,10 @@
 #           Clean means every target had at least one scored reading across the
 #           schedule AND the +15m, +1h and +6h readings all scored something.
 #           Anything less is unmeasurable-with-reason: a measurement gap,
-#           recorded as such, never as health. The exit status is the done-claim
-#           block: 0 for clean or regressed, 1 for unmeasurable-with-reason.
+#           recorded as such, never as health. A beta regression exits 1 as well,
+#           so a beta failure is never read as a pass. The exit status is the
+#           done-claim block: 0 for clean or regressed, 1 for
+#           unmeasurable-with-reason, interrupted, or a beta regression.
 # gate      The done-claim gate for one task: exit 0 only when every watch that
 #           task registered has reached a terminal state that is not a
 #           measurement gap. A watch still running is not a pass, and an
@@ -1054,29 +1056,32 @@ cw_beta_map_summary() {
 # "beta<TAB>namespace<TAB>deployment<TAB>matched-path" line per beta target whose
 # key matches a changed path or the repository name. A key matches a path when
 # the path is the key or sits under it, so a route prefix and a repository name
-# are both expressible.
+# are both expressible. Two keys can name the same target, so each target is
+# emitted once: it is one deployment to fingerprint, wait for, and read.
 cw_beta_targets() {  # <repo-name> <files>
   local repo=$1 files=$2 key target path matched
-  while IFS=' ' read -r key target; do
-    [ -n "$key" ] && [ -n "$target" ] || continue
-    case "$target" in */*) ;; *) continue ;; esac
-    matched=''
-    while IFS= read -r path; do
-      [ -n "$path" ] || continue
-      case "$path" in
-        "$key"|"$key"/*) matched=$path; break ;;
-      esac
-    done <<PATHS
+  {
+    while IFS=' ' read -r key target; do
+      [ -n "$key" ] && [ -n "$target" ] || continue
+      case "$target" in */*) ;; *) continue ;; esac
+      matched=''
+      while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        case "$path" in
+          "$key"|"$key"/*) matched=$path; break ;;
+        esac
+      done <<PATHS
 $files
 PATHS
-    if [ -z "$matched" ]; then
-      [ "$repo" = "$key" ] || continue
-      matched=$repo
-    fi
-    printf 'beta\t%s\t%s\t%s\n' "${target%%/*}" "${target#*/}" "$matched"
-  done <<MAP
+      if [ -z "$matched" ]; then
+        [ "$repo" = "$key" ] || continue
+        matched=$repo
+      fi
+      printf 'beta\t%s\t%s\t%s\n' "${target%%/*}" "${target#*/}" "$matched"
+    done <<MAP
 $(cw_beta_map_lines)
 MAP
+  } | awk -F'\t' '!seen[$2 "/" $3]++'
 }
 
 cw_beta_path() { printf '%s/beta\n' "$(cw_watch_dir "$1")"; }
@@ -3208,8 +3213,9 @@ cmd_drive() {
 }
 
 # The exit status is the done-claim block: an unmeasurable watch is a failure,
-# so verdict exits 1 for it and 0 only for clean or regressed. A watch still
-# running is not terminal and exits 0, because it has not claimed anything yet.
+# so verdict exits 1 for it and 0 only for clean or regressed. A beta regression
+# is a failure too, so it exits 1. A watch still running is not terminal and
+# exits 0, because it has not claimed anything yet.
 cmd_verdict() {
   local id=$1 line
   cw_watch_exists "$id" || die "unknown watch: $id"
