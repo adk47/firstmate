@@ -1243,7 +1243,16 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   append-only `core_refusals` table as `refused_by_core:<reason>`, and the reason routes it:
   `proof_required` / `no_sound_precedent` go to the ask path (`refused_to_ask`, emitted by
   `asks --plan P --out FILE` for `need_asks.py build --from-drain`, the one reviewed ask
-  path), `validator_hold` and any unnamed reason stay held. The route has one source, the
+  path), any unnamed reason stays held. Beside an ask reason, `validator_hold` is asked
+  too UNLESS its cause is hard (`HARD_HOLD_CAUSES`: fraud, impersonation, legal, a credit
+  the profile already has, an unfinished check - read from the request's stored verdict:
+  its `review_*` rules, `rule_errors`, `fraud_hold`, and the hard codes of
+  `hold_reason_codes`), unmeasured or unclassified. A velocity rule is the bands' band
+  B only on an editing burst (`editing_burst` on the plan row, from the bands'
+  `high_risk_roles`); every other velocity hold is band C and stays held. Core never
+  says which hold it is, so the cause comes from the snapshot (`hold_causes` on the plan
+  row): an old plan holds every such row, and "on the ask route" is not "asked" -
+  `need_asks.py` sends only where a document names a sendable need. The route has one source, the
   recorded `core_refusals` row, so a refusal whose route could not be recorded is held and
   never reported as waiting on an ask. No tier-2 or person queue for a refused approval,
   the run that meets those refusals is not an error (`held_by_core`, `errors` 0, exit 0),

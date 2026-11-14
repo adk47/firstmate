@@ -84,6 +84,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from .policy import HOLD_ON_ERROR_KEY, conflict_scan
+
 #: Bumped whenever a rule's meaning changes. It is part of the idempotency key, so a
 #: rule change deliberately produces NEW keys and a re-run re-decides those rows; an
 #: unchanged rule produces the same key and the write is a no-op.
@@ -222,6 +224,101 @@ CORE_ASK_REASONS = ("proof_required", "no_sound_precedent")
 #: the audience ``need_asks.py --from-drain`` decides the document for) or ``hold``.
 ROUTE_ASK, ROUTE_HOLD = "ask", "hold"
 CORE_REFUSED = "refused_by_core"
+
+#: Core answers ``validator_hold`` for every validator hold alike and does not say which
+#: one, so the CAUSE is read from the request's own stored verdict when the snapshot is
+#: taken (``hold_causes``). A hold on this list is one the claimant's document answers,
+#: so a row core refuses with an ask reason AND ``validator_hold`` is still asked
+#: (owner decision 2026-11-14: a row held with no ask waits on nobody the customer can
+#: reach). The eight proof rules are the validator's own band B (credit_trust_bands.json
+#: ``proof_required.rules``); the class C score signature is a score fact, not a finding
+#: about the person. The two velocity rules are NOT unconditionally askable: the bands
+#: make a velocity hold band B only on an editing role, so they are read from the table
+#: at run time (``velocity_hold_causes``) and asked only on an editing burst
+#: (``editing_burst``).
+CLASS_C_HOLD = "class_c"
+ASKABLE_HOLD_CAUSES = frozenset({
+    "review_org_role_without_outside_source", "review_high_risk_profile_score",
+    "review_big_track_weak_footprint", "review_editing_role_without_trusted_credit",
+    "review_big_track_without_trusted_credit", "review_role_cardinality",
+    "review_hold_for_documents", "review_account_unanchored_sum",
+    CLASS_C_HOLD,
+})
+
+#: Hold causes that are NEVER asked, each with the class that keeps it held. The first
+#: three classes are the decision's own (fraud, impersonation, legal). ``already_held``
+#: is a request racing or repeating an approved credit on the same profile: a proof ask
+#: there asks a customer to document a credit they already have. ``unmeasured`` is a
+#: check the validator could not complete.
+FRAUD_HOLD = "fraud_hold"
+HARD_HOLD_CAUSES = {
+    "review_held_submitter": "fraud",
+    FRAUD_HOLD: "fraud",
+    "review_role_credited_to_other_at_trusted_source": "impersonation",
+    "review_operations_tombstone": "legal",
+    "review_duplicate_of_approved_credit": "already_held",
+    HOLD_ON_ERROR_KEY: "unmeasured",
+}
+
+
+#: The validator's own band table. The editing-role definition (``high_risk_roles``) and
+#: the velocity rules (``proof_required.editing_burst_rules``) are read from it at run
+#: time, never copied into this file: a table that cannot be read makes both unmeasured,
+#: which holds.
+BANDS_PATH = Path(__file__).resolve().parent.parent / "credit_trust" / "credit_trust_bands.json"
+_BANDS: dict[str, Any] | None = None
+
+
+def bands_config() -> dict[str, Any]:
+    """The validated band table, or ``{}`` when it cannot be read."""
+    global _BANDS
+    if _BANDS is None:
+        try:
+            loaded = json.loads(BANDS_PATH.read_text())
+        except (OSError, ValueError):
+            loaded = {}
+        _BANDS = loaded if isinstance(loaded, dict) else {}
+    return _BANDS
+
+
+def velocity_hold_causes() -> frozenset[str]:
+    """The velocity rules of the bands (``proof_required.editing_burst_rules``)."""
+    proof = bands_config().get("proof_required")
+    rules = proof.get("editing_burst_rules") if isinstance(proof, dict) else None
+    if not isinstance(rules, list):
+        return frozenset()
+    return frozenset(r for r in rules if isinstance(r, str) and r)
+
+
+def editing_burst(claimed_roles: Sequence[str] | None) -> bool | None:
+    """Did the request claim an editing role, the one case a velocity hold may be asked.
+
+    The bands call a velocity hold band B only when an editing role was held
+    (``high_risk_roles``: a ``catalog_children`` role or a ``code_pattern`` match); every
+    other velocity hold is band C, which no document clears. ``None`` when the roles or
+    that definition could not be read: unmeasured is not an ask.
+    """
+    roles = [str(r).strip().lower() for r in claimed_roles or () if str(r).strip()]
+    if not roles:
+        return None
+    high = bands_config().get("high_risk_roles")
+    if not isinstance(high, dict):
+        return None
+    raw_children = high.get("catalog_children")
+    children = ({str(c).strip().lower() for c in raw_children if str(c).strip()}
+                if isinstance(raw_children, list) else set())
+    raw_pattern = high.get("code_pattern")
+    pattern = raw_pattern if isinstance(raw_pattern, str) and raw_pattern else None
+    if not children and pattern is None:
+        return None
+    try:
+        regex = re.compile(pattern, re.IGNORECASE) if pattern else None
+    except re.error:
+        return None
+    for role in roles:
+        if role in children or (regex is not None and regex.search(role)):
+            return True
+    return False
 
 
 class DrainWriteError(DrainError):
@@ -379,7 +476,10 @@ CREATE TABLE IF NOT EXISTS requests (
   -- one the row is NOT auto-approvable and falls through to ask.
   precedent_request_id TEXT,
   track_id          TEXT,
-  claimed_roles     TEXT           -- JSON array, the claim the precedent key is built from
+  claimed_roles     TEXT,          -- JSON array, the claim the precedent key is built from
+  -- Why the validator holds this request, read from its stored verdict: a JSON array
+  -- of causes ([] = it holds nothing), NULL = not measured (no readable verdict).
+  hold_causes       TEXT
 );
 CREATE INDEX IF NOT EXISTS requests_status ON requests(status);
 CREATE TABLE IF NOT EXISTS decided (
@@ -437,7 +537,83 @@ def open_snapshot(path: str | None = None) -> sqlite3.Connection:
     # A snapshot file made before ``duplicate_kind`` existed gains the column on open.
     if "duplicate_kind" not in {r[1] for r in db.execute("PRAGMA table_info(requests)")}:
         db.execute("ALTER TABLE requests ADD COLUMN duplicate_kind TEXT")
+    # ... and one made before ``hold_causes`` existed reads as "not measured" (NULL).
+    if "hold_causes" not in {r[1] for r in db.execute("PRAGMA table_info(requests)")}:
+        db.execute("ALTER TABLE requests ADD COLUMN hold_causes TEXT")
     return db
+
+
+def hold_causes(verification_data: Any) -> list[str] | None:
+    """Why the validator holds a request, from its stored verdict; ``None`` = unreadable.
+
+    The same reading core's ``validatorConflict`` makes (``policy.conflict_scan``: any
+    ``review_*`` rule at or above 30, the class C signature, ``rule_errors._hold_on_error``),
+    plus the fraud hold and the hold codes the validator records on a non-approval
+    (``hold_reason_codes``). Core answers all of them with the one word
+    ``validator_hold``; this is what tells a document question from a fraud hold. A
+    verdict with no readable ``rule_risk_percent`` is not measured, never "holds
+    nothing"; so is a ``fraud_hold`` that is there but is not a mapping with a decision
+    (an absent or null one is simply no fraud hold).
+    """
+    scan = conflict_scan(verification_data)
+    if not scan["measured"]:
+        return None
+    out: set[str] = set(scan["hold_rules"])
+    if scan["class_c"]:
+        out.add(CLASS_C_HOLD)
+    if scan["hold_on_error"]:
+        out.add(HOLD_ON_ERROR_KEY)
+    fraud = verification_data.get(FRAUD_HOLD)
+    if fraud is not None:
+        decision = fraud.get("decision") if isinstance(fraud, dict) else None
+        if not isinstance(decision, str):
+            return None
+        if decision.strip().lower() == "hold":
+            out.add(FRAUD_HOLD)
+    # The validator's own machine record of why a verdict was not an approval. Only the
+    # codes that are HARD_HOLD_CAUSES are causes here: the score codes (``score:*``,
+    # ``risk_score_at_or_above_threshold``) ride every askable row and are not a hold this
+    # code classifies.
+    codes = verification_data.get("hold_reason_codes")
+    if isinstance(codes, (list, tuple)):
+        for code in codes:
+            if isinstance(code, str) and code in HARD_HOLD_CAUSES:
+                out.add(code)
+    return sorted(out)
+
+
+def _causes_tuple(value: Any) -> tuple[str, ...] | None:
+    """Hold causes as stored (a JSON array, a list, or nothing) -> a tuple, or ``None``.
+
+    Anything that is not a list of strings is "not measured": a malformed value must
+    never read as "holds nothing", which is the one answer that lets an ask through.
+    """
+    if isinstance(value, (str, bytes)):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    if not isinstance(value, (list, tuple)) or not all(isinstance(c, str) and c for c in value):
+        return None
+    return tuple(sorted(set(value)))
+
+
+def _causes_json(value: Any) -> str | None:
+    causes = _causes_tuple(value)
+    return None if causes is None else json.dumps(list(causes))
+
+
+def _roles_tuple(value: Any) -> tuple[str, ...] | None:
+    """The stored ``claimed_roles`` (a JSON array) -> a non-empty tuple, or ``None``."""
+    if isinstance(value, (str, bytes)):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    if not isinstance(value, (list, tuple)):
+        return None
+    roles = tuple(str(r).strip() for r in value if isinstance(r, str) and str(r).strip())
+    return roles or None
 
 
 DUP_REQUEST, DUP_PROFILE_CREDIT, DUP_OTHER = "request", "profile_credit", "other"
@@ -484,8 +660,8 @@ def load_snapshot(db: sqlite3.Connection, rows: Iterable[dict[str, Any]], *,
         db.execute(
             "INSERT INTO requests (request_id, profile_id, user_id, status, created_at, expires_at,"
             " duplicate_of, duplicate_kind, precedent_key, proof_verdict, proof_received_at, proof_id,"
-            " asked_at, precedent_request_id, track_id, claimed_roles)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            " asked_at, precedent_request_id, track_id, claimed_roles, hold_causes)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(request_id) DO UPDATE SET profile_id=excluded.profile_id, user_id=excluded.user_id,"
             " status=excluded.status, created_at=excluded.created_at, expires_at=excluded.expires_at,"
             " duplicate_of=excluded.duplicate_of, duplicate_kind=excluded.duplicate_kind,"
@@ -493,7 +669,7 @@ def load_snapshot(db: sqlite3.Connection, rows: Iterable[dict[str, Any]], *,
             " proof_verdict=excluded.proof_verdict, proof_received_at=excluded.proof_received_at,"
             " proof_id=excluded.proof_id, asked_at=excluded.asked_at,"
             " precedent_request_id=excluded.precedent_request_id, track_id=excluded.track_id,"
-            " claimed_roles=excluded.claimed_roles",
+            " claimed_roles=excluded.claimed_roles, hold_causes=excluded.hold_causes",
             (rid, r.get("profile_id"), r.get("user_id"), str(r.get("status") or ""),
              r.get("created_at") or r.get("createdAt"), expires,
              duplicate_of, duplicate_kind, r.get("precedent_key"), r.get("proof_verdict"),
@@ -501,7 +677,8 @@ def load_snapshot(db: sqlite3.Connection, rows: Iterable[dict[str, Any]], *,
              r.get("asked_at") or r.get("askedAt"),
              r.get("precedent_request_id") or r.get("precedentRequestId"),
              r.get("track_id") or r.get("trackId"),
-             json.dumps(list(r.get("claimed_roles") or []), sort_keys=True)))
+             json.dumps(list(r.get("claimed_roles") or []), sort_keys=True),
+             _causes_json(r.get("hold_causes"))))
         n += 1
     db.commit()
     return n
@@ -598,7 +775,9 @@ SELECT
   p.request_id AS precedent_request_id,
   r.proof_id,
   r.duplicate_kind,
-  r.proof_received_at
+  r.proof_received_at,
+  r.hold_causes,
+  r.claimed_roles
 FROM requests r
 LEFT JOIN decided   d ON d.request_id = r.duplicate_of
 LEFT JOIN precedent p ON p.precedent_key = r.precedent_key
@@ -627,14 +806,24 @@ class Decision:
     #: is only autonomous because that original decision stands, so the ledger row and
     #: the audit trail both name it.
     duplicate_of: str | None = None
+    #: On an approve: why the validator holds the request, from the snapshot (see
+    #: ``hold_causes``). ``()`` = it holds nothing, ``None`` = not measured. It decides
+    #: whether a row core refuses with ``validator_hold`` may still be asked.
+    hold_causes: tuple[str, ...] | None = None
+    #: On an approve whose causes include a velocity rule: did the request claim an
+    #: editing role (the bands' band B case)? ``None`` = the roles could not be read,
+    #: which holds, and nothing for a row with no velocity cause.
+    editing_burst: bool | None = None
 
     def as_row(self) -> dict[str, Any]:
         """The canonical plan row. Sorted keys, no clock, no run id -> byte-identical."""
         return {
             "decision_key": self.decision_key,
             "duplicate_of": self.duplicate_of,
+            "editing_burst": self.editing_burst,
             "evidence_anchor": self.evidence_anchor,
             "expires_at": self.expires_at,
+            "hold_causes": None if self.hold_causes is None else list(self.hold_causes),
             "outcome": self.outcome,
             "profile_id": self.profile_id,
             "proof_verdict": self.proof_verdict,
@@ -705,11 +894,14 @@ def plan(db: sqlite3.Connection, *, now: datetime | None = None) -> list[Decisio
     out: list[Decision] = []
     for (rid, profile_id, user_id, _status, expires_at, proof_verdict,
          rule, duplicate_decision, duplicate_of, precedent_outcome, precedent_request_id,
-         proof_id, duplicate_kind, proof_received_at) in db.execute(LADDER_SQL, {"now": stamp}):
+         proof_id, duplicate_kind, proof_received_at, causes, roles) in db.execute(LADDER_SQL, {"now": stamp}):
         anchor = precedent_request_id if rule == "precedent" else (
             proof_id if rule == "proof_verdict" else None)
         outcome, reason = _resolve(rule, proof_verdict, precedent_outcome, anchor,
                                    duplicate_decision, duplicate_kind, proof_received_at)
+        held = _causes_tuple(causes) if outcome == "approve" else None
+        burst = (editing_burst(_roles_tuple(roles))
+                 if held and velocity_hold_causes().intersection(held) else None)
         out.append(Decision(
             request_id=rid,
             rule=rule,
@@ -723,6 +915,9 @@ def plan(db: sqlite3.Connection, *, now: datetime | None = None) -> list[Decisio
             proof_verdict=proof_verdict,
             evidence_anchor=anchor,
             duplicate_of=duplicate_of if rule == "duplicate" else None,
+            # only an approve can be refused by core, so only an approve carries them
+            hold_causes=held,
+            editing_burst=burst,
         ))
     out.sort(key=lambda d: d.request_id)
     return out
@@ -753,7 +948,9 @@ def parse_plan(data: bytes | str) -> list[Decision]:
             status=row.get("status"), expires_at=row.get("expires_at"),
             proof_verdict=row.get("proof_verdict"),
             evidence_anchor=row.get("evidence_anchor"),
-            duplicate_of=row.get("duplicate_of")))
+            duplicate_of=row.get("duplicate_of"),
+            hold_causes=_causes_tuple(row.get("hold_causes")),
+            editing_burst=row.get("editing_burst") if isinstance(row.get("editing_burst"), bool) else None))
     return out
 
 
@@ -827,7 +1024,8 @@ CREATE TABLE IF NOT EXISTS core_refusals (
   reason       TEXT NOT NULL,        -- core's own reason for THIS row, verbatim
   outcome      TEXT NOT NULL,        -- refused_by_core:<reason>, never 'approve'
   route        TEXT NOT NULL CHECK (route IN ('ask', 'hold')),
-  refused_at   TEXT NOT NULL
+  refused_at   TEXT NOT NULL,
+  hold_note    TEXT                  -- with validator_hold: what kept it held, or askable:<causes>
 );
 CREATE INDEX IF NOT EXISTS core_refusals_key ON core_refusals(decision_key, id);
 CREATE TRIGGER IF NOT EXISTS core_refusals_no_update BEFORE UPDATE ON core_refusals
@@ -874,6 +1072,9 @@ def open_ledger(path: str) -> sqlite3.Connection:
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=FULL")   # a kill -9 must not lose a committed row
     db.executescript(LEDGER_SCHEMA)
+    # A ledger made before ``hold_note`` existed gains the column on open.
+    if "hold_note" not in {r[1] for r in db.execute("PRAGMA table_info(core_refusals)")}:
+        db.execute("ALTER TABLE core_refusals ADD COLUMN hold_note TEXT")
     return db
 
 
@@ -1057,25 +1258,66 @@ def is_refusal(failure: dict[str, Any] | None) -> bool:
     return isinstance(status, int) and 400 <= status < 500 and status not in NOT_A_ROW_VERDICT
 
 
-def core_refusal_route(reasons: Sequence[str] | None) -> str:
+def hold_blocks_ask(hold_causes: Sequence[str] | None,
+                    editing_burst: bool | None = None) -> str | None:
+    """Why a validator hold keeps a row off the ask path, or ``None`` when it may be asked.
+
+    Asked only when EVERY cause is one a document answers. Not measured, a hold core
+    reports that the snapshot does not show (the verdict moved since), a hard cause and
+    a cause this code has never classified all hold: unmeasured is not an ask. A velocity
+    rule is the bands' band B only on an editing burst; on any other role, or with roles
+    that could not be read, the document does not clear it and the row is held.
+    """
+    if hold_causes is None:
+        return "hold_cause_unmeasured"
+    causes = sorted({str(c) for c in hold_causes})
+    if not causes:
+        return "hold_cause_not_in_snapshot"
+    for cause in causes:
+        if cause in HARD_HOLD_CAUSES:
+            return f"{HARD_HOLD_CAUSES[cause]}:{cause}"
+    velocity = velocity_hold_causes()
+    for cause in causes:
+        if cause in velocity:
+            if editing_burst is None:
+                return f"velocity_roles_unmeasured:{cause}"
+            if not editing_burst:
+                return f"band_c_velocity:{cause}"
+        elif cause not in ASKABLE_HOLD_CAUSES:
+            return f"unclassified:{cause}"
+    return None
+
+
+def core_refusal_route(reasons: Sequence[str] | None,
+                       hold_causes: Sequence[str] | None = None,
+                       editing_burst: bool | None = None) -> str:
     """``ask`` when core named a reason the ask path answers, otherwise ``hold``.
 
     A claimant owing a document, or a precedent core found unsound, is answerable by
-    asking - ``need_asks.py`` names the document. A row core holds on its own facts
-    (``validator_hold``) is held, and so is any reason this code does not recognise:
-    an unmeasured route is not an ask.
+    asking - ``need_asks.py`` names the document. When core ALSO lists
+    ``validator_hold`` the row is still asked unless the hold's cause is one a document
+    cannot answer (``hold_blocks_ask``): core adds ``validator_hold`` to its proof
+    reasons first, so holding on the word alone held rows whose only open question was
+    the document. A reason this code does not recognise is held: an unmeasured route is
+    not an ask.
     """
     named = {str(r) for r in reasons or ()}
-    if "validator_hold" in named:
+    if not named & set(CORE_ASK_REASONS):
         return ROUTE_HOLD
-    return ROUTE_ASK if named & set(CORE_ASK_REASONS) else ROUTE_HOLD
+    if "validator_hold" in named and hold_blocks_ask(hold_causes, editing_burst) is not None:
+        return ROUTE_HOLD
+    return ROUTE_ASK
 
 
-def core_refusal_reason(reasons: Sequence[str] | None) -> str:
+def core_refusal_reason(reasons: Sequence[str] | None,
+                        hold_causes: Sequence[str] | None = None,
+                        editing_burst: bool | None = None) -> str:
     """The one reason the row's outcome is named after: the one that decided the route."""
     named = [str(r) for r in reasons or () if str(r).strip()]
-    if core_refusal_route(named) == ROUTE_ASK:
+    if core_refusal_route(named, hold_causes, editing_burst) == ROUTE_ASK:
         return next(r for r in named if r in CORE_ASK_REASONS)
+    if "validator_hold" in named:
+        return "validator_hold"
     return named[0] if named else "-"
 
 
@@ -1085,15 +1327,21 @@ def _record_core_refusal(db: sqlite3.Connection, d: Decision, at: datetime,
 
     The intent and the failure keep what was attempted (an approve); this row is what
     the row BECAME, so nothing downstream reads a refused approval as still in flight.
+    ``hold_note`` says why a validator hold kept the row off the ask path (or that it
+    did not), so a held row names its cause instead of the one word core sent.
     """
     reasons = [str(r) for r in (getattr(exc, "reasons", ()) or ()) if str(r).strip()]
-    reason = core_refusal_reason(reasons)
+    reason = core_refusal_reason(reasons, d.hold_causes, d.editing_burst)
     outcome = f"{CORE_REFUSED}:{reason}"
+    note = None
+    if "validator_hold" in reasons:
+        note = (hold_blocks_ask(d.hold_causes, d.editing_burst)
+                or "askable:" + ",".join(sorted(d.hold_causes or ())))
     db.execute(
         "INSERT INTO core_refusals (decision_key, request_id, user_id, reason, outcome,"
-        " route, refused_at) VALUES (?,?,?,?,?,?,?)",
+        " route, refused_at, hold_note) VALUES (?,?,?,?,?,?,?,?)",
         (d.decision_key, d.request_id, d.user_id, reason, outcome,
-         core_refusal_route(reasons), _stamp_precise(at)))
+         core_refusal_route(reasons, d.hold_causes, d.editing_burst), _stamp_precise(at), note))
     return outcome
 
 
@@ -2303,7 +2551,8 @@ def snapshot_from_replica(query: Callable[[str], list[list[Any]]], *,
         try:
             vd = json.loads(vd_json or "{}")
         except ValueError:
-            vd = {}
+            vd = None
+        causes = hold_causes(vd)        # before the coercion below: unreadable stays unmeasured
         if not isinstance(vd, dict):
             vd = {}
         rid = str(rid)
@@ -2323,6 +2572,7 @@ def snapshot_from_replica(query: Callable[[str], list[list[Any]]], *,
             "proof_received_at": fact.get("proof_received_at"),
             "proof_id": fact.get("proof_id"),
             "asked_at": asked.get(rid),
+            "hold_causes": causes,
         })
     return rows
 

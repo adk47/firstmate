@@ -946,6 +946,110 @@ class ReplicaSnapshotTests(unittest.TestCase):
         # a removal notice is NOT an ask
         self.assertIsNone(rows[1]["asked_at"])
 
+    def test_the_snapshot_reads_why_the_validator_holds_each_request(self):
+        """Core answers every validator hold with one word; the cause is read here, from
+        the same stored verdict core reads, and an unreadable verdict is not measured."""
+        def vd(**kw):
+            return json.dumps(kw)
+        pending = [
+            ("r1", "1001", "p1", "user_verification_needed", "2026-11-01T00:00:00Z",
+             vd(rule_risk_percent={"review_big_track_without_trusted_credit": 100,
+                                   "review_hourly_velocity_profile": 29,
+                                   "review_hold_for_documents": 30, "track_credit": 70,
+                                   "collaborations": 90, "reject_artist_credit": 100}),
+             "{}", "t", "{Producer}"),
+            ("r2", "1002", "p2", "user_verification_needed", "2026-11-01T00:00:00Z",
+             vd(rule_risk_percent={"review_held_submitter": 100},
+                fraud_hold={"decision": "hold"}, rule_errors={"_hold_on_error": "x"}),
+             "{}", "t", "{Producer}"),
+            ("r3", "1003", "p3", "user_verification_needed", "2026-11-01T00:00:00Z",
+             vd(rule_risk_percent={"track_credit": 69, "collaborations": 90,
+                                   "review_role_cardinality": True},
+                fraud_hold={"decision": "clear"}),
+             "{}", "t", "{Producer}"),
+            ("r4", "1004", "p4", "user_verification_needed", "2026-11-01T00:00:00Z",
+             "{}", "{}", "t", "{Producer}"),
+            ("r5", "1005", "p5", "user_verification_needed", "2026-11-01T00:00:00Z",
+             "not json", "{}", "t", "{Producer}"),
+            ("r6", "1006", "p6", "user_verification_needed", "2026-11-01T00:00:00Z",
+             vd(rule_risk_percent=[1, 2]), "{}", "t", "{Producer}"),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            q, _calls = self._query(pending)
+            rows = sd.snapshot_from_replica(q, ledger_path=self._ledger(td),
+                                            proof_store_path=self._proof_store(td, []))
+        self.assertEqual([r["hold_causes"] for r in rows], [
+            ["class_c", "review_big_track_without_trusted_credit", "review_hold_for_documents"],
+            ["_hold_on_error", "fraud_hold", "review_held_submitter"],
+            [],         # under both class C thresholds; a boolean is not a score; cleared
+            None,       # no verdict on the row: not measured, never "holds nothing"
+            None,       # unreadable JSON
+            None,       # rules that are not a map
+        ])
+
+    def test_the_fraud_class_and_the_hard_codes_rest_on_the_validator_s_own_record(self):
+        """``hold_reason_codes`` is the validator's machine record of why a verdict was not
+        an approval; a hard code there is a hard cause here. A ``fraud_hold`` that is
+        present but is not a mapping with a decision is unmeasured, never "no hold";
+        absent or null is simply no fraud hold; the score codes are not a hold."""
+        askable = {"rule_risk_percent": {"review_big_track_without_trusted_credit": 40}}
+        self.assertEqual(
+            sd.hold_causes({**askable, "hold_reason_codes": ["review_held_submitter"]}),
+            ["review_big_track_without_trusted_credit", "review_held_submitter"])
+        self.assertEqual(
+            sd.hold_causes({**askable, "hold_reason_codes":
+                            ["risk_score_at_or_above_threshold", "score:track_credit"]}),
+            ["review_big_track_without_trusted_credit"])
+        self.assertEqual(sd.hold_causes({**askable, "fraud_hold": None}),
+                         ["review_big_track_without_trusted_credit"])
+        self.assertEqual(sd.hold_causes(askable), ["review_big_track_without_trusted_credit"])
+        self.assertIsNone(sd.hold_causes({**askable, "fraud_hold": "hold"}))
+        self.assertIsNone(sd.hold_causes({**askable, "fraud_hold": {"decision": 5}}))
+        self.assertIsNone(sd.hold_causes({**askable, "fraud_hold": {}}))
+        self.assertEqual(sd.hold_causes({**askable, "fraud_hold": {"decision": "hold"}}),
+                         ["fraud_hold", "review_big_track_without_trusted_credit"])
+    def test_the_causes_ride_the_plan_on_approve_rows_only_and_survive_a_round_trip(self):
+        precedent = [{"precedent_key": "k", "outcome": "approve", "request_id": rid(9999)}]
+        db = snapshot([row(1, precedent_key="k", hold_causes=["review_role_cardinality", "class_c"]),
+                       row(2, precedent_key="k", hold_causes=[]),
+                       row(3, precedent_key="k"),
+                       row(4, precedent_key="k", hold_causes="[1, 2]"),
+                       row(5, hold_causes=["review_held_submitter"])],
+                      precedent=precedent)
+        decisions = sd.plan(db, now=NOW)
+        self.assertEqual([(d.outcome, d.hold_causes) for d in decisions], [
+            ("approve", ("class_c", "review_role_cardinality")),
+            ("approve", ()),
+            ("approve", None),
+            ("approve", None),      # a malformed value is not measured
+            ("ask", None),          # only an approve can be refused by core
+        ])
+        again = sd.parse_plan(sd.serialize(decisions))
+        self.assertEqual([d.hold_causes for d in again], [d.hold_causes for d in decisions])
+        self.assertEqual(sd.serialize(again), sd.serialize(decisions))
+        # a plan written before the fields existed reads as not measured
+        old = [json.dumps({k: v for k, v in d.as_row().items()
+                           if k not in ("hold_causes", "editing_burst")})
+               for d in decisions]
+        self.assertEqual([d.hold_causes for d in sd.parse_plan("\n".join(old))], [None] * 5)
+        self.assertEqual([d.editing_burst for d in sd.parse_plan("\n".join(old))], [None] * 5)
+
+    def test_a_snapshot_file_made_before_the_causes_gains_the_column(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "snap.sqlite")
+            before = sd.SNAPSHOT_SCHEMA.replace("  claimed_roles     TEXT,", "  claimed_roles     TEXT")
+            before = "\n".join(ln for ln in before.splitlines() if "hold_causes" not in ln
+                               and "Why the validator holds" not in ln and "of causes ([]" not in ln)
+            old = sqlite3.connect(path)
+            old.executescript(before)
+            self.assertNotIn("hold_causes", {r[1] for r in old.execute("PRAGMA table_info(requests)")})
+            old.close()
+            db = sd.open_snapshot(path)
+            sd.load_snapshot(db, [row(1, hold_causes=["class_c"])])
+            self.assertEqual(db.execute("SELECT hold_causes FROM requests").fetchall(),
+                             [('["class_c"]',)])
+            db.close()
+
     def test_the_newest_verdict_wins_even_when_it_is_soft(self):
         with tempfile.TemporaryDirectory() as td:
             proofs = self._proof_store(td, [
@@ -3864,6 +3968,179 @@ class WriteFailureTests(unittest.TestCase):
                                                         "hold"))
         self.assertEqual(sd.refused_asks(self.db), [])
         self.assertEqual(sd.failure_summary(self.db)["held_refusals"], 1)
+
+    def _held_with(self, causes, *reasons, editing_burst=None):
+        """One approve whose snapshot says the validator holds it for ``causes``, refused
+        by core with ``reasons``; returns (reason, outcome, route, hold_note)."""
+        (d,) = approvals(1)
+        d = dataclasses_replace(d, hold_causes=causes, editing_burst=editing_burst)
+        sd.apply([d], self.db, shards=1, write_pool=1, writer=self._row_refused(*reasons))
+        return self.db.execute("SELECT reason, outcome, route, hold_note FROM core_refusals"
+                               " ORDER BY id DESC LIMIT 1").fetchone()
+
+    def test_a_proof_refusal_is_asked_when_the_hold_beside_it_is_one_a_document_answers(self):
+        """Core lists ``validator_hold`` first on a proof row, so holding on that word
+        alone held rows whose only open question was the document (2026-11-14)."""
+        got = self._held_with(("review_big_track_without_trusted_credit",),
+                              "proof_required", "validator_hold", "high_risk_score")
+        self.assertEqual(got, ("proof_required", "refused_by_core:proof_required", "ask",
+                               "askable:review_big_track_without_trusted_credit"))
+        self.assertEqual([(a["request_id"], a["outcome"], a["reason_code"])
+                          for a in sd.refused_asks(self.db)],
+                         [(rid(1), "ask", "refused_by_core:proof_required")])
+
+    def test_a_velocity_hold_is_asked_only_on_an_editing_burst(self):
+        """The bands make a velocity hold band B only when an editing role was held
+        (``editing_burst_rules``); on any other role it is band C, which no document
+        clears, and roles that could not be read are not measured."""
+        for cause in sorted(sd.velocity_hold_causes()):
+            with self.subTest(cause=cause, case="editing"):
+                self.setUp()
+                got = self._held_with((cause,), "proof_required", "validator_hold",
+                                      editing_burst=True)
+                self.assertEqual(got, ("proof_required", "refused_by_core:proof_required",
+                                       "ask", f"askable:{cause}"))
+            with self.subTest(cause=cause, case="not editing"):
+                self.setUp()
+                got = self._held_with((cause,), "proof_required", "validator_hold",
+                                      editing_burst=False)
+                self.assertEqual(got, ("validator_hold", "refused_by_core:validator_hold",
+                                       "hold", f"band_c_velocity:{cause}"))
+                self.assertEqual(sd.refused_asks(self.db), [])
+            with self.subTest(cause=cause, case="roles unread"):
+                self.setUp()
+                got = self._held_with((cause,), "proof_required", "validator_hold",
+                                      editing_burst=None)
+                self.assertEqual(got, ("validator_hold", "refused_by_core:validator_hold",
+                                       "hold", f"velocity_roles_unmeasured:{cause}"))
+
+    def test_the_editing_burst_is_read_from_the_bands_not_a_copy_of_the_roles(self):
+        bands = json.loads((SCRIPTS / "credit_trust/credit_trust_bands.json").read_text())
+        high = bands["high_risk_roles"]
+        for role in list(high["catalog_children"]) + ["Editor", "Vocal Editing", "Compilation"]:
+            with self.subTest(role=role):
+                self.assertTrue(sd.editing_burst([role]), role)
+        for role in ("Mastering", "Mixing", "Producer", "Immersive Mixing"):
+            with self.subTest(role=role):
+                self.assertFalse(sd.editing_burst([role]), role)
+        self.assertIsNone(sd.editing_burst([]))
+        self.assertIsNone(sd.editing_burst(None))
+
+    def test_the_editing_burst_rides_the_plan_and_survives_a_round_trip(self):
+        velocity = sorted(sd.velocity_hold_causes())[0]
+        precedent = [{"precedent_key": "k", "outcome": "approve", "request_id": rid(9999)}]
+        db = snapshot([row(1, precedent_key="k", hold_causes=[velocity],
+                           claimed_roles=["Editor"]),
+                       row(2, precedent_key="k", hold_causes=[velocity],
+                           claimed_roles=["Mastering"]),
+                       row(3, precedent_key="k", hold_causes=[velocity]),
+                       row(4, precedent_key="k", hold_causes=["class_c"],
+                           claimed_roles=["Editor"])],
+                      precedent=precedent)
+        decisions = sd.plan(db, now=NOW)
+        self.assertEqual([d.editing_burst for d in decisions], [True, False, None, None])
+        again = sd.parse_plan(sd.serialize(decisions))
+        self.assertEqual([d.editing_burst for d in again], [True, False, None, None])
+        self.assertEqual(sd.serialize(again), sd.serialize(decisions))
+
+    def test_every_askable_hold_cause_alone_or_together_is_asked(self):
+        for causes in [(c,) for c in sorted(sd.ASKABLE_HOLD_CAUSES)] + [
+                tuple(sorted(sd.ASKABLE_HOLD_CAUSES))]:
+            with self.subTest(causes=causes):
+                self.setUp()
+                self.assertEqual(self._held_with(causes, "validator_hold", "proof_required")[2],
+                                 "ask")
+
+    def test_a_hard_hold_is_never_asked_even_beside_a_proof_reason(self):
+        """Fraud, impersonation and legal holds, a credit the profile already has and a
+        check that could not complete stay held: the document does not answer them."""
+        want = {"review_held_submitter": "fraud", "fraud_hold": "fraud",
+                "review_role_credited_to_other_at_trusted_source": "impersonation",
+                "review_operations_tombstone": "legal",
+                "review_duplicate_of_approved_credit": "already_held",
+                "_hold_on_error": "unmeasured"}
+        self.assertEqual(sd.HARD_HOLD_CAUSES, want)
+        for cause, kind in want.items():
+            # alone, and layered under a cause that would otherwise be asked
+            for causes in ((cause,), ("review_big_track_without_trusted_credit", cause)):
+                with self.subTest(causes=causes):
+                    self.setUp()
+                    got = self._held_with(causes, "proof_required", "validator_hold")
+                    self.assertEqual(got, ("validator_hold", "refused_by_core:validator_hold",
+                                           "hold", f"{kind}:{cause}"))
+                    self.assertEqual(sd.refused_asks(self.db), [])
+
+    def test_a_hold_whose_cause_was_not_measured_or_not_classified_stays_held(self):
+        """Unmeasured is not an ask: no cause on the plan row, a hold core reports that the
+        snapshot does not show, and a rule this code has never seen all hold."""
+        for causes, note in ((None, "hold_cause_unmeasured"),
+                             ((), "hold_cause_not_in_snapshot"),
+                             (("review_a_rule_added_later",), "unclassified:review_a_rule_added_later"),
+                             (("review_big_track_weak_footprint", "review_a_rule_added_later"),
+                              "unclassified:review_a_rule_added_later")):
+            with self.subTest(causes=causes):
+                self.setUp()
+                got = self._held_with(causes, "proof_required", "validator_hold")
+                self.assertEqual((got[2], got[3]), ("hold", note))
+
+    def test_the_hold_cause_changes_nothing_when_core_named_no_ask_reason(self):
+        """An askable cause never turns a row core did not put on the ask path into an ask."""
+        got = self._held_with(("review_big_track_without_trusted_credit",),
+                              "validator_hold", "reject_rule")
+        self.assertEqual(got[:3], ("validator_hold", "refused_by_core:validator_hold", "hold"))
+
+    def test_a_proof_refusal_with_no_validator_hold_ignores_the_causes(self):
+        """Core did not hold it, so the snapshot's causes are not consulted - a stale
+        cause must not hold a row core says is only waiting on a document."""
+        got = self._held_with(("review_held_submitter",), "proof_required", "high_risk_score")
+        self.assertEqual(got, ("proof_required", "refused_by_core:proof_required", "ask", None))
+
+    def test_every_review_rule_the_validator_can_fire_is_classified_once(self):
+        """A rule IDP adds later must fail here until someone says ask or hold for it."""
+        bands = json.loads((SCRIPTS / "credit_trust/credit_trust_bands.json").read_text())
+        known: set[str] = set()
+
+        def walk(node):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    if str(k).startswith("review_"):
+                        known.add(k)
+                    walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v)
+            elif isinstance(node, str) and node.startswith("review_"):
+                known.add(node)
+        walk(bands)
+        self.assertGreaterEqual(len(known), 14)
+        classified = (set(sd.ASKABLE_HOLD_CAUSES) | set(sd.HARD_HOLD_CAUSES)
+                      | set(sd.velocity_hold_causes()))
+        self.assertEqual(known - classified, set())
+        self.assertEqual(set(sd.ASKABLE_HOLD_CAUSES) & set(sd.HARD_HOLD_CAUSES), set())
+        self.assertEqual(set(sd.velocity_hold_causes()) & (
+            set(sd.ASKABLE_HOLD_CAUSES) | set(sd.HARD_HOLD_CAUSES)), set())
+        # the bands' own velocity rules are the ones asked only on an editing burst
+        self.assertEqual(set(sd.velocity_hold_causes()),
+                         set(bands["proof_required"]["editing_burst_rules"]))
+        # the validator's own "ask the claimant" rules are all askable here
+        self.assertLessEqual(set(bands["proof_required"]["rules"]), set(sd.ASKABLE_HOLD_CAUSES))
+
+    def test_a_ledger_made_before_the_hold_note_gains_the_column(self):
+        path = str(self.dir / "old.sqlite")
+        old = sqlite3.connect(path)
+        old.execute("CREATE TABLE core_refusals (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    " decision_key TEXT NOT NULL, request_id TEXT NOT NULL, user_id INTEGER,"
+                    " reason TEXT NOT NULL, outcome TEXT NOT NULL,"
+                    " route TEXT NOT NULL CHECK (route IN ('ask', 'hold')), refused_at TEXT NOT NULL)")
+        old.execute("INSERT INTO core_refusals (decision_key, request_id, reason, outcome, route,"
+                    " refused_at) VALUES ('k', 'r', 'validator_hold', 'refused_by_core:validator_hold',"
+                    " 'hold', '2026-11-13T00:00:00.000000Z')")
+        old.commit()
+        old.close()
+        db = sd.open_ledger(path)
+        self.assertEqual(db.execute("SELECT route, hold_note FROM core_refusals").fetchall(),
+                         [("hold", None)])
+        db.close()
 
     def test_a_refusal_whose_route_could_not_be_recorded_is_never_called_an_ask(self):
         """The route has ONE source: the recorded refusal. With no row saying "ask", the

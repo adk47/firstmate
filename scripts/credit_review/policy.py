@@ -85,22 +85,40 @@ def _num(v: Any) -> float | None:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
-def validator_conflict(vd: Any) -> dict[str, Any] | None:
-    """The validator conflict the server holds an AGENT approval on, or None.
-    Mirrors agentApprovalGuard.validatorConflict exactly: only JSON numbers
-    count as rule scores."""
-    vd = vd if isinstance(vd, dict) else {}
-    rules = vd.get("rule_risk_percent") if isinstance(vd.get("rule_risk_percent"), dict) else {}
+def conflict_scan(vd: Any) -> dict[str, Any]:
+    """The validator's conflict facts for a verdict, with "not measured" kept distinct.
+
+    Mirrors agentApprovalGuard.validatorConflict's reading (only JSON numbers count as
+    rule scores). ``measured`` is False when the verdict, or its ``rule_risk_percent``,
+    could not be read: unmeasured is never "holds nothing", the one answer that lets an
+    approval through.
+    """
+    if not isinstance(vd, dict):
+        return {"measured": False, "class_c": False, "hold_rules": [], "hold_on_error": False,
+                "track_credit": None, "collaborations": None}
+    errors = vd.get("rule_errors") if isinstance(vd.get("rule_errors"), dict) else {}
+    hold_on_error = HOLD_ON_ERROR_KEY in errors
+    rules = vd.get("rule_risk_percent")
+    if not isinstance(rules, dict):
+        return {"measured": False, "class_c": False, "hold_rules": [],
+                "hold_on_error": hold_on_error, "track_credit": None, "collaborations": None}
     tc, col = _num(rules.get("track_credit")), _num(rules.get("collaborations"))
     class_c = tc is not None and col is not None and tc >= CONFLICT_TRACK_CREDIT and col >= CONFLICT_COLLABORATIONS
     holds = sorted(k for k, v in rules.items()
                    if str(k).startswith(HOLD_RULE_PREFIX) and _num(v) is not None and _num(v) >= HOLD_RULE_MIN_SCORE)
-    errors = vd.get("rule_errors") if isinstance(vd.get("rule_errors"), dict) else {}
-    hold_on_error = HOLD_ON_ERROR_KEY in errors
-    if not (class_c or holds or hold_on_error):
+    return {"measured": True, "class_c": class_c, "hold_rules": holds,
+            "hold_on_error": hold_on_error, "track_credit": tc, "collaborations": col}
+
+
+def validator_conflict(vd: Any) -> dict[str, Any] | None:
+    """The validator conflict the server holds an AGENT approval on, or None.
+    Mirrors agentApprovalGuard.validatorConflict exactly: only JSON numbers
+    count as rule scores."""
+    scan = conflict_scan(vd)
+    if not (scan["class_c"] or scan["hold_rules"] or scan["hold_on_error"]):
         return None
-    return {"class_c": class_c, "hold_rules": holds, "hold_on_error": hold_on_error,
-            "track_credit": tc, "collaborations": col}
+    return {k: scan[k] for k in
+            ("class_c", "hold_rules", "hold_on_error", "track_credit", "collaborations")}
 
 
 def validator_rejected_rules(vd: Any) -> list[str]:
