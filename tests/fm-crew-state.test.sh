@@ -187,16 +187,10 @@ arm_idle_record() {  # <state-dir> <id>
 # A live process whose cwd is <worktree> and whose process name classifies as
 # an agent (bin/backends/tmux.sh's shared vocabulary). A record-sourced busy
 # verdict is only evidence of what the agent last REPORTED, so fm-crew-state
-# corroborates it against exactly this (bin/fm-lane-liveness-lib.sh). The
-# fixture is a copy of `sleep` named `pi`, so `ps -o comm=` reports an agent
-# name rather than a shell; fm_test_cleanup reaps it with the temp root.
+# corroborates it against exactly this (bin/fm-lane-liveness-lib.sh).
+# fm_test_cleanup reaps the fixture with the temp root.
 spawn_live_agent() {  # <case-dir> <worktree>
-  local d=$1 wt=$2 bin="$1/agentbin/pi"
-  mkdir -p "$1/agentbin"
-  cp "$(command -v sleep)" "$bin" || return 1
-  chmod +x "$bin" || return 1
-  ( cd "$wt" && exec "$bin" 300 ) &
-  printf '%s\n' "$!"
+  fm_spawn_live_agent_fixture "$1/agentbin" pi "$2"
 }
 
 # A live process shaped like the Gemini CLI: comm and argv[0] say node, and only

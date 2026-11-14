@@ -75,22 +75,9 @@ record_claude_idle() {  # <state-dir> <id>
 # same record is a claim nothing corroborates and the lane reads unknown.
 LIVE_AGENTS=()
 spawn_live_agent() {  # <dir> <worktree>
-  local dir=$1 wt=$2 bin="$1/agentbin/claude" i=0
-  mkdir -p "$1/agentbin"
-  # Never rewrite a binary another fixture of this home is already executing: a copy
-  # over a running image fails with ETXTBSY.
-  if [ ! -x "$bin" ]; then
-    cp "$(command -v sleep)" "$bin" || return 1
-    chmod +x "$bin" || return 1
-  fi
-  ( cd "$wt" && exec "$bin" 300 ) >/dev/null 2>&1 &
-  LIVE_AGENTS+=("$!")
-  while [ "$i" -lt 50 ]; do
-    [ -d "/proc/$!" ] && return 0
-    i=$((i + 1))
-    sleep 0.02
-  done
-  return 0
+  local pid
+  pid=$(fm_spawn_live_agent_fixture "$1/agentbin" claude "$2") || return 1
+  LIVE_AGENTS+=("$pid")
 }
 
 reap_live_agents() {

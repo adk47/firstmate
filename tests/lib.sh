@@ -385,6 +385,32 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# --- live agent fixtures ----------------------------------------------------
+
+# fm_spawn_live_agent_fixture <bindir> <name> <cwd>: start a live process that
+# holds its cwd in <cwd> and presents <name> to the shared process vocabulary.
+# A bash symlink keeps the wanted name without dispatching through a coreutils
+# multicall binary, whose argv[0]-based applet lookup rejects a copied or
+# renamed binary; the idle loop blocks in sleep instead of spinning on a
+# /dev/zero read. Echoes the pid.
+fm_spawn_live_agent_fixture() {
+  local bindir=$1 name=$2 cwd=$3 bin pid args first i=0
+  mkdir -p "$bindir" || return 1
+  bin="$bindir/$name"
+  ln -sf "$(command -v bash)" "$bin" || return 1
+  ( cd "$cwd" && exec "$bin" -c 'while :; do sleep 30; done' ) >/dev/null 2>&1 &
+  pid=$!
+  while [ "$i" -lt 50 ]; do
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
+    args=${args#"${args%%[![:space:]]*}"}
+    first=${args%%[[:space:]]*}
+    [ "${first##*/}" = "$name" ] && break
+    i=$((i + 1))
+    sleep 0.02
+  done
+  printf '%s\n' "$pid"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

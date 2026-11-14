@@ -144,17 +144,7 @@ busy_record() {  # <id> <state> <source> [gen-in-record]
 # A live process whose cwd is <worktree> and whose name classifies as an agent,
 # so a record-backed busy verdict is corroborated by fm-crew-state.sh.
 spawn_live_agent() {  # <dir> <worktree>
-  local dir=$1 wt=$2 bin="$1/agentbin/pi" i=0
-  mkdir -p "$1/agentbin"
-  cp "$(command -v sleep)" "$bin" || return 1
-  chmod +x "$bin" || return 1
-  ( cd "$wt" && exec "$bin" 300 ) >/dev/null 2>&1 &
-  while [ "$i" -lt 50 ]; do
-    [ -d "/proc/$!" ] && return 0
-    i=$((i + 1))
-    sleep 0.02
-  done
-  return 0
+  fm_spawn_live_agent_fixture "$1/agentbin" pi "$2" >/dev/null
 }
 
 : > "$FAKE/orca-live"

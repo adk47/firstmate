@@ -48,8 +48,6 @@
 # Sourcing: requires bin/fm-backend.sh already sourced (for
 # fm_backend_source and FM_BACKEND_LIB_DIR). set -u safe.
 
-FM_LANE_LIVENESS_LIB_VERSION=v1
-
 # fm_lane_physical_path: the physical form of a directory path, so a recorded
 # worktree and a kernel cwd can be compared. bin/fm-spawn.sh records the
 # worktree with bash's LOGICAL pwd, which keeps any symlinked component; a

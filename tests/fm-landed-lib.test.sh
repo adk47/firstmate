@@ -77,7 +77,7 @@ test_local_only_merged_into_local_default_is_landed() {
   git -C "$d" add feature.txt || fail "could not stage the local feature"
   git_id "$d" commit -q -m "feature work" || fail "could not commit the local feature"
   git -C "$d" checkout -q main || fail "could not return to main"
-  git -C "$d" merge -q --no-ff -m "merge feature" feat || fail "could not merge the local feature"
+  git_id "$d" merge -q --no-ff -m "merge feature" feat || fail "could not merge the local feature"
   rc=0
   fm_landed_content_in_default "$d" || rc=$?
   [ "$rc" -eq 0 ] || fail "work merged into the local default branch must read landed, got rc=$rc"

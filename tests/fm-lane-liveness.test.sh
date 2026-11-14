@@ -22,19 +22,13 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-lane-liveness)
 
-# A live process whose cwd is <dir> and whose process name is <name>. A copy of
-# `sleep` under the wanted name is what makes `ps -o comm=` report that name, so
-# the shared process vocabulary classifies it exactly as it would a real
-# harness. fm_test_cleanup reaps it with the temp root.
+# A live process whose cwd is <dir> and whose process name is <name>, so the
+# shared process vocabulary classifies it exactly as it would a real harness.
+# fm_test_cleanup reaps it with the temp root.
 spawn_named_process() {  # <dir> <name> <cwd>
-  local dir=$1 name=$2 cwd=$3 bin="$1/$2"
-  mkdir -p "$dir"
-  cp "$(command -v sleep)" "$bin" || return 1
-  chmod +x "$bin" || return 1
   # The child's stdio is detached: a background process holding the caller's
   # stdout pipe would make a `$(...)` capture wait for its whole lifetime.
-  ( cd "$cwd" && exec "$bin" 300 ) >/dev/null 2>&1 &
-  printf '%s\n' "$!"
+  fm_spawn_live_agent_fixture "$1" "$2" "$3"
 }
 
 # A live process shaped like the Gemini CLI: an interpreter whose comm and

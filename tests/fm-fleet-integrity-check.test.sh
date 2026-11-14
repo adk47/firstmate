@@ -23,17 +23,10 @@ assert_present "$CHECK" "bin/fm-fleet-integrity-check.sh is missing"
 
 TMP_ROOT=$(fm_test_tmproot fm-fleet-integrity)
 
-# A live process whose cwd is <dir> and whose process name is <name>. A copy of
-# `sleep` under the wanted name is what makes `ps -o comm=` report that name, so
-# the shared process vocabulary classifies it as an agent.
+# A live process whose cwd is <dir> and whose process name is <name>, so the
+# shared process vocabulary classifies it as an agent.
 spawn_named_process() {  # <dir> <name> <cwd>
-  local dir=$1 name=$2 cwd=$3 bin
-  bin="$dir/$name"
-  mkdir -p "$dir"
-  cp "$(command -v sleep)" "$bin" || return 1
-  chmod +x "$bin" || return 1
-  ( cd "$cwd" && exec "$bin" 300 ) >/dev/null 2>&1 &
-  printf '%s\n' "$!"
+  fm_spawn_live_agent_fixture "$1" "$2" "$3"
 }
 
 # A bare shell in <dir> with no child process: the shape a hard-killed agent
@@ -417,7 +410,7 @@ test_local_only_merged_lane_is_silent() {
   git -C "$d/lane" checkout -q -b feat || fail "could not branch the local repo"
   commit_file "$d/lane" feature.txt feature || fail "could not commit the local work"
   git -C "$d/lane" checkout -q main || fail "could not return to main"
-  git -C "$d/lane" merge -q --no-ff -m merge feat || fail "could not merge locally"
+  git -C "$d/lane" -c user.name=fm -c user.email=fm@example.invalid merge -q --no-ff -m merge feat || fail "could not merge locally"
   make_terminal_lane "$d" "$d/lane" "done: shipped" || fail "could not prepare the lane"
   sleep 0.2
   out=$(run_check "$d")
