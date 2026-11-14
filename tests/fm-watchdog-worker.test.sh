@@ -56,6 +56,10 @@ SH
   cat > "$home/fakebin/fake-send" <<SH
 #!/usr/bin/env bash
 printf 'send %s\n' "\$1" >> "$home/calls"
+if [ -f "$home/units/send-fails" ]; then
+  printf 'error: fire-and-forget delivery unconfirmed\n' >&2
+  exit 3
+fi
 printf '%s\n' "\$*" >> "$home/steers"
 SH
   # A relaunch transaction the backend refuses structurally, exactly as
@@ -64,7 +68,10 @@ SH
 #!/usr/bin/env bash
 printf 'control %s\n' "\$*" >> "$home/calls"
 if [ -f "$home/units/control-transient" ]; then
-  printf 'error: could not reach the endpoint (timed out)\n' >&2
+  exit 124
+fi
+if [ -f "$home/units/control-kind-refusal" ]; then
+  printf "error: task %s records kind 'fix', which has no defined relaunch shape\n" "\$1" >&2
   exit 1
 fi
 printf 'error: task %s runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'\''exit'\'' and respawn the task instead\n' "\$1" >&2
@@ -74,6 +81,14 @@ SH
   cat > "$home/fakebin/fake-spawn" <<SH
 #!/usr/bin/env bash
 printf 'spawn %s\n' "\$*" >> "$home/calls"
+if [ -f "$home/units/spawn-transient" ]; then
+  printf 'error: backend=orca selected but orca status --json failed; start Orca and wait for the runtime\n' >&2
+  exit 1
+fi
+if [ -f "$home/units/spawn-refuses" ]; then
+  printf 'error: task %s recorded worktree is missing; refusing to relaunch\n' "\$1" >&2
+  exit 2
+fi
 printf 'relaunched true task=%s\n' "\$1"
 SH
   cat > "$home/fakebin/fake-lane-switch" <<SH
@@ -211,6 +226,94 @@ held_backlog_bin() {  # <home> <id...>: a tasks-axi stand-in that reports held i
 }
 
 start_clock() { date +%s; }
+
+test_a_structural_refusal_outside_the_old_phrase_list_spends_no_budget() {
+  local home now out
+  home=$(make_home kind-refusal); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-kind-refusal"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  out=$(tick "$home" "$now")
+  assert_contains "$out" "has no defined relaunch shape" \
+    "a structural refusal was not reported with the backend's own reason"
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "1" \
+    "a structural refusal phrased outside the old list was not escalated"
+  assert_eq "$(counter "$home" '^control .* relaunch')" "1" \
+    "a structural refusal phrased outside the old list was retried"
+  pass "a structural refusal is classified by the control command's own error contract"
+}
+
+test_a_boot_refusal_keeps_the_lane_relaunch_history() {
+  local home now relaunches
+  home=$(make_home boot-refusal); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  jq -n --argjson now "$now" \
+    '{schema: 1, boot_identity: "boot-old", units: {}, backlog: {},
+      tasks: { w1: { sig: "abc", since: $now, stage: 2, stage_at: $now,
+        rings: [$now, $now], relaunches: [$now, $now], steers: [$now], woke: false,
+        istage: 1, istage_at: $now, ibase: "001.msg", strikes: [$now],
+        refusal: "", refusal_at: 0 } }}' \
+    > "$home/state/.watchdog-worker.json"
+  BOOT=boot-new tick "$home" "$now" >/dev/null
+  relaunches=$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")
+  assert_eq "$relaunches" "2" \
+    "a boot-pass refusal reset the lane's persisted relaunch budget"
+  assert_eq "$(jq -r '.tasks.w1.strikes | length' "$home/state/.watchdog-worker.json")" "1" \
+    "a boot-pass refusal reset the lane's persisted strike history"
+  assert_eq "$(jq -r '.tasks.w1.refusal' "$home/state/.watchdog-worker.json")" \
+    "error: task w1 runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'exit' and respawn the task instead" \
+    "the boot-pass refusal was not recorded"
+  pass "a boot-pass refusal preserves the lane's persisted counters"
+}
+
+test_an_orca_replacement_names_a_note_it_could_not_deliver() {
+  local home now out
+  home=$(make_home orca-note-fails); fake_tools "$home"
+  : > "$home/units/send-fails"
+  worker "$home" w1 missing ship pi orca
+  now=$(start_clock)
+  out=$(tick "$home" "$now")
+  assert_contains "$out" "could not deliver w1 its carry-over note" \
+    "a replacement started without its carry-over note was reported relaunched silently"
+  grep -q 'could not deliver its carry-over note' <<< "$(wakes "$home")" \
+    || fail "a lost carry-over note never reached firstmate: $(wakes "$home")"
+  pass "an Orca replacement whose carry-over note cannot be delivered is escalated"
+}
+
+test_a_spawn_preflight_refusal_spends_no_budget_and_retries_once() {
+  local home now
+  home=$(make_home orca-spawn-refuses); fake_tools "$home"
+  : > "$home/units/spawn-refuses"
+  worker "$home" w1 missing ship pi orca
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 600))" >/dev/null
+  assert_eq "$(counter "$home" '^spawn w1 --relaunch')" "1" \
+    "a structural spawn refusal was retried before its window closed"
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "1" \
+    "a structural spawn refusal did not escalate exactly once"
+  assert_eq "$(wakes "$home" | grep -c 'hourly relaunch budget')" "0" \
+    "a structural spawn refusal spent the lane's relaunch budget"
+  pass "a structural spawn refusal is not retried inside its window"
+}
+
+test_a_transient_spawn_failure_is_not_a_refusal() {
+  local home now
+  home=$(make_home orca-spawn-transient); fake_tools "$home"
+  : > "$home/units/spawn-transient"
+  worker "$home" w1 missing ship pi orca
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 600))" >/dev/null
+  assert_eq "$(counter "$home" '^spawn w1 --relaunch')" "2" \
+    "a transient spawn failure was treated as a structural refusal"
+  [ -z "$(wakes "$home" | grep 'cannot relaunch w1')" ] \
+    || fail "a transient spawn failure escalated as a refusal: $(wakes "$home")"
+  pass "a transient spawn failure is retried on the ordinary budget"
+}
 
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake() {
   local home now out
@@ -783,6 +886,11 @@ test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn() {
 test_a_refused_relaunch_spends_no_budget_and_escalates_once
 test_a_refused_relaunch_is_retried_only_after_its_window
 test_a_transient_relaunch_failure_is_not_a_refusal
+test_a_structural_refusal_outside_the_old_phrase_list_spends_no_budget
+test_a_boot_refusal_keeps_the_lane_relaunch_history
+test_an_orca_replacement_names_a_note_it_could_not_deliver
+test_a_spawn_preflight_refusal_spends_no_budget_and_retries_once
+test_a_transient_spawn_failure_is_not_a_refusal
 test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake
 test_an_unread_steer_is_interrupted_then_relaunched_once_each

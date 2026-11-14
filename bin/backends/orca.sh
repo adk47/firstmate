@@ -399,7 +399,10 @@ process.stdout.write(id + "\t" + (closed ? "1" : "0"));
 }
 
 # fm_backend_orca_pty_root_pid <pty-id>: the root pid Orca's host process
-# sweep records for that pty session, or fail.
+# sweep records for that pty session. Returns 3 when the sweep itself succeeded
+# and does not name that pty (an authoritative "no such session"), and 1 when
+# the sweep could not be read at all - a distinction the callers need, because
+# a failed read proves nothing about the pty.
 fm_backend_orca_pty_root_pid() {  # <pty-id>
   local pty=$1 out
   out=$(orca diagnostics memory --json 2>/dev/null || true)
@@ -419,7 +422,7 @@ for (const w of worktrees) {
     }
   }
 }
-process.exit(1);
+process.exit(3);
 ' "$pty"
 }
 
@@ -488,10 +491,15 @@ fm_backend_orca_agent_state() {  # <terminal-id>
   closed=${record##*$'\t'}
   # A pty Orca's sweep still names is a live process tree, and that verdict is
   # the stronger fact: a record can lag the kernel, never outrank it.
-  if root=$(fm_backend_orca_pty_root_pid "$pty"); then
+  root=$(fm_backend_orca_pty_root_pid "$pty")
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
     fm_backend_orca_tree_state "$root"
     return 0
   fi
+  # A sweep that could not be read proves nothing, so a possibly live pty is
+  # never declared gone on a transient diagnostics failure.
+  [ "$rc" -eq 3 ] || { printf 'unreadable'; return 0; }
   # No swept pty plus a record that proves the pane gone is a terminal no agent
   # can be running in: the shape a closed Orca tab leaves behind, where the
   # record survives with connected=false, writable=false, and

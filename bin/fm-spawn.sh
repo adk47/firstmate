@@ -1231,6 +1231,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # A relaunch must PROVE the previous agent is gone before it launches another
   # one into the same endpoint, and only backends whose in-place relaunch is
   # proven may do it (bin/fm-control-lib.sh owns that capability table).
+  # Every structural refusal in this preflight exits 2, distinct from the 1 a
+  # retryable launch failure reports, so a supervisor can tell them apart.
   if [ "$BACKEND" = orca ]; then
     # Orca's in-place relaunch is unproven, but a terminal Orca itself reports
     # gone (its classifier's `missing`: the terminal handle is stale, as after
@@ -1240,25 +1242,25 @@ if [ "$RELAUNCH" -eq 1 ]; then
     RELAUNCH_STATE=$(fm_backend_agent_state orca "$RELAUNCH_TARGET")
     [ "$RELAUNCH_STATE" = missing ] || {
       echo "error: task $ID's Orca terminal $RELAUNCH_TARGET reads '$RELAUNCH_STATE'; Orca relaunch only replaces a terminal Orca no longer has (missing), into a new terminal" >&2
-      exit 1
+      exit 2
     }
     ORCA_WORKTREE_ID=$(fm_meta_get "$RELAUNCH_META" orca_worktree_id)
     [ -n "$ORCA_WORKTREE_ID" ] || {
       echo "error: task $ID has no recorded orca_worktree_id; refusing to relaunch" >&2
-      exit 1
+      exit 2
     }
     ORCA_RELAUNCH_NEWTERM=1
     RELAUNCH_STATE=dead
   else
     fm_control_backend_relaunch_verified "$BACKEND" || {
       echo "error: backend '$BACKEND' has no proven in-place relaunch (a recovery-grade agent-state classifier plus a verified replacement launch into the same endpoint); refusing rather than risking two agents in one endpoint" >&2
-      exit 1
+      exit 2
     }
     RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   fi
   [ "$RELAUNCH_STATE" = dead ] || {
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
+    exit 2
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   # A relaunch keeps the temp root the task already recorded, so a task spawned
@@ -1273,7 +1275,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
-    exit 1
+    exit 2
   }
   if [ "$KIND" = secondmate ]; then
     FIRSTMATE_HOME=$(fm_meta_get "$RELAUNCH_META" home)
@@ -1282,7 +1284,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     PROJ=$(fm_meta_get "$RELAUNCH_META" project)
     [ -n "$PROJ" ] || {
       echo "error: task $ID has no recorded project; refusing to relaunch" >&2
-      exit 1
+      exit 2
     }
   fi
   if [ "$BACKEND" = herdr ]; then
@@ -1300,7 +1302,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   ARG3=${HARNESS_ARG:-$RELAUNCH_PRIOR_HARNESS}
   [ -n "$ARG3" ] || {
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
-    exit 1
+    exit 2
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in

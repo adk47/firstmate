@@ -84,6 +84,7 @@ case "${1:-} ${2:-}" in
     printf '{"ok":true,"result":{"terminal":{"handle":"term-1","ptyId":"wt::/x@@pty1","worktreePath":"/x","agentIdentity":"pi","title":"Pi ready"}}}\n'
     ;;
   "diagnostics memory")
+    [ ! -f "$D/diag-fail" ] || exit 1
     root=$(cat "$D/root" 2>/dev/null || echo 0)
     printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"wt::/x","sessions":[{"sessionId":"wt::/x@@other","pid":1},{"sessionId":"%s","pid":%s}]}]}}\n' \
       "$(cat "$D/pty" 2>/dev/null || echo 'wt::/x@@pty1')" "$root"
@@ -228,6 +229,18 @@ test_an_operator_closed_terminal_is_missing() {
   pass "orca agent state: a terminal Orca reports gone reads missing, not unreadable"
 }
 
+test_a_closed_record_with_an_unreadable_sweep_stays_unreadable() {
+  local d st
+  d=$(new_dir closed-sweep-failed)
+  unswept "$d"
+  closed_record "$d" ',"exitCause":{"kind":"operator_close"}'
+  : > "$d/diag-fail"
+  st=$(agent_state "$d")
+  [ "$st" = unreadable ] \
+    || fail "a failed sweep must not declare a possibly live pty gone, got '$st'"
+  pass "orca agent state: only a successful sweep that omits the pty proves it gone"
+}
+
 test_a_live_pty_outranks_a_stale_record() {
   local d st
   d=$(new_dir record-lies)
@@ -317,6 +330,7 @@ test_shell_only_tree_is_dead
 test_stranger_below_root_is_ambiguous
 test_missing_and_unreadable
 test_an_operator_closed_terminal_is_missing
+test_a_closed_record_with_an_unreadable_sweep_stays_unreadable
 test_a_live_pty_outranks_a_stale_record
 test_an_unverified_stop_stays_unreadable
 test_control_exit_on_orca
