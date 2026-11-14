@@ -347,8 +347,20 @@ BETA_METRICS="restarts oomkilled rss_ratio http_5xx_per_min p95_ms"
 BETA_WAIT_ATTEMPTS=${FM_CW_BETA_WAIT_ATTEMPTS:-4}
 BETA_POLL_SECONDS=${FM_CW_BETA_POLL_SECONDS:-15}
 BETA_WAIT_CEILING_SECONDS=60
-case "$BETA_WAIT_ATTEMPTS" in ''|*[!0-9]*) BETA_WAIT_ATTEMPTS=4 ;; esac
-case "$BETA_POLL_SECONDS" in ''|*[!0-9]*) BETA_POLL_SECONDS=15 ;; esac
+# Normalize a configured count: anything but decimal digits is not a count, a
+# value wider than the ceiling is above every usable bound, and leading zeros are
+# stripped so no arithmetic below reads one as an octal literal.
+cw_beta_bound() {  # <value> <default> <ceiling>
+  local v=$1 zeros
+  case "$v" in ''|*[!0-9]*) printf '%s\n' "$2"; return 0 ;; esac
+  zeros=${v%%[!0]*}
+  v=${v#"$zeros"}
+  [ -n "$v" ] || v=0
+  [ "${#v}" -le "${#3}" ] || v=$3
+  printf '%s\n' "$v"
+}
+BETA_WAIT_ATTEMPTS=$(cw_beta_bound "$BETA_WAIT_ATTEMPTS" 4 "$BETA_WAIT_CEILING_SECONDS")
+BETA_POLL_SECONDS=$(cw_beta_bound "$BETA_POLL_SECONDS" 15 "$BETA_WAIT_CEILING_SECONDS")
 [ "$BETA_POLL_SECONDS" -ge 1 ] || BETA_POLL_SECONDS=1
 [ "$BETA_POLL_SECONDS" -le "$BETA_WAIT_CEILING_SECONDS" ] \
   || BETA_POLL_SECONDS=$BETA_WAIT_CEILING_SECONDS

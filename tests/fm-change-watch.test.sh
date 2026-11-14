@@ -1938,6 +1938,23 @@ case "$out" in
     pass "a zero beta poll still bounds the wait by the ceiling" ;;
   *) fail "a zero beta poll left the beta wait unbounded: $out" ;;
 esac
+# A numeral with a leading zero is a decimal count, not an octal literal: it must
+# neither abort the script nor escape the ceiling.
+out=$(FM_CW_BETA_POLL_SECONDS=08 BETA_ATTEMPTS=400 run_beta "$HOME_B5" 1790000000 register b5 \
+  'https://github.com/Muso-AI/web-credits-next/pull/90') || fail "leading-zero poll register failed"
+case "$out" in
+  *"awaiting the deploy:"*"after 7 attempt(s)"*)
+    pass "a leading-zero beta poll is read as decimal and still bounded" ;;
+  *) fail "a leading-zero beta poll broke the wait bound: $out" ;;
+esac
+# A count wider than the ceiling cannot be a usable bound.
+out=$(BETA_ATTEMPTS=99999999999999999999 run_beta "$HOME_B5" 1790000000 register b5 \
+  'https://github.com/Muso-AI/web-credits-next/pull/91') || fail "overflowing-bound register failed"
+case "$out" in
+  *"awaiting the deploy:"*"after 4 attempt(s)"*)
+    pass "an overflowing beta wait bound is clamped" ;;
+  *) fail "an overflowing beta wait bound escaped the ceiling: $out" ;;
+esac
 # A beta fingerprint that could not be read is no proof the merged sha landed,
 # so the stage states an unmeasured beta instead of reading the pre-change pods.
 HOME_B9=$(seed_beta_world b9)
