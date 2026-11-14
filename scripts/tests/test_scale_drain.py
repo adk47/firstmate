@@ -1318,6 +1318,249 @@ class ReplicaSnapshotTests(unittest.TestCase):
         self.assertEqual((refuse["outcome"], refuse["request_id"]), ("refuse", "d2"))
         self.assertEqual(len(precedent), 2, "a row with no track yields no precedent")
 
+    # ── a bounded snapshot (``snapshot --max-rows``) ────────────────────────────
+
+    @staticmethod
+    def _trk(n):
+        return f"{n:08x}-1111-4111-8111-111111111111"
+
+    @staticmethod
+    def _filtering_replica(pending, decided):
+        """A replica that answers the statement it is sent: a pending read honours its
+        LIMIT, a decided read honours its ``trackid IN`` / ``id IN`` list. ``decided`` may
+        be a list or a callable giving an iterator, so a large population is never built
+        unless a statement really asks for all of it."""
+        import re  # noqa: PLC0415 - only this double parses SQL
+
+        calls = []
+
+        def ids_of(sql, column):
+            m = re.search(column + r" IN \(([^)]*)\)", sql)
+            return None if m is None else set(re.findall(r"UUID '([0-9a-f-]{36})'", m.group(1)))
+
+        def q(sql):
+            calls.append(sql)
+            tail = sql.rsplit("LIMIT", 1)
+            n = int(tail[1]) if len(tail) == 2 and tail[1].strip().isdigit() else None
+            if "status IN ('approved', 'rejected')" not in sql:
+                return list(pending)[:n]
+            source = decided() if callable(decided) else decided
+            tracks, ids = ids_of(sql, "trackid"), ids_of(sql, r"\bid")
+            if tracks is not None:
+                source = (r for r in source if r[3] in tracks)
+            elif ids is not None:
+                source = (r for r in source if r[0] in ids)
+            return list(source)[:n]         # a cut statement is answered cut
+        return q, calls
+
+    def _plan_of(self, td, rows):
+        path = str(Path(td) / f"snap-{len(rows)}.jsonl")
+        with open(path, "w") as fh:
+            for r in rows:
+                fh.write(json.dumps(r, sort_keys=True) + "\n")
+        return {d.request_id: d for d in sd.plan(sd._build_snapshot(_args(snapshot=path)), now=NOW)}
+
+    def _claims(self):
+        """Six pending requests and a decided population in which a cut read lies.
+
+        Track 1 holds user 1001's claim REJECTED first and APPROVED later, with other
+        accounts' decisions between them. Read whole, the claim has an approve precedent;
+        read cut after the rejection, it reads as refused.
+        """
+        t = self._trk
+        pending = [
+            (rid(1), "1001", "p1", "user_verification_needed", "2026-11-01T00:00:00Z",
+             "{}", "{}", t(1), "{Mixing Engineer}"),
+            # names a decided request on ANOTHER track as its duplicate
+            (rid(2), "1002", "p2", "user_verification_needed", "2026-11-01T00:00:00Z",
+             json.dumps({"duplicate_of": rid(90)}), "{}", t(2), "{Producer}"),
+            (rid(3), "1003", "p3", "unverified", "2026-11-01T00:00:00Z",
+             "{}", "{}", t(2), "{Producer}"),
+            (rid(4), "1004", "p4", "user_verification_needed", "2026-11-01T00:00:00Z",
+             "{}", "{}", t(3), "{Songwriter}"),
+            (rid(5), "1005", "p5", "user_verification_needed", "2026-11-01T00:00:00Z",
+             "{}", "{}", t(4), "{Songwriter}"),
+            (rid(6), "1006", "p6", "user_verification_needed", "2026-11-01T00:00:00Z",
+             "{}", "{}", t(5), "{Composer}"),
+        ]
+        decided = [(rid(10), "rejected", "1001", t(1), "{Mixing Engineer}")]
+        decided += [(rid(100 + i), "approved", str(5000 + i), t(1), "{Mixing Engineer}")
+                    for i in range(40)]
+        decided += [
+            (rid(11), "approved", "1001", t(1), "{Mixing Engineer}"),
+            (rid(12), "rejected", "1003", t(2), "{Producer}"),
+            (rid(13), "approved", "1004", t(3), "{Songwriter}"),
+            (rid(14), "approved", "1006", t(5), "{Composer}"),
+            # on a track no pending row claims: the duplicate target, and its neighbour
+            (rid(90), "approved", "1002", t(9), "{Producer}"),
+            (rid(91), "rejected", "1002", t(9), "{Producer}"),
+        ]
+        return pending, decided
+
+    def test_a_bounded_snapshot_keeps_the_full_precedent_for_its_tracks(self):
+        pending, decided = self._claims()
+        with tempfile.TemporaryDirectory() as td:
+            q, _calls = self._filtering_replica(pending, decided)
+            proofs = self._proof_store(td, [])
+            full_rows = sd.replica_snapshot_rows(q, proof_store_path=proofs)
+            full = self._plan_of(td, full_rows)
+            self.assertEqual(full[rid(1)].reason_code, "precedent_match")
+            self.assertEqual(full[rid(2)].outcome, "close_duplicate")
+            self.assertEqual(full[rid(3)].reason_code, "precedent_refuse")
+            full_precedent = {r["precedent_key"]: r for r in full_rows
+                              if r["__kind"] == "precedent"}
+            for bound in (1, 2, 3, 4, 5, 6, 50):
+                with self.subTest(bound=bound):
+                    rows = sd.replica_snapshot_rows(q, proof_store_path=proofs, limit=bound)
+                    kept = [r for r in rows if r["__kind"] == "request"]
+                    self.assertEqual(len(kept), min(bound, len(pending)))
+                    precedent = {r["precedent_key"]: r for r in rows
+                                 if r["__kind"] == "precedent"}
+                    for r in kept:
+                        key = r["precedent_key"]
+                        self.assertEqual(precedent.get(key), full_precedent.get(key),
+                                         "a kept request's precedent is the whole population's")
+                    for key, row in precedent.items():
+                        self.assertEqual(row, full_precedent[key],
+                                         "no precedent the whole population does not give")
+                    plan = self._plan_of(td, rows)
+                    self.assertEqual(sorted(plan), sorted(r["request_id"] for r in kept))
+                    for request_id, decision in plan.items():
+                        self.assertEqual(decision, full[request_id],
+                                         "a bounded plan decides its rows as the full plan does")
+
+    def test_a_duplicate_target_read_by_id_sets_no_precedent(self):
+        """r90 is read because r2 names it. The rest of its track was not read, so the
+        approval is a decided row and nothing more: r91's rejection was never seen, and a
+        key built from half a track's decisions is not a precedent."""
+        pending, decided = self._claims()
+        q, calls = self._filtering_replica(pending, decided)
+        rows, precedent = sd.decided_facts(q, pending=[
+            {"request_id": rid(2), "track_id": self._trk(2), "duplicate_of": rid(90)}])
+        self.assertEqual(sorted(r["request_id"] for r in rows), [rid(12), rid(90)])
+        self.assertEqual([p["request_id"] for p in precedent], [rid(12)])
+        self.assertEqual(len(calls), 2, "one read by track, one by id")
+        self.assertIn(f"id IN (UUID '{rid(90)}')", calls[1])
+
+    def test_a_bounded_decided_read_is_filtered_and_paged_never_cut(self):
+        tracks = [self._trk(i) for i in range(450)]
+        pending = [(rid(i + 1), str(1000 + i), f"p{i}", "unverified", "2026-11-01T00:00:00Z",
+                    "{}", "{}", tracks[i], "{Producer}") for i in range(450)]
+        decided = [(rid(10_000 + i), "approved", str(1000 + i), tracks[i], "{Producer}")
+                   for i in range(450)]
+        with tempfile.TemporaryDirectory() as td:
+            q, calls = self._filtering_replica(pending, decided)
+            rows = sd.replica_snapshot_rows(q, proof_store_path=self._proof_store(td, []),
+                                            limit=450)
+        self.assertTrue(calls[0].rstrip().endswith("LIMIT 450"), "the pending read is bounded")
+        reads = calls[1:]
+        self.assertEqual(len(reads), 3, "450 tracks at 200 a statement")
+        named: list[str] = []
+        for sql in reads:
+            self.assertNotIn("LIMIT", sql, "a decided read is never cut")
+            ids = sql.split("trackid IN (", 1)[1].split(")", 1)[0].split(", ")
+            self.assertLessEqual(len(ids), sd.DECIDED_CHUNK)
+            named += [i[len("UUID '"):-1] for i in ids]
+        self.assertEqual(sorted(named), sorted(tracks), "every track once, none dropped")
+        self.assertEqual(sum(r["__kind"] == "decided" for r in rows), 450)
+        self.assertEqual(sum(r["__kind"] == "precedent" for r in rows), 450)
+
+    def test_an_unbounded_snapshot_reads_the_two_statements_unchanged(self):
+        pending, decided = self._claims()
+        for limit in (None, 0, -5):
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as td:
+                q, calls = self._filtering_replica(pending, decided)
+                rows = sd.replica_snapshot_rows(q, proof_store_path=self._proof_store(td, []),
+                                                limit=limit)
+                self.assertEqual(len(calls), 2, "the pending read and the decided read")
+                for sql in calls:
+                    self.assertNotIn("LIMIT", sql, "an unbounded read is never cut")
+                    self.assertNotIn("IN (UUID", sql, "an unbounded read names no rows")
+                self.assertEqual(sum(r["__kind"] == "request" for r in rows), len(pending))
+                self.assertEqual(sum(r["__kind"] == "decided" for r in rows), len(decided))
+
+    def test_max_rows_bounds_what_the_snapshot_holds_in_memory(self):
+        """20,000 decided requests over 2,000 tracks. A snapshot bounded to 20 pending rows
+        reads the 200 decided requests on their tracks and never holds the rest."""
+        import tracemalloc  # noqa: PLC0415 - only this test measures memory
+
+        tracks = [self._trk(i) for i in range(2000)]
+        pending = [(rid(i + 1), str(1000 + i), f"p{i}", "unverified", "2026-11-01T00:00:00Z",
+                    "{}", "{}", tracks[i], "{Producer}") for i in range(2000)]
+
+        def decided():
+            return ((rid(100_000 + i), "approved", str(9000 + i), tracks[i % 2000], "{Producer}")
+                    for i in range(20_000))
+
+        def peak(limit):
+            with tempfile.TemporaryDirectory() as td:
+                q, _calls = self._filtering_replica(pending, decided)
+                proofs = self._proof_store(td, [])
+                tracemalloc.start()
+                try:
+                    rows = sd.replica_snapshot_rows(q, proof_store_path=proofs, limit=limit)
+                    return tracemalloc.get_traced_memory()[1], rows
+                finally:
+                    tracemalloc.stop()
+
+        whole, all_rows = peak(None)
+        bounded, rows = peak(20)
+        self.assertEqual(sum(r["__kind"] == "decided" for r in all_rows), 20_000)
+        self.assertEqual(sum(r["__kind"] == "request" for r in rows), 20)
+        self.assertEqual(sum(r["__kind"] == "decided" for r in rows), 200,
+                         "all ten decided requests on each of the 20 tracks, and no other")
+        self.assertLess(bounded * 10, whole,
+                        f"bounded peak {bounded} bytes against {whole} unbounded")
+
+    def test_a_value_that_is_not_a_uuid_is_never_put_in_a_statement(self):
+        calls = []
+
+        def q(sql):
+            calls.append(sql)
+            return []
+
+        for track in ("trk-1", "x') OR 1=1 --", self._trk(1) + "'"):
+            with self.subTest(track=track):
+                with self.assertRaises(sd.DrainError) as ctx:
+                    sd.decided_facts(q, pending=[{"request_id": rid(1), "track_id": track}])
+                self.assertIn("is not a UUID", str(ctx.exception))
+        self.assertEqual(calls, [], "refused before any statement was built")
+        # no track, no claim key: nothing to read, and that is not an error
+        self.assertEqual(sd.decided_facts(q, pending=[{"request_id": rid(1), "track_id": ""}]),
+                         ([], []))
+        # a duplicate target that is not a request id names nothing to read
+        self.assertEqual(sd.decided_facts(q, pending=[
+            {"request_id": rid(1), "track_id": "", "duplicate_of": "not-a-request"}]), ([], []))
+        self.assertEqual(calls, [])
+
+    def test_the_cli_bounds_the_pending_rows_and_keeps_their_decided_rows(self):
+        from credit_review import verify_notify  # noqa: PLC0415 - patched below
+
+        pending, decided = self._claims()
+        for max_rows, want in (
+                # r1 and r2: track 1 (42 decided) + track 2 (1) + the duplicate target r90
+                (2, {"rows": 2 + 44 + 42, "bounded": 2, "decided": 44, "precedent": 42}),
+                (0, {"rows": 6 + 47 + 45, "decided": 47, "precedent": 45})):
+            with self.subTest(max_rows=max_rows), tempfile.TemporaryDirectory() as td:
+                q, _calls = self._filtering_replica(pending, decided)
+                out = Path(td) / "snap.jsonl"
+                err = io.StringIO()
+                with mock.patch.object(verify_notify, "trino", q), \
+                        mock.patch.object(sd, "proof_claims", lambda _p=None: {}), \
+                        contextlib.redirect_stderr(err):
+                    rc = sd._main(["snapshot", "--out", str(out), "--max-rows", str(max_rows),
+                                   "--ledger", str(Path(td) / "none.sqlite")])
+                self.assertEqual(rc, 0)
+                stats = json.loads(err.getvalue().strip().splitlines()[-1])
+                self.assertEqual({k: stats.get(k) for k in want}, want)
+                self.assertEqual("bounded" in stats, bool(max_rows))
+                kinds = [json.loads(line)["__kind"] for line in out.read_text().splitlines()]
+                self.assertEqual(len(kinds), want["rows"])
+                self.assertEqual(kinds.count("request"), max_rows or len(pending),
+                                 "--max-rows counts pending rows; their facts are not cut off")
+                self.assertEqual(kinds.count("decided"), want["decided"])
+                self.assertEqual(kinds.count("precedent"), want["precedent"])
+
     def test_one_claimants_approval_is_not_another_claimants_precedent(self):
         decided = [("d1", "approved", "u1", "trk-1", '{Mixing Engineer}')]
 

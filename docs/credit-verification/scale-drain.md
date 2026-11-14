@@ -787,6 +787,35 @@ python3 -m credit_review.scale_drain bench --snapshot snap.jsonl
 `plan` writes canonical JSONL: sorted by `request_id`, sorted keys, no timestamp, no run
 id, no shard number. That is what makes "run it twice, diff the bytes" a real test.
 
+### A bounded snapshot (`snapshot --max-rows N`)
+
+The full replica snapshot reads the whole decided population (5,559,206 rows on
+2026-11-13) to derive precedent, which is too much to hold in memory for a rehearsal on
+node-8. `--max-rows N` bounds it:
+
+- the pending read asks the replica for at most N rows. The statement has no order, so
+  which N is the replica's choice and two bounded snapshots are not the same rows;
+- the decided read is **filtered**, not cut: every decided request on the tracks those N
+  rows claim, 200 tracks a statement, plus the decided requests they name as their
+  duplicate, by id. A claim key holds the track, so those are all the decided rows that
+  can set a precedent for the N rows. The plan decides each of them as the full plan
+  would;
+- N counts pending rows. The decided and precedent rows are written after them and are
+  not counted against it. The summary line carries `"bounded": N`.
+
+There is no `LIMIT` on a decided read, and there must never be one (pinned by
+`ReplicaSnapshotTests` in `scripts/tests/test_scale_drain.py`). A decided population
+cut short does not only lose approvals: a claim rejected once and approved later reads as
+**refused** when the cut falls between the two, and the plan queues it for refusal. A
+decided request read only as a duplicate target sits on a track whose other decisions
+were not read, so it is carried as a decided row and sets no precedent. A track id that
+is not a UUID stops the run when its statement is built, before that statement is sent;
+a duplicate target that is not a UUID names no request and is simply not read.
+
+Measured on node-8, 2026-11-14 19:50Z: 400 pending rows in 2.1 s, their 388 tracks in two
+statements of 2.2 s and 2.1 s returning 162 decided rows, 22 MB resident. Without
+`--max-rows` the two statements are the ones above, unchanged.
+
 ### What `apply` needs, and what it says when a write fails
 
 `apply` writes through `muso-admin-api.sh`, and the wrapper refuses every `call`/`call-batch`

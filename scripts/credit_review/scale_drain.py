@@ -2466,6 +2466,33 @@ FROM postgresql_core.public.credit_requests
 WHERE status IN ('approved', 'rejected') AND deletedat IS NULL
 """
 
+#: The same rows for a bounded snapshot (``snapshot --max-rows``): only the decided
+#: requests on the tracks its pending rows claim, and the decided requests those rows name
+#: as their duplicate. A claim key holds the track, so every decided row that can set a
+#: precedent for one of those pending rows is on one of those tracks: the filter drops
+#: nothing the ladder reads for them. ``{ids}`` is filled only with values
+#: ``_uuid_literals`` has checked are UUIDs, at most ``DECIDED_CHUNK`` a statement, and
+#: every statement is read whole: there is no LIMIT on a decided read, because a decided
+#: population cut short reads a claim whose approval was cut off as refused.
+DECIDED_BY_TRACK_SQL = DECIDED_SQL.rstrip("\n") + "\n  AND trackid IN ({ids})\n"
+DECIDED_BY_ID_SQL = DECIDED_SQL.rstrip("\n") + "\n  AND id IN ({ids})\n"
+DECIDED_CHUNK = 200
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _uuid_literals(ids: Iterable[str]) -> str:
+    """``UUID '...'`` literals for a filtered statement. Anything that is not a UUID
+    raises: these values are interpolated into SQL, and a track or request id from the
+    replica is always one."""
+    out = []
+    for value in ids:
+        text = str(value).strip().lower()
+        if not _UUID_RE.match(text):
+            raise DrainError(f"{value!r} is not a UUID: refusing to put it in a statement")
+        out.append(f"UUID '{text}'")
+    return ", ".join(out)
+
 #: Proof verdicts live in the proof store, not in core's verificationData. Only a verdict
 #: that is a decision is mapped: a soft or undetermined verdict is not an approval and is
 #: not a refusal, so it stays unmapped and the row follows its own rules.
@@ -2610,8 +2637,37 @@ def proof_facts(store_path: str | None = None) -> dict[str, dict[str, Any]]:
     return {rid: proof_fact(claims) for rid, claims in proof_claims(store_path).items()}
 
 
-def decided_facts(query: Callable[[str], list[list[Any]]]) -> tuple[list[dict[str, Any]],
-                                                                     list[dict[str, Any]]]:
+def _decided_rows(query: Callable[[str], list[list[Any]]],
+                  pending: Sequence[dict[str, Any]]) -> tuple[list[list[Any]], set[str]]:
+    """The decided rows a bounded snapshot needs, and the tracks they were read for.
+
+    One statement per ``DECIDED_CHUNK`` tracks, then one per ``DECIDED_CHUNK`` duplicate
+    targets, each handled as it arrives. A row both reads return is kept once. A pending
+    row with no track has no claim key, so it adds no track; a duplicate target that is
+    not a UUID names no request (it stays ``unmatched``, as in the full snapshot).
+    """
+    tracks = sorted({str(r.get("track_id") or "").strip().lower() for r in pending} - {""})
+    targets = set()
+    for r in pending:
+        target, _kind = classify_duplicate(r.get("duplicate_of"))
+        text = str(target or "").strip().lower()
+        if _UUID_RE.match(text):
+            targets.add(text)
+    rows: list[list[Any]] = []
+    seen: set[str] = set()
+    for sql, ids in ((DECIDED_BY_TRACK_SQL, tracks), (DECIDED_BY_ID_SQL, sorted(targets))):
+        for at in range(0, len(ids), DECIDED_CHUNK):
+            for row in query(sql.format(ids=_uuid_literals(ids[at:at + DECIDED_CHUNK]))):
+                rid = str(row[0])
+                if rid not in seen:
+                    seen.add(rid)
+                    rows.append(row)
+    return rows, set(tracks)
+
+
+def decided_facts(query: Callable[[str], list[list[Any]]], *,
+                  pending: Sequence[dict[str, Any]] | None = None
+                  ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """(decided rows, precedent rows) derived from the decided population.
 
     No precedent key was ever recorded, so the key is the narrowest one every decided row
@@ -2621,14 +2677,29 @@ def decided_facts(query: Callable[[str], list[list[Any]]]) -> tuple[list[dict[st
     A key with several approvals cites the lowest approved request id (the replica returns
     no ordering here, so the lowest id is used: the choice is stable across runs, which is
     what the byte-identical plan needs).
+
+    ``pending`` is given by a bounded snapshot (``snapshot --max-rows``): the pending rows
+    it keeps. The read is then FILTERED to those rows' tracks and duplicate targets
+    (``_decided_rows``), never cut: every decided request on those tracks is read, so each
+    precedent it returns is the one the whole population gives. A decided row read only as
+    a duplicate target sits on another track, where the rest of that track's decisions
+    were not read, so it sets no precedent. ``pending=None`` reads the whole population
+    in the one statement, as before.
     """
+    if pending is None:
+        source: Iterable[list[Any]] = query(DECIDED_SQL)
+        tracks: set[str] | None = None
+    else:
+        source, tracks = _decided_rows(query, pending)
     decided: list[dict[str, Any]] = []
     approved: dict[str, str] = {}
     rejected: dict[str, str] = {}
-    for rid, status, user_id, track_id, credits in query(DECIDED_SQL):
+    for rid, status, user_id, track_id, credits in source:
         rid = str(rid)
         state = str(status or "").strip().lower()
         decided.append({"request_id": rid, "decision": state})
+        if tracks is not None and str(track_id or "").strip().lower() not in tracks:
+            continue
         key = claim_key(user_id, track_id, _roles(credits))
         if key is None:
             continue
@@ -2651,8 +2722,12 @@ def decided_facts(query: Callable[[str], list[list[Any]]]) -> tuple[list[dict[st
 
 def snapshot_from_replica(query: Callable[[str], list[list[Any]]], *,
                           ledger_path: str | None = None,
-                          proof_store_path: str | None = None) -> list[dict[str, Any]]:
+                          proof_store_path: str | None = None,
+                          limit: int | None = None) -> list[dict[str, Any]]:
     """Build snapshot rows from the core replica, joined to the real facts.
+
+    ``limit`` asks the replica for at most that many pending rows (a bounded snapshot).
+    Which rows is the replica's choice: the statement has no order.
 
     ``query`` is ``verify_notify.trino`` (or a test double). One query for the whole
     population, one for the ask history - no per-user round trip, which is the hoist.
@@ -2667,7 +2742,10 @@ def snapshot_from_replica(query: Callable[[str], list[list[Any]]], *,
     asked = asked_at_by_request(ledger_path)
     proofs = proof_claims(proof_store_path)
     rows: list[dict[str, Any]] = []
-    for rid, uid, pid, status, created, vd_json, _meta, track_id, credits in query(SNAPSHOT_SQL):
+    sql = SNAPSHOT_SQL if not limit else SNAPSHOT_SQL.rstrip("\n") + "\nLIMIT %d\n" % limit
+    for rid, uid, pid, status, created, vd_json, _meta, track_id, credits in query(sql):
+        if limit and len(rows) >= limit:
+            break
         # A verdict that does not parse is carried as an uncovered hold, never as "no hold".
         try:
             uncovered = va.uncovered_holds(json.loads(vd_json) if vd_json else None)
@@ -2727,15 +2805,24 @@ def _read_jsonl(path: str) -> list[dict[str, Any]]:
 
 def replica_snapshot_rows(query: Callable[[str], list[list[Any]]], *,
                           ledger_path: str | None = None,
-                          proof_store_path: str | None = None) -> list[dict[str, Any]]:
+                          proof_store_path: str | None = None,
+                          limit: int | None = None) -> list[dict[str, Any]]:
     """The snapshot file's rows: pending requests plus the decided and precedent rows.
 
     One document, so the documented ``snapshot`` then ``plan --snapshot`` contract carries
     every fact the ladder needs without a second flag.
+
+    ``limit`` (``snapshot --max-rows``) makes it a bounded snapshot: at most ``limit``
+    pending rows, and the decided requests on those rows' tracks plus their duplicate
+    targets instead of the whole decided population (5.5M rows, which a rehearsal on
+    node-8 must not hold in memory). The decided read is filtered, never cut, so those
+    pending rows carry the precedent and duplicate facts the full snapshot gives them.
+    ``limit`` bounds the pending rows only; a value of 0 or less is no bound.
     """
+    limit = int(limit) if limit and int(limit) > 0 else None
     requests = snapshot_from_replica(query, ledger_path=ledger_path,
-                                     proof_store_path=proof_store_path)
-    decided, precedent = decided_facts(query)
+                                     proof_store_path=proof_store_path, limit=limit)
+    decided, precedent = decided_facts(query, pending=requests if limit else None)
     return ([{**r, "__kind": "request"} for r in requests]
             + [{**r, "__kind": "decided"} for r in decided]
             + [{**r, "__kind": "precedent"} for r in precedent])
@@ -2953,7 +3040,11 @@ def _cmd_snapshot(args: argparse.Namespace) -> int:
     if args.source == "replica":
         from . import verify_notify  # noqa: PLC0415 - pulls the Trino client
 
-        rows = replica_snapshot_rows(verify_notify.trino, ledger_path=args.ledger)
+        # --max-rows counts PENDING rows here, and they are bounded where they are read.
+        # Cutting the finished file instead dropped the decided and precedent rows that
+        # follow the pending ones, so a bounded plan had no precedent at all.
+        rows = replica_snapshot_rows(verify_notify.trino, ledger_path=args.ledger,
+                                     limit=args.max_rows)
         decided = [r for r in rows if r.get("__kind") == "decided"]
         precedent = [r for r in rows if r.get("__kind") == "precedent"]
         stats: dict[str, Any] = {"source": "replica", "decided": len(decided),
@@ -2980,8 +3071,10 @@ def _cmd_snapshot(args: argparse.Namespace) -> int:
                 break
             page += 1
         stats = {"source": "admin", "pages": page, **client.stats.as_dict()}
-    if args.max_rows:
-        rows = rows[:args.max_rows]
+    if args.max_rows and args.max_rows > 0:
+        stats["bounded"] = args.max_rows
+        if args.source != "replica":
+            rows = rows[:args.max_rows]
     blob = "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows).encode("utf-8")
     if args.out:
         Path(args.out).write_bytes(blob)
@@ -3108,7 +3201,10 @@ def _main(argv: list[str] | None = None) -> int:
     p.add_argument("--status", action="append", default=None,
                    help="pending status to include (repeatable; default the two pending ones)")
     p.add_argument("--page-size", type=int, default=200)
-    p.add_argument("--max-rows", type=int, default=0)
+    p.add_argument("--max-rows", type=int, default=0,
+                   help="a bounded snapshot: at most N pending rows. From the replica it "
+                        "also reads the decided requests on those rows' tracks (filtered, "
+                        "never cut) instead of the whole decided population")
     p.add_argument("--pool", type=int, default=8)
     p.add_argument("--admin-script", default=None)
     common(p)
