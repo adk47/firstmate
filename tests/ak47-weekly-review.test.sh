@@ -21,6 +21,9 @@ export AK47_STATE=$SANDBOX/state
 export AK47_CACHE=$SANDBOX/cache
 export AK47_CONFIG=$SANDBOX/config
 export AK47_TMP_ROOT=$SANDBOX/tmp
+# The fixtures are 20 samples; the shipped floor is 168 (an hour apart for a
+# week). Lowering it here keeps the rule under test without 2016 fake lines.
+export AK47_REVIEW_MIN_SAMPLES=10
 export FM_HOME=$SANDBOX/fmhome
 mkdir -p "$AK47_STATE" "$AK47_CACHE" "$AK47_CONFIG" "$AK47_TMP_ROOT" "$FM_HOME/state"
 
@@ -136,6 +139,60 @@ test_counts_a_loop_gap_just_over_three_intervals() {
   pass "the review counts a loop gap just over three intervals"
 }
 
+test_holds_a_ceiling_that_sits_at_its_own_maximum() {
+  # swap_pct p95 at 100 with a 50% ceiling used to propose 126%: a ceiling that
+  # cannot be read as a percentage, from a metric that is sustained at full.
+  # That is a finding about the box, never a raise.
+  seed_samples swap_pct 100 20
+  AK47_REVIEW_MIN_SAMPLES=10 "$REVIEW" >/dev/null 2>&1
+  local diff
+  diff=$(cat "$(ls "$AK47_STATE"/review-*.diff | tail -1)")
+  case "$diff" in
+    *"swap_pct|126"*|*"swap_pct|1"*) fail "the review proposed a percentage ceiling above 100" ;;
+  esac
+  case "$diff" in
+    *HELD*swap_pct*) : ;;
+    *) fail "the review did not say why it held the swap ceiling: $diff" ;;
+  esac
+  pass "a percentage at its own maximum is held, not raised past 100"
+}
+
+test_holds_a_ceiling_it_cannot_trust_to_few_samples() {
+  seed_samples load15 31 3
+  AK47_REVIEW_MIN_SAMPLES=100 "$REVIEW" >/dev/null 2>&1
+  local diff
+  diff=$(cat "$(ls "$AK47_STATE"/review-*.diff | tail -1)")
+  case "$diff" in
+    *CHANGE*load15*) fail "the review proposed a change from 3 samples" ;;
+    *"load15: HELD"*) : ;;
+    *) fail "the review did not report the thin sample count: $diff" ;;
+  esac
+  pass "a ceiling is not moved on fewer samples than the floor allows"
+}
+
+test_holds_a_ceiling_when_the_sampler_is_not_measuring() {
+  # tmp_gb records 0 when the size walk fails. A p95 of 0 against a peak of 433
+  # used to propose lowering the ceiling to 1 GB - a ceiling that would page
+  # the box on every tick. An unmeasured metric is never a quiet one.
+  {
+    local i now
+    now=$(date +%s)
+    : >"$AK47_STATE/samples.log"
+    for ((i = 0; i < 20; i++)); do
+      printf '%s tmp_gb=%s\n' "$((now - (20 - i) * 300))" "$([ "$i" -eq 19 ] && echo 433 || echo 0)"
+    done >>"$AK47_STATE/samples.log"
+  }
+  AK47_REVIEW_MIN_SAMPLES=10 "$REVIEW" >/dev/null 2>&1
+  local diff
+  diff=$(cat "$(ls "$AK47_STATE"/review-*.diff | tail -1)")
+  case "$diff" in
+    *"tmp_gb|1"*) fail "the review lowered a ceiling to the sampler's zero" ;;
+    *"tmp_gb: HELD"*) : ;;
+    *) fail "the review did not report the unmeasured metric: $diff" ;;
+  esac
+  pass "a metric whose sampler reported zero is held, not used to lower its ceiling"
+}
+
 test_reads_a_sample_written_by_the_tick() {
   local tick=$ROOT/ak47/tick.sh out
   cat >"$AK47_CONFIG/devops.conf" <<'CONF'
@@ -234,6 +291,9 @@ test_proposes_a_lower_when_p95_sits_far_below_the_ceiling
 test_emits_a_unified_diff_against_the_budget
 test_counts_only_lines_inside_the_window
 test_counts_a_loop_gap_just_over_three_intervals
+test_holds_a_ceiling_that_sits_at_its_own_maximum
+test_holds_a_ceiling_it_cannot_trust_to_few_samples
+test_holds_a_ceiling_when_the_sampler_is_not_measuring
 test_reads_a_sample_written_by_the_tick
 test_never_writes_the_budget
 test_never_proposes_a_new_action_class

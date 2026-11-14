@@ -345,6 +345,29 @@ It writes the diff to `~/.local/state/ak47/review-<date>.diff` and files it. It
 never applies it, never adds a class to the tick's table, and never widens its
 own authority. A new action class needs the captain's word.
 
+### The review holds a ceiling it cannot justify
+
+The first live review proposed `swap_pct|126` (a percentage above 100),
+`tmp_gb|1` (lowered to the zero its sampler writes when the size walk fails) and
+`load15|39` from 14 samples in a week — because the loop had been dead. Each of
+those would have made the box worse: a ceiling at 100% pages forever, a 1 GB
+`/tmp` ceiling pages every tick, and a ceiling moved on 14 samples is a number
+invented. So the review now holds a row and says why, in the diff, where the
+next reader sees it:
+
+- **fewer than 168 samples** (one an hour for a week at the five-minute
+  interval) — `HELD load15: only 14 sample(s), fewer than 168`;
+- **a percentage whose p95 sits at its own maximum** — a raise cannot help, and
+  the honest output is "sustained at ceiling", not 126%;
+- **p95 of zero against a non-zero peak** — the sampler is not measuring, so the
+  value is missing, not quiet;
+- **a proposed raise that would sit below the observed peak** — that ceiling is
+  breached again the moment the box repeats itself.
+
+`HELD` rows and `CHANGE` rows are printed separately, and a review with only
+`HELD` rows still writes its diff, so a quiet review and a suppressed one never
+look the same.
+
 ## Safety
 
 `/tmp` is load-bearing on this box. The tick refuses before it deletes:
@@ -468,7 +491,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-104 tests across seven files: the budget, the census, the guards, the guarded
+107 tests across seven files: the budget, the census, the guards, the guarded
 delete, the big-entry take-down, the tick, and the weekly review. They are hermetic — no tmux, no
 network, no live fleet state — and registered as `pure-contract-unit` in
 `bin/fm-test-run.sh`.

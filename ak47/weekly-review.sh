@@ -99,21 +99,28 @@ PY
 # ---- the proposal --------------------------------------------------------------
 # A unified diff against budget.conf, built by rewriting only the ceiling column
 # of the rows the rule fires on. Nothing is applied.
-proposal=$(python3 - "$BUDGET" "$stats" <<'PY'
+proposal=$(python3 - "$BUDGET" "$stats" "${AK47_REVIEW_MIN_SAMPLES:-168}" <<'PY'
 import sys
-budget, stats = sys.argv[1], sys.argv[2]
-p05, p95 = {}, {}
+budget, stats, min_samples = sys.argv[1], sys.argv[2], int(sys.argv[3])
+p05, p95, peak, count = {}, {}, {}, {}
 for line in stats.splitlines():
     f = line.split("\t")
-    if len(f) >= 4:
+    if len(f) >= 6:
         p05[f[0]] = float(f[1])
         p95[f[0]] = float(f[3])
+        peak[f[0]] = float(f[4])
+        count[f[0]] = int(f[5])
+# A ceiling moved on a handful of samples is a number invented, not measured.
+# 168 is one sample an hour for a week at the five-minute interval; below that
+# the review says nothing and says why.
+thin = {k for k, n in count.items() if n < min_samples}
 rows = []
 with open(budget, encoding="utf-8") as fh:
     for line in fh:
         rows.append(line.rstrip("\n"))
 out = []
 changes = []
+helds = []
 for line in rows:
     if not line.strip() or line.lstrip().startswith("#"):
         out.append(line)
@@ -138,6 +145,19 @@ for line in rows:
         sys.exit(2)
     step = 10 ** max(0, len(str(int(c))) - 2)
     new = None
+    held = None
+    # A percentage cannot exceed 100, so a proposal of 126% is not a ceiling,
+    # it is a metric that has been sitting at its own maximum. p95 at the hard
+    # cap means the box is sustained there: that is a finding, never a raise.
+    hard = 100.0 if "%" in unit else None
+    # p95 of zero against a non-zero peak is not a quiet metric, it is an
+    # unmeasured one: the samplers record 0 when a walk or a read failed, and
+    # lowering a ceiling to that number would page the box forever.
+    degenerate = peak.get(key, 0) > 0 and p95.get(key, 0) == 0
+    if key in thin:
+        held = "only %d sample(s), fewer than %d" % (count.get(key, 0), min_samples)
+    elif degenerate:
+        held = "p95 0 against a peak of %.0f: the sampler is not measuring" % peak.get(key, 0)
     if direction == "min":
         # A floor is breached from below, so the low tail is the statistic that
         # matters. p05 within 20% of the floor means the floor is about to be
@@ -164,19 +184,43 @@ for line in rows:
         elif v <= c * 0.50:
             new = int((v * 1.5 // step + 1) * step)
             why = f"p95 {v:.0f} is below half of {ceil}"
+    if held is not None:
+        out.append(line)
+        helds.append(f"{key}: HELD - {held}")
+        continue
+    if new is not None and direction == "max":
+        if hard is not None and new > hard:
+            out.append(line)
+            helds.append(f"{key}: HELD - p95 {p95.get(key, 0):.0f} is at the "
+                         f"metric's own maximum ({hard:.0f}%); raising a ceiling "
+                         f"cannot help, this is a sustained-at-ceiling finding")
+            continue
+        if new <= peak.get(key, 0):
+            out.append(line)
+            helds.append(f"{key}: HELD - the proposal {new} would sit below the "
+                         f"observed peak {peak.get(key, 0):.0f}, which breaches "
+                         f"the moment the box does that again")
+            continue
     if new is None or new == int(c) or new <= 0:
         out.append(line)
         continue
     f[1] = str(new)
     out.append("|".join(f))
     changes.append(f"{key}: {ceil} -> {new} ({why}; the reason text may need rewriting)")
+if not changes and not helds:
+    print("NO_CHANGES")
+    raise SystemExit(0)
 if not changes:
+    for h in helds:
+        print(f"HELD {h}")
     print("NO_CHANGES")
     raise SystemExit(0)
 import difflib
 for d in difflib.unified_diff(rows, out, fromfile="ak47/budget.conf", tofile="ak47/budget.conf (proposed)", lineterm=""):
     print(d)
 print("---")
+for h in helds:
+    print(f"HELD {h}")
 for c in changes:
     print(f"CHANGE {c}")
 PY
