@@ -310,3 +310,22 @@ ak47_breach() {
     exit (v < c) ? 0 : 1
   }'
 }
+
+# swap_reclaim - stop swapping, let the pages come back, then start swapping again.
+#
+# The `swapoff -a && swapon -a` form has two defects that only show up when it
+# fails: a unit killed between the two calls leaves the box with no swap, and the
+# next run's `swapoff -a` then fails instantly because nothing is on - so the
+# `&&` chain can never turn swap back on again. Swap is restored here whatever
+# happened above, and the reclaim itself is given a budget so a slow swapoff
+# cannot outlast the unit's start timeout.
+swap_reclaim() {
+  local before after rc=0
+  before=$(awk '/^SwapFree:/{printf "%d", ($2)/1048576}' /proc/meminfo 2>/dev/null || echo 0)
+  timeout "${AK47_SWAPOFF_BUDGET:-600}" swapoff -a 2>/dev/null || rc=$?
+  swapon -a 2>/dev/null || true
+  after=$(awk '/^SwapFree:/{printf "%d", ($2)/1048576}' /proc/meminfo 2>/dev/null || echo 0)
+  # shellcheck disable=SC2034  # read by the tick after this call
+  AK47_SWAP_RECLAIMED=$(( ${after:-0} - ${before:-0} ))
+  return "$rc"
+}

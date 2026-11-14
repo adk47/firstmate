@@ -345,8 +345,8 @@ report_only() {
   sw=$(ak47_swap_pct); mem=$(ak47_mem_avail_gb)
   if [ "${sw:-0}" -ge 70 ] && [ "${mem:-0}" -ge 20 ]; then
     if [ "$SWAP_ARMED" = 1 ] && [ "$APPLY" -eq 1 ]; then
-      if swapoff -a 2>/dev/null && swapon -a 2>/dev/null; then
-        act "swap-pressure swap=${sw}% mem=${mem}G action='swapoff -a && swapon -a' revert='none needed: pages back in'"
+      if swap_reclaim; then
+        act "swap-pressure swap=${sw}% mem=${mem}G action='swapoff -a; swapon -a' reclaimed_gb=${AK47_SWAP_RECLAIMED:-0} revert='none needed: pages back in'"
       else
         act "WARN swap-pressure swap=${sw}% action failed; left alone"
         failures=$((failures + 1))

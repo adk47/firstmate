@@ -97,6 +97,30 @@ test_expiry_does_not_run_lsof_per_entry() {
 }
 
 
+test_swap_is_restored_even_when_the_reclaim_fails() {
+  # swapoff -a && swapon -a has two failure modes that only appear when it goes
+  # wrong: a tick killed between the two calls leaves the box with no swap, and
+  # the next run's swapoff fails instantly because nothing is on - so the &&
+  # chain can never turn swap back on. Swap must be restored either way.
+  local box
+  box=$(mktemp -d "${TMPDIR:-/tmp}/ak47-swap.XXXXXX")
+  mkdir -p "$box/bin"
+  printf '#!/bin/sh\nexit 1\n' >"$box/bin/swapoff"
+  printf '#!/bin/sh\necho on >>"%s/swapon.calls"\n' "$box" >"$box/bin/swapon"
+  chmod +x "$box/bin/swapoff" "$box/bin/swapon"
+  (
+    export PATH="$box/bin:$PATH" AK47_STATE="$box/state"
+    mkdir -p "$AK47_STATE"
+    # shellcheck source=../ak47/lib/common.sh
+    . "$ROOT/ak47/lib/common.sh"
+    swap_reclaim
+    echo "rc=$?"
+  ) >/dev/null 2>&1
+  [ -s "$box/swapon.calls" ] || fail "a failed swapoff left swap off for good"
+  rm -rf "$box"
+  pass "swap is turned back on even when the reclaim itself fails"
+}
+
 test_the_finding_class_is_one_the_inbox_accepts() {
   # Every ak47 finding went undelivered for days because the tick filed under a
   # class name fm-inbox does not have. The gate was honest - it logged
@@ -572,3 +596,4 @@ test_an_unmeasurable_tree_is_a_finding_not_silence
 test_expiry_is_bounded_per_run_and_says_what_is_left
 test_expiry_does_not_run_lsof_per_entry
 test_the_finding_class_is_one_the_inbox_accepts
+test_swap_is_restored_even_when_the_reclaim_fails

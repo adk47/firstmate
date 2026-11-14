@@ -256,6 +256,49 @@ Three changes, all landed by `hdevops/ansible/playbooks/07-ak47-hygiene.yml`:
    `pids_pct` is also a budget row, so the tick samples it every five minutes
    and the weekly review can propose moving it.
 
+### Why systemd-oomd does not watch this host, and the one line that changes it
+
+The swap drop-in is installed and `systemctl show user@1000.service` reports
+`ManagedOOMSwap=kill`, yet the 2026-11-10 lockup ran at 99% swap and oomd did
+nothing, and `oomctl` lists **no** monitored cgroups. Three verified reasons:
+
+1. **The slice is not watched.** `user@1000.service` resolves
+   `MemoryPressureWatch=skip`, so the kernel collects no memory pressure (PSI)
+   for it. oomd acts on pressure readings; with no reading there is nothing to
+   act on. The packaged
+   `/usr/lib/systemd/system/user@.service.d/10-oomd-user-service-defaults.conf`
+   sets `ManagedOOMMemoryPressure=kill` and a 50% limit, which is why the policy
+   looks armed — but the policy alone does not start the watch.
+   Proven on this box: a transient scope started with
+   `-p MemoryPressureWatch=on -p ManagedOOMMemoryPressure=kill` appears in
+   `oomctl` under "Memory Pressure Monitored CGroups" with live `Avg10`; the same
+   scope without the watch does not.
+2. **Swap pressure does not exist on this kernel.** `/proc/pressure/` has `cpu`,
+   `io` and `memory` and nothing else, so `ManagedOOMSwap=kill` can never fire
+   here. oomd's `Swap Used Limit: 90%` is the only swap lever and it is not
+   per-cgroup, so a slice that swaps instead of paging stays invisible.
+3. **The drop-in postdates the unit.** `user@1000.service` entered active at
+   2026-11-05 19:42 and the swap drop-in was installed 2026-11-10, so the running
+   unit has never read it. `daemon-reload` alone does not re-apply service
+   properties to a running unit.
+
+Aaron's call, not the tick's — enabling the watch lets oomd kill the largest
+cgroup under the slice after 20 s at 50% pressure, and that cgroup can be a
+worker, a lane, or the chair:
+
+```
+# see it, immediately, without touching the running configuration:
+sudo systemctl set-property --runtime user@1000.service MemoryPressureWatch=on
+oomctl | sed -n '/Memory Pressure Monitored CGroups/,$p'
+
+# make it survive, with the revert:
+printf '[Service]\nMemoryPressureWatch=on\n' \
+  | sudo tee /etc/systemd/system/user@1000.service.d/60-ak47-oomd-mem.conf
+sudo systemctl daemon-reload
+# revert: sudo rm /etc/systemd/system/user@1000.service.d/60-ak47-oomd-mem.conf
+#         && sudo systemctl set-property --runtime user@1000.service MemoryPressureWatch=skip
+```
+
 The per-unit default is read when the user manager starts, and restarting
 `user@1000.service` would restart every unit in the slice — the fleet-wide
 disruption this change exists to prevent. So it applies at the next login; the
@@ -410,7 +453,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-102 tests across seven files: the budget, the census, the guards, the guarded
+103 tests across seven files: the budget, the census, the guards, the guarded
 delete, the big-entry take-down, the tick, and the weekly review. They are hermetic — no tmux, no
 network, no live fleet state — and registered as `pure-contract-unit` in
 `bin/fm-test-run.sh`.
