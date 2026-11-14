@@ -2533,12 +2533,24 @@ cw_real_user_check() {  # <watch-id> -> "<state>\t<reason>"
 # contract and a row saying why nothing was measurable is the honest record.
 cw_row_write() {  # <watch-id> <terminal-state> <reason> [<task>] [<url>] [<merge-epoch>] [<registered-epoch>]
   local id=$1 state=$2 reason=$3 task=${4:-} url=${5:-} t0=${6:-} created=${7:-}
-  local completed r900 r3600 r21600 ru ru_reason gaps unproven
+  local completed r900 r3600 r21600 ru ru_reason gaps unproven beta
   if cw_watch_exists "$id"; then
     task=$(cw_meta_get "$id" task || true)
     url=$(cw_meta_get "$id" pr_url || true)
     t0=$(cw_meta_get "$id" t0 || true)
     created=$(cw_meta_get "$id" created || true)
+  fi
+  # The beta verdict belongs in the durable row, so a merge whose beta stage
+  # measured nothing (or measured a regression) is recalled from the row itself
+  # rather than from a printed line. Doing it here means an open row and its
+  # terminal rewrite carry the same beta fact; the caller adds it explicitly only
+  # when the merge created no watch directory to hold a beta record.
+  beta=$(cw_beta_verdict "$id")
+  if [ -n "$beta" ]; then
+    case "$reason" in
+      *"$beta"*) ;;
+      *) reason="$reason; beta: $beta" ;;
+    esac
   fi
   case "$state" in
     open) completed=null ;;
@@ -3021,13 +3033,6 @@ cmd_register() {
     sentries=''
     sentry_unreadable=1
   fi
-  now=$(cw_now)
-  t0=$(cw_forge_merge_epoch "$url" "$provider" 2>/dev/null || true)
-  case "$t0" in
-    ''|*[!0-9]*) t0=$now ;;
-  esac
-  [ "$t0" -le "$now" ] || t0=$now
-
   if [ -z "$targets" ] && [ -z "$sentries" ] && [ -z "$runs" ]; then
     unread=$(printf '%s\n' "$derived" | grep -c '^note	manifest unread: ' || true)
     inventory_unread=$(printf '%s\n' "$derived" | grep -c '^note	image inventory unread: ' || true)
@@ -3063,8 +3068,9 @@ cmd_register() {
     # surface is not-applicable; one whose surface could not be read is a
     # measurement gap, so the audit never passes a merge nobody could measure.
     # A gap is a watch that ended unmeasurable, so it queues the same wake.
-    # The beta reason belongs in the durable row too, so a merge that measured
-    # nothing beta-served is never recalled as a silent pass.
+    # This merge has no watch directory to hold a beta record, so its beta reason
+    # is carried here explicitly; cw_row_write appends it for every watch-backed
+    # row, so the reason is durable rather than only printed.
     row_reason="$row_reason; beta: $beta_verdict"
     cw_row_write "$id" "$row_state" "$row_reason" \
       "$task" "$url" "$t0" "$now"

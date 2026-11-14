@@ -1920,6 +1920,27 @@ case "$out" in
   *) fail "an unreadable beta fingerprint was not stated: $out" ;;
 esac
 
+# The beta reason is durable, not only printed: a merge that DOES have production
+# targets but no beta-served path records the reason in its registration row and
+# again in its terminal rewrite, so the row alone states why nothing was measured
+# in beta.
+HOME_B10=$(new_world b10)
+seed_pr "$HOME_B10" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_B10" "$MANIFEST" "$FEED_LINE"
+run_cw "$HOME_B10" 1790000000 register b10 "$PR_URL" >/dev/null \
+  || fail "production-with-no-beta register failed"
+ROW_B10="$HOME_B10/state/change-watch/rows/b10-3317.json"
+grep -q '"terminal_state": "open"' "$ROW_B10" \
+  || fail "a merge with production targets did not record an open row: $(cat "$ROW_B10")"
+grep -q 'nothing to measure: no changed path is served by a beta target' "$ROW_B10" \
+  || fail "the open row did not carry the beta reason: $(cat "$ROW_B10")"
+run_cw "$HOME_B10" 1790044000 drive b10-3317 >/dev/null || true
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_B10" \
+  || fail "the drive did not rewrite the row's terminal state: $(cat "$ROW_B10")"
+grep -q 'nothing to measure: no changed path is served by a beta target' "$ROW_B10" \
+  || fail "the terminal row dropped the beta reason: $(cat "$ROW_B10")"
+pass "the beta reason is durable in both the registration and terminal row"
+
 # A beta target already above the absolute bar but unchanged is clean: the
 # verdict is relative to the beta baseline, never to an absolute bar.
 HOME_B6=$(seed_beta_world b6)
