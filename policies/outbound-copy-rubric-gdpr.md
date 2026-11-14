@@ -46,7 +46,11 @@ matter of course."
    required. It may ask only for these: that the person claims the page in the Muso app;
    a document from the artist's label or management naming them as authorised; the link
    to the page concerned; that they write from the email address on their Muso account
-   or sign in to the Muso app and write from there.
+   or sign in to the Muso app and write from there; and, to confirm that a page is
+   theirs, a link to their own artist page on Spotify or Apple Music or to an official
+   social account that matches the profile, or a document from their label or
+   management that names them (ruling 2026-11-13: proof that a page is someone's is a
+   matching link or a label or management document, never an identity document).
    Where someone writes on behalf of another person, it may ask that the person they
    write for claims the page and writes from their own account, or for a document from
    that person's label or management naming the writer as authorised.
@@ -71,8 +75,16 @@ matter of course."
    messages report that a request is open and what it needs, nothing else.
 7. A request for something is not a refusal. If the message asks the person for
    anything, it must say the request stays open and how to send what is asked.
-8. No personal data in the text: no name of the person, no email address, no link to
-   their page. (The greeting is a plain "Hello".)
+8. No personal data in the text: no name of the person, no email address of the person,
+   no link to their page. (The greeting is a plain "Hello".)
+   One opening line and one subject are allowed, because they name Muso's own mailbox
+   and not the person. A letter that answers a deletion request in a new mail thread
+   starts with "You wrote to us at notices@muso.ai on <date> about your deletion
+   request." (or the same line with legal@muso.ai), and its subject is "Your Muso.AI
+   data deletion request" (rulings legal-finalize-fable-k1/2026-11-04-new-thread-lead
+   and gdpr-support-from-1104). Do not approve any other address in the text, a
+   different opening line or subject, or that line or subject on a message about
+   anything other than a deletion request.
 9. Plain words, short sentences. No internal nouns (queue, tier, pipeline, ledger, gate,
    register, verdict, ticket id, admin) and no staff names. The sign-off is the only
    signature.

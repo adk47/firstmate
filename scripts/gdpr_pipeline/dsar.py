@@ -10,14 +10,19 @@ What this module owns:
             month of receipt of the request". We state the EARLIER of one calendar month and receipt + 30 days, so
             the stated date is never later than either reading. An extension moves it only when one is recorded.
   identity  Aaron's ruling of 2026-11-12, as three gates: (1) account control, (2) a tie between that requester and
-            the page (a processed claim, or a verified sender on the page's own website host), (3) an authority
+            the page (a processed claim that carries verification links and was processed after it was made, see
+            `sources.link_matches_profile` through `sources.page_facts`, or a verified sender on the page's own
+            website host), (3) an authority
             document, asked for only where 1 and 2 do not settle it. A passport is never asked for: it proves the
-            person, not that the page is theirs. `need()` is the ONE thing the requester still has to do.
+            person, not that the page is theirs. `need_of()` is the ONE thing the requester still has to do.
   state     received -> identity_check -> in_progress -> responded -> closed. DERIVED from recorded facts on every
             run, never set by hand, so a request cannot reach `closed` without a recorded final response.
   ladder    at most one message owed per request per run: the acknowledgement (states the deadline and the need),
             a status update at the halfway point, and, past the deadline, a status update every 14 days until the
-            final response. The final response for an erasure is the existing confirmation letter.
+            final response. The final response for an erasure is the existing confirmation letter. The ownership ask
+            (`NEED_CLAIM_EVIDENCE`) is the one that does not wait for the halfway point: it goes at once, because
+            the last message may have said nothing was needed. `send.deliver` holds any of them to one customer
+            message per person per UTC day (`Store.person_contacted_on`).
   alarm     `clock_rows()` names every statutory request inside 7 days of its date or past it.
 
 Scope: the statutory classes only (`STATUTORY`). A legal threat or a takedown notice is not a data-subject request
@@ -57,7 +62,15 @@ TERMINAL = (CLOSED,)
 
 NEED_NONE, NEED_UNKNOWN, NEED_CLAIM_OR_AUTHORITY, NEED_LINK, NEED_AUTHORITY, NEED_ACCOUNT = (
     "none", "unknown", "claim_or_authority", "link", "authority", "account")
-NEEDS = (NEED_NONE, NEED_UNKNOWN, NEED_CLAIM_OR_AUTHORITY, NEED_LINK, NEED_AUTHORITY, NEED_ACCOUNT)
+# The requester's account already holds the processed claim on the page, and that claim carries no evidence
+# (`sources.link_matches_profile`): telling them to claim the page would ask for what they have done. What is owed is
+# the ownership ask (rulings 2026-11-13, firstmate inbox 002 and 003 of lane gdpr-overdue-drive-g2).
+NEED_CLAIM_EVIDENCE = "claim_evidence"
+NEEDS = (NEED_NONE, NEED_UNKNOWN, NEED_CLAIM_OR_AUTHORITY, NEED_LINK, NEED_AUTHORITY, NEED_ACCOUNT,
+         NEED_CLAIM_EVIDENCE)
+# What a SENT ownership ask writes on its request: the date it went (`Store.apply_effects` puts the send time
+# there, whatever this says). The statutory date is not moved by it (ruling 2026-11-13, inbox 003 point 4).
+OWNERSHIP_ASK_EFFECT = {"ownership_ask_at": "sent"}
 
 KIND_ACK, KIND_STATUS, KIND_EXTENSION = "ack", "status", "extension"
 KIND_ACCESS = "access"          # the cover message of an Art. 15 answer (gdpr_pipeline/access.py holds the copy)
@@ -82,6 +95,7 @@ MOOT_OF_VERDICT = {
     identity.GONE: "gone",
 }
 NO_LINK = "no_link"         # only an 8-char id prefix is on file and the catalog has no single page for it
+CLAIM_UNCHECKED = "claim_unchecked"     # the requester's own processed claim, with no evidence on it: not a tie
 UNTIED_VERDICTS = (identity.ASK_IDENTITY, identity.ASK_AUTH, identity.ASK_LINK)
 
 # The code backstop on our own sentences. The reviewer's lint has its own list; this one runs before a body is ever
@@ -148,8 +162,9 @@ def gates(cls: str, account_id, account_how: str, representative: bool, page_ver
           pages_named: int, prefixes_read: bool = False) -> dict:
     """The three gates for one request, and the ONE thing still needed from the requester.
 
-    `page_verdicts` is the per-page identity answer ({"id", "verdict"}); `pages_named` is how many pages the request
-    names at all (a page whose read failed is named but has no usable verdict). `prefixes_read` says the catalog
+    `page_verdicts` is the per-page identity answer ({"id", "verdict"}, and "own_claim": True where the requesting
+    account holds the processed claim on that page and the claim carries no evidence); `pages_named` is how many
+    pages the request names at all (a page whose read failed is named but has no usable verdict). `prefixes_read` says the catalog
     answered this run's id-prefix lookup: only then is an 8-char id that is still unresolved a FACT (no single page
     carries it, so the link has to come from the requester) and not a read that failed. Nothing here reads request
     text.
@@ -160,7 +175,7 @@ def gates(cls: str, account_id, account_how: str, representative: bool, page_ver
     g1 = account_id is not None
     ties: dict[str, str] = {}
     unknown = pages_named > len(page_verdicts)
-    untied = no_link = False
+    untied = no_link = own_claim = False
     tied = 0
     for pv in page_verdicts:
         verdict = pv.get("verdict") or ""
@@ -170,8 +185,10 @@ def gates(cls: str, account_id, account_how: str, representative: bool, page_ver
         elif verdict in MOOT_OF_VERDICT and cls == "privacy_erasure":
             ties[pv["id"]] = MOOT_OF_VERDICT[verdict]
         elif verdict in UNTIED_VERDICTS:
-            ties[pv["id"]] = ""
+            mine = bool(pv.get("own_claim"))
+            ties[pv["id"]] = CLAIM_UNCHECKED if mine else ""
             untied = True
+            own_claim = own_claim or mine
         elif verdict == identity.UNKNOWN and len(pv["id"]) == 8 and prefixes_read:
             ties[pv["id"]] = NO_LINK
             no_link = True
@@ -193,7 +210,8 @@ def gates(cls: str, account_id, account_how: str, representative: bool, page_ver
     elif no_link:
         need = NEED_LINK            # that letter asks for the link AND says how to connect the page
     elif untied:
-        need = NEED_CLAIM_OR_AUTHORITY
+        # One page the requester has already claimed is enough to make "claim the page" the wrong thing to say.
+        need = NEED_CLAIM_EVIDENCE if own_claim else NEED_CLAIM_OR_AUTHORITY
     elif unknown:
         need = NEED_UNKNOWN
     else:
@@ -204,7 +222,8 @@ def gates(cls: str, account_id, account_how: str, representative: bool, page_ver
         "tie": {"pass": tie_pass, "pages": ties},
         # Gate 3 is asked for only where 1 and 2 do not settle it. No store records a document yet, so `on_file`
         # is always False: an authority document that arrives has no coded check, and the alarm names the request.
-        "authority": {"needed": need in (NEED_AUTHORITY, NEED_CLAIM_OR_AUTHORITY), "on_file": False},
+        "authority": {"needed": need in (NEED_AUTHORITY, NEED_CLAIM_OR_AUTHORITY, NEED_CLAIM_EVIDENCE),
+                      "on_file": False},
         "need": need,
     }
 
@@ -547,12 +566,32 @@ def owed(row: dict, sends: list[dict], now: datetime, open_from_requester: int =
                 "effects": {"extended_until": _iso(new), "extension_reason": "number",
                             "extension_ruling": row["extension_need_ruling"].strip()}}
 
+    # The ownership ask goes AT ONCE (ruling 2026-11-13, inbox 003 point 3): the request needs something from the
+    # requester that no message has told them, and the last one may have said the opposite (#469 was told nothing
+    # was needed that morning). It does not wait for the halfway point, the quiet window or a promised next contact.
+    # It stands down only for a letter that may be out, and `send.deliver` still holds it to one message per person
+    # per UTC day. A request nobody has written to yet gets the acknowledgement below, which carries the same ask.
+    ack_ok = d - now >= timedelta(days=ACK_MIN_RUNWAY_DAYS)
+    in_flight = any(s.get("state") in ("sending", "unknown") and s.get("at")
+                    and now - _parse(s["at"]) < timedelta(days=QUIET_DAYS) for s in sends)
+    if (need == NEED_CLAIM_EVIDENCE and not row.get("ownership_ask_at") and not in_flight
+            and (first_contact_made(row, sends) or not ack_ok)):
+        if now < d:
+            return {"kind": KIND_STATUS, "slot": next_status_slot(sends), "variant": f"status_{need}",
+                    "effects": dict(OWNERSHIP_ASK_EFFECT),
+                    "facts": {"received": received, "next": human_date(d)}, "next_contact_at": _iso(d)}
+        nxt = now + timedelta(days=LATE_INTERVAL_DAYS)
+        return {"kind": KIND_STATUS, "slot": next_status_slot(sends), "variant": f"late_{need}",
+                "effects": dict(OWNERSHIP_ASK_EFFECT),
+                "facts": {"received": received, "next": human_date(nxt)}, "next_contact_at": _iso(nxt)}
+
     # An acknowledgement, and an in-time status update, both tell the requester they will have our answer by the date.
     # With less than ACK_MIN_RUNWAY_DAYS left that is a promise nothing here can keep, so a request first reached that
     # late gets neither (see below). A new request is acknowledged within the hour, with the whole month ahead.
-    if d - now >= timedelta(days=ACK_MIN_RUNWAY_DAYS):
+    if ack_ok:
         if not first_contact_made(row, sends):
-            return {"kind": KIND_ACK, "slot": KIND_ACK, "variant": f"ack_{need}", "effects": {},
+            return {"kind": KIND_ACK, "slot": KIND_ACK, "variant": f"ack_{need}",
+                    "effects": dict(OWNERSHIP_ASK_EFFECT) if need == NEED_CLAIM_EVIDENCE else {},
                     "facts": {"received": received, "due": human_date(d)}, "next_contact_at": _iso(d)}
         halfway = _parse(row["received_at"]) + (d - _parse(row["received_at"])) / 2
         if now >= halfway and not row.get("status_sent_at") and not quiet:

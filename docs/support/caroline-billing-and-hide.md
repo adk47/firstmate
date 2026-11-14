@@ -121,7 +121,8 @@ track or an album.
 
 Now (`identity.decide_item`, `sources.item_page`): the item's artists are read **from the catalog**, and the item
 passes only when it has **exactly one artist** and that artist's profile passes `identity.decide_page` for this
-requester and this class. It is the same function with the same evidence: a processed claim, an account name, a
+requester and this class. It is the same function with the same evidence: a processed claim carrying verification
+links (ruling 2026-11-13; `docs/support/gdpr-pipeline.md`, "A claim is a tie only with evidence"), an account name, a
 verified sender's name, the page's own website domain, the verified-sender rule and the big-name exclusion.
 
 It is not weaker than the profile gate, and in four places it is stricter:
@@ -138,7 +139,7 @@ Shadow run of this gate against a copy of the live register (read-only, 2026-11-
 
 | result | pages |
 |---|---|
-| `JAN_REVIEW` -> `PASS_A` (the requester's account holds the processed claim on the one artist) | 2 (#369 album, #334 track) |
+| `JAN_REVIEW` -> `PASS_A` (the requester's account holds the processed claim on the one artist; measured before the 2026-11-13 ruling, since which a claim also needs a verification link naming the page) | 2 (#369 album, #334 track) |
 | `JAN_REVIEW` -> `LEGAL_HIDE_FIRST` (legal threat, small item, small artist) | 5 tracks on 3 rows (#364, #78, #188) |
 | `JAN_REVIEW` -> `JAN_BIGNAME` | 1 album on 2 rows (#252, #418) |
 | unchanged | everything else |

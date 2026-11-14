@@ -2,7 +2,10 @@
 
 The table this implements (Fable, `gdpr-ack-v2-and-arpad-1101.md` §3; implement, never re-derive):
 
-  A claim           the requesting account holds a PROCESSED claim on the profile
+  A claim           the requesting account holds a PROCESSED claim on the profile that carries a link naming the
+                    page's own Spotify / Apple artist id or one of its linked social accounts, and was processed
+                    after it was made (rulings 2026-11-13, 2026-11-14: a claim with no such link, processed the
+                    moment it was made, ties nobody to a page for a hide)
   B account email   the Intercom contact resolves to exactly one Muso account (identity_resolver r5, or the
                     sender address equals exactly one account email) AND that account's name matches the page
   C unclaimed name  the page is unclaimed and its display name equals the requester's name (name-fold
@@ -77,8 +80,13 @@ class Page:
     artists: tuple = ()
     item_why: str = ""
     # Accounts whose processed claim does not show the page is theirs (hide_guard.prove): taken out of
-    # claim_user_ids and named here. Last on purpose: page_facts builds a Page by position.
+    # claim_user_ids and named here.
     claim_unproven: frozenset = frozenset()
+    # The accounts in `claim_user_ids` whose claim was processed after it was made AND carries a link naming this
+    # page's own Spotify / Apple artist id or one of its linked social accounts (`sources.link_matches_profile`): the
+    # only claims a hide may rest on. Last on purpose: callers build a Page positionally, and a field added last
+    # never shifts one of them.
+    checked_claim_user_ids: frozenset = frozenset()
 
 
 @dataclass
@@ -166,6 +174,28 @@ def big_name(p: Page) -> bool:
     return (p.popularity or 0) >= BIG_POPULARITY or (p.credit_count or 0) >= BIG_CREDITS
 
 
+# Ruling 2026-11-13 (firstmate relay, lane gdpr-overdue-drive-g2 inbox 002). A claim is filed by the account itself,
+# and most are processed the instant they are made with nothing attached: such a claim says the account ASKED for
+# the page, not that the page is theirs. Paths A and the DMCA claim-first rule read `checked_claim_user_ids` only.
+UNCHECKED_CLAIM = ("the requesting account's processed claim on this page carries no verification links that "
+                   "name this page's own Spotify / Apple artist id or one of its linked social accounts, or was "
+                   "processed the moment it was made: not a tie for a hide (rulings 2026-11-13, 2026-11-14)")
+
+# The identity rules a stored page verdict was decided under. A hide is prepared from the STORED verdict, hours after
+# it was decided, so a rule that gets stricter has to reach the verdicts already on file: `run.decide_row` stamps
+# this on every page verdict, `hide_batch.plan` takes an identity pass only when its stamp is the current one, and
+# the tick re-decides a row that carries an older pass. Raise it whenever a path that returns a pass is narrowed.
+#   1  (no stamp) everything decided before 2026-11-13
+#   2  a claim ties a requester to a page only with verification links, processed after it was made
+#   3  a link counts only when it names the page's own Spotify / Apple artist id or one of its linked social handles
+RULES_V = 3
+
+
+def stale_pass(pv: dict) -> bool:
+    """A stored page verdict that passed identity under rules older than the current ones."""
+    return pv.get("verdict") in IDENTITY_PASS and pv.get("rules") != RULES_V
+
+
 def decide_page(p: Page, r: Requester, cls: str) -> PageVerdict:
     def v(verdict: str, why: str) -> PageVerdict:
         return PageVerdict(p.entity_id, verdict, why)
@@ -210,9 +240,14 @@ def decide_page(p: Page, r: Requester, cls: str) -> PageVerdict:
         return v(UNKNOWN, f"the catalog answer did not state {p.facts_unknown} for this page: claimed status and "
                           f"the big-name exclusion cannot be established, so no path may pass; re-read next run")
     if cls == "dmca_takedown":
-        if r.account_id is not None and r.account_id in p.claim_user_ids:
-            return PageVerdict(p.entity_id, PASS_A, "DMCA claim-first: the requesting account holds the processed "
-                                                    "claim", r.account_id, p.entity_id)
+        if r.account_id is not None and r.account_id in p.checked_claim_user_ids:
+            # The whole verdict, not `v`: the hide guard re-reads the proof from `account` and `owner_page`.
+            return PageVerdict(p.entity_id, PASS_A,
+                               "DMCA claim-first: the requesting account holds the processed claim, and the claim "
+                               "carries a link naming this page's own Spotify / Apple artist or a linked social "
+                               "account", r.account_id, p.entity_id)
+        if r.account_id is not None and (r.account_id in p.claim_user_ids or r.account_id in p.claim_unproven):
+            return v(DMCA_REVIEW, f"DMCA/takedown is claim-first (captain 10-23): {UNCHECKED_CLAIM}")
         return v(DMCA_REVIEW, "DMCA/takedown is claim-first (captain 10-23): the requester holds no processed claim")
     if cls == "legal_threat":
         if big_name(p):
@@ -220,11 +255,16 @@ def decide_page(p: Page, r: Requester, cls: str) -> PageVerdict:
         # Hide-first is what a legal threat gets when nobody is known to own the page. An ownership pass is stronger
         # than the exception it displaces: the account that holds the claim is asking for its own profile to come
         # down, so the request is decided as any owner's (2026-11-13; before this every legal page was held, and no
-        # claim state could ever release it).
-        if r.account_id is not None and r.account_id in p.claim_user_ids:
+        # claim state could ever release it). "Holds the claim" is the same tie a hide needs, so the claim carries
+        # verification links (ruling 2026-11-13); without them the requester is asked, never hidden.
+        if r.account_id is not None and r.account_id in p.checked_claim_user_ids:
             return PageVerdict(p.entity_id, PASS_A,
-                               f"A: account {r.account_id} holds the processed claim on the page, so a legal threat on "
-                               f"it is decided as an owner's request", r.account_id, p.entity_id)
+                               f"A: account {r.account_id} holds the processed claim on the page, and the claim carries "
+                               f"verification links, so a legal threat on it is decided as an owner's request",
+                               r.account_id, p.entity_id)
+        if r.account_id is not None and (r.account_id in p.claim_user_ids or r.account_id in p.claim_unproven):
+            return v(ASK_IDENTITY, f"a legal threat from account {r.account_id}, which holds the page's claim: "
+                                   f"{UNCHECKED_CLAIM}; ask for evidence of authority")
         return v(LEGAL_HIDE_FIRST, "legal threat: hide first, identity after (10-23 exception); the captain owns the reply")
     if not (r.name or r.email or r.account_id is not None):
         return v(UNKNOWN, "no requester on file (the mail ledger keeps no sender): the thread must be read before "
@@ -234,13 +274,21 @@ def decide_page(p: Page, r: Requester, cls: str) -> PageVerdict:
     # exempt, by the captain's hide-first rule.
     if r.representative:
         return v(ASK_AUTH, "E: writing for someone else -> ask for the data subject's written authorisation")
-    if r.account_id is not None and r.account_id in p.claim_user_ids:
-        return PageVerdict(p.entity_id, PASS_A, f"A: account {r.account_id} holds the processed claim on the page",
-                           r.account_id, p.entity_id)
     if r.account_id is not None and r.account_id in p.claim_unproven:
         return v(ASK_IDENTITY, f"account {r.account_id} holds a claim on the page that was made without "
                                f"verification, and the page holds sources that account did not create: that claim "
                                f"is not a tie to the page; ask for evidence of authority")
+    if r.account_id is not None and r.account_id in p.checked_claim_user_ids:
+        # The whole verdict, not `v`: the hide guard re-reads the proof from `account` and `owner_page`, and a pass
+        # that records neither is held (`NOT_RECORDED`) and decided again on every tick.
+        return PageVerdict(p.entity_id, PASS_A,
+                           f"A: account {r.account_id} holds the processed claim on the page, and the claim carries "
+                           f"a link naming this page's own Spotify / Apple artist or a linked social account",
+                           r.account_id, p.entity_id)
+    if r.account_id is not None and r.account_id in p.claim_user_ids:
+        # The requester's OWN claim, without evidence. Not "claimed by somebody else", and not a pass: the tie
+        # itself is what is still owed (links on the claim, or evidence of authority).
+        return v(ASK_IDENTITY, f"account {r.account_id}: {UNCHECKED_CLAIM}")
     if p.is_claimed or p.claim_user_ids:
         return v(ASK_IDENTITY, "the page is claimed by an account that is not the requester's: mismatch = ASK")
     # A NAME MATCH IS NOT A TIE (captain 2026-11-12: "a passport proves the person, not that the profile is theirs").

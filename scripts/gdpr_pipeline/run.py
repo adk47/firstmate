@@ -544,6 +544,8 @@ class Run:
         rows = [r for r in self.store.all("open") if not stale_hours or not r["decided_at"]
                 or r["identity_verdict"] == identity.UNKNOWN or r["rev"] > r["decided_rev"]
                 or (r["class"] in dsar.STATUTORY and not (r.get("gates") or {}).get("v"))
+                # a pass decided under older identity rules is not a pass the hide batch may use: decide it again now
+                or any(identity.stale_pass(pv) for pv in r["verdict_detail"])
                 or now - parse_iso(r["decided_at"]) > timedelta(hours=stale_hours)]
         prefixes = sorted({p["id"] for r in rows for p in r["pages"] if len(p["id"]) == 8})
         resolved: dict[str, str] = {}
@@ -677,13 +679,22 @@ class Run:
             dec = identity.decide(facts, req, cls)
             action = ""
             if cls in dsar.STATUTORY:
-                gates = dsar.gates(cls, acc, how, rep, [{"id": pv.entity_id, "verdict": pv.verdict}
-                                                        for pv in dec.pages], len(pages),
+                # A page the requesting account has already claimed, where the claim carries no evidence: what the
+                # requester is asked for is the ownership ask, not "claim the page" (`dsar.NEED_CLAIM_EVIDENCE`).
+                # `hide_guard.prove` above has already taken an unproven account OFF `claim_user_ids` and named it in
+                # `claim_unproven`, so that set is read too: reading `claim_user_ids` alone finds nobody, and the
+                # requester is told to claim a page they have claimed.
+                mine = {p.entity_id for p in facts if acc is not None and acc not in p.checked_claim_user_ids
+                        and (acc in p.claim_user_ids or acc in p.claim_unproven)}
+                gates = dsar.gates(cls, acc, how, rep,
+                                   [{"id": pv.entity_id, "verdict": pv.verdict, "own_claim": pv.entity_id in mine}
+                                    for pv in dec.pages], len(pages),
                                    prefixes_read=getattr(self, "prefixes_read", False))
         # `account` / `owner_page` / `sender_host` are written only on a pass (identity.PageVerdict): they are what
         # the hide guard reads the proof again from. A row decided before they existed lacks them, and the guard
-        # re-decides it.
-        detail = [{"id": pv.entity_id, "verdict": pv.verdict, "why": pv.why,
+        # re-decides it. `rules` is the identity rule set the verdict was decided under (`identity.RULES_V`): a pass
+        # decided under older rules is not one the hide batch may use.
+        detail = [{"id": pv.entity_id, "verdict": pv.verdict, "why": pv.why, "rules": identity.RULES_V,
                    **({"account": pv.account_id} if pv.account_id is not None else {}),
                    **({"owner_page": pv.owner_page} if pv.owner_page else {}),
                    **({"sender_host": pv.sender_host} if pv.sender_host else {})} for pv in dec.pages]
@@ -1110,9 +1121,21 @@ class Run:
                 msg = self.store.put_message(rid, slot, item["kind"], item["variant"], item["text"],
                                              copy_gate.body_sha(item["text"]), item["copy_sha"], item["facts"],
                                              item["next_contact_at"], item.get("effects"))
-            ans = checker(msg["kind"], msg["body"], variant=msg["variant"], slot=slot)
+            # The reviewer is shown the letter as it will go on the wire (`send.reviewed_form`): a request that can
+            # only be answered in a new mail thread gets the approved lead line and subject with its body. The
+            # frozen row keeps the body alone, which is what `deliver` matches before it assembles the same letter.
+            try:
+                text, subject = letter_send.reviewed_form(self.store.get(rid) or {}, msg["body"])
+            except ValueError as exc:
+                # A class or subject with no approved new-thread form (`copy.NoApprovedRequestType` /
+                # `copy.NoApprovedSubject`). `deliver` ledgers that as a REFUSAL for this one request; authoring it
+                # must not end the run and leave every other message of the hour unauthored.
+                self.fail(f"dsar #{item['register_no']} {item['variant']}", exc)
+                continue
+            ans = checker(msg["kind"], text, variant=msg["variant"], slot=slot, subject=subject)
             changed = (msg["gate_result"], msg["verdict_id"]) != (ans.result, ans.verdict_id)
             self.store.update_message(rid, slot, "dsar_gate" if changed else "",
+                                      event_detail={"reviewed_sha": copy_gate.body_sha(text), "subject": subject},
                                       state="approved" if ans.ok else "held", **ans.as_cols())
             out.append({**item, "text": msg["body"], "variant": msg["variant"], "body_sha": msg["body_sha"],
                         "gate": ans.result, "gate_reason": ans.reason, "verdict_id": ans.verdict_id,
@@ -1232,27 +1255,41 @@ class Run:
         rid = row["id"]
         prior = self.store.send_record(rid, dsar.KIND_ACCESS)
         if prior and prior["state"] in ("sent", "sending", "unknown"):
+            self._access_owed(row, "")
             return {"state": "skipped", "register_no": register_no, "why": [f"already {prior['state']}"]}
-        acc, why_acc = self._access_account(row, conv_reader or sources.conversation)
-        answers = self.store.access_answers(rid)
-        answer = answers[-1] if answers else None
-        raw = None
-        if answer and answer["path"]:
-            try:
-                with open(answer["path"], "rb") as fh:
-                    raw = fh.read()
-            except OSError:
-                raw = None
-        age = ((now - parse_iso(answer["produced_at"])).total_seconds() / 3600) if answer else 0.0
-        email_now = None
-        if acc is not None:
-            try:
-                email_now = (email_reader or sources.account_email)(acc)
-            except sources.Unknown:
-                email_now = None        # unread is held, never "unchanged"
-        why = access.undeliverable(answer, raw, acc, age, email_now)
-        if why_acc and acc is None:
-            why.append(why_acc)
+        conv_reader = conv_reader or sources.conversation
+        email_reader = email_reader or sources.account_email
+        acc, why_acc = self._access_account(row, conv_reader)
+
+        def read_once():
+            answers = self.store.access_answers(rid)
+            answer = answers[-1] if answers else None
+            raw = None
+            if answer and answer["path"]:
+                try:
+                    with open(answer["path"], "rb") as fh:
+                        raw = fh.read()
+                except OSError:
+                    raw = None
+            age_h = ((now - parse_iso(answer["produced_at"])).total_seconds() / 3600) if answer else 0.0
+            email = None
+            if acc is not None:
+                try:
+                    email = email_reader(acc)
+                except sources.Unknown:
+                    email = None        # unread is held, never "unchanged"
+            reasons = access.undeliverable(answer, raw, acc, age_h, email)
+            if why_acc and acc is None:
+                reasons.append(why_acc)
+            return answer, raw, age_h, email, reasons
+
+        answer, raw, age, email_now, why = read_once()
+        if not dry_run and answer is not None and age > access.FRESH_HOURS:
+            built = self.access_build(register_no, record=True, conv_reader=conv_reader)
+            if built.get("state") != "built":
+                return {"state": "held", "register_no": register_no,
+                        "why": [f"the copy could not be rebuilt before sending ({built.get('why')})"]}
+            answer, raw, age, email_now, why = read_once()
         if why:
             return {"state": "held", "register_no": register_no, "why": why}
         copy_doc = dsar.load_copy()
@@ -1273,13 +1310,27 @@ class Run:
         if not ans.ok:
             return {"state": "held", "register_no": register_no, "why": [f"copy gate {ans.result}: {ans.reason}"]}
         email = email_now       # equal to the address in the copy, or `undeliverable` held it above
+        if not dry_run:
+            earlier = self.store.person_contacted_on({**row, "requester_email": email},
+                                                     datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+            if earlier:         # the early hold; the guard is the claim below
+                self._access_owed(row, now)
+                return {"state": "held", "register_no": register_no,
+                        "why": [letter_send.day_hold(earlier, "this answer")]}
         out = {"state": "would_send", "register_no": register_no, "sha256": answer["sha256"],
                "body_sha": copy_gate.body_sha(body), "verdict_id": ans.verdict_id}
         if dry_run:
             return out
         key = letter_send.idem_key(rid, dsar.KIND_ACCESS, body + answer["sha256"])
-        self.store.claim_send(rid, dsar.KIND_ACCESS, "mail_attach", email, copy_gate.body_sha(body),
-                              f"gate:{ans.verdict_id}", "sending", detail=f"copy sha256 {answer['sha256']}", idem=key)
+        # Claimed only if this person still has no letter today, in one write transaction: another worker's letter
+        # to the same person may have been claimed since the read above.
+        earlier = self.store.claim_send_for_person(
+            {**row, "requester_email": email}, rid, dsar.KIND_ACCESS, "mail_attach", email, copy_gate.body_sha(body),
+            f"gate:{ans.verdict_id}", detail=f"copy sha256 {answer['sha256']}", idem=key)
+        if earlier:
+            self._access_owed(row, now)
+            return {"state": "held", "register_no": register_no,
+                    "why": [letter_send.day_hold(earlier, "this answer")]}
         try:
             ref = (mailer or letter_send._mail_send_attachment)(email, body, key, subject, answer["path"])
         except letter_send.Ambiguous as exc:
@@ -1293,7 +1344,20 @@ class Run:
         self.store.finish_send(rid, dsar.KIND_ACCESS, "sent", ref=ref, detail=f"copy sha256 {answer['sha256']}")
         self.store.stamp_sent(rid, dsar.KIND_ACCESS, dsar.KIND_ACCESS, ref)
         self.store.update_message(rid, dsar.KIND_ACCESS, "dsar_sent", state="sent")
+        self._access_owed(row, "")
         return {**out, "state": "sent"}
+
+    def _access_owed(self, row: dict, at) -> None:
+        """Record (or clear, with `at` empty) the fact that this access answer is OWED because the one-message-per-
+        person-per-UTC-day rule deferred it. The tick reads the mark and delivers it on the next day the person has
+        no message, so a deferred statutory answer never waits on a person to re-run a command. The comparison is on
+        PRESENCE, not on the clock: a second held tick writes nothing, so the mark keeps the day the answer first
+        became owed and the row's `rev` (which re-decides it) does not move."""
+        when = now_iso() if at else ""
+        if bool(row.get("access_owed_at")) == bool(when):
+            return
+        self.store.update(row["id"], "access_owed" if when else "access_delivered", access_owed_at=when)
+        row["access_owed_at"] = when
 
 
 def requester_of(r: dict, conv: dict) -> tuple[str, str, bool, bool]:

@@ -1,0 +1,64 @@
+{
+  "_comment": "Round 5: the three ownership-ask variants added in v4 of policies/gdpr-dsar-copy.json (ack_claim_evidence, status_claim_evidence, late_claim_evidence; block need_claim_evidence) through the gate's own gate.py (check -> pending -> review -> check) in a scratch mirror of this tree, under the gdpr rubric as amended in the same commit (rule 2 names the ownership ask). Bodies carry example dates (received 11 November 2026, due 11 December 2026, next 26 November 2026): fixed wording, no personal data. The statements were signed with a THROWAWAY key that exists only in the scratch mirror, so none of these is a verdict the production gate accepts: the verdict a send needs is the one the reviewer host signs on the body node-8 authors after deploy. The mirror differs from the tree in one file, the allowed-signers list. One reviewer pass, 3 bodies, 3 approve.",
+  "round": 5,
+  "rulings": [
+    "gdpr-overdue-drive-g2 inbox 002 (2026-11-13T20:23Z)",
+    "gdpr-overdue-drive-g2 inbox 003 (2026-11-13)"
+  ],
+  "gdpr_commit_base": "8a896df71",
+  "gdpr_tree": "the working tree that became the commit carrying this file",
+  "copy_sha256_at_review": "e483ba9485f4cdd0050d97d6a31d8748a02b4b8afeac654485ed108cfa864b55",
+  "rubric_file_sha256": "c2681a48eef9c30a3deccc2659df000923a31d59b92e4c7da22797e6760363fc",
+  "counts": {
+    "approve": 3,
+    "rewrite": 0,
+    "refuse": 0
+  },
+  "items": [
+    {
+      "variant": "ack_claim_evidence",
+      "campaign": "gdpr-ack",
+      "body_sha256": "71d337e5de54afc710c80426852fe869455d4933e3cb67ea37b4bbf6b76da25a",
+      "verdict": "approve",
+      "note": "Acknowledgement states the received date and the answer date, states the one-month rule as a plain fact without naming an article, asks only for permitted proof, and says the request stays open.",
+      "reviewer_model": "mac-pool/claude-fable-5-1",
+      "reviewed_at": "2026-11-13T22:18:56Z",
+      "rubric": "gdpr",
+      "rubric_sha256": "c2681a48eef9c30a3deccc2659df000923a31d59b92e4c7da22797e6760363fc",
+      "gate_check_after_review": {
+        "rc": 0,
+        "result": "approved"
+      }
+    },
+    {
+      "variant": "status_claim_evidence",
+      "campaign": "gdpr-status",
+      "body_sha256": "043bc1faa6ac50dd926147b3da0acc255b50ff4f308b7a327c9a9ae765da76ec",
+      "verdict": "approve",
+      "note": "Status update says the request is open, asks only for a matching link or a label/management document, names no article, states the received date and the next-contact date, no apology, no promise beyond the date.",
+      "reviewer_model": "mac-pool/claude-fable-5-1",
+      "reviewed_at": "2026-11-13T22:18:56Z",
+      "rubric": "gdpr",
+      "rubric_sha256": "c2681a48eef9c30a3deccc2659df000923a31d59b92e4c7da22797e6760363fc",
+      "gate_check_after_review": {
+        "rc": 0,
+        "result": "approved"
+      }
+    },
+    {
+      "variant": "late_claim_evidence",
+      "campaign": "gdpr-status",
+      "body_sha256": "e7763787fd994a932eb6fe2f199d8e38c2b6fa3611a3a85372811ea466d016d0",
+      "verdict": "approve",
+      "note": "Late status update says once that we are late and sorry, gives no reason, keeps the request open, asks only for permitted proof, and states the next date; date arithmetic is for code to confirm.",
+      "reviewer_model": "mac-pool/claude-fable-5-1",
+      "reviewed_at": "2026-11-13T22:18:56Z",
+      "rubric": "gdpr",
+      "rubric_sha256": "c2681a48eef9c30a3deccc2659df000923a31d59b92e4c7da22797e6760363fc",
+      "gate_check_after_review": {
+        "rc": 0,
+        "result": "approved"
+      }
+    }
+  ]
+}

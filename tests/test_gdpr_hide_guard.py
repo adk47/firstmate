@@ -35,12 +35,23 @@ def pid(n: int) -> str:
 
 
 def reviewed_claim(account=OWNER, claim_id="c1"):
-    return {"claim_id": claim_id, "account": account, "reason": "", "created": T0,
+    return {"claim_id": claim_id, "account": account, "reason": "", "created": T0, "processed_later": True,
             "links": {"instagram": "https://instagram.com/the.artist", "weblinks": []}}
 
 
+# The profile under test as the live admin profile reads now: a streaming-sourced page that links the instagram
+# account `reviewed_claim` names. A claim link is evidence only against this (`sources.link_matches_profile`).
+LINKED = {"raws": ["spotify:9", "tidal:2"], "created": T0 - 86400,
+          "identity": sources.ProfileIdentity(social=frozenset({("instagram", "the.artist")}))}
+
+
+def linked(ids):
+    return {i: LINKED for i in ids}
+
+
 def instant_claim(account=OWNER, claim_id="c2"):
-    return {"claim_id": claim_id, "account": account, "reason": "created by user", "created": T0, "links": ""}
+    return {"claim_id": claim_id, "account": account, "reason": "created by user", "created": T0, "links": "",
+            "processed_later": False}
 
 
 SITE = "https://www.artist-site.example/"      # the website the profile under test carries
@@ -52,7 +63,7 @@ def entry(n, basis="PASS_A", account=OWNER, request_id=1, register_no=500, entit
     """(batch entry, the stored page decision it was planned from)."""
     b = {"id": pid(n), "entity": entity, "register_no": register_no, "basis": basis,
          "due_at": "2026-12-01T00:00:00Z", "need": ["hdevops", "pdp"], "request_id": request_id}
-    d = {"id": pid(n), "verdict": basis, "why": "test"}
+    d = {"id": pid(n), "verdict": basis, "why": "test", "rules": identity.RULES_V}
     if recorded:
         d["owner_page"] = owner or pid(n)
         if account is not None:
@@ -75,7 +86,8 @@ def judge(pairs, claims=None, srcs=None, history=(), now=NOW, email="someone@exa
     claims = claims or {}
     return hide_guard.judge([b for b, _ in pairs], rows_for(pairs, email), list(history), now,
                             claim_reader=lambda ids: {i: claims.get(i, []) for i in ids},
-                            source_reader=lambda ids: {i: srcs[i] for i in ids if i in (srcs or {})},
+                            source_reader=linked if srcs is None else (
+                                lambda ids: {i: srcs[i] for i in ids if i in srcs}),
                             site_reader=lambda ids: {i: sites[i] for i in ids if i in (sites or {})})
 
 
@@ -112,13 +124,27 @@ class Ownership(unittest.TestCase):
         PASS_A, and the guard admits that entry as it admits any path A."""
         claims = {pid(1): [reviewed_claim()]}
         (p,) = hide_guard.prove([identity.Page(pid(1), "profile", True, "An Artist", True, frozenset({OWNER}),
-                                              10.0, 5)], OWNER,
-                                claim_reader=lambda ids: claims, source_reader=lambda ids: {})
+                                              10.0, 5, checked_claim_user_ids=frozenset({OWNER}))], OWNER,
+                                claim_reader=lambda ids: claims, source_reader=linked)
         pv = identity.decide_page(p, identity.Requester(name="x", email="x@example.org", account_id=OWNER),
                                  "legal_threat")
         self.assertEqual((pv.verdict, pv.account_id, pv.owner_page), ("PASS_A", OWNER, pid(1)))
         (d,) = judge([entry(1, basis=pv.verdict, account=pv.account_id, owner=pv.owner_page)], claims)
         self.assertEqual((d["outcome"], d["proof"], d["claim_id"]), ("admitted", "reviewed_claim", "c1"))
+
+    def test_a_takedown_from_the_claim_holder_enters_as_path_a(self):
+        """A verified DMCA claimant is an owner's request too: the identity step's pass has to carry the account and
+        the profile the guard re-reads, or `judge` holds it as NOT_RECORDED and the hide never happens."""
+        claims = {pid(1): [reviewed_claim()]}
+        (p,) = hide_guard.prove([identity.Page(pid(1), "profile", True, "An Artist", True, frozenset({OWNER}),
+                                              10.0, 5, checked_claim_user_ids=frozenset({OWNER}))], OWNER,
+                                claim_reader=lambda ids: claims, source_reader=linked)
+        pv = identity.decide_page(p, identity.Requester(name="x", email="x@example.org", account_id=OWNER),
+                                  "dmca_takedown")
+        self.assertEqual((pv.verdict, pv.account_id, pv.owner_page), ("PASS_A", OWNER, pid(1)))
+        (d,) = judge([entry(1, basis=pv.verdict, account=pv.account_id, owner=pv.owner_page)], claims)
+        self.assertEqual((d["outcome"], d["reason"], d["proof"], d["claim_id"]),
+                         ("admitted", "", "reviewed_claim", "c1"))
 
     def test_a_legal_page_is_held_whatever_its_own_basis_says(self):
         """An owner's legal request is decided as path A above, so a legal basis in the batch means no ownership was
@@ -138,11 +164,13 @@ class Ownership(unittest.TestCase):
         (d,) = judge(pairs, {pid(1): [reviewed_claim()]})
         self.assertEqual((d["outcome"], d["reason"]), ("held", hide_guard.NOT_RECORDED))
         stale = hide_guard.needs_redecide(rows_for(pairs), [b for b, _ in pairs],
-                                          claim_reader=lambda ids: {i: [reviewed_claim()] for i in ids})
+                                          claim_reader=lambda ids: {i: [reviewed_claim()] for i in ids},
+                                          source_reader=linked)
         self.assertEqual([r["id"] for r in stale], [1])
         done = [entry(1)]
         self.assertEqual(hide_guard.needs_redecide(rows_for(done), [b for b, _ in done],
-                                                  claim_reader=lambda ids: {i: [reviewed_claim()] for i in ids}),
+                                                  claim_reader=lambda ids: {i: [reviewed_claim()] for i in ids},
+                                                  source_reader=linked),
                          [])
 
     def test_a_recorded_pass_whose_claim_is_gone_is_decided_again(self):
@@ -154,7 +182,63 @@ class Ownership(unittest.TestCase):
                                           claim_reader=lambda ids: {i: [] for i in ids})
         self.assertEqual(stale, rows)
         self.assertEqual(hide_guard.needs_redecide(rows, [b for b, _ in pairs],
-                                                  claim_reader=lambda ids: {i: [reviewed_claim()] for i in ids}), [])
+                                                  claim_reader=lambda ids: {i: [reviewed_claim()] for i in ids},
+                                                  source_reader=linked), [])
+
+    def test_a_claim_processed_the_moment_it_was_made_cannot_replace_the_reviewed_one(self):
+        """The pass was recorded on a claim processed after it was made. That claim is deleted, and the account still
+        holds another with the same matching link and no `reason`, processed the second it was filed: nobody looked
+        at it, the identity step would ask, and the guard holds the page on a multi-source profile the same way."""
+        pairs = [entry(1)]
+        rows = rows_for(pairs)
+        instant = dict(reviewed_claim(claim_id="c9"), processed_later=False)
+        self.assertFalse(hide_guard.reviewed(instant, LINKED))
+        for claim in (instant, {k: v for k, v in instant.items() if k != "processed_later"},
+                      dict(instant, processed_later="true")):               # only the reader's own True counts
+            (d,) = judge(pairs, {pid(1): [claim]})
+            self.assertEqual((d["outcome"], d["proof"], d["reason"]), ("held", "", hide_guard.UNVERIFIED), claim)
+        self.assertEqual(hide_guard.needs_redecide(rows, [b for b, _ in pairs],
+                                                  claim_reader=lambda ids: {i: [instant] for i in ids},
+                                                  source_reader=linked), rows)
+        # while the reviewed claim is still there, the instant one beside it changes nothing
+        (d,) = judge(pairs, {pid(1): [instant, reviewed_claim()]})
+        self.assertEqual((d["outcome"], d["proof"], d["claim_id"]), ("admitted", "reviewed_claim", "c1"))
+
+    def test_a_proof_that_fails_now_is_not_passed_by_a_takedown_or_a_legal_threat(self):
+        """`page_facts` called the claim checked; the live read does not (its link names nobody's account now). The
+        failed proof takes the account out of the checked set too, so the two classes that read that set first ask
+        instead of passing a page the guard would only hold in silence."""
+        changed = dict(reviewed_claim(), links={"weblinks": ["https://www.youtube.com/shorts/abc123"]})
+        page = identity.Page(pid(1), "profile", True, "An Artist", True, frozenset({OWNER}), 10.0, 5,
+                             checked_claim_user_ids=frozenset({OWNER}))
+        (p,) = hide_guard.prove([page], OWNER, claim_reader=lambda ids: {pid(1): [changed]}, source_reader=linked)
+        self.assertEqual((p.claim_user_ids, p.checked_claim_user_ids, p.claim_unproven),
+                         (frozenset(), frozenset(), frozenset({OWNER})))
+        who = identity.Requester(name="x", email="x@example.org", account_id=OWNER)
+        got = {cls: identity.decide_page(p, who, cls).verdict
+               for cls in ("dmca_takedown", "legal_threat", "privacy_erasure")}
+        self.assertEqual(got, {"dmca_takedown": "DMCA_REVIEW", "legal_threat": "ASK_IDENTITY",
+                               "privacy_erasure": "ASK_IDENTITY"})
+        self.assertIn("link", identity.decide_page(p, who, "dmca_takedown").why)       # says why, not "no claim"
+        # and the proof that still holds keeps passing all three
+        (ok,) = hide_guard.prove([page], OWNER, claim_reader=lambda ids: {pid(1): [reviewed_claim()]},
+                                 source_reader=linked)
+        self.assertEqual({cls: identity.decide_page(ok, who, cls).verdict
+                          for cls in ("dmca_takedown", "legal_threat", "privacy_erasure")},
+                         dict.fromkeys(("dmca_takedown", "legal_threat", "privacy_erasure"), "PASS_A"))
+
+    def test_a_recorded_pass_whose_claim_no_longer_names_the_profile_is_decided_again(self):
+        """The pass was recorded while the claim linked the profile's own account. The claimant has since replaced
+        the link with a page that is nobody's account: the guard holds the page, and the row goes back to the
+        identity step, which asks for the tie instead of leaving the hold in silence."""
+        pairs = [entry(1)]
+        rows = rows_for(pairs)
+        changed = dict(reviewed_claim(), links={"weblinks": ["https://www.youtube.com/shorts/abc123"]})
+        (d,) = judge(pairs, {pid(1): [changed]})
+        self.assertEqual((d["outcome"], d["reason"]), ("held", hide_guard.UNVERIFIED))
+        self.assertEqual(hide_guard.needs_redecide(rows, [b for b, _ in pairs],
+                                                  claim_reader=lambda ids: {i: [changed] for i in ids},
+                                                  source_reader=linked), rows)
 
     def test_a_legal_hide_first_row_is_not_decided_again_on_every_run(self):
         """A legal page with no owner match decides the same way every time: re-deciding it would spend a full
@@ -205,6 +289,7 @@ class Ownership(unittest.TestCase):
         hide_guard.judge(*(lambda ps: ([b for b, _ in ps], rows_for(ps)))([entry(1), entry(2, basis="PASS_D",
                                                                                            account=None)]),
                          [], NOW, claim_reader=lambda ids: {i: [reviewed_claim()] for i in ids},
+                         source_reader=linked,
                          site_reader=lambda ids: asked.append(list(ids)) or {i: SITE for i in ids})
         self.assertEqual(asked, [[pid(2)]])
 
@@ -215,6 +300,7 @@ class Ownership(unittest.TestCase):
             pairs = [entry(1, basis="PASS_D", account=None), entry(2, request_id=2)]
             stale = hide_guard.needs_redecide(rows_for(pairs), [b for b, _ in pairs],
                                               claim_reader=lambda ids: {i: [reviewed_claim()] for i in ids},
+                                              source_reader=linked,
                                               site_reader=lambda ids: {i: now_site for i in ids})
             self.assertEqual([r["id"] for r in stale], [1], now_site)
 
@@ -249,21 +335,77 @@ class UnreviewedClaims(unittest.TestCase):
         self.assertEqual((d["outcome"], d["reason"]), ("held", hide_guard.UNVERIFIED))
 
     def test_a_claim_with_a_reason_nobody_has_seen_is_not_a_reviewed_claim(self):
+        self.assertTrue(hide_guard.reviewed(reviewed_claim(), LINKED))
         c = dict(reviewed_claim(), reason="bulk import")
-        self.assertFalse(hide_guard.reviewed(c))
-        self.assertFalse(hide_guard.reviewed(dict(reviewed_claim(), links={"weblinks": [], "instagram": ""})))
-        self.assertFalse(hide_guard.reviewed(dict(reviewed_claim(), links=None)))
+        self.assertFalse(hide_guard.reviewed(c, LINKED))
+        self.assertFalse(hide_guard.reviewed(dict(reviewed_claim(), links={"weblinks": [], "instagram": ""}), LINKED))
+        self.assertFalse(hide_guard.reviewed(dict(reviewed_claim(), links=None), LINKED))
+
+    def test_a_claim_link_counts_only_when_it_names_an_account_or_artist_the_profile_itself_names(self):
+        """Ruling 2026-11-14: ownership evidence is an account or profile URL on a recognised platform that matches
+        the profile, never just any page-shaped link. The guard reads the claim and the profile again at batch time,
+        so a claim whose links were changed after the pass is weighed on what it carries now."""
+        spotify_id = "4Z8W4fKeB5YxbusRsdQVPb"
+        profile = dict(LINKED, identity=sources.ProfileIdentity(
+            spotify=frozenset({spotify_id}), apple=frozenset({"1234567"}),
+            social=frozenset({("instagram", "the.artist"), ("youtube", "theartist"), ("tiktok", "the.artist"),
+                              ("twitter", "theartist")})))
+        matching = [{"weblinks": [f"https://open.spotify.com/artist/{spotify_id}"]},
+                    {"weblinks": ["https://music.apple.com/us/artist/the-artist/1234567"]},
+                    {"weblinks": ["https://www.youtube.com/@TheArtist"]},
+                    {"instagram": "instagram.com/the.artist/"},
+                    {"weblinks": ["https://www.tiktok.com/@the.artist"]},
+                    {"twitter": "https://x.com/theartist"}]
+        not_matching = [{"weblinks": ["https://www.google.com/search?q=the+artist"]},     # a page, not an account
+                        {"weblinks": ["https://www.youtube.com/shorts/abc123"]},          # somebody's video
+                        {"weblinks": ["https://www.youtube.com/watch?v=abc123"]},
+                        {"weblinks": ["https://www.artist-site.example/"]},               # a website is not a platform
+                        {"weblinks": ["https://open.spotify.com/artist/0000000000000000000000"]},   # another artist
+                        {"weblinks": ["https://music.apple.com/us/artist/other/7654321"]},
+                        {"instagram": "https://instagram.com/somebody.else"},             # another account
+                        {"instagram": "https://instagram.com/p/abc123"},                  # a post
+                        {"weblinks": ["https://www.tiktok.com/@somebody.else"]},
+                        {"twitter": "https://x.com/somebody_else"},
+                        {"weblinks": ["abcd"]}]                                           # four characters: the old rule
+        for links in matching:
+            claim = dict(reviewed_claim(), links=links)
+            self.assertTrue(hide_guard.reviewed(claim, profile), links)
+            (d,) = judge([entry(1)], {pid(1): [claim]}, {pid(1): profile})
+            self.assertEqual((d["outcome"], d["proof"], d["reason"]), ("admitted", "reviewed_claim", ""), links)
+        for links in not_matching:
+            claim = dict(reviewed_claim(), links=links)
+            self.assertFalse(hide_guard.reviewed(claim, profile), links)
+            (d,) = judge([entry(1)], {pid(1): [claim]}, {pid(1): profile})
+            self.assertEqual((d["outcome"], d["reason"]), ("held", hide_guard.UNVERIFIED), links)
+
+    def test_a_claim_is_no_evidence_against_a_profile_that_names_no_account(self):
+        """Nothing to compare with is not a match: the page is held, never admitted on the link alone."""
+        bare = {"raws": ["spotify:9"], "created": T0 - 86400, "identity": sources.ProfileIdentity()}
+        for src in (bare, {"raws": ["spotify:9"], "created": T0 - 86400}):
+            self.assertFalse(hide_guard.reviewed(reviewed_claim(), src))
+            (d,) = judge([entry(1)], {pid(1): [reviewed_claim()]}, {pid(1): src})
+            self.assertEqual((d["outcome"], d["reason"]), ("held", hide_guard.UNVERIFIED))
+        self.assertFalse(hide_guard.reviewed(reviewed_claim(), None))
+        (d,) = judge([entry(1)], {pid(1): [reviewed_claim()]}, {})
+        self.assertEqual((d["outcome"], d["reason"]), ("held", hide_guard.NOT_FOUND))
 
     def test_a_profile_core_does_not_return_is_held_not_admitted(self):
         (d,) = judge([entry(1)], {pid(1): [instant_claim()]}, {})
         self.assertEqual((d["outcome"], d["reason"]), ("held", hide_guard.NOT_FOUND))
 
-    def test_the_profile_is_read_only_for_claims_that_need_it(self):
+    def test_the_profile_is_read_for_every_claim_the_requester_holds_and_for_no_other(self):
+        """A link is evidence only against the profile's own accounts, so a reviewed claim needs the profile too.
+        A page the requester holds no claim on is refused without a read."""
         asked = []
         hide_guard.judge(*self._two(), [], NOW,
                          claim_reader=lambda ids: {pid(1): [reviewed_claim()], pid(2): [instant_claim()]},
-                         source_reader=lambda ids: asked.append(list(ids)) or {pid(2): self.OWN})
-        self.assertEqual(asked, [[pid(2)]])
+                         source_reader=lambda ids: asked.append(list(ids)) or {pid(1): LINKED, pid(2): self.OWN})
+        self.assertEqual(asked, [[pid(1), pid(2)]])
+        asked.clear()
+        got = hide_guard.judge(*self._two(), [], NOW,
+                               claim_reader=lambda ids: {pid(1): [reviewed_claim(STRANGER)], pid(2): []},
+                               source_reader=lambda ids: asked.append(list(ids)) or {})
+        self.assertEqual((asked, [d["reason"] for d in got]), ([], [hide_guard.NOT_HOLDER] * 2))
 
     @staticmethod
     def _two():
@@ -295,13 +437,18 @@ class TheIdentityStepAsks(unittest.TestCase):
     MERGED = {"raws": ["muso:1111", "tidal:22"], "created": T0}
     OWN = {"raws": ["muso:1111"], "created": T0 + 1}
 
-    def page(self, n=1, holders=(OWNER,), **kw):
-        return identity.Page(pid(n), "profile", True, "An Artist", True, frozenset(holders), 10.0, 5, **kw)
+    def page(self, n=1, holders=(OWNER,), checked=None, **kw):
+        """A page as `sources.page_facts` hands it to the identity step: `checked` is what the page's own facts made
+        of the claim's links, so a test that wants a claim to be evidence says so here (absent is never a pass)."""
+        return identity.Page(pid(n), "profile", True, "An Artist", True, frozenset(holders), 10.0, 5,
+                             checked_claim_user_ids=frozenset(holders) if checked is None else frozenset(checked),
+                             **kw)
 
     def prove(self, facts, account=OWNER, claims=None, srcs=None):
         return hide_guard.prove(facts, account,
                                 claim_reader=lambda ids: {i: (claims or {}).get(i, []) for i in ids},
-                                source_reader=lambda ids: {i: srcs[i] for i in ids if i in (srcs or {})})
+                                source_reader=linked if srcs is None else (
+                                    lambda ids: {i: srcs[i] for i in ids if i in srcs}))
 
     def verdict(self, page, account=OWNER, cls="privacy_erasure"):
         return identity.decide_page(page, identity.Requester(name="x", email="x@example.org", account_id=account),
@@ -312,23 +459,28 @@ class TheIdentityStepAsks(unittest.TestCase):
         pv = self.verdict(p)
         self.assertEqual((pv.verdict, pv.account_id, pv.owner_page), ("PASS_A", OWNER, pid(1)))
 
-    def test_an_instant_claim_on_the_accounts_own_profile_still_passes(self):
-        (p,) = self.prove([self.page()], claims={pid(1): [instant_claim()]}, srcs={pid(1): self.OWN})
-        self.assertEqual(self.verdict(p).verdict, "PASS_A")
+    def test_an_instant_claim_on_the_accounts_own_profile_is_asked(self):
+        """Ruling 2026-11-13: an instant claim is not a verified claimant, whatever the profile's sources look like.
+        The guard does not strip it (it is the account's own new profile), and the identity step asks for the tie."""
+        (p,) = self.prove([self.page(checked=())], claims={pid(1): [instant_claim()]}, srcs={pid(1): self.OWN})
+        self.assertEqual(p.claim_unproven, frozenset())
+        pv = self.verdict(p)
+        self.assertEqual((pv.verdict, pv.account_id, pv.owner_page), ("ASK_IDENTITY", None, ""))
+        self.assertIn("carries no verification links", pv.why)
 
     def test_an_unverified_claim_on_a_merged_profile_is_asked_and_told_why(self):
-        (p,) = self.prove([self.page()], claims={pid(1): [instant_claim()]}, srcs={pid(1): self.MERGED})
+        (p,) = self.prove([self.page(checked=())], claims={pid(1): [instant_claim()]}, srcs={pid(1): self.MERGED})
         self.assertEqual((p.claim_user_ids, p.claim_unproven), (frozenset(), frozenset({OWNER})))
         pv = self.verdict(p)
         self.assertEqual((pv.verdict, pv.account_id, pv.owner_page), ("ASK_IDENTITY", None, ""))
-        self.assertIn("without verification", pv.why)
+        self.assertIn("made without verification", pv.why)
 
     def test_a_takedown_on_an_unverified_claim_does_not_pass(self):
-        (p,) = self.prove([self.page()], claims={pid(1): [instant_claim()]}, srcs={pid(1): self.MERGED})
+        (p,) = self.prove([self.page(checked=())], claims={pid(1): [instant_claim()]}, srcs={pid(1): self.MERGED})
         self.assertEqual(self.verdict(p, cls="dmca_takedown").verdict, "DMCA_REVIEW")
 
     def test_somebody_elses_claim_stays_on_the_page(self):
-        (p,) = self.prove([self.page(holders=(OWNER, STRANGER))],
+        (p,) = self.prove([self.page(holders=(OWNER, STRANGER), checked=(STRANGER,))],
                           claims={pid(1): [instant_claim(OWNER), reviewed_claim(STRANGER, "c9")]},
                           srcs={pid(1): self.MERGED})
         self.assertEqual(p.claim_user_ids, frozenset({STRANGER}))
@@ -340,7 +492,9 @@ class TheIdentityStepAsks(unittest.TestCase):
         (t,) = self.prove([track], claims={pid(1): [instant_claim()]}, srcs={pid(1): self.MERGED})
         self.assertEqual(t.artists[0].claim_user_ids, frozenset())
         self.assertNotEqual(self.verdict(t).verdict, "PASS_A")
-        (t,) = self.prove([track], claims={pid(1): [reviewed_claim()]})
+        reviewed = identity.Page(pid(7), "track", name="A Song", popularity=1.0, item_read=True,
+                                 artists=(self.page(),))
+        (t,) = self.prove([reviewed], claims={pid(1): [reviewed_claim()]})
         self.assertEqual(self.verdict(t).verdict, "PASS_A")
 
     def test_nothing_is_read_for_a_requester_who_holds_no_claim(self):
@@ -376,20 +530,26 @@ class TheIdentityStepAsks(unittest.TestCase):
 class DecideRow(unittest.TestCase):
     """Through Run.decide_row: what lands on the register row."""
 
-    def decide(self, claim, srcs):
+    def decide(self, claim, srcs, cls="privacy_erasure", checked=None, holders=frozenset({OWNER})):
         s = Store(":memory:")
         self.addCleanup(s.db.close)
-        rid, _ = s.upsert({"keys": ["register:901"], "channel": "register", "class": "privacy_erasure",
+        rid, _ = s.upsert({"keys": ["register:901"], "channel": "register", "class": cls,
                            "received_at": "2026-11-01T00:00:00Z", "requester_email": "owner@example.org",
                            "pages": [{"id": pid(1)}]})
+        # what `sources.page_facts` hands the identity step: the claim's links are evidence only when they match the
+        # page's own facts, which a fixture supplies by making a reviewed claim the checked one (`checked=()` says no)
+        if checked is None:
+            checked = ({pid(1): frozenset({OWNER})}
+                       if OWNER in holders and hide_guard.reviewed(claim, LINKED) else {})
         facts = lambda pages, hid, cl, half=None, items=False: [                               # noqa: E731
-            identity.Page(p["id"], "profile", True, "An Artist", True, frozenset(cl.get(p["id"], ())), 10.0, 5)
+            identity.Page(p["id"], "profile", True, "An Artist", True, frozenset(cl.get(p["id"], ())), 10.0, 5,
+                          checked_claim_user_ids=frozenset(checked.get(p["id"], ())))
             for p in pages]
         with mock.patch.object(sources, "resolve_account", lambda *a, **k: (OWNER, "unique account email")), \
                 mock.patch.object(sources, "account_names", lambda ids: {}), \
-                mock.patch.object(sources, "processed_claims", lambda ids: {i: {OWNER} for i in ids}), \
+                mock.patch.object(sources, "processed_claims", lambda ids: {i: set(holders) for i in ids}), \
                 mock.patch.object(sources, "claim_proofs", lambda ids: {i: [claim] for i in ids}), \
-                mock.patch.object(sources, "profile_sources", lambda ids: {i: srcs for i in ids}), \
+                mock.patch.object(sources, "profile_sources", lambda ids: {i: srcs or LINKED for i in ids}), \
                 mock.patch.object(sources, "page_facts", facts):
             Run(s, log=lambda *_: None).decide_row(s.get(rid), set(), {}, lambda c: {})
         return s.get(rid)
@@ -397,11 +557,33 @@ class DecideRow(unittest.TestCase):
     def test_a_pass_records_the_account_and_the_profile_it_rests_on(self):
         row = self.decide(reviewed_claim(), None)
         self.assertEqual(row["verdict_detail"][0] | {"why": ""},
-                         {"id": pid(1), "verdict": "PASS_A", "why": "", "account": OWNER, "owner_page": pid(1)})
+                         {"id": pid(1), "verdict": "PASS_A", "why": "", "rules": identity.RULES_V,
+                          "account": OWNER, "owner_page": pid(1)})
         self.assertEqual(hide_guard.needs_redecide(
             [row], [{"id": pid(1), "basis": "PASS_A", "request_id": row["id"]}],
-            claim_reader=lambda ids: {i: [reviewed_claim()] for i in ids}),
+            claim_reader=lambda ids: {i: [reviewed_claim()] for i in ids}, source_reader=linked),
                          [])
+
+    def test_the_requesters_own_claim_that_proves_nothing_gets_the_ownership_ask_not_claim_the_page(self):
+        """The five-requester case, through the real `hide_guard.prove` on an unverified `claim_proofs` answer: the
+        proof takes the account off `claim_user_ids`, and the gates must still know the claim is the requester's."""
+        unverified = {
+            "processed the moment it was made": instant_claim(),
+            "processed later, no link": {**reviewed_claim(), "links": ""},
+            "processed later, a link to somebody else":
+                {**reviewed_claim(), "links": {"instagram": "https://instagram.com/someone.else"}},
+        }
+        for name, claim in unverified.items():
+            with self.subTest(name):
+                row = self.decide(claim, None)
+                self.assertEqual(row["verdict_detail"][0]["verdict"], "ASK_IDENTITY")
+                self.assertEqual((row["gates"]["need"], row["gates"]["tie"]),
+                                 (dsar.NEED_CLAIM_EVIDENCE, {"pass": False, "pages": {pid(1): dsar.CLAIM_UNCHECKED}}))
+        # a reviewed claim is a tie and owes nothing; a page claimed by ANOTHER account is still "claim or authority"
+        self.assertEqual(self.decide(reviewed_claim(), None)["gates"]["need"], dsar.NEED_NONE)
+        other = self.decide(reviewed_claim(account=OWNER + 1), None, holders={OWNER + 1})
+        self.assertEqual((other["verdict_detail"][0]["verdict"], other["gates"]["need"]),
+                         ("ASK_IDENTITY", dsar.NEED_CLAIM_OR_AUTHORITY))
 
     def test_a_pass_whose_claim_was_deleted_is_put_back_for_a_new_decision(self):
         row = self.decide(reviewed_claim(), None)
@@ -432,7 +614,8 @@ class DecideRow(unittest.TestCase):
     def test_an_own_site_pass_records_the_sender_host_the_guard_compares(self):
         row = self.decide_d(SITE)
         self.assertEqual(row["verdict_detail"][0] | {"why": ""},
-                         {"id": pid(1), "verdict": "PASS_D", "why": "", "owner_page": pid(1), "sender_host": HOST})
+                         {"id": pid(1), "verdict": "PASS_D", "why": "", "rules": identity.RULES_V,
+                          "owner_page": pid(1), "sender_host": HOST})
         (b,) = hide_batch.plan([row], set(), set(), {})
         for now_site, want in ((SITE, ("admitted", "")), ("https://new-owner.example/", ("held",
                                                                                        hide_guard.SITE_MOVED))):
@@ -457,8 +640,33 @@ class DecideRow(unittest.TestCase):
         self.assertEqual((row["identity_verdict"], row["ask_kind"]), ("ASK_IDENTITY", "ASK_IDENTITY"))
         self.assertNotIn("owner_page", row["verdict_detail"][0])
         self.assertEqual(row["gates"]["tie"]["pass"], False)
-        self.assertEqual(row["gates"]["need"], dsar.NEED_CLAIM_OR_AUTHORITY)
+        # the claim is the requester's own, so what is owed is evidence for it (ruling 2026-11-13 21:56Z), not
+        # "claim the page": this read `claim_or_authority` while the gates looked for the claim where the proof
+        # had just taken it away
+        self.assertEqual(row["gates"]["need"], dsar.NEED_CLAIM_EVIDENCE)
         self.assertEqual(hide_batch.plan([row], set(), set(), {}), [])
+
+    def test_a_takedown_or_a_legal_threat_whose_live_proof_fails_is_decided_not_passed_and_never_planned(self):
+        """Decide, then the guard: `page_facts` still calls the claim checked, the live claim no longer links the
+        profile's account. Neither class records a pass, so no hide is planned and nothing waits behind a guard
+        hold; the legal threat is asked for the tie, the takedown goes to its claim-first review."""
+        changed = dict(reviewed_claim(), links={"weblinks": ["https://www.youtube.com/shorts/abc123"]})
+        stale_checked = {pid(1): frozenset({OWNER})}
+        want = {"dmca_takedown": "DMCA_REVIEW", "legal_threat": "ASK_IDENTITY", "privacy_erasure": "ASK_IDENTITY"}
+        for cls, verdict in want.items():
+            row = self.decide(changed, None, cls=cls, checked=stale_checked)
+            (pv,) = row["verdict_detail"]
+            self.assertEqual((row["identity_verdict"], pv["verdict"]), (verdict, verdict), cls)
+            self.assertNotIn("owner_page", pv, cls)
+            self.assertEqual(hide_batch.plan([row], set(), set(), {}), [], cls)
+            self.assertEqual(hide_batch.plan([row], set(), set(), {}, include_legal=True), [], cls)
+        self.assertEqual(self.decide(changed, None, cls="legal_threat", checked=stale_checked)["ask_kind"],
+                         "ASK_IDENTITY")
+        # the same rows with the proof intact pass and are planned
+        for cls in want:
+            row = self.decide(reviewed_claim(), None, cls=cls, checked=stale_checked)
+            self.assertEqual(row["verdict_detail"][0]["verdict"], "PASS_A", cls)
+            self.assertEqual([b["id"] for b in hide_batch.plan([row], set(), set(), {})], [pid(1)], cls)
 
 
 class Readers(unittest.TestCase):
@@ -467,7 +675,18 @@ class Readers(unittest.TestCase):
                "createdAt": "2026-11-13T01:42:21.790000"}
         with mock.patch.object(sources, "profile_doc", lambda p: doc if p == pid(1) else None):
             got = sources.profile_sources([pid(1), pid(2), "not-an-id"])
-        self.assertEqual(got, {pid(1): {"raws": ["muso:abc"], "created": 1794534141}})
+        self.assertEqual(got, {pid(1): {"raws": ["muso:abc"], "created": 1794534141,
+                                        "identity": sources.ProfileIdentity()}})
+
+    def test_profile_sources_names_the_accounts_the_profile_itself_links(self):
+        doc = {"rawProfiles": [{"id": "4Z8W4fKeB5YxbusRsdQVPb", "source": "spotify", "name": "n",
+                                "url": "https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb"}],
+               "createdAt": "2026-11-13T01:42:21.790000", "spotifyId": "4Z8W4fKeB5YxbusRsdQVPb",
+               "links": {"instagram": "https://www.instagram.com/The.Artist/", "website": "https://artist-site.example"}}
+        with mock.patch.object(sources, "profile_doc", lambda p: doc):
+            named = sources.profile_sources([pid(1)])[pid(1)]["identity"]
+        self.assertEqual((named.spotify, named.apple, named.social),
+                         (frozenset({"4Z8W4fKeB5YxbusRsdQVPb"}), frozenset(), frozenset({("instagram", "the.artist")})))
 
     def test_a_profile_answer_without_sources_or_a_date_is_unread(self):
         for doc in ({"createdAt": "2026-11-13T01:42:21"}, {"rawProfiles": [{"id": "a"}], "createdAt": "2026-11-13"},
@@ -488,18 +707,22 @@ class Readers(unittest.TestCase):
                 sources.profile_sites([pid(1)])
 
     def test_claim_proofs_parses_the_claim_and_never_guesses(self):
-        row = ["77", pid(1), str(OWNER), "", "created by user", '{"weblinks":["https://a.example"]}', str(T0)]
+        row = ["77", pid(1), str(OWNER), "", "created by user", '{"weblinks":["https://a.example"]}', str(T0), "false"]
         with mock.patch.object(sources, "trino", lambda sql: [row]):
             got = sources.claim_proofs([pid(1), pid(2)])
         self.assertEqual(got[pid(1)], [{"claim_id": "77", "account": OWNER, "reason": "created by user",
-                                        "links": {"weblinks": ["https://a.example"]}, "created": T0}])
+                                        "links": {"weblinks": ["https://a.example"]}, "created": T0,
+                                        "processed_later": False}])
         self.assertEqual(got[pid(2)], [])
-        for bad in (row[:6], row[:2] + [""] + row[3:], row[:5] + ["{not json"] + row[6:]):
+        for later, want in (("true", True), ("false", False), ("", False), ("NULL", False)):
+            with mock.patch.object(sources, "trino", lambda sql: [row[:7] + [later]]):
+                self.assertIs(sources.claim_proofs([pid(1)])[pid(1)][0]["processed_later"], want, later)
+        for bad in (row[:6], row[:7], row[:2] + [""] + row[3:], row[:5] + ["{not json"] + row[6:]):
             with mock.patch.object(sources, "trino", lambda sql: [bad]), self.assertRaises(sources.Unknown):
                 sources.claim_proofs([pid(1)])
 
     def test_a_claim_filed_on_an_extra_profile_counts_for_that_profile(self):
-        row = ["78", pid(9), str(OWNER), f'["{pid(2)}"]', "", "", str(T0)]
+        row = ["78", pid(9), str(OWNER), f'["{pid(2)}"]', "", "", str(T0), "true"]
         with mock.patch.object(sources, "trino", lambda sql: [row]):
             got = sources.claim_proofs([pid(2)])
         self.assertEqual([c["claim_id"] for c in got[pid(2)]], ["78"])
@@ -570,15 +793,15 @@ class Caps(unittest.TestCase):
         register = [admitted_event(100 + n, f"account:{1000 + n}", NOW - timedelta(hours=1), request_id=100 + n)
                     for n in range(1, 21)]
         cases = [
-            ([entry(1, basis="PASS_B")], {pid(1): [reviewed_claim()]}, {}, ()),
-            ([entry(1, basis="LEGAL_HIDE_FIRST", account=None)], {}, {}, ()),
-            ([entry(1, recorded=False)], {pid(1): [reviewed_claim()]}, {}, ()),
-            ([entry(1, account=STRANGER)], {pid(1): [reviewed_claim(OWNER)]}, {}, ()),
+            ([entry(1, basis="PASS_B")], {pid(1): [reviewed_claim()]}, None, ()),
+            ([entry(1, basis="LEGAL_HIDE_FIRST", account=None)], {}, None, ()),
+            ([entry(1, recorded=False)], {pid(1): [reviewed_claim()]}, None, ()),
+            ([entry(1, account=STRANGER)], {pid(1): [reviewed_claim(OWNER)]}, None, ()),
             ([entry(1)], {pid(1): [instant_claim()]}, {pid(1): {"raws": ["muso:1", "tidal:2"], "created": T0}}, ()),
             ([entry(1)], {pid(1): [instant_claim()]}, {}, ()),
-            ([entry(1)], {pid(1): [reviewed_claim()]}, {}, burst),
-            ([entry(1)], {pid(1): [reviewed_claim()]}, {}, register),
-            ([entry(1, basis="PASS_D", account=None)], {}, {}, ()),
+            ([entry(1)], {pid(1): [reviewed_claim()]}, None, burst),
+            ([entry(1)], {pid(1): [reviewed_claim()]}, None, register),
+            ([entry(1, basis="PASS_D", account=None)], {}, None, ()),
         ]
         seen = {}
         for pairs, claims, srcs, history in cases:
@@ -607,7 +830,7 @@ class Recorded(unittest.TestCase):
     def guard(self, batch, rows, claims, write=True, now=None):
         return hide_guard.guard(batch, rows, self.s, write=write, now=now,
                                 claim_reader=lambda ids: {i: claims.get(i, []) for i in ids},
-                                source_reader=lambda ids: {})
+                                source_reader=linked)
 
     def test_a_non_owner_is_dropped_from_the_batch_and_the_refusal_is_on_the_record(self):
         row, batch = self.request(1, [entry(1, account=STRANGER), entry(2)])
@@ -712,7 +935,7 @@ class HideBatchCommand(unittest.TestCase):
                 mock.patch.object(self.cli, "slack_post", post), \
                 mock.patch.object(sources, "hidden_lists", lambda: (set(), set())), \
                 mock.patch.object(sources, "claim_proofs", reader), \
-                mock.patch.object(sources, "profile_sources", lambda ids: {}), \
+                mock.patch.object(sources, "profile_sources", linked), \
                 mock.patch.object(hide_batch, "in_flight_ids", lambda ids, **k: {}), \
                 mock.patch.object(hide_batch, "own_added", lambda **k: {"hdevops": set(), "pdp": set()}), \
                 mock.patch.object(hide_batch, "open_prs", open_prs), \

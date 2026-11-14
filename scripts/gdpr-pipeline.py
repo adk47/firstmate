@@ -51,6 +51,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -59,6 +60,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gdpr_pipeline import approval, copy, copy_gate, dsar, hide_batch, hide_guard, send, sources  # noqa: E402
+from gdpr_pipeline import access  # noqa: E402
 from gdpr_pipeline import intake as intake_core  # noqa: E402
 from gdpr_pipeline.run import JAN, Run, backfill_table, page_chunks, page_text, SLACK_CHANNEL  # noqa: E402
 from gdpr_pipeline import store  # noqa: E402
@@ -766,6 +768,39 @@ def refuse_send(a, kind: str, items: list[dict]) -> None:
         raise SystemExit(1)
 
 
+def access_owed_send(run: Run, now) -> None:
+    """The Art. 15 answers the one-message-per-person-per-UTC-day rule deferred, delivered on the next day the
+    person has no message. The mark is recorded on the row (`access_owed_at`) by `Run.access_deliver`, so nothing
+    here depends on a person noticing a log line, and `access_deliver` rebuilds the copy itself when the recorded one
+    is older than `access.FRESH_HOURS`, so a deferred answer is never sent stale and never waits on an operator.
+
+    NON-FATAL, like the ladder: a rebuild or a gate that cannot answer leaves THAT row owed for the next tick and the
+    tick goes on, so one unreadable row can never stop every other requester's letter."""
+    if os.path.exists(DSAR_KILL):
+        # ONE switch stops every outbound GDPR letter (ruling 2026-11-14): the ladder, the operator's
+        # `access --deliver`, and this pass. The rows stay owed and go on the first tick after the file is removed.
+        print(f"access owed: disabled ({DSAR_KILL})")
+        return
+    rows = oldest_first([r for r in run.store.all("open")
+                         if r["class"] == "privacy_access" and r.get("access_owed_at")])
+    if not rows:
+        return
+    tally: dict[str, int] = {}
+    for r in rows:
+        try:
+            out = run.access_deliver(r["register_no"], now)
+        except (dsar.CopyError, access.ManifestError, sources.Unknown, OSError, sqlite3.Error) as exc:
+            run.fail(f"access answer #{r['register_no']} (still owed)", exc)
+            tally["failed"] = tally.get("failed", 0) + 1
+            print(f"  access #{r['register_no']} -> failed {exc} (still owed)")
+            continue
+        state = out.get("state") or "held"
+        tally[state] = tally.get(state, 0) + 1
+        print(f"  access #{r['register_no']} -> {state} {out.get('why') or out.get('ref') or ''}")
+    print(f"access owed: {len(rows)} answer(s) deferred by the daily rule: "
+          + ", ".join(f"{n} {s}" for s, n in sorted(tally.items())))
+
+
 def dsar_ladder(run: Run, now, limit: int, send_them: bool) -> None:
     """Author the ladder messages owed and (with `send_them`) send the approved ones. Prints one line per message.
 
@@ -1047,6 +1082,9 @@ def main() -> int:
             # BEFORE the scheduled send: a statutory request the ladder has authored a message for gets no legacy ask
             # (Run.asks), so the ladder has to have looked at the hour's new requests first.
             if getattr(a, "ladder", False):
+                # BEFORE the ladder: a statutory access answer outranks the ordinary ladder letter, so the answer
+                # takes the person's day and the letter is the one held (and re-offered on the next tick).
+                access_owed_send(run, now)
                 dsar_ladder(run, now, a.ladder_limit, send_them=True)
             run.dsar_states()
             # AFTER the read-back: `mark_hidden` is what turns a landed hide into hidden_at, so a confirmation
@@ -1129,6 +1167,14 @@ def main() -> int:
         except sources.Unknown as exc:
             run.fail("hide lists", exc)
             return 2
+        stale = hide_batch.stale_passes(run.store.all("open"))
+        if stale:
+            # Not a failure and not an empty batch: the tick decides these again within the hour, and until then
+            # nobody knows the hide set, so the open batch PRs are left exactly as they are.
+            print(f"hide batch: not run. {len(stale)} open request(s) carry an identity pass decided under older "
+                  f"identity rules ({', '.join(f'#{n}' for n in stale)}); the next tick decides them again. "
+                  f"No PR was opened, changed or closed.")
+            return 0
         def planned() -> tuple[list[dict], list[dict], dict, set[str]]:
             rows = run.store.all("open")
             cand = hide_batch.plan(rows, hd, pdp, {}, include_legal=a.include_legal)
@@ -1155,9 +1201,9 @@ def main() -> int:
         # own-site (path D) row is decided again too: only that step reads whether the sender is verified. A decision
         # or a proof that cannot be READ stops the run here, before the open PR is touched.
         try:
-            stale = hide_guard.needs_redecide(rows, batch)
-            if stale and a.open_prs:
-                run.decide_rows(stale, hd & pdp, half=sources.half_hidden(hd, pdp))
+            redecide = hide_guard.needs_redecide(rows, batch)
+            if redecide and a.open_prs:
+                run.decide_rows(redecide, hd & pdp, half=sources.half_hidden(hd, pdp))
                 if run.errors:
                     return 2
                 rows, batch, flight, carried = planned()

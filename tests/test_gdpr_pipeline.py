@@ -48,6 +48,13 @@ HERE = os.path.dirname(os.path.abspath(__file__)) + "/../scripts"
 
 ARPAD = "7950a3c4-db2f-49bb-9acf-0d406bfb09ae"
 OTHER = "11111111-2222-3333-4444-555555555555"
+SPOTIFY_LINK = "https://open.spotify.com/artist/0OdUWJ0sBjDrqHygGUXeCF"
+
+
+def _linked_profile(ids):
+    """The live profile the hide guard reads for a claim: it names the Spotify artist SPOTIFY_LINK points at."""
+    return {i: {"raws": ["spotify:0OdUWJ0sBjDrqHygGUXeCF"], "created": 0,
+                "identity": sources.ProfileIdentity(spotify=frozenset({"0OdUWJ0sBjDrqHygGUXeCF"}))} for i in ids}
 
 
 def page(**kw):
@@ -90,11 +97,37 @@ class Identity(unittest.TestCase):
                     self.assertNotIn(identity.decide_page(p, r, cls).verdict, ("PASS_B", "PASS_C"), (cls, r, p))
 
     def test_claim_is_a_path_not_a_requirement(self):
-        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}))
+        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}), checked_claim_user_ids=frozenset({42}))
         self.assertEqual(identity.decide([claimed], Requester(account_id=42), "privacy_erasure").verdict, "PASS_A")
         # someone ELSE holds the claim -> ASK, even when the name matches
         self.assertEqual(identity.decide([claimed], Requester(name="Arpad Laczkovszki", account_id=7),
                                          "privacy_erasure").verdict, "ASK_IDENTITY")
+
+    def test_a_claim_with_no_verification_links_is_not_a_tie_for_a_hide(self):
+        """Ruling 2026-11-13. A claim is filed by the account itself and most are processed the instant they are
+        made: 3 of the 7 pages in the open hide batch rested on one made within minutes of the erasure request."""
+        own = page(is_claimed=True, claim_user_ids=frozenset({42}))        # the requester's own claim, no evidence
+        d = identity.decide([own], Requester(account_id=42), "privacy_erasure")
+        self.assertEqual((d.verdict, d.basis), ("ASK_IDENTITY", ""))
+        self.assertIn("no verification links", d.pages[0].why)
+        self.assertNotIn("not the requester's", d.pages[0].why)              # it is their claim: say what is missing
+        # the takedown rule is claim-first, and it is the same claim
+        d = identity.decide([own], Requester(account_id=42), "dmca_takedown")
+        self.assertNotIn(d.verdict, identity.HIDE_ELIGIBLE)
+        self.assertIn("no verification links", d.pages[0].why)
+        # a track passes only through its artist, so the artist's unchecked claim does not pass it either
+        item = Page(OTHER, "track", name="A Song", popularity=1, item_read=True, artists=(own,))
+        self.assertNotIn(identity.decide([item], Requester(account_id=42), "privacy_erasure").verdict,
+                         identity.HIDE_ELIGIBLE)
+        # evidence on SOMEBODY ELSE's claim proves nothing about this requester
+        theirs = page(is_claimed=True, claim_user_ids=frozenset({42, 7}), checked_claim_user_ids=frozenset({7}))
+        self.assertEqual(identity.decide([theirs], Requester(account_id=42), "privacy_erasure").verdict, "ASK_IDENTITY")
+        self.assertEqual(identity.decide([theirs], Requester(account_id=7), "privacy_erasure").verdict, "PASS_A")
+        # exhaustive: without a checked claim no requester shape reaches path A on any class
+        for cls in ("privacy_erasure", "dmca_takedown"):
+            for r in (Requester(account_id=42), Requester(account_id=42, name="Arpad Laczkovszki", verified=True),
+                      Requester(account_id=42, account_names=("Laczkovszki Arpad",))):
+                self.assertNotEqual(identity.decide_page(own, r, cls).verdict, "PASS_A", (cls, r))
 
     def test_an_account_whose_name_matches_is_asked_to_claim_the_page(self):
         d = identity.decide([page()], Requester(account_id=9, account_names=("Arpad Laczkovszki",)), "privacy_erasure")
@@ -173,7 +206,7 @@ class Identity(unittest.TestCase):
         self.assertEqual((d.verdict, d.basis), ("PASS_D", "D"))
         self.assertIn(ARPAD, d.pages[0].why)
         # the claim path, and it is the artist's claim that counts
-        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}))
+        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}), checked_claim_user_ids=frozenset({42}))
         self.assertEqual(identity.decide([self.item(claimed)], Requester(account_id=42), "privacy_erasure").verdict,
                          "PASS_A")
         self.assertEqual(identity.decide([self.item(claimed)], Requester(account_id=7, name="Arpad Laczkovszki"),
@@ -195,6 +228,7 @@ class Identity(unittest.TestCase):
                 Requester(name="Arpad Laczkovszki", representative=True, verified=True),
                 Requester(email="legal@biglabel.com", verified=True)]
         arts = [page(), page(popularity=61), page(credit_count=50), page(is_claimed=True, claim_user_ids=frozenset({42})),
+                page(is_claimed=True, claim_user_ids=frozenset({42}), checked_claim_user_ids=frozenset({42})),
                 page(found=False), page(gone=True), page(facts_unknown="isClaimed"), page(hidden=True),
                 page(name="Big Label Artist", website="https://www.biglabel.com/a")]
         for cls in ("privacy_erasure", "dmca_takedown", "legal_threat"):
@@ -217,7 +251,7 @@ class Identity(unittest.TestCase):
         self.assertEqual(identity.decide([self.item()], ok, "privacy_erasure").verdict, "JAN_REVIEW")
 
     def test_a_big_item_goes_to_jan_on_every_path_including_a_claim(self):
-        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}))
+        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}), checked_claim_user_ids=frozenset({42}))
         self.assertEqual(identity.decide([self.item(claimed, popularity=60)], Requester(account_id=42),
                                          "privacy_erasure").verdict, "JAN_BIGNAME")
         self.assertEqual(identity.decide([self.item(claimed, popularity=59)], Requester(account_id=42),
@@ -241,12 +275,18 @@ class Identity(unittest.TestCase):
         self.assertEqual(identity.decide([self.item(page(facts_unknown="creditCount"))], r, "legal_threat").verdict,
                          "JAN_REVIEW")
         # an item whose one artist the requester holds the claim on is that owner's request, on the artist's profile
-        owned = self.item(page(is_claimed=True, claim_user_ids=frozenset({42})))
+        owned = self.item(page(is_claimed=True, claim_user_ids=frozenset({42}),
+                               checked_claim_user_ids=frozenset({42})))
         d = identity.decide([owned], Requester(account_id=42), "legal_threat")
         self.assertEqual((d.verdict, d.pages[0].owner_page), ("PASS_A", ARPAD))
+        # the claim alone, with no verification links on it, does not make the requester the owner of the page: an
+        # item can never produce an ASK, so it falls back to the legal rule and the hide guard holds it
+        unevidenced = self.item(page(is_claimed=True, claim_user_ids=frozenset({42})))
+        self.assertEqual(identity.decide([unevidenced], Requester(account_id=42), "legal_threat").verdict,
+                         "LEGAL_HIDE_FIRST")
 
     def test_dmca_on_an_item_is_claim_first_like_a_profile(self):
-        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}))
+        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}), checked_claim_user_ids=frozenset({42}))
         self.assertEqual(identity.decide([self.item(claimed)], Requester(account_id=42), "dmca_takedown").verdict,
                          "PASS_A")
         self.assertEqual(identity.decide([self.item(claimed)], Requester(account_id=7), "dmca_takedown").verdict,
@@ -255,13 +295,18 @@ class Identity(unittest.TestCase):
     def test_legal_threat_hides_first_except_big_names(self):
         self.assertEqual(identity.decide([page()], Requester(), "legal_threat").verdict, "LEGAL_HIDE_FIRST")
         self.assertEqual(identity.decide([page(popularity=80)], Requester(), "legal_threat").verdict, "JAN_BIGNAME")
-        # the account holding the claim is asking for its own profile: path A, like any owner request
-        owned = page(is_claimed=True, claim_user_ids=frozenset({42}))
+        # the account holding the claim is asking for its own profile: path A, like any owner request, when the
+        # claim carries verification links (ruling 2026-11-13)
+        owned = page(is_claimed=True, claim_user_ids=frozenset({42}), checked_claim_user_ids=frozenset({42}))
         d = identity.decide([owned], Requester(account_id=42), "legal_threat")
         self.assertEqual((d.verdict, d.basis, d.pages[0].account_id, d.pages[0].owner_page),
                          ("PASS_A", "A", 42, ARPAD))
         self.assertEqual(identity.decide([owned], Requester(account_id=7), "legal_threat").verdict,
                          "LEGAL_HIDE_FIRST")
+        # the same claim with no links on it is not a tie: the requester is asked, not hidden
+        unevidenced = page(is_claimed=True, claim_user_ids=frozenset({42}))
+        self.assertEqual(identity.decide([unevidenced], Requester(account_id=42), "legal_threat").verdict,
+                         "ASK_IDENTITY")
         # a big-name page still goes to Jan on every path, a claim included
         self.assertEqual(identity.decide([page(is_claimed=True, claim_user_ids=frozenset({42}), popularity=60)],
                                          Requester(account_id=42), "legal_threat").verdict, "JAN_BIGNAME")
@@ -365,7 +410,7 @@ class Identity(unittest.TestCase):
                             Requester(name="Arpad Laczkovszki", verified=True), "privacy_erasure")
         self.assertEqual(d.verdict, "ASK_IDENTITY")
         self.assertEqual({p.entity_id: p.verdict for p in d.pages}, {ARPAD: "ASK_IDENTITY", OTHER: "ASK_IDENTITY"})
-        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}))
+        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}), checked_claim_user_ids=frozenset({42}))
         d = identity.decide([claimed, page(entity_id=OTHER, name="Somebody Else")], Requester(account_id=42),
                             "privacy_erasure")
         self.assertEqual({p.entity_id: p.verdict for p in d.pages}, {ARPAD: "PASS_A", OTHER: "ASK_IDENTITY"})
@@ -382,9 +427,12 @@ class ItemFacts(unittest.TestCase):
     these pin WHERE each fact comes from: the catalog item, its artists' catalog profiles, the claiming table. The
     request contributes the id and nothing else."""
     T = "99999999-aaaa-bbbb-cccc-dddddddddddd"
-    PROFILE = {"name": "Laczkovszki Arpad", "isClaimed": True, "popularity": 3, "creditCount": 4, "links": {}}
+    SPOTIFY = "0OdUWJ0sBjDrqHygGUXeCF"
+    PROFILE_LINK = f"https://open.spotify.com/artist/{SPOTIFY}"
+    PROFILE = {"name": "Laczkovszki Arpad", "isClaimed": True, "popularity": 3, "creditCount": 4, "links": {},
+               "spotifyId": SPOTIFY}
 
-    def read(self, item, profiles=None, claims=None, pages=None, hidden=(), half=None, calls=None):
+    def read(self, item, profiles=None, claims=None, pages=None, hidden=(), half=None, calls=None, checked=None):
         profiles = {ARPAD: self.PROFILE} if profiles is None else profiles
         calls = calls if calls is not None else []
 
@@ -403,7 +451,11 @@ class ItemFacts(unittest.TestCase):
 
         def processed_claims(ids):
             calls.append(("claims", tuple(ids)))
-            return claims or {}
+            got = sources.Claims(claims or {})
+            evidence = dict(claims or {}) if checked is None else checked
+            for pid, uids in got.items():
+                got.links[pid] = {uid: (self.PROFILE_LINK,) for uid in uids if uid in evidence.get(pid, set())}
+            return got
 
         with mock.patch.object(sources, "item_doc", item_doc), \
                 mock.patch.object(sources, "profile_doc", profile_doc), \
@@ -555,7 +607,8 @@ class RepresentativeBeatsClaim(unittest.TestCase):
 
     def test_a_claim_held_by_the_writer_does_not_excuse_authorisation(self):
         from gdpr_pipeline.identity import ASK_AUTH, LEGAL_HIDE_FIRST, PASS_A, decide_page
-        page = Page(ARPAD, "profile", True, "Arpad", True, frozenset({42}), 1.0, 0, "", False)
+        page = Page(ARPAD, "profile", True, "Arpad", True, frozenset({42}), 1.0, 0, "", False,
+                    checked_claim_user_ids=frozenset({42}))
         writer = Requester(name="A P", email="a@pm.me", account_id=42, representative=True)
         self.assertEqual(decide_page(page, writer, "privacy_erasure").verdict, ASK_AUTH)
         # the same claim without the representative flag is still path A
@@ -901,11 +954,11 @@ class HideBatch(unittest.TestCase):
     def test_plan_takes_only_hide_eligible_profiles_most_overdue_first(self):
         rows = [
             {"id": 1, "status": "open", "register_no": 40, "due_at": "2026-12-01T00:00:00Z", "pages": [],
-             "verdict_detail": [{"id": ARPAD, "verdict": "PASS_C"}, {"id": OTHER, "verdict": "ASK_IDENTITY"}]},
+             "verdict_detail": [{"id": ARPAD, "verdict": "PASS_C", "rules": identity.RULES_V}, {"id": OTHER, "verdict": "ASK_IDENTITY"}]},
             {"id": 2, "status": "open", "register_no": 41, "due_at": "2026-10-01T00:00:00Z", "pages": [],
              "verdict_detail": [{"id": OTHER, "verdict": "LEGAL_HIDE_FIRST"}]},
             {"id": 3, "status": "open", "register_no": 42, "due_at": "2026-09-01T00:00:00Z", "pages": [],
-             "verdict_detail": [{"id": "33333333-2222-3333-4444-555555555555", "verdict": "PASS_A"}]},
+             "verdict_detail": [{"id": "33333333-2222-3333-4444-555555555555", "verdict": "PASS_A", "rules": identity.RULES_V}]},
         ]
         plan = hide_batch.plan(rows, set(), {"33333333-2222-3333-4444-555555555555"},
                                in_flight={"hdevops": {"33333333-2222-3333-4444-555555555555"}})
@@ -917,6 +970,69 @@ class HideBatch(unittest.TestCase):
         plan2 = hide_batch.plan(rows, set(), {"33333333-2222-3333-4444-555555555555"}, {})
         self.assertEqual(plan2[0]["need"], ["hdevops"])
 
+    def test_a_pass_decided_under_older_identity_rules_is_not_in_the_batch_and_stops_the_run(self):
+        """The batch is built from the verdict on file. One decided before a rule got stricter is not a pass yet,
+        and a batch built without it would close the open PR as "nothing still waiting"."""
+        old = {"id": 1, "status": "open", "register_no": 469, "due_at": "2026-10-24T00:00:00Z", "pages": [],
+               "verdict_detail": [{"id": ARPAD, "verdict": "PASS_A", "why": "A: holds the processed claim"}]}
+        new = {"id": 2, "status": "open", "register_no": 442, "due_at": "2026-12-10T00:00:00Z", "pages": [],
+               "verdict_detail": [{"id": OTHER, "verdict": "PASS_A", "rules": identity.RULES_V}]}
+        asked = {"id": 3, "status": "open", "register_no": 400, "due_at": "2026-12-06T00:00:00Z", "pages": [],
+                 "verdict_detail": [{"id": ARPAD, "verdict": "ASK_IDENTITY"}]}       # not a pass: nothing stale
+        closed = dict(old, id=4, register_no=5, status="closed")
+        self.assertEqual([b["register_no"] for b in hide_batch.plan([old, new, asked], set(), set(), {})], [442])
+        self.assertEqual(hide_batch.stale_passes([old, new, asked, closed]), [469])
+        self.assertEqual(hide_batch.stale_passes([new, asked, closed]), [])
+        for wrong in (1, "2", None, identity.RULES_V + 1):
+            stamped = dict(old, verdict_detail=[dict(old["verdict_detail"][0], rules=wrong)])
+            self.assertEqual(hide_batch.plan([stamped], set(), set(), {}), [], wrong)
+
+    def test_the_hide_batch_command_touches_no_pr_while_a_stale_pass_is_on_file(self):
+        import contextlib
+        import io
+        cli = _cli()
+        s = Store(":memory:")
+        rid, _ = s.upsert({"keys": ["intercom:5"], "channel": "intercom", "class": "privacy_erasure",
+                           "received_at": "2026-09-01T10:00:00Z", "pages": [{"entity": "profile", "id": ARPAD}]})
+        s.update(rid, "decide", identity_verdict="PASS_A", verdict_detail=[{"id": ARPAD, "verdict": "PASS_A"}])
+        no = s.get(rid)["register_no"]
+        calls = []
+
+        def go():
+            out = io.StringIO()
+            with mock.patch.object(cli, "Store", lambda *a, **k: s), \
+                    mock.patch.object(cli, "hold_lock", lambda *a, **k: mock.MagicMock()), \
+                    mock.patch.object(cli.os.path, "exists", lambda p: False), \
+                    mock.patch.object(cli.sources, "hidden_lists", lambda: (set(), set())), \
+                    mock.patch.object(cli.hide_batch, "in_flight_ids", lambda ids: {"hdevops": set(), "pdp": set()}), \
+                    mock.patch.object(cli.hide_batch, "own_added", lambda: {}), \
+                    mock.patch.object(cli.sources, "claim_proofs",
+                                      lambda ids: {pid: [{"account": 42, "claim_id": "c1", "reason": "",
+                                                          "links": {"weblinks": [SPOTIFY_LINK]},
+                                                          "created": 0.0, "processed_later": True}] for pid in ids}), \
+                    mock.patch.object(cli.sources, "profile_sources", _linked_profile), \
+                    mock.patch.object(cli.hide_batch, "open_prs",
+                                      lambda batch, dry_run=True: calls.append([b["id"] for b in batch])
+                                      or {"blocked_items": [], "unreadable": []}), \
+                    mock.patch.object(sys, "argv", ["gdpr-pipeline.py", "--store", ":memory:", "hide-batch", "--open-prs"]), \
+                    contextlib.redirect_stdout(out):
+                try:
+                    rc = cli.main()
+                except Exception:               # the fake open_prs answer is not the whole shape; the call is the point
+                    rc = None
+            return rc, out.getvalue()
+
+        rc, text = go()
+        self.assertEqual((rc, calls), (0, []))
+        self.assertIn(f"#{no}", text)
+        self.assertIn("No PR was opened, changed or closed", text)
+        # decided again under the current rules, the same command reaches open_prs with the page (the guard reads
+        # the proof again: a pass it cannot tie to an account and a page is `proof_not_recorded`, not a pass)
+        s.update(rid, "decide", verdict_detail=[{"id": ARPAD, "verdict": "PASS_A", "rules": identity.RULES_V,
+                                                 "account": 42, "owner_page": ARPAD}])
+        go()
+        self.assertEqual(calls, [[ARPAD]])
+
     def test_a_page_held_for_the_captains_legal_threat_call_is_not_swept_up_by_another_row(self):
         """Two register rows can carry the SAME page id. Register #126 (legal threat) holds 7871c617 for the captain's
         own hide-first call; register #246 independently decides the same page PASS_A. The batch dedups by PAGE, so
@@ -925,7 +1041,7 @@ class HideBatch(unittest.TestCase):
             {"id": 1, "status": "open", "class": "legal_threat", "register_no": 126, "due_at": "2026-11-22T00:00:00Z",
              "pages": [], "verdict_detail": [{"id": ARPAD, "verdict": "LEGAL_HIDE_FIRST"}]},
             {"id": 2, "status": "open", "class": "privacy_erasure", "register_no": 246, "due_at": "2026-12-02T00:00:00Z",
-             "pages": [], "verdict_detail": [{"id": ARPAD, "verdict": "PASS_A"}]},
+             "pages": [], "verdict_detail": [{"id": ARPAD, "verdict": "PASS_A", "rules": identity.RULES_V}]},
         ]
         self.assertEqual(hide_batch.plan(rows, set(), set(), {}), [])
         # the captain's GO (include_legal) is what lets it through, and then it is attributed to the row that named it
@@ -940,7 +1056,7 @@ class HideBatch(unittest.TestCase):
     def test_plan_takes_a_track_the_identity_gate_passed_and_says_what_it_is(self):
         rows = [{"id": 1, "status": "open", "register_no": 146, "due_at": "2026-11-20T00:00:00Z",
                  "pages": [{"entity": "track", "id": self.TRACK}, {"entity": "album", "id": OTHER}],
-                 "verdict_detail": [{"id": self.TRACK, "verdict": "PASS_A"}, {"id": OTHER, "verdict": "JAN_REVIEW"}]}]
+                 "verdict_detail": [{"id": self.TRACK, "verdict": "PASS_A", "rules": identity.RULES_V}, {"id": OTHER, "verdict": "JAN_REVIEW"}]}]
         plan = hide_batch.plan(rows, set(), set(), {})
         self.assertEqual([(b["id"], b["entity"], b["need"]) for b in plan], [(self.TRACK, "track", ["hdevops", "pdp"])])
 
@@ -979,7 +1095,7 @@ class HideBatch(unittest.TestCase):
 
     def test_half_opened_batch_is_retried_for_the_missing_half_only(self):
         rows = [{"id": 1, "status": "open", "register_no": 40, "due_at": "2026-12-01T00:00:00Z", "pages": [],
-                  "verdict_detail": [{"id": ARPAD, "verdict": "PASS_C"}]}]
+                  "verdict_detail": [{"id": ARPAD, "verdict": "PASS_C", "rules": identity.RULES_V}]}]
         # the H-DevOps PR opened, the PDP one failed: the next run plans the PDP half
         plan = hide_batch.plan(rows, set(), set(), {"hdevops": {ARPAD}, "pdp": set()})
         self.assertEqual([(p["id"], p["need"]) for p in plan], [(ARPAD, ["pdp"])])
@@ -1796,7 +1912,7 @@ class BacklogAndDiff(unittest.TestCase):
         self.assertEqual(hide_batch.in_flight_ids([ARPAD], runner=raising), {"hdevops": set(), "pdp": set()})
         # and the batch still plans the eligible page, which is the whole point: nothing is hidden by not planning
         rows = [{"id": 1, "status": "open", "due_at": "2026-11-01T00:00:00Z", "register_no": 39,
-                 "verdict_detail": [{"id": ARPAD, "verdict": "PASS_C", "why": ""}],
+                 "verdict_detail": [{"id": ARPAD, "verdict": "PASS_C", "why": "", "rules": identity.RULES_V}],
                  "pages": [{"entity": "profile", "id": ARPAD}]}]
         plan = hide_batch.plan(rows, set(), set(), hide_batch.in_flight_ids([ARPAD], runner=raising))
         self.assertEqual([b["id"] for b in plan], [ARPAD])
@@ -1838,11 +1954,200 @@ class ReplyMergesAndSitemapShapes(unittest.TestCase):
         def fake_trino(sql):
             if "postgresql_core.public.claiming" not in sql:
                 return []
-            return [[main_pid, "42", f'["{extra_pid}"]']]      # target as an EXTRA, not the claim's main id
+            # target as an EXTRA, not the claim's main id; a claim with a link, processed after it was made
+            return [[main_pid, "42", f'["{extra_pid}"]', f'{{"weblinks":"{SPOTIFY_LINK}"}}', "true"]]
 
         with mock.patch.object(sources, "trino", fake_trino):
             got = sources.processed_claims([main_pid, extra_pid])
         self.assertEqual(got, {main_pid: {42}, extra_pid: {42}})
+        self.assertEqual(got.links, {main_pid: {42: (SPOTIFY_LINK,)}, extra_pid: {42: (SPOTIFY_LINK,)}})
+
+    def test_a_claim_link_is_evidence_only_when_it_names_the_profiles_own_music_or_social_page(self):
+        """Ruling 2026-11-14: "a link counts as ownership evidence only when it matches the profile ... Any
+        page-shaped link is not enough." Driven through the live path (`processed_claims` -> `page_facts`), which is
+        the one owner of the rule."""
+        from unittest import mock
+        from gdpr_pipeline import sources
+        page = {"name": "Laczkovszki Arpad", "isClaimed": True, "popularity": 1, "creditCount": 2,
+                "spotifyId": "0OdUWJ0sBjDrqHygGUXeCF",
+                "rawProfiles": [{"id": "123456789", "source": "apple", "url": ""}],
+                "links": {"instagram": "https://www.instagram.com/arpad/", "twitter": "https://twitter.com/arpad"}}
+        empty_page = dict(page, spotifyId="", rawProfiles=[], links={})
+        for links, later, doc, want in (
+                (f'{{"weblinks":"{SPOTIFY_LINK}"}}', "true", page, True),
+                ('{"weblinks":"https://open.spotify.com/intl-de/artist/0OdUWJ0sBjDrqHygGUXeCF?si=1"}',
+                 "true", page, True),                                            # intl segment, query string
+                ('{"weblinks":"open.spotify.com/artist/0OdUWJ0sBjDrqHygGUXeCF"}', "true", page, True),
+                ('{"weblinks":"https://music.apple.com/us/artist/arpad/123456789"}', "true", page, True),
+                ('{"weblinks":["", "https://music.apple.com/gb/artist/123456789"]}', "true", page, True),
+                ('{"instagram":"instagram.com/arpad"}', "true", page, True),     # typed without the scheme
+                ('{"instagram":"https://www.instagram.com/Arpad/"}', "true", page, True),
+                ('{"weblinks":"https://www.youtube.com/@arpad"}', "true",
+                 dict(page, links={"youtube": "https://www.youtube.com/@arpad/videos"}), True),
+                ('{"twitter":"https://www.instagram.com/arpad/"}', "true", page, True),   # any link key
+                ('{"twitter":"https://x.com/arpad"}', "true", page, True),       # x.com is the profile's twitter handle
+                ('{"weblinks":"my pages: https://example.com/me, https://open.spotify.com/artist/0OdUWJ0sBjDrqHygGUXeCF"}',
+                 "true", page, True),
+                # another page's ids and handles are not this page's (same shape, no match)
+                ('{"weblinks":"https://open.spotify.com/artist/4dpARuHxo51G3z768sgnrY"}', "true", page, False),
+                ('{"weblinks":"https://open.spotify.com/track/0OdUWJ0sBjDrqHygGUXeCF"}', "true", page, False),
+                ('{"weblinks":"https://music.apple.com/us/artist/987654321"}', "true", page, False),
+                ('{"instagram":"https://www.instagram.com/someone_else/"}', "true", page, False),
+                ('{"twitter":"https://x.com/someone_else"}', "true", page, False),
+                ('{"weblinks":"https://www.google.com/search?q=me"}', "true", page, False),
+                ('{"weblinks":"john.doe/me"}', "true", page, False),
+                # a content / navigation page is not an account: its first path segment is a section name
+                # (`/shorts/<video>`, `/groups/<group>`), so two different videos or groups must not match
+                ('{"weblinks":"https://www.youtube.com/shorts/victim-video"}', "true",
+                 dict(page, links={"youtube": "https://www.youtube.com/shorts/other-video"}), False),
+                ('{"weblinks":"https://facebook.com/groups/other-group"}', "true",
+                 dict(page, links={"facebook": "https://facebook.com/groups/victim-group"}), False),
+                ('{"weblinks":"https://www.youtube.com/watch?v=abc"}', "true",
+                 dict(page, links={"youtube": "https://www.youtube.com/@arpad"}), False),
+                # a filled field that holds no link at all is still not a link (QA on hydra #1963)
+                ('{"weblinks":"x"}', "true", page, False), ('{"instagram":"@arpad"}', "true", page, False),
+                ('{"weblinks":"john.doe"}', "true", page, False), ('{"weblinks":"instagram.com"}', "true", page, False),
+                ('{"weblinks":"me@label.example"}', "true", page, False),
+                ('{"weblinks":["x", "Some Name"]}', "true", page, False),
+                (f'{{"weblinks":"{SPOTIFY_LINK}"}}', "false", page, False),      # processed the moment it was made
+                ("", "true", page, False), ("null", "true", page, False),          # no links at all
+                (f'{{"weblinks":"{SPOTIFY_LINK}"}}', "true", empty_page, False),   # unreadable / identity-free page
+                ('{"weblinks":"https://open.spotify.com/artist/5"}', "true",
+                 dict(page, spotifyId="5", rawProfiles=[]), False)):
+            rows = [[ARPAD, "42", "", links, later]]
+            with self.subTest(links=links, later=later), \
+                    mock.patch.object(sources, "trino", lambda sql: rows if "claiming" in sql else []), \
+                    mock.patch.object(sources, "profile_doc", lambda pid, doc=doc: doc):
+                got = sources.processed_claims([ARPAD])
+                [p] = sources.page_facts([{"entity": "profile", "id": ARPAD}], set(), got)
+            self.assertEqual(p.checked_claim_user_ids, frozenset({42}) if want else frozenset())
+
+    def test_on_every_network_only_an_accounts_own_url_is_a_handle(self):
+        """QA on hydra #1963 and the ruling of 2026-11-14 16:13Z: a content or navigation page (shorts, groups,
+        posts, watch, playlist) is not a handle and never counts as an ownership match. Each network is pinned
+        both ways through the live path: the profile and the claim carry the SAME non-account shape with
+        different content and must not match; the account's own URL on that network must."""
+        from unittest import mock
+        from gdpr_pipeline import sources
+        base = {"name": "Laczkovszki Arpad", "isClaimed": True, "popularity": 1, "creditCount": 2,
+                "spotifyId": "", "rawProfiles": []}
+        not_accounts = {
+            "youtube": [("https://www.youtube.com/shorts/victim", "https://www.youtube.com/shorts/other"),
+                        ("https://www.youtube.com/watch?v=victim", "https://www.youtube.com/watch?v=other"),
+                        ("https://www.youtube.com/playlist?list=PLvictim", "https://www.youtube.com/playlist?list=PLother"),
+                        ("https://www.youtube.com/post/Ugvictim", "https://www.youtube.com/post/Ugother"),
+                        ("https://youtu.be/victim", "https://youtu.be/other")],
+            "facebook": [("https://www.facebook.com/groups/victim", "https://www.facebook.com/groups/other"),
+                         ("https://www.facebook.com/arpad/posts/1", "https://www.facebook.com/other/posts/1"),
+                         ("https://www.facebook.com/watch/?v=1", "https://www.facebook.com/watch/?v=2"),
+                         ("https://www.facebook.com/photo/?fbid=1", "https://www.facebook.com/photo/?fbid=2"),
+                         ("https://www.facebook.com/photo.php?fbid=1", "https://www.facebook.com/photo.php?fbid=2"),
+                         ("https://www.facebook.com/story.php?story_fbid=1", "https://www.facebook.com/story.php?story_fbid=2"),
+                         ("https://www.facebook.com/profile.php?id=1", "https://www.facebook.com/profile.php?id=2"),
+                         ("https://www.facebook.com/pages/Victim/1", "https://www.facebook.com/pages/Other/2"),
+                         ("https://www.facebook.com/events/1", "https://www.facebook.com/events/2")],
+            "instagram": [("https://www.instagram.com/p/Cvictim/", "https://www.instagram.com/p/Cother/"),
+                          ("https://www.instagram.com/reel/Cvictim/", "https://www.instagram.com/reel/Cother/"),
+                          ("https://www.instagram.com/stories/arpad/1/", "https://www.instagram.com/stories/other/2/"),
+                          ("https://www.instagram.com/explore/tags/victim/", "https://www.instagram.com/explore/tags/other/"),
+                          ("https://www.instagram.com/tv/Cvictim", "https://www.instagram.com/tv/Cother"),
+                          ("https://www.instagram.com/direct", "https://www.instagram.com/direct")],
+            "twitter": [("https://x.com/arpad/status/1", "https://x.com/other/status/2"),
+                        ("https://twitter.com/i/lists/1", "https://twitter.com/i/lists/2"),
+                        ("https://twitter.com/hashtag/victim", "https://twitter.com/hashtag/other"),
+                        ("https://twitter.com/search?q=victim", "https://twitter.com/search?q=other"),
+                        ("https://x.com/i", "https://x.com/i"), ("https://x.com/settings", "https://x.com/settings"),
+                        ("https://x.com/notifications", "https://x.com/notifications")],
+            "tiktok": [("https://www.tiktok.com/t/ZTvictim/", "https://www.tiktok.com/t/ZTother/"),
+                       ("https://www.tiktok.com/video/1", "https://www.tiktok.com/video/2"),
+                       ("https://www.tiktok.com/tag/victim", "https://www.tiktok.com/tag/other"),
+                       ("https://www.tiktok.com/discover", "https://www.tiktok.com/discover")],
+        }
+        accounts = {"youtube": ("https://www.youtube.com/@arpad", "https://youtube.com/@Arpad/videos"),
+                    "facebook": ("https://www.facebook.com/arpad", "https://m.facebook.com/arpad/"),
+                    "instagram": ("https://www.instagram.com/arpad/", "instagram.com/Arpad"),
+                    "twitter": ("https://twitter.com/arpad", "https://x.com/arpad?s=20"),
+                    "tiktok": ("https://www.tiktok.com/@arpad", "https://www.tiktok.com/@arpad/video/1")}
+        self.assertEqual(set(not_accounts), set(accounts))
+        self.assertEqual(set(accounts), set(sources.SOCIAL_HOSTS.values()), "a network with no case here")
+
+        def checked(on_profile: str, on_claim: str, network: str) -> bool:
+            rows = [[ARPAD, "42", "", json.dumps({"weblinks": on_claim}), "true"]]
+            doc = dict(base, links={network: on_profile})
+            with mock.patch.object(sources, "trino", lambda sql: rows if "claiming" in sql else []), \
+                    mock.patch.object(sources, "profile_doc", lambda pid: doc):
+                [p] = sources.page_facts([{"entity": "profile", "id": ARPAD}], set(), sources.processed_claims([ARPAD]))
+            return p.checked_claim_user_ids == frozenset({42})
+
+        for network, pairs in not_accounts.items():
+            for on_profile, on_claim in pairs:
+                with self.subTest(network=network, on_profile=on_profile):
+                    self.assertIsNone(sources._social(on_profile))
+                    self.assertIsNone(sources._social(on_claim))
+                    self.assertFalse(checked(on_profile, on_claim, network))
+                    # nor does it match the account's own URL on that network
+                    self.assertFalse(checked(accounts[network][0], on_claim, network))
+        for network, (on_profile, on_claim) in accounts.items():
+            with self.subTest(network=network, account=True):
+                self.assertTrue(checked(on_profile, on_claim, network))
+                self.assertFalse(checked(on_profile, on_claim.replace("rpad", "rpad_other"), network))
+
+    def test_a_profile_names_its_own_spotify_and_social_pages_from_the_catalog_document(self):
+        from gdpr_pipeline import sources
+        doc = {"spotifyId": "0OdUWJ0sBjDrqHygGUXeCF",
+               "rawProfiles": [{"id": "0OdUWJ0sBjDrqHygGUXeCF", "source": "spotify",
+                                "url": "https://open.spotify.com/artist/0OdUWJ0sBjDrqHygGUXeCF"},
+                               {"id": "15546", "source": "tidal", "url": "https://tidal.com/artist/15546"},
+                               {"id": "music", "source": "youtube_music", "url": ""}],
+               "links": {"instagram": "https://www.instagram.com/arpad/", "twitter": "",
+                         "youtube": "https://www.youtube.com/channel/UC123", "website": "https://arpad.example"}}
+        got = sources.profile_identity(doc)
+        self.assertEqual(got.spotify, frozenset({"0OdUWJ0sBjDrqHygGUXeCF"}))
+        self.assertEqual(got.social, frozenset({("instagram", "arpad"), ("youtube", "uc123")}))
+        self.assertEqual(sources.profile_identity(None), sources.ProfileIdentity())
+        self.assertFalse(sources.profile_identity({"spotifyId": "", "links": {"website": "https://x.example"}}))
+
+    def test_the_claim_read_keeps_every_processed_claim_and_carries_the_links_to_compare(self):
+        from unittest import mock
+        from gdpr_pipeline import sources
+        rows = [[ARPAD, "42", "", "", "false"],                                     # instant, nothing attached
+                [ARPAD, "43", "", f'{{"weblinks":"{SPOTIFY_LINK}"}}', "true"],
+                [OTHER, "44", "", f'{{"weblinks":"{SPOTIFY_LINK}"}}', "false"]]
+        with mock.patch.object(sources, "trino", lambda sql: rows if "claiming" in sql else []):
+            got = sources.processed_claims([ARPAD, OTHER])
+        self.assertEqual(got, {ARPAD: {42, 43}, OTHER: {44}})      # "who holds a claim" is unchanged
+        self.assertEqual(got.links, {ARPAD: {43: (SPOTIFY_LINK,)}, OTHER: {}})
+        doc = {"name": "Laczkovszki Arpad", "isClaimed": True, "popularity": 1, "creditCount": 2,
+               "spotifyId": "0OdUWJ0sBjDrqHygGUXeCF"}
+        with mock.patch.object(sources, "profile_doc", lambda pid: doc):
+            [p] = sources.page_facts([{"entity": "profile", "id": ARPAD}], set(), got)
+            # a claims map that is not the read's own answer carries no link to compare: absent is never a pass
+            [q] = sources.page_facts([{"entity": "profile", "id": ARPAD}], set(), {ARPAD: {42, 43}})
+        self.assertEqual((p.claim_user_ids, p.checked_claim_user_ids), (frozenset({42, 43}), frozenset({43})))
+        self.assertEqual((q.claim_user_ids, q.checked_claim_user_ids), (frozenset({42, 43}), frozenset()))
+        # a page whose catalog document names no artist id or social account matches nothing: ask, never pass
+        with mock.patch.object(sources, "profile_doc", lambda pid: dict(doc, spotifyId="", links={})):
+            [u] = sources.page_facts([{"entity": "profile", "id": ARPAD}], set(), got)
+        self.assertEqual(u.checked_claim_user_ids, frozenset())
+
+    def test_a_match_from_one_claim_is_not_lost_when_the_same_account_files_another(self):
+        """One account can hold several processed claims that map to the same page (a second claim on the page, or a
+        claim on another page that carries this one as an extra). Every one of their links has to be compared, or a
+        matching link in the earlier row disappears and the verified owner is asked instead of the hide proceeding.
+        The rows' order is whatever Trino returns, so both orders are pinned."""
+        from unittest import mock
+        from gdpr_pipeline import sources
+        doc = {"name": "Laczkovszki Arpad", "isClaimed": True, "popularity": 1, "creditCount": 2,
+               "spotifyId": "0OdUWJ0sBjDrqHygGUXeCF"}
+        matching = [ARPAD, "42", "", f'{{"weblinks":"{SPOTIFY_LINK}"}}', "true"]
+        other = [OTHER, "42", f'["{ARPAD}"]', '{"instagram":"https://www.instagram.com/someone_else/"}', "true"]
+        for rows in ([matching, other], [other, matching]):
+            with self.subTest(first=rows[0][0]), \
+                    mock.patch.object(sources, "trino", lambda sql, rows=rows: rows if "claiming" in sql else []), \
+                    mock.patch.object(sources, "profile_doc", lambda pid: doc):
+                got = sources.processed_claims([ARPAD])
+                [p] = sources.page_facts([{"entity": "profile", "id": ARPAD}], set(), got)
+            self.assertEqual(p.checked_claim_user_ids, frozenset({42}))
 
     def test_two_post_confirmation_replies_make_two_distinct_requests(self):
         """QA 14th round: reply 1 supplies page A, reply 2 names A again plus B. Each reply becomes its own request
@@ -4095,8 +4400,10 @@ class SendPath(unittest.TestCase):
         account; it is wrong now, and leaving it in place would have made every legal@ letter fail at gog."""
         for channel, thread in (("legal", "1a073f2a93c21a6e"), ("notices", "1a1a436083a51047"),
                                 ("support", "1a11c64e6b139977")):
+            # Three different people: one message per person per UTC day (`store.person_contacted_on`) would
+            # otherwise hold the second and third letters, and this test is about the mailbox, not that rule.
             rid, _ = self.row(keys=[f"gmail:{channel}@muso.ai:{thread}"], channel=channel, conversation_id="",
-                              gmail_thread=thread)
+                              gmail_thread=thread, requester_email=f"person-{channel}@example.com")
             seen = {}
 
             def fake_mail(thread_id, text, approved_by, dry_run=False, key="", mailbox=""):
@@ -5135,6 +5442,9 @@ class TwoConfirmationLetters(unittest.TestCase):
                                lambda c, t, a, dry_run=False, key="": sent.append(t) or "posted"):
             interim = send.deliver(self.run, self.item(rid, "confirm-interim"), "confirm", "U7RP6HKUZ",
                                    slot="confirm-interim")
+            # The second letter is offered on a later day: one message per person per UTC day holds it, the same
+            # way it holds any second letter to one person (`store.person_contacted_on`).
+            self.s.db.execute("UPDATE erasure_sends SET at='2026-09-30T09:00:00Z'")
             final = send.deliver(self.run, self.item(rid, "confirm"), "confirm", "U7RP6HKUZ", slot="confirm")
         self.assertEqual((interim["state"], final["state"]), ("sent", "sent"))
         self.assertEqual(len(sent), 2, "two different letters, not a re-send")
@@ -6243,7 +6553,7 @@ class StaleDecisionRevision(unittest.TestCase):
         self.s = Store(":memory:")
         self.run = Run(self.s, log=lambda *_: None)
 
-    def row(self, verdict="PASS_A"):
+    def row(self, verdict="PASS_A", rules=identity.RULES_V):
         rid, _ = self.s.upsert({"keys": ["intercom:5"], "channel": "intercom", "class": "privacy_erasure",
                                 "received_at": "2026-09-01T10:00:00Z", "requester_email": "a@b.co",
                                 "pages": [{"entity": "profile", "id": ARPAD}]})
@@ -6254,10 +6564,47 @@ class StaleDecisionRevision(unittest.TestCase):
         # It carries its identity chain, as every decided statutory row does: one with no chain is selected on
         # every pass until it has one (tests/test_gdpr_dsar.py FirstReply), which is a different reason to decide.
         self.s.update(rid, "decide", identity_verdict=verdict, action="hide first",
-                      verdict_detail=[{"id": ARPAD, "verdict": verdict, "why": "x"}], decided_at=now_iso(),
-                      gates={"v": 1, "need": "none"})
+                      verdict_detail=[{"id": ARPAD, "verdict": verdict, "why": "x", **({"rules": rules} if rules else {})}],
+                      decided_at=now_iso(), gates={"v": 1, "need": "none"})
         self.s.mark_decided(rid)
         return rid
+
+    def test_a_pass_decided_under_older_identity_rules_is_decided_again_on_the_next_tick(self):
+        """Ruling 2026-11-13: a claim with no verification links is not a tie. The hide batch reads the STORED
+        verdict, so a pass decided before the ruling has to be decided again at once, not at its 20-hour refresh."""
+        rid = self.row(rules=None)                      # decided a second ago, under rules that carried no stamp
+        seen = []
+        with mock.patch.object(self.run, "decide_row", lambda r, *a: seen.append(r["id"])):
+            self.run.decide_all(set(), stale_hours=20)
+        self.assertEqual(seen, [rid])
+        # a verdict that is not a pass has nothing to take back, whatever rules decided it
+        self.s.update(rid, "decide", verdict_detail=[{"id": ARPAD, "verdict": "ASK_IDENTITY", "why": "x"}])
+        self.s.mark_decided(rid)
+        seen.clear()
+        with mock.patch.object(self.run, "decide_row", lambda r, *a: seen.append(r["id"])):
+            self.run.decide_all(set(), stale_hours=20)
+        self.assertEqual(seen, [])
+
+    def test_a_decision_stamps_the_identity_rules_it_was_made_under(self):
+        rid = self.row(rules=None)
+        claims = sources.Claims({ARPAD: {7}})
+        claims.links = {ARPAD: {7: (SPOTIFY_LINK,)}}
+        with mock.patch.object(sources, "conversation", lambda cid: {}), \
+                mock.patch.object(sources, "resolve_account", lambda *a: (7, "external_id (professional id)")), \
+                mock.patch.object(sources, "account_names", lambda ids: {}), \
+                mock.patch.object(sources, "processed_claims", lambda ids: claims), \
+                mock.patch.object(sources, "claim_proofs",
+                                  lambda ids: {pid: [{"account": 7, "claim_id": "c1", "reason": "",
+                                                      "links": {"weblinks": [SPOTIFY_LINK]},
+                                                      "created": 0.0, "processed_later": True}] for pid in ids}), \
+                mock.patch.object(sources, "profile_sources", _linked_profile), \
+                mock.patch.object(sources, "profile_doc", lambda pid: {"name": "x", "isClaimed": True, "popularity": 1,
+                                                                       "creditCount": 2,
+                                                                       "spotifyId": "0OdUWJ0sBjDrqHygGUXeCF"}):
+            self.run.decide_all(set(), stale_hours=20)
+        [pv] = self.s.get(rid)["verdict_detail"]
+        self.assertEqual((pv["verdict"], pv["rules"]), ("PASS_A", identity.RULES_V))
+        self.assertEqual(hide_batch.stale_passes(self.s.all("open")), [])
 
     def test_an_unchanged_row_is_not_re_decided(self):
         self.row()

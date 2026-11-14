@@ -15,7 +15,9 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]          # scripts/
@@ -75,30 +77,239 @@ def _q(xs) -> str:
     return ",".join("'" + str(x).replace("'", "''") + "'" for x in xs)
 
 
-def processed_claims(profile_ids: list[str]) -> dict[str, set[int]]:
+# The keys of `claiming.verificationlinks` that hold a LINK (measured on the replica 2026-11-13: every processed
+# claim of the last 30 days is NULL, {facebook, instagram, twitter, weblinks}, or {email, role[, instagram,
+# weblink]}). `email` and `role` say who filed a company claim; they are not a link to anything.
+CLAIM_LINK_KEYS = ("facebook", "instagram", "twitter", "weblinks", "weblink")
+
+
+class Claims(dict):
+    """{profile id: accounts holding a PROCESSED, not deleted claim}, plus `.links`: the verification links each of
+    those claims was filed with, `{profile id: {account id: (link, ...)}}`. One read answers both, so the two can
+    never disagree. A plain dict has no `.links`, and every reader treats that as "no link to compare": absent is
+    never a pass. A claim is evidence only when one of its links names a surface the profile itself carries,
+    matched by `link_matches_profile`."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.links: dict[str, dict[int, tuple[str, ...]]] = {}
+
+
+@dataclass(frozen=True)
+class ProfileIdentity:
+    """The artist ids and social handles the catalog attributes to ONE page. A claim link is evidence only when it
+    names one of these; a link to any other page is not a tie to this profile (ruling 2026-11-14)."""
+
+    spotify: frozenset[str] = frozenset()
+    apple: frozenset[str] = frozenset()
+    social: frozenset[tuple[str, str]] = frozenset()
+
+    def __bool__(self) -> bool:
+        return bool(self.spotify or self.apple or self.social)
+
+
+# An artist id, in the two shapes a claim or a profile names one. Both are matched on the id alone: a page URL can
+# be dressed with an `intl-xx` segment or a locale and an artist name, and none of that changes whose page it is.
+SPOTIFY_ARTIST = re.compile(r"^/(?:intl-[a-z-]+/)?artist/([0-9A-Za-z]{22})(?:[/?#]|$)", re.I)
+APPLE_ARTIST = re.compile(r"^/(?:[a-z]{2}/)?artist/(?:[^/]+/)?(\d+)(?:[/?#]|$)", re.I)
+# A social profile: the network plus the handle of an ACCOUNT's own URL. x.com and twitter.com are one network;
+# www. and m. are the same host. Only the account shapes count - `/shorts/<video>`, `/groups/<group>`,
+# `/watch` and the like are other people's pages, and reading their first path segment as a handle would tie two
+# unrelated links to one account (QA on hydra #1963).
+SOCIAL_HOSTS = {"instagram.com": "instagram", "facebook.com": "facebook", "fb.com": "facebook",
+                "twitter.com": "twitter", "x.com": "twitter", "tiktok.com": "tiktok",
+                "youtube.com": "youtube", "youtu.be": "youtube"}
+# A one-segment URL on these networks is a handle, unless it is one of the network's own section, navigation or
+# content roots (`/photo/?fbid=`, `/i/...`, `/settings`): those are the same word on every account, so reading one
+# as a handle would match two unrelated links. The list is a tripwire for the common ones and can never be
+# complete; `SOCIAL_HANDLE` below is the rule (a `.php` endpoint is never a handle), and a miss still needs the
+# catalog's OWN profile link to be that same non-account page.
+SOCIAL_NOT_HANDLES = frozenset({
+    # shared
+    "home", "search", "explore", "login", "logout", "signup", "settings", "notifications", "messages", "about",
+    "help", "privacy", "terms", "tos", "legal", "policies", "share", "sharer", "intent", "hashtag", "live",
+    # instagram
+    "p", "reel", "reels", "stories", "accounts", "direct", "tv", "tags", "locations", "directory", "developer",
+    # facebook
+    "groups", "events", "marketplace", "gaming", "friends", "watch", "photo", "photos", "video", "videos",
+    "posts", "pages", "pg", "people", "public", "notes", "places", "saved", "memories", "bookmarks", "me",
+    "dialog", "plugins", "business", "ads", "jobs", "games", "fundraisers", "offers", "media",
+    # twitter / x
+    "i", "compose", "lists", "topics", "communities", "account", "download", "who_to_follow",
+    # youtube / tiktok roots, should a looser shape ever reach here
+    "playlist", "results", "shorts", "post", "feed", "embed", "channel", "user", "c", "t", "tag", "discover",
+    "foryou", "following"})
+# What a handle can look like on any of them. A dotted `.php` endpoint (`photo.php`, `story.php`, `profile.php`)
+# fits the letters and is refused by name.
+SOCIAL_HANDLE = re.compile(r"[a-z0-9_][a-z0-9._-]{0,99}")
+
+
+def _url_parts(url: str) -> tuple[str, str] | None:
+    raw = url.strip()
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", raw, re.I):
+        raw = "https://" + raw
+    try:
+        u = urllib.parse.urlparse(raw)
+    except ValueError:
+        return None
+    if u.scheme.lower() not in ("http", "https") or not u.hostname:
+        return None
+    host = u.hostname.lower().rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if host.startswith("m."):
+        host = host[2:]
+    return host, u.path or "/"
+
+
+def _artist_id(url: str) -> tuple[str, str] | None:
+    parts = _url_parts(url)
+    if not parts:
+        return None
+    host, path = parts
+    if host == "open.spotify.com":
+        m = SPOTIFY_ARTIST.match(path)
+        return ("spotify", m.group(1)) if m else None
+    if host == "music.apple.com":
+        m = APPLE_ARTIST.match(path)
+        return ("apple", m.group(1)) if m else None
+    return None
+
+
+def _social(url: str) -> tuple[str, str] | None:
+    parts = _url_parts(url)
+    if not parts:
+        return None
+    network = SOCIAL_HOSTS.get(parts[0])
+    if not network:
+        return None
+    segments = [s for s in parts[1].split("/") if s]
+    if not segments:
+        return None
+    if network == "youtube":
+        # a channel's own forms only: /@handle, /channel/<id>, /user/<name>, /c/<name>
+        if not segments[0].startswith("@"):
+            if len(segments) < 2 or segments[0].lower() not in ("channel", "user", "c"):
+                return None
+            segments = segments[1:]
+    elif network == "tiktok":
+        if not segments[0].startswith("@"):
+            return None
+    elif len(segments) != 1:
+        # instagram / facebook / twitter: the account is the whole path, so a deeper path is a
+        # content or navigation page (`/groups/<g>`, `/shorts/<v>`, `/handle/reels`, ...)
+        return None
+    handle = segments[0].lstrip("@").lower().rstrip(".")
+    if not SOCIAL_HANDLE.fullmatch(handle) or handle.endswith(".php") or handle in SOCIAL_NOT_HANDLES:
+        return None
+    return network, handle
+
+
+def profile_identity(doc: dict | None) -> ProfileIdentity:
+    """The surfaces the catalog itself attributes to the page: its Spotify / Apple artist id, and the handle of each
+    social account it links. A profile that could not be read, or carries none of these, is an EMPTY identity - and
+    an empty identity matches nothing, so the requester is asked rather than passed."""
+    if not isinstance(doc, dict):
+        return ProfileIdentity()
+    spotify, apple, social = set(), set(), set()
+    sid = doc.get("spotifyId")
+    if isinstance(sid, str) and re.fullmatch(r"[0-9A-Za-z]{22}", sid.strip()):
+        spotify.add(sid.strip())
+    raws = doc.get("rawProfiles")
+    for raw in raws if isinstance(raws, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        url = raw.get("url")
+        found = _artist_id(url) if isinstance(url, str) else None
+        if found:
+            (spotify if found[0] == "spotify" else apple).add(found[1])
+        source, rid = str(raw.get("source") or "").lower(), raw.get("id")
+        if isinstance(rid, str) and re.fullmatch(r"\d+", rid.strip()):
+            if source in ("apple", "apple_music"):
+                apple.add(rid.strip())
+        if isinstance(rid, str) and source == "spotify" and re.fullmatch(r"[0-9A-Za-z]{22}", rid.strip()):
+            spotify.add(rid.strip())
+    links = doc.get("links") if isinstance(doc.get("links"), dict) else {}
+    for value in links.values():
+        for item in (value if isinstance(value, list) else [value]):
+            if isinstance(item, str):
+                found = _social(item)
+                if found:
+                    social.add(found)
+    return ProfileIdentity(frozenset(spotify), frozenset(apple), frozenset(social))
+
+
+def _claim_link_tokens(links_json: str) -> tuple[str, ...]:
+    try:
+        doc = json.loads(links_json) if links_json else None
+    except ValueError:
+        return ()
+    return claim_link_tokens(doc)
+
+
+def claim_link_tokens(doc) -> tuple[str, ...]:
+    """Every link a claim's `verificationlinks` document carries, one token each. The ONE reader of that document:
+    the identity step (`processed_claims`) and the hide guard (`hide_guard.reviewed`) both match these tokens with
+    `link_matches_profile`, so the two cannot disagree about what a claim offers as evidence."""
+    if not isinstance(doc, dict):
+        return ()
+    out = []
+    for key in CLAIM_LINK_KEYS:
+        value = doc.get(key)
+        for item in (value if isinstance(value, list) else [value]):
+            if isinstance(item, str):
+                out.extend(t.strip("()<>[]\"'") for t in re.split(r"[\s,;]+", item) if t.strip("()<>[]\"'"))
+    return tuple(out)
+
+
+def link_matches_profile(link: str, identity: ProfileIdentity) -> bool:
+    """One claim link names this profile: the same Spotify / Apple artist id, or the same network and handle as a
+    social account the profile links. Deliberately NOT a website host, a search result or any other page-shaped
+    link: those say someone posted a URL, not that the page is the requester's."""
+    if not identity:
+        return False
+    found = _artist_id(link)
+    if found and ((found[0] == "spotify" and found[1] in identity.spotify)
+                  or (found[0] == "apple" and found[1] in identity.apple)):
+        return True
+    social = _social(link)
+    return bool(social and social in identity.social)
+
+
+def processed_claims(profile_ids: list[str]) -> Claims:
     """{profile id: accounts holding a PROCESSED, not deleted claim}, whether the target is the claim's main profile
     or one of its `extraprofileids`. A claim that carries the target only as an extra still means the requester owns
-    that page; dropping it would send a rightful claim down the ASK_IDENTITY road."""
+    that page; dropping it would send a rightful claim down the ASK_IDENTITY road.
+
+    `.links` on the answer is each such claim's verification links, for a reader that holds the profile document
+    (`page_facts`) to compare with the surfaces the catalog attributes to that page. The `updatedat > createdat`
+    rule of ruling 2026-11-13 lives here, at the read: a claim processed the moment it was made carries no links
+    for any later reader, so a dead second copy of the rule cannot drift from what is executed."""
     ids = sorted({p for p in profile_ids if UUID_RE.fullmatch(p)})
-    out: dict[str, set[int]] = {p: set() for p in ids}
+    out = Claims({p: set() for p in ids})
+    out.links = {p: {} for p in ids}
     for i in range(0, len(ids), 150):
         chunk = ids[i:i + 150]
         # extraprofileids is a varchar whose exact shape (JSON array, comma list, brace list) is not guaranteed, so
         # match with strpos on the raw text and confirm the uuid in Python rather than trusting a cast.
         extra = " OR ".join(f"strpos(lower(CAST(extraprofileids AS varchar)), '{p.lower()}') > 0" for p in chunk)
-        for pid, uid, ex in trino(
-                "SELECT CAST(profileid AS varchar), CAST(userid AS varchar), CAST(extraprofileids AS varchar) "
+        # verificationlinks is a JSON column: a CAST to varchar fails on an object, json_format does not.
+        for pid, uid, ex, links, later in trino(
+                "SELECT CAST(profileid AS varchar), CAST(userid AS varchar), CAST(extraprofileids AS varchar), "
+                "json_format(verificationlinks), CAST(updatedat > createdat AS varchar) "
                 "FROM postgresql_core.public.claiming "
                 f"WHERE (CAST(profileid AS varchar) IN ({_q(chunk)}) OR {extra}) AND userid IS NOT NULL "
                 "AND deletedat IS NULL AND lower(CAST(status AS varchar)) = 'processed'"):
             if not uid.isdigit():
                 continue
-            if pid in out:
-                out[pid].add(int(uid))
+            tokens = _claim_link_tokens(links) if later == "true" else ()
             low = (ex or "").lower()
-            for target in chunk:
-                if target.lower() in low and target in out:
+            for target in dict.fromkeys([pid] + [t for t in chunk if t.lower() in low]):
+                if target in out:
                     out[target].add(int(uid))
+                    if tokens:
+                        seen = out.links[target].get(int(uid), ())
+                        out.links[target][int(uid)] = tuple(dict.fromkeys(seen + tokens))
     return out
 
 
@@ -113,7 +324,9 @@ def _width(n: int, rows: list[list[str]]) -> list[list[str]]:
 
 def claim_proofs(profile_ids: list[str]) -> dict[str, list[dict]]:
     """{profile id: every PROCESSED, not deleted claim on it} with what the hide guard needs to weigh one:
-    {"claim_id", "account", "reason", "links" (the claimant's verification links, parsed), "created" (epoch s)}.
+    {"claim_id", "account", "reason", "links" (the claimant's verification links, parsed), "created" (epoch s),
+    "processed_later" (True only when the replica states `updatedat > createdat`: the claim was processed after it
+    was made, the same fact `processed_claims` requires before a link is evidence; anything else is False)}.
 
     `processed_claims` answers "who holds a claim"; this answers "what kind of claim". Measured 2026-11-13: 5,217 of
     6,189 claims processed in 30 days carry reason 'created by user', no links, and were processed the second they
@@ -124,10 +337,10 @@ def claim_proofs(profile_ids: list[str]) -> dict[str, list[dict]]:
     for i in range(0, len(ids), 150):
         chunk = ids[i:i + 150]
         extra = " OR ".join(f"strpos(lower(CAST(extraprofileids AS varchar)), '{p.lower()}') > 0" for p in chunk)
-        for cid, pid, uid, ex, reason, links, created in _width(7, trino(
+        for cid, pid, uid, ex, reason, links, created, later in _width(8, trino(
                 "SELECT CAST(id AS varchar), CAST(profileid AS varchar), CAST(userid AS varchar), "
                 "CAST(extraprofileids AS varchar), CAST(reason AS varchar), json_format(verificationlinks), "
-                "CAST(CAST(to_unixtime(createdat) AS bigint) AS varchar) "
+                "CAST(CAST(to_unixtime(createdat) AS bigint) AS varchar), CAST(updatedat > createdat AS varchar) "
                 "FROM postgresql_core.public.claiming "
                 f"WHERE (CAST(profileid AS varchar) IN ({_q(chunk)}) OR {extra}) AND userid IS NOT NULL "
                 "AND deletedat IS NULL AND lower(CAST(status AS varchar)) = 'processed'")):
@@ -138,7 +351,7 @@ def claim_proofs(profile_ids: list[str]) -> dict[str, list[dict]]:
             except ValueError as exc:
                 raise Unknown(f"claim {cid}: verification links are not JSON") from exc
             claim = {"claim_id": cid, "account": int(uid), "reason": reason or "", "links": parsed,
-                     "created": int(created)}
+                     "created": int(created), "processed_later": later == "true"}
             low = (ex or "").lower()
             for target in chunk:
                 if target == pid or target.lower() in low:
@@ -147,8 +360,9 @@ def claim_proofs(profile_ids: list[str]) -> dict[str, list[dict]]:
 
 
 def profile_sources(profile_ids: list[str]) -> dict[str, dict]:
-    """{profile id: {"raws": the profile's sources as 'muso:<id>', 'tidal:<id>', ..., "created": epoch s}} from the
-    live admin profile. A profile core does not return is absent from the answer: "not read" is the caller's to
+    """{profile id: {"raws": the profile's sources as 'muso:<id>', 'tidal:<id>', ..., "created": epoch s,
+    "identity": the artist ids and social handles the profile itself names (`profile_identity`)}} from the live
+    admin profile. A profile core does not return is absent from the answer: "not read" is the caller's to
     refuse, never an empty source list.
 
     Not the catalog view: on 2026-11-13 its newest profile was four days old, so it lacked 782 of 5,214 new
@@ -169,7 +383,8 @@ def profile_sources(profile_ids: list[str]) -> dict[str, dict]:
             raise Unknown(f"admin profile {pid}: the answer did not state when the profile was created") from exc
         if at.tzinfo is None:
             at = at.replace(tzinfo=timezone.utc)
-        out[pid] = {"raws": [f"{x['source']}:{x.get('id') or ''}" for x in raws], "created": int(at.timestamp())}
+        out[pid] = {"raws": [f"{x['source']}:{x.get('id') or ''}" for x in raws], "created": int(at.timestamp()),
+                    "identity": profile_identity(doc)}
     return out
 
 
@@ -379,10 +594,15 @@ def page_facts(pages: list[dict], hidden: set[str], claims: dict[str, set[int]],
             out.append(Page(pid, ent, True, str(doc.get("name") or ""), facts_unknown=",".join(bad),
                             hidden=pid in hidden, half_hidden=half.get(pid, "")))
             continue
+        # Only `processed_claims`' own answer carries `.links`; anything else has none, so a plain dict has no
+        # claim with evidence.
+        identity = profile_identity(doc)
+        checked = frozenset(uid for uid, tokens in getattr(claims, "links", {}).get(pid, {}).items()
+                            if any(link_matches_profile(token, identity) for token in tokens))
         out.append(Page(pid, ent, True, str(doc.get("name") or ""), doc.get("isClaimed") is True,
                         frozenset(claims.get(pid, set())), float(doc.get("popularity")),
                         int(doc.get("creditCount")), str(links.get("website") or ""), pid in hidden,
-                        half_hidden=half.get(pid, "")))
+                        half_hidden=half.get(pid, ""), checked_claim_user_ids=checked))
     return out
 
 

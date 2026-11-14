@@ -21,6 +21,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -30,7 +31,7 @@ try:
     from unittest import mock
 except ImportError:  # pragma: no cover
     import mock  # type: ignore
-from gdpr_pipeline import access, copy_gate, dsar, identity, send, sources  # noqa: E402
+from gdpr_pipeline import access, copy, copy_gate, dsar, identity, send, sources  # noqa: E402
 from gdpr_pipeline.run import Run, page_text  # noqa: E402
 from gdpr_pipeline.store import Store  # noqa: E402
 
@@ -42,7 +43,14 @@ def _reviewed(account):
     """A claim filed against an existing profile and processed with the claimant's links: the kind the identity
     step counts as a tie (hide_guard.prove)."""
     return {"claim_id": f"claim-{account}", "account": account, "reason": "", "created": 1_760_000_000,
-            "links": {"instagram": "https://instagram.com/the.artist"}}
+            "processed_later": True, "links": {"instagram": "https://instagram.com/the.artist"}}
+
+
+def _linked(ids):
+    """The live profile for those claims: it links the instagram account the claim names, which is what makes the
+    link evidence (`hide_guard.reviewed`)."""
+    return {i: {"raws": ["spotify:9"], "created": 1_750_000_000,
+                "identity": sources.ProfileIdentity(social=frozenset({("instagram", "the.artist")}))} for i in ids}
 
 
 def utc(*a):
@@ -119,6 +127,25 @@ class Gates(unittest.TestCase):
         self.assertTrue(g["authority"]["needed"])
         self.assertFalse(g["authority"]["on_file"], "nothing records a document yet: never read as received")
 
+    def test_a_page_the_requester_already_claimed_with_no_evidence_gets_the_ownership_ask(self):
+        """Ruling 2026-11-13 (inbox 003): a requester whose own claim carries no evidence is asked for a link or a
+        label / management document. "Claim the page" would ask for what they have already done."""
+        pv = [{"id": "p0", "verdict": "ASK_IDENTITY", "own_claim": True}]
+        g = dsar.gates("privacy_erasure", 7, "account email", False, pv, 1)
+        self.assertEqual((g["tie"]["pass"], g["tie"]["pages"], g["need"]),
+                         (False, {"p0": "claim_unchecked"}, "claim_evidence"))
+        self.assertTrue(g["authority"]["needed"])
+        # one such page among others is enough; a page somebody else claimed keeps the older ask
+        mixed = pv + [{"id": "p1", "verdict": "ASK_IDENTITY"}]
+        self.assertEqual(dsar.gates("privacy_erasure", 7, "account email", False, mixed, 2)["need"], "claim_evidence")
+        other = [{"id": "p1", "verdict": "ASK_IDENTITY", "own_claim": False}]
+        self.assertEqual(dsar.gates("privacy_erasure", 7, "account email", False, other, 1)["need"],
+                         "claim_or_authority")
+        # the mark never turns a pass into an ask, and a representative is still asked for authority first
+        tied = [{"id": "p0", "verdict": "PASS_A", "own_claim": True}]
+        self.assertEqual(dsar.gates("privacy_erasure", 7, "account email", False, tied, 1)["need"], "none")
+        self.assertEqual(dsar.gates("privacy_erasure", 7, "account email", True, pv, 1)["need"], "authority")
+
     def test_a_page_already_off_the_site_ties_nobody(self):
         # live dry run 2026-11-12: 71 hidden or gone pages were counted as gate-2 passes; 12 pages were tied by a claim
         for v, how in (("ALREADY_HIDDEN", "hidden"), ("HIDDEN_PENDING", "hidden"), ("GONE", "gone")):
@@ -177,14 +204,16 @@ class Decide(unittest.TestCase):
         self.assertEqual(how, "created")
         return rid
 
-    def decide(self, rid, account=7, claims=None, hidden=(), resolver=None, facts=None, conv=None):
+    def decide(self, rid, account=7, claims=None, hidden=(), resolver=None, facts=None, conv=None, checked=None):
         claims = claims or {}
+        evidence = claims if checked is None else checked
 
         def page_facts(pages, hid, cl, half=None, items=False):
             if facts is not None:
                 return facts(pages)
             return [identity.Page(p["id"], found=len(p["id"]) == 36, name="Laczkovszki Arpad", hidden=p["id"] in hid,
-                                  is_claimed=bool(cl.get(p["id"])), claim_user_ids=frozenset(cl.get(p["id"], ())))
+                                  is_claimed=bool(cl.get(p["id"])), claim_user_ids=frozenset(cl.get(p["id"], ())),
+                                  checked_claim_user_ids=frozenset(evidence.get(p["id"], ())))
                     for p in pages]
 
         conv = conv or {"contact_role": "user", "external_id": "ext-1", "customer_text": "please remove my page"}
@@ -194,6 +223,7 @@ class Decide(unittest.TestCase):
                 mock.patch.object(sources, "processed_claims", lambda ids: {i: claims[i] for i in ids if i in claims}), \
                 mock.patch.object(sources, "claim_proofs", lambda ids: {i: [_reviewed(u) for u in claims.get(i, ())]
                                                                         for i in ids}), \
+                mock.patch.object(sources, "profile_sources", _linked), \
                 mock.patch.object(sources, "page_facts", page_facts):
             self.run.decide_rows([self.s.get(rid)], set(hidden), conv_reader=lambda cid: conv,
                                  prefix_resolver=resolver or (lambda prefixes: {}))
@@ -213,6 +243,16 @@ class Decide(unittest.TestCase):
         self.assertEqual((row["gates"]["account"]["pass"], row["gates"]["tie"]["pass"], row["gates"]["need"]),
                          (True, False, "claim_or_authority"))
         self.assertEqual(dsar.owed(row, [], NOW)["variant"], "ack_claim_or_authority")
+
+    def test_the_requesters_own_claim_with_no_evidence_is_asked_for_ownership_not_to_claim_again(self):
+        row = self.decide(self.add(), claims={PROFILE: {7}}, checked={})
+        self.assertEqual(row["identity_verdict"], "ASK_IDENTITY")
+        self.assertEqual((row["gates"]["tie"], row["gates"]["need"]),
+                         ({"pass": False, "pages": {PROFILE: "claim_unchecked"}}, "claim_evidence"))
+        self.assertEqual(dsar.owed(row, [], NOW)["variant"], "ack_claim_evidence")
+        # somebody else's unchecked claim is not the requester's: the older ask stands
+        row = self.decide(self.add(), claims={PROFILE: {99}}, checked={})
+        self.assertEqual(row["gates"]["need"], "claim_or_authority")
 
     def test_a_page_claimed_by_another_account_is_not_a_tie(self):
         row = self.decide(self.add(), claims={PROFILE: {99}})
@@ -343,6 +383,25 @@ class Copy(unittest.TestCase):
                     self.assertIn("do not need", low, f"block {name} mentions {word!r}")
             self.assertNotIn("name as it appears", low, name)
         self.assertIn("do not need to send a passport", self.doc["blocks"]["need_claim_or_authority"])
+
+    def test_the_ownership_ask_asks_for_a_matching_link_or_a_label_document_and_nothing_else(self):
+        """Rulings 2026-11-13 (inbox 002, 003): proof that a page is someone's is a matching link or a label /
+        management document. It is never an identity document, and it never tells a claimant to claim the page."""
+        block = self.doc["blocks"]["need_claim_evidence"]
+        low = block.lower()
+        for must in ("confirm that the page is yours", "spotify or apple music artist page",
+                     "official social account that matches the profile", "label or management",
+                     "do not need to send a passport"):
+            self.assertIn(must, low)
+        for never in ("claim the page", "claim it", "sign in", "name as it appears"):
+            self.assertNotIn(never, low)
+        for prefix in ("ack_", "status_", "late_"):
+            blocks = self.doc["variants"][prefix + "claim_evidence"]["blocks"]
+            self.assertIn("need_claim_evidence", blocks)
+            self.assertNotIn("need_claim_or_authority", blocks)
+        late = dsar.render(self.doc, "late_claim_evidence", self.FACTS)
+        self.assertNotIn("nothing", late.lower(), "the letter that corrects 'nothing is needed' must not repeat it")
+        self.assertIn("we need something from you", late)
 
     def test_a_late_update_says_late_and_sorry_once_and_gives_no_reason(self):
         """Decision 2026-11-12 (inbox 004): 'we are late, we are sorry, here is the actual date you will get your
@@ -516,6 +575,54 @@ class Ladder(unittest.TestCase):
         late_ack = self.row(ack_sent_at="2026-11-24T00:00:00Z")
         self.assertIsNone(dsar.owed(late_ack, [], utc(2026, 11, 27)))
         self.assertIsNotNone(dsar.owed(late_ack, [], utc(2026, 12, 2)))
+
+    # ---- the ownership ask goes at once (ruling 2026-11-13, inbox 003 point 3)
+    EVIDENCE = {"v": 1, "need": "claim_evidence"}
+
+    def test_the_ownership_ask_goes_at_once_whatever_the_ladder_last_said(self):
+        # #469's shape: past its date, told "nothing is needed" that morning, next contact promised in 14 days
+        told = self.row(received_at="2026-09-24T13:06:13Z", gates=self.EVIDENCE,
+                        status_sent_at="2026-11-13T06:35:00Z", next_contact_at="2026-11-27T06:35:00Z")
+        sent = [{"kind": "status", "state": "sent", "at": "2026-11-13T06:35:00Z"}]
+        now = utc(2026, 11, 13, 22, 0)
+        w = dsar.owed(told, sent, now)
+        self.assertEqual((w["kind"], w["slot"], w["variant"]), ("status", "status-2", "late_claim_evidence"))
+        self.assertEqual(w["effects"], {"ownership_ask_at": "sent"})
+        self.assertEqual(w["facts"], {"received": "24 September 2026", "next": "27 November 2026"})
+        # the same request under the older need waits for its promised contact: only this need jumps the queue
+        self.assertIsNone(dsar.owed({**told, "gates": {"v": 1, "need": "claim_or_authority"}}, sent, now))
+        # #465's shape: asked two days ago, date still ahead, halfway point not reached
+        asked = self.row(received_at="2026-11-11T15:40:16Z", gates=self.EVIDENCE, ask_sent_at="2026-11-11T16:32:00Z")
+        w = dsar.owed(asked, [], now)
+        self.assertEqual((w["kind"], w["slot"], w["variant"]), ("status", "status", "status_claim_evidence"))
+        self.assertEqual(w["facts"]["next"], "11 December 2026")
+        self.assertEqual(w["effects"], {"ownership_ask_at": "sent"})
+        self.assertNotIn("due", w["facts"])
+
+    def test_the_ownership_ask_is_sent_once_and_stands_down_for_a_letter_that_may_be_out(self):
+        now = utc(2026, 11, 13, 22, 0)
+        asked = self.row(received_at="2026-11-11T15:40:16Z", gates=self.EVIDENCE, ask_sent_at="2026-11-11T16:32:00Z")
+        gone = {**asked, "ownership_ask_at": "2026-11-13T22:30:00Z", "status_sent_at": "2026-11-13T22:30:00Z"}
+        self.assertIsNone(dsar.owed(gone, [], utc(2026, 11, 14, 22, 0)), "sent: the ordinary schedule applies again")
+        for state in ("sending", "unknown"):
+            flight = [{"kind": "status", "state": state, "at": "2026-11-13T21:00:00Z"}]
+            self.assertIsNone(dsar.owed(asked, flight, now), state)
+        for state in ("refused", "failed"):
+            tried = [{"kind": "status", "state": state, "at": "2026-11-13T21:00:00Z"}]
+            self.assertEqual(dsar.owed(asked, tried, now)["variant"], "status_claim_evidence", state)
+
+    def test_a_request_nobody_has_written_to_gets_the_ownership_ask_in_its_first_message(self):
+        fresh = self.row(gates=self.EVIDENCE)
+        w = dsar.owed(fresh, [], NOW)
+        self.assertEqual((w["kind"], w["slot"], w["variant"]), ("ack", "ack", "ack_claim_evidence"))
+        self.assertEqual(w["effects"], {"ownership_ask_at": "sent"})
+        # inside the last three days no acknowledgement can promise the date: the ask still goes, as an update
+        near = self.row(received_at="2026-10-13T04:18:33Z", gates=self.EVIDENCE)
+        w = dsar.owed(near, [], utc(2026, 11, 11, 12, 0))
+        self.assertEqual((w["kind"], w["variant"]), ("status", "status_claim_evidence"))
+        self.assertEqual(w["facts"]["next"], "12 November 2026")
+        # no other need writes the date
+        self.assertEqual(dsar.owed(self.row(), [], NOW)["effects"], {})
 
     def test_past_the_date_there_is_no_acknowledgement_only_an_update_with_the_next_contact(self):
         old = self.row(received_at="2026-09-01T00:00:00Z")
@@ -907,9 +1014,26 @@ class Wiring(unittest.TestCase):
     def request(self, n=1, cls="privacy_erasure", received="2026-11-11T00:00:00Z", need="claim_or_authority", **kw):
         rid, _ = self.s.upsert({"keys": [f"intercom:{n}"], "channel": "intercom", "class": cls,
                                 "received_at": received, "pages": []})
+        kw.setdefault("requester_email", "arpad@example.com")
         self.s.update(rid, "decide", conversation_id=f"2154766503954{n:02d}", gates={"v": 1, "need": need},
-                      requester_name="Arpad Laczkovszki", requester_email="arpad@example.com", **kw)
+                      requester_name="Arpad Laczkovszki", **kw)
         return rid
+
+    def mail_request(self, n=1, channel="notices", email="arpad@example.com", received="2026-11-11T00:00:00Z"):
+        """A deletion request written to notices@ / legal@: a thread this host can never reply in, and an address."""
+        rid, _ = self.s.upsert({"keys": [f"gmail:{channel}@:{n}"], "channel": channel, "class": "privacy_erasure",
+                                "received_at": received, "pages": []})
+        self.s.update(rid, "decide", gmail_thread=f"1a15058a85f5f6{n:02d}", gates={"v": 1, "need": "link"},
+                      requester_email=email)
+        return rid
+
+    def mailer(self):
+        """The new-thread writer and the host's mail accounts (support@ only: notices@ / legal@ are aliases)."""
+        def post(email, text, approved_by, dry_run=False, key="", mailbox="", subject=""):
+            self.posted.append((email, text, subject, mailbox, approved_by))
+            return "thread_id 1a1d5c0696b7b61a"
+        return (mock.patch.object(send, "_mail_send_new_thread", post),
+                mock.patch.object(send, "gog_accounts", lambda: {"support@muso.ai": {"gmail"}}))
 
     # ---- the store
     def test_a_live_store_from_before_the_ladder_migrates_in_place(self):
@@ -922,7 +1046,7 @@ class Wiring(unittest.TestCase):
             db = sqlite3.connect(path)
             for col in ("gates", "ack_sent_at", "ack_ref", "status_sent_at", "status_ref", "next_contact_at",
                         "dsar_state", "dsar_state_at", "extended_until", "extension_reason", "extension_ruling",
-                        "answer_promised_at"):
+                        "answer_promised_at", "ownership_ask_at"):
                 db.execute(f"ALTER TABLE erasure_requests DROP COLUMN {col}")
             db.execute("DROP TABLE dsar_messages")
             db.commit()
@@ -931,6 +1055,7 @@ class Wiring(unittest.TestCase):
             row = again.get(rid)
             self.assertEqual((row["gates"], row["ack_sent_at"], row["extended_until"]), ({}, "", ""))
             self.assertEqual(row["answer_promised_at"], "")
+            self.assertEqual(row["ownership_ask_at"], "")
             self.assertEqual(again.messages(rid), [])
 
     def test_a_message_table_from_the_first_ladder_gains_the_effects_column(self):
@@ -996,6 +1121,43 @@ class Wiring(unittest.TestCase):
         self.assertEqual((row["interim_confirm_at"], row["confirmed_at"]), ("", ""),
                          "an extension notice is not a response")
         self.assertEqual([x["variant"] for x in self.run.dsar_owed(now) if x["row"] == a], [], "and it is sent once")
+
+    def test_a_sent_ownership_ask_records_the_date_it_went_and_moves_no_statutory_date(self):
+        """Ruling 2026-11-13 (inbox 003 point 4): the register notes when the ownership ask went out; the statutory
+        date is not moved."""
+        now = utc(2026, 11, 13, 22, 0)
+        rid = self.request(1, received="2026-09-24T13:06:13Z", need="claim_evidence")
+        self.s.claim_send(rid, "status", "intercom", "c", "0" * 64, "gate:x", "sending")
+        self.s.finish_send(rid, "status", "sent", ref="x")
+        self.s.update(rid, "status", status_sent_at="2026-11-13T06:35:00Z", next_contact_at="2026-11-27T06:35:00Z")
+        before = self.s.get(rid)
+        self.assertEqual(before["ownership_ask_at"], "")
+        with self.writer(), mock.patch.object(copy_gate, "check", pending), \
+                mock.patch.object(self.s, "person_contacted_on", lambda row, day: None):
+            held = self.run.dsar_send(now, checker=pending)
+        self.assertEqual([x["state"] for x in held], ["held"])
+        self.assertEqual(self.s.get(rid)["ownership_ask_at"], "", "an ask that was only authored is not a sent ask")
+        with self.writer(), mock.patch.object(copy_gate, "check", approve), \
+                mock.patch.object(self.s, "person_contacted_on", lambda row, day: None):
+            out = self.run.dsar_send(now, checker=approve)
+        self.assertEqual([(x["state"], x["variant"], x["slot"]) for x in out],
+                         [("sent", "late_claim_evidence", "status-2")])
+        body = self.posted[0][1]
+        self.assertIn("To finish this request we need to confirm that the page is yours.", body)
+        self.assertIn("You do not need to send a passport or any other identity document.", body)
+        self.assertNotIn("claim the page", body.lower())
+        after = self.s.get(rid)
+        self.assertRegex(after["ownership_ask_at"], r"^20\d\d-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertNotEqual(after["ownership_ask_at"], "sent", "the date it went, not the placeholder")
+        for col in ("due_at", "received_at", "extended_until", "extension_reason", "answer_promised_at"):
+            self.assertEqual(after[col], before[col], f"{col}: an ownership ask moves no date")
+        self.assertEqual(dsar.due(after), dsar.due(before))
+        events = [e for e in self.s.events(rid) if e["kind"] == "dsar_effect"]
+        self.assertEqual(len(events), 1, "the note is on the row's own trail")
+        self.assertIn("ownership_ask_at", events[0]["detail"])
+        with self.writer(), mock.patch.object(copy_gate, "check", approve), \
+                mock.patch.object(self.s, "person_contacted_on", lambda row, day: None):
+            self.assertEqual(self.run.dsar_send(now, checker=approve), [], "once")
 
     def test_a_sent_late_update_records_the_answer_date_and_the_clock_names_it_when_it_passes(self):
         now = utc(2026, 11, 12, 12, 0)
@@ -1147,15 +1309,205 @@ class Wiring(unittest.TestCase):
         for kind, slot in (("ask", "ask"), ("confirm", "confirm"), ("confirm", "confirm-interim")):
             self.assertFalse(send.is_gated(kind, slot), (kind, slot))
 
-    def test_a_request_that_needs_a_new_mail_thread_is_held(self):
-        rid = self.request()
-        self.run.dsar_author(NOW, checker=approve)
-        body = self.s.message(rid, "ack")["body"]
-        with self.writer(), mock.patch.object(send, "route", lambda row: ("mail_new_thread", "a@b.example")), \
-                mock.patch.object(copy_gate, "check", approve):
-            out = send.deliver(self.run, {"row": rid, "register_no": 40, "text": body}, "ack", "gate:pending")
-        self.assertEqual((out["state"], self.posted), ("refused", []))
-        self.assertIn("not reviewed copy", out["why"])
+    # ---- a request that can only be answered in a new mail thread (notices@ / legal@)
+    def test_the_reviewer_is_asked_about_a_new_thread_letter_as_it_goes_on_the_wire(self):
+        rid = self.mail_request()
+        asked = []
+
+        def recording(kind, body, variant="", slot="", subject="", runner=None):
+            asked.append((body, subject))
+            return approve(kind, body, variant, slot, subject)
+        post, accounts = self.mailer()
+        with post, accounts, mock.patch.object(copy_gate, "check", recording):
+            out = self.run.dsar_send(NOW, checker=recording)
+        frozen = self.s.message(rid, "ack")["body"]
+        lead = "You wrote to us at notices@muso.ai on 11 November 2026 about your deletion request."
+        wire, subject = lead + "\n\n" + frozen, "Your Muso.AI data deletion request"
+        # the author step and the send step put the same pair to the gate, and it is the letter that left
+        self.assertEqual(asked, [(wire, subject), (wire, subject)])
+        self.assertEqual([x["state"] for x in out], ["sent"])
+        self.assertEqual([p[:4] for p in self.posted], [("arpad@example.com", wire, subject, "support@muso.ai")])
+        self.assertTrue(self.posted[0][4].startswith("gate:v-"))
+        self.assertFalse(frozen.startswith("You wrote"))        # the row on record stays the authored body
+        gate = [e for e in self.s.events(rid) if e["kind"] == "dsar_gate"]
+        self.assertIn(copy_gate.body_sha(wire), json.dumps(gate))
+        self.assertIn(subject, json.dumps(gate))
+
+    def test_a_verdict_on_the_body_alone_does_not_send_a_new_thread_letter(self):
+        rid = self.mail_request()
+
+        def body_only(kind, body, variant="", slot="", subject="", runner=None):
+            return pending(kind, body) if subject or body.startswith("You wrote") else approve(kind, body)
+        post, accounts = self.mailer()
+        with post, accounts, mock.patch.object(copy_gate, "check", body_only):
+            out = self.run.dsar_send(NOW, checker=body_only)
+        self.assertEqual(([x["state"] for x in out], self.posted), (["held"], []))
+        self.assertEqual(self.s.message(rid, "ack")["gate_result"], "pending")
+
+    def test_a_new_thread_letter_for_a_class_with_no_approved_subject_is_refused(self):
+        rid = self.mail_request()
+        self.s.update(rid, "decide", **{"class": "privacy_access"})
+        post, accounts = self.mailer()
+        with post, accounts, mock.patch.object(copy_gate, "check", approve):
+            out = self.run.dsar_send(NOW, checker=approve)
+        self.assertEqual(self.posted, [])
+        self.assertEqual([x["state"] for x in out], ["refused"])
+
+    def test_a_letter_that_cannot_be_assembled_is_reported_and_the_other_rows_are_still_authored(self):
+        """`route()` refuses a class with no approved new-thread subject before the author step asks for the wire
+        form, so today the two cannot disagree. If they ever do, `copy.new_thread_letter` raises a `ValueError` and
+        the author step must record THAT request and carry on: a held row is retryable, but an exception would
+        leave every other request of the hour with no reviewed message."""
+        bad = self.mail_request(1)                                    # notices@: the wire form is a new thread
+        self.s.update(bad, "decide", **{"class": "privacy_access"})   # ... whose subject has no GO
+        good = self.request(2)
+        real = send.route
+
+        def route(row):
+            if row.get("id") == bad:
+                return "mail_new_thread", row.get("requester_email")
+            return real(row)
+        with mock.patch.object(send, "route", route):
+            out = self.run.dsar_author(NOW, checker=approve)
+        self.assertEqual([x["row"] for x in out], [good], "the ordinary row is authored and put up for review")
+        self.assertTrue(all(x["approved"] for x in out))
+        self.assertEqual(self.s.message(good, "ack")["state"], "approved")
+        self.assertEqual(self.s.message(bad, "ack")["gate_result"], "", "no verdict is bound to a letter nobody can assemble")
+        self.assertEqual([e for e in self.s.events(bad) if e["kind"] == "dsar_gate"], [])
+        self.assertEqual(len(self.run.errors), 1)
+        self.assertIn("no approved SUBJECT", self.run.errors[0])
+
+    # ---- one message per person per UTC day
+    def test_a_second_request_from_the_same_person_waits_for_another_day(self):
+        first, second, other = self.request(1), self.request(2), self.request(3, requester_email="b@example.com")
+        with self.writer(), mock.patch.object(copy_gate, "check", approve):
+            out = {x["row"]: x for x in self.run.dsar_send(NOW, checker=approve)}
+        self.assertEqual([out[r]["state"] for r in (first, second, other)], ["sent", "held", "sent"])
+        self.assertIn("one message per person per UTC day", out[second]["why"])
+        self.assertEqual((len(self.posted), self.s.send_record(second, "ack")), (2, None))   # the slot stays free
+        # the day after, the ledger holds nothing for that day and the held message goes
+        self.s.db.execute("UPDATE erasure_sends SET at='2026-11-10T09:00:00Z'")
+        with self.writer(), mock.patch.object(copy_gate, "check", approve):
+            again = {x["row"]: x for x in self.run.dsar_send(NOW, checker=approve)}
+        self.assertEqual((again[second]["state"], len(self.posted)), ("sent", 3))
+
+    def test_a_letter_that_may_be_out_counts_as_the_days_message(self):
+        first, second = self.request(1), self.request(2)
+        self.s.claim_send(first, "ask", "intercom", "215476650395401", "0" * 64, "U1", "unknown")
+        self.assertEqual(self.s.person_contacted_on(self.s.get(second), datetime.now(timezone.utc).strftime("%Y-%m-%d"))["kind"], "ask")
+        self.s.finish_send(first, "ask", "refused")
+        self.assertIsNone(self.s.person_contacted_on(self.s.get(second), datetime.now(timezone.utc).strftime("%Y-%m-%d")))
+
+    def test_an_older_identity_ask_waits_for_another_day_after_a_ladder_letter(self):
+        first = self.request(1)
+        with self.writer(), mock.patch.object(copy_gate, "check", approve):
+            self.assertEqual([x["state"] for x in self.run.dsar_send(NOW, checker=approve)], ["sent"])
+        asked = self.request(2, need="link")
+        item = {"row": asked, "register_no": self.s.get(asked)["register_no"], "channel": "intercom",
+                "to": self.s.get(asked)["conversation_id"], "kind": "ASK_LINK", "text": copy.ASK["ASK_LINK"],
+                "class": "privacy_erasure"}
+        with self.writer():
+            held = send.deliver(self.run, item, "ask", "U1")
+        self.assertEqual((held["state"], len(self.posted)), ("held", 1), "one message to that person today")
+        self.assertIn("one message per person per UTC day", held["why"])
+        self.assertIsNone(self.s.send_record(asked, "ask"), "nothing was refused: the ask slot stays free")
+        self.assertEqual(self.s.get(asked)["ask_sent_at"], "")
+        # the next day the ledger holds nothing for that person today
+        self.s.db.execute("UPDATE erasure_sends SET at='2026-11-11T09:00:00Z'")
+        with self.writer():
+            again = send.deliver(self.run, item, "ask", "U1")
+        self.assertEqual((again["state"], len(self.posted)), ("sent", 2))
+
+    # ---- ... and the day is reserved WITH the claim, not by a read before it
+    def another_worker_claims_after_the_first_read(self, store, other, kind="ask"):
+        """The race, made deterministic: the early read answers "no letter today", and before this worker reaches
+        its own claim another worker claims a letter to the same person on a different request."""
+        real, seen = store.person_contacted_on, []
+
+        def read(row, day):
+            got = real(row, day)
+            if not seen:
+                store.claim_send(other, kind, "intercom", "215476650395499", "0" * 64, "gate:other", "sending")
+            seen.append(got)
+            return got
+        return mock.patch.object(store, "person_contacted_on", read), seen
+
+    def test_a_ladder_letter_is_held_when_another_worker_claimed_the_person_after_the_early_read(self):
+        first, other = self.request(1), self.request(2)
+        racing, seen = self.another_worker_claims_after_the_first_read(self.s, other)
+        with self.writer(), mock.patch.object(copy_gate, "check", approve), racing:
+            out = {x["row"]: x for x in self.run.dsar_send(NOW, checker=approve)}
+        self.assertIsNone(seen[0], "the early read saw nothing: only the claim's own read can hold this letter")
+        self.assertEqual(out[first]["state"], "held")
+        self.assertIn("one message per person per UTC day", out[first]["why"])
+        self.assertEqual(self.posted, [], "no letter left for a person another worker is already writing to")
+        self.assertIsNone(self.s.send_record(first, "ack"), "nothing was claimed: the slot stays free")
+
+    def test_an_identity_ask_is_held_when_another_worker_claimed_the_person_after_the_early_read(self):
+        asked, other = self.request(1, need="link"), self.request(2)
+        item = {"row": asked, "register_no": self.s.get(asked)["register_no"], "channel": "intercom",
+                "to": self.s.get(asked)["conversation_id"], "kind": "ASK_LINK", "text": copy.ASK["ASK_LINK"],
+                "class": "privacy_erasure"}
+        racing, seen = self.another_worker_claims_after_the_first_read(self.s, other, kind="confirm")
+        with self.writer(), racing:
+            held = send.deliver(self.run, item, "ask", "U1")
+        self.assertEqual((seen[0], held["state"], self.posted), (None, "held", []))
+        self.assertIn("one message per person per UTC day", held["why"])
+        self.assertIsNone(self.s.send_record(asked, "ask"))
+        self.assertEqual(self.s.get(asked)["ask_sent_at"], "")
+
+    def test_workers_on_different_requests_from_one_person_claim_one_letter_between_them(self):
+        """Real connections, real threads: the unique key is per request, so only the write lock stands between
+        eight workers and eight letters to one person."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "erasure.sqlite")
+            seed = Store(path)
+            rows = {}
+            for n in range(1, 9):
+                rid, _ = seed.upsert({"keys": [f"intercom:{n}"], "channel": "intercom", "class": "privacy_erasure",
+                                      "received_at": "2026-11-11T00:00:00Z", "pages": []})
+                seed.update(rid, "decide", conversation_id=f"2154766503954{n:02d}", requester_email="arpad@example.com")
+                rows[rid] = seed.get(rid)
+            seed.db.close()
+            start, opening, got = threading.Barrier(len(rows)), threading.Lock(), {}
+
+            def worker(rid):
+                with opening:
+                    mine = Store(path)
+                try:
+                    start.wait(timeout=30)
+                    got[rid] = mine.claim_send_for_person(rows[rid], rid, "ack", "intercom", "c", "0" * 64, "gate:x")
+                except Exception as exc:        # a worker that could not answer is a failed test, not a held one
+                    got[rid] = exc
+                finally:
+                    mine.db.close()
+            threads = [threading.Thread(target=worker, args=(rid,)) for rid in rows]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join(timeout=60)
+            claimed = [rid for rid, answer in got.items() if answer is None]
+            self.assertEqual((len(got), len(claimed)), (8, 1), got)
+            winner = rows[claimed[0]]["register_no"]
+            for rid, answer in got.items():
+                if rid != claimed[0]:
+                    self.assertEqual((answer["register_no"], answer["kind"], answer["state"]), (winner, "ack", "sending"))
+            check = Store(path)
+            self.addCleanup(check.db.close)
+            self.assertEqual(check.db.execute("SELECT COUNT(*) FROM erasure_sends").fetchone()[0], 1)
+
+    def test_a_held_claim_leaves_no_open_transaction_and_an_already_claimed_slot_still_refuses(self):
+        first, second = self.request(1), self.request(2)
+        self.assertIsNone(self.s.claim_send_for_person(self.s.get(first), first, "ack", "intercom", "c", "0" * 64, "gate:x"))
+        held = self.s.claim_send_for_person(self.s.get(second), second, "ack", "intercom", "c", "0" * 64, "gate:x")
+        self.assertEqual((held["kind"], held["state"], self.s.db.in_transaction), ("ack", "sending", False))
+        self.assertIsNone(self.s.send_record(second, "ack"))
+        # the same request's own slot is still the double-send guard: a claim over a letter that may be out raises
+        self.s.db.execute("UPDATE erasure_sends SET at='2026-11-10T09:00:00Z'")
+        self.s.db.commit()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.s.claim_send_for_person(self.s.get(first), first, "ack", "intercom", "c", "0" * 64, "gate:x")
+        self.assertFalse(self.s.db.in_transaction)
 
     # ---- the approved path, end to end
     def test_an_approved_acknowledgement_sends_once_with_the_verdict_on_the_ledger(self):
@@ -1203,7 +1555,7 @@ class Wiring(unittest.TestCase):
 
     def test_the_cap_counts_messages_that_reached_a_writer(self):
         for n in (1, 2, 3):
-            self.request(n)
+            self.request(n, requester_email=f"p{n}@example.com")
         with self.writer(), mock.patch.object(copy_gate, "check", approve):
             out = self.run.dsar_send(NOW, limit=2, checker=approve)
         self.assertEqual((len(self.posted), [x["state"] for x in out]), (2, ["sent", "sent"]))
@@ -1805,6 +2157,11 @@ MANIFEST = {
 }
 
 
+REBUILT = {"users": [["7", "ana@example.org", "Ana Rebuilt", '{"a":1}']],
+           "orders": [["2", "7", "9.99"], ["1", "7", "5.00"]],
+           "teams": [["4", "ana@example.org", "Ana's team"]]}
+
+
 def replica(schema=None, tables=None, fail=()):
     """A fake of the read-only replica: answers the schema read and each source read, and records every query."""
     schema = SCHEMA if schema is None else schema
@@ -2108,14 +2465,229 @@ class AccessAnswer(unittest.TestCase):
         self.assertIsNone(self.store.send_record(self.row["id"], "access"))
         self.assertLess(access.ATTACH_MAX_BYTES * 4 / 3, 25 * 1024 * 1024)
 
-    def test_a_stale_copy_or_a_requester_who_lost_the_account_is_held(self):
+    OLD = "2026-11-10T09:00:00Z"
+
+    def age_the_copy(self):
+        self.store.db.execute("UPDATE access_answers SET produced_at=?", (self.OLD,))
+        self.store.db.commit()
+
+    def test_a_stale_copy_is_rebuilt_before_it_is_sent_and_the_old_bytes_never_go(self):
+        first = self.build()
+        self.age_the_copy()
+        dry = self.deliver(dry_run=True)
+        self.assertTrue(any("rebuild it first" in w for w in dry["why"]), dry)
+        self.assertEqual(self.sent, [], "a dry run rebuilds nothing and sends nothing")
+        with mock.patch.object(access, "load_manifest", lambda *a, **k: MANIFEST), \
+                mock.patch.object(sources, "trino_wide", replica(tables=REBUILT)):
+            out = self.deliver()
+        self.assertEqual(out["state"], "sent")
+        (m,) = self.sent
+        sent_sha = hashlib.sha256(m["bytes"]).hexdigest()
+        self.assertEqual(sent_sha, out["sha256"])
+        self.assertNotEqual(sent_sha, first["sha256"], "the copy sent is the rebuilt one, not the stale bytes")
+        self.assertEqual(self.store.access_answers(self.row["id"])[-1]["sha256"], sent_sha)
+        self.assertLessEqual(len(self.store.access_answers(self.row["id"])), 2)
+
+    def test_a_requester_who_lost_the_account_is_held(self):
         self.build()
-        out = self.deliver(now=datetime.now(timezone.utc) + timedelta(hours=access.FRESH_HOURS + 1))
-        self.assertTrue(any("rebuild it first" in w for w in out["why"]), out)
         sources.resolve_account = lambda ext, email, trusted: (8, "external_id (test)")
         out = self.deliver()
         self.assertTrue(any("does not control this account now" in w for w in out["why"]), out)
         self.assertEqual(self.sent, [])
+
+    def cli(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gdpr_cli_access", ROOT / "scripts" / "gdpr-pipeline.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        return cli
+
+    def tick(self, now, manifest=MANIFEST, tables=None, loader=None, kill="/nonexistent/gdpr-dsar-ladder.disabled"):
+        """`gdpr-pipeline.py tick`'s access pass, on the fake replica and the approved gate."""
+        import contextlib
+        import io
+        out = io.StringIO()
+        read = replica(**{"tables": tables}) if tables else replica()
+        cli = self.cli()
+        with mock.patch.object(access, "load_manifest", loader or (lambda *a, **k: manifest)), \
+                mock.patch.object(cli, "DSAR_KILL", kill), \
+                mock.patch.object(sources, "trino_wide", read), \
+                mock.patch.object(sources, "conversation", self.conv), \
+                mock.patch.object(sources, "account_email", self.read_email), \
+                mock.patch.object(copy_gate, "check", approve), \
+                mock.patch.object(send, "_mail_send_attachment", self.mailer), \
+                contextlib.redirect_stdout(out):
+            cli.access_owed_send(self.run, now)
+        return out.getvalue()
+
+    def ladder_ask(self):
+        rid, _ = self.store.upsert({"keys": ["intercom:902"], "channel": "intercom", "class": "privacy_erasure",
+                                    "received_at": "2026-11-02T00:00:00Z", "requester_email": "ana@example.org",
+                                    "conversation_id": "902", "pages": []})
+        row = self.store.get(rid)
+        return {"row": rid, "register_no": row["register_no"], "channel": "intercom", "to": "902",
+                "kind": "ASK_LINK", "text": copy.ASK["ASK_LINK"], "class": "privacy_erasure"}
+
+    def test_a_day_held_answer_is_owed_on_the_row_and_the_tick_rebuilds_and_delivers_it_next_day(self):
+        first = self.build()
+        other, _ = self.store.upsert({"keys": ["intercom:901"], "channel": "intercom", "class": "privacy_erasure",
+                                      "received_at": "2026-11-02T00:00:00Z", "requester_email": "ana@example.org",
+                                      "conversation_id": "901", "pages": []})
+        self.store.claim_send(other, "ack", "intercom", "901", "0" * 64, "gate:x", "sending")
+        self.store.finish_send(other, "ack", "sent", ref="api-log posted")
+        held = self.deliver()
+        self.assertEqual((held["state"], self.sent), ("held", []))
+        self.assertTrue(self.store.get(self.row["id"])["access_owed_at"],
+                        "the debt is recorded on the row the tick reads, not only in a log line")
+        # the next UTC day: the letter is yesterday's and the recorded copy is past its freshness window
+        self.store.db.execute("UPDATE erasure_sends SET at=?", (self.OLD,))
+        self.store.db.commit()
+        self.age_the_copy()
+        said = self.tick(datetime.now(timezone.utc), tables=REBUILT)
+        self.assertIn("access owed: 1", said)
+        self.assertEqual(len(self.sent), 1)
+        sent_sha = hashlib.sha256(self.sent[0]["bytes"]).hexdigest()
+        self.assertNotEqual(sent_sha, first["sha256"], "the stale copy is never the one sent")
+        self.assertEqual(self.store.access_answers(self.row["id"])[-1]["sha256"], sent_sha,
+                         "the tick rebuilt the copy before sending it, with no operator command")
+        self.assertFalse(self.store.get(self.row["id"])["access_owed_at"], "the debt is cleared once it is delivered")
+
+    def test_the_operator_kill_switch_stops_the_owed_answer_and_it_goes_on_the_first_tick_after(self):
+        """Ruling 2026-11-14: the owed-access send honours the operator kill switch, the same as every other send.
+        With the file present nothing is rebuilt, claimed or sent and the debt stays on the row; removed, the same
+        tick pass delivers it."""
+        self.build()
+        other, _ = self.store.upsert({"keys": ["intercom:901"], "channel": "intercom", "class": "privacy_erasure",
+                                      "received_at": "2026-11-02T00:00:00Z", "requester_email": "ana@example.org",
+                                      "conversation_id": "901", "pages": []})
+        self.store.claim_send(other, "ack", "intercom", "901", "0" * 64, "gate:x", "sending")
+        self.store.finish_send(other, "ack", "sent", ref="api-log posted")
+        self.assertEqual(self.deliver()["state"], "held")
+        self.store.db.execute("UPDATE erasure_sends SET at=?", (self.OLD,))
+        self.store.db.commit()
+        self.age_the_copy()
+        before = (self.store.get(self.row["id"]), len(self.store.access_answers(self.row["id"])),
+                  self.store.db.execute("SELECT COUNT(*) FROM erasure_sends").fetchone()[0])
+        with tempfile.TemporaryDirectory() as d:
+            kill = os.path.join(d, "gdpr-dsar-ladder.disabled")
+            open(kill, "w").close()
+            said = self.tick(datetime.now(timezone.utc), tables=REBUILT, kill=kill)
+            self.assertEqual(said.strip(), f"access owed: disabled ({kill})")
+            self.assertEqual(self.sent, [])
+            after = (self.store.get(self.row["id"]), len(self.store.access_answers(self.row["id"])),
+                     self.store.db.execute("SELECT COUNT(*) FROM erasure_sends").fetchone()[0])
+            self.assertEqual(after, before, "a stopped pass rebuilds nothing, claims nothing and keeps the debt")
+            os.unlink(kill)
+            said = self.tick(datetime.now(timezone.utc), tables=REBUILT, kill=kill)
+        self.assertIn("access owed: 1", said)
+        self.assertEqual(len(self.sent), 1)
+        self.assertFalse(self.store.get(self.row["id"])["access_owed_at"])
+
+    def test_a_second_held_tick_neither_bumps_the_revision_nor_adds_an_event(self):
+        self.build()
+        other, _ = self.store.upsert({"keys": ["intercom:901"], "channel": "intercom", "class": "privacy_erasure",
+                                      "received_at": "2026-11-02T00:00:00Z", "requester_email": "ana@example.org",
+                                      "conversation_id": "901", "pages": []})
+        self.store.claim_send(other, "ack", "intercom", "901", "0" * 64, "gate:x", "sending")
+        self.store.finish_send(other, "ack", "sent", ref="api-log posted")
+        self.deliver()
+        self.store.update(self.row["id"], "access_owed", access_owed_at=self.OLD)
+        first = self.store.get(self.row["id"])
+        events = len(self.store.events(self.row["id"]))
+
+        self.assertEqual(self.deliver()["state"], "held")
+        again = self.store.get(self.row["id"])
+        self.assertEqual(again["access_owed_at"], self.OLD,
+                         "the mark keeps the day the answer first became owed")
+        self.assertEqual(again["rev"], first["rev"], "a repeated hold is not a new change to the row")
+        self.assertEqual(len(self.store.events(self.row["id"])), events)
+
+    def owed_row(self, n=903, email="bob@example.org"):
+        rid, _ = self.store.upsert({"keys": [f"intercom:{n}"], "channel": "intercom", "class": "privacy_access",
+                                    "received_at": "2026-11-02T00:00:00Z", "requester_email": email,
+                                    "conversation_id": str(n), "pages": []})
+        self.store.update(rid, "access_owed", access_owed_at=self.OLD)
+        return self.store.get(rid)
+
+    def test_a_row_that_fails_to_rebuild_is_reported_and_still_owed_and_the_ladder_still_sends(self):
+        """A read that raises inside the owed pass is contained on that row: the failure is recorded, the debt stays
+        on the row for the next tick, nothing is claimed or sent for it, and the same tick's ladder still sends
+        another requester's letter."""
+        self.build()
+        self.store.update(self.row["id"], "access_owed", access_owed_at=self.OLD)
+        self.age_the_copy()
+        ask = self.ladder_ask()
+        self.store.update(ask["row"], "decide", gates={"v": 1, "need": "link"})
+
+        def loader(*_a, **_k):
+            raise access.ManifestError("the replica could not be read")
+        said = self.tick(datetime.now(timezone.utc), loader=loader)
+        self.assertIn(f"access #{self.no} -> failed", said)
+        self.assertIn("still owed", said)
+        self.assertTrue(any(f"#{self.no}" in e for e in self.run.errors), self.run.errors)
+        self.assertTrue(self.store.get(self.row["id"])["access_owed_at"], "the debt stays for the next tick")
+        self.assertEqual(self.sent, [], "a row that failed claims nothing")
+        self.assertIsNone(self.store.send_record(self.row["id"], dsar.KIND_ACCESS))
+        with mock.patch.object(copy_gate, "GATE", pathlib.Path(__file__)), \
+                mock.patch.object(copy_gate, "check", approve), \
+                mock.patch.object(send, "_intercom_send",
+                                  lambda c, t, a, dry_run=False, key="": "api-log posted"):
+            self.cli().dsar_ladder(self.run, datetime.now(timezone.utc), 25, send_them=True)
+        self.assertEqual((self.store.send_record(ask["row"], "ack") or {}).get("state"), "sent",
+                         "the tick goes on to the ladder")
+
+    def test_two_owed_rows_are_each_contained_so_one_failure_does_not_strand_the_other(self):
+        first = self.build()
+        second = self.owed_row()
+        self.store.update(self.row["id"], "access_owed", access_owed_at=self.OLD)
+        self.conv = lambda cid: {"contact_role": "user", "external_id": f"ext-{cid}",
+                                 "contact_email": "ana@example.org", "customer_text": "please send me my data"}
+        sources.resolve_account = lambda ext, email, trusted: (int(str(ext).split("-")[1]), "external_id (test)")
+        built = self.run.access_build(second["register_no"], record=True, conv_reader=self.conv, reader=replica(),
+                                     manifest=MANIFEST)
+        self.assertEqual(built["state"], "built")
+        self.age_the_copy()
+        calls = {"n": 0}
+
+        def loader(*_a, **_k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise access.ManifestError("the replica could not be read")
+            return MANIFEST
+        said = self.tick(datetime.now(timezone.utc), loader=loader)
+        self.assertIn(f"access #{self.no} -> failed", said)
+        self.assertIn("access owed: 2", said)
+        self.assertEqual(len(self.sent), 1, "the second owed answer is still delivered")
+        self.assertTrue(self.store.get(self.row["id"])["access_owed_at"])
+        self.assertFalse(self.store.get(second["id"])["access_owed_at"])
+        self.assertNotEqual(hashlib.sha256(self.sent[0]["bytes"]).hexdigest(), first["sha256"])
+
+    def test_an_owed_answer_whose_rebuild_is_incomplete_sends_nothing(self):
+        self.build()
+        self.store.update(self.row["id"], "access_owed", access_owed_at=self.OLD)
+        self.age_the_copy()
+        m = {**MANIFEST, "systems": MANIFEST["systems"] + [{"id": "intercom", "holds": "support", "covered": False}]}
+        said = self.tick(datetime.now(timezone.utc), manifest=m)
+        self.assertIn("access owed: 1", said)
+        self.assertEqual(self.sent, [], "an incomplete rebuilt copy is never sent")
+        self.assertTrue(self.store.get(self.row["id"])["access_owed_at"], "it is still owed, for the next tick")
+        self.assertIsNone(self.store.send_record(self.row["id"], dsar.KIND_ACCESS))
+
+    def test_a_statutory_answer_takes_the_day_from_an_ordinary_ladder_letter(self):
+        self.build()
+        self.store.update(self.row["id"], "access_owed", access_owed_at=self.OLD)
+        item = self.ladder_ask()
+        with mock.patch.object(send, "_intercom_send", lambda conv, text, who, dry_run, key="": "api-log posted"):
+            self.tick(datetime.now(timezone.utc))
+            self.assertEqual(len(self.sent), 1, "the access answer goes first, in the same tick")
+            held = send.deliver(self.run, item, "ask", "U1")
+            self.assertEqual((held["state"], len(self.sent)), ("held", 1), "the letter is the one held")
+            self.assertIn("one message per person per UTC day", held["why"])
+            self.assertIsNone(self.store.send_record(item["row"], "ask"), "nothing was refused: the slot stays free")
+            self.store.db.execute("UPDATE erasure_sends SET at='2026-11-10T09:00:00Z'")
+            self.store.db.commit()
+            again = send.deliver(self.run, item, "ask", "U1")
+        self.assertEqual(again["state"], "sent", "the held letter is offered again on the next day")
 
     def test_a_copy_is_never_sent_to_an_address_the_account_no_longer_has(self):
         """QA review of #1908 (critical): the copy is up to 24 h old and carried its own recipient. An account whose
@@ -2164,6 +2736,43 @@ class AccessAnswer(unittest.TestCase):
         self.assertEqual(self.deliver()["state"], "skipped")
         self.assertFalse(self.store.get(self.row["id"])["confirmed_at"])
 
+    def test_the_answer_waits_its_turn_behind_a_ladder_letter_to_the_same_person(self):
+        self.build()
+        other, _ = self.store.upsert({"keys": ["intercom:901"], "channel": "intercom", "class": "privacy_erasure",
+                                      "received_at": "2026-11-02T00:00:00Z", "requester_email": "ana@example.org",
+                                      "conversation_id": "901", "pages": []})
+        self.store.claim_send(other, "ack", "intercom", "901", "0" * 64, "gate:x", "sending")
+        self.store.finish_send(other, "ack", "sent", ref="api-log posted")
+        held = self.deliver()
+        self.assertEqual((held["state"], self.sent), ("held", []), "one message to that person today")
+        self.assertIn("one message per person per UTC day", held["why"][0])
+        self.assertIsNone(self.store.send_record(self.row["id"], dsar.KIND_ACCESS),
+                          "nothing was refused: the answer slot stays free")
+        # the next day the ledger holds nothing for that person today, so the answer goes
+        self.store.db.execute("UPDATE erasure_sends SET at='2026-11-10T09:00:00Z'")
+        self.assertEqual(self.deliver()["state"], "sent")
+        self.assertEqual(len(self.sent), 1)
+        self.assertTrue(self.store.send_record(self.row["id"], dsar.KIND_ACCESS) is not None)
+
+    def test_the_answer_is_held_when_another_worker_claimed_the_person_after_the_early_read(self):
+        self.build()
+        other, _ = self.store.upsert({"keys": ["intercom:901"], "channel": "intercom", "class": "privacy_erasure",
+                                      "received_at": "2026-11-02T00:00:00Z", "requester_email": "ana@example.org",
+                                      "conversation_id": "901", "pages": []})
+        real, seen = self.store.person_contacted_on, []
+
+        def read(row, day):
+            got = real(row, day)
+            if not seen:        # the other worker's claim lands after this worker's early read
+                self.store.claim_send(other, "ack", "intercom", "901", "0" * 64, "gate:other", "sending")
+            seen.append(got)
+            return got
+        with mock.patch.object(self.store, "person_contacted_on", read):
+            held = self.deliver()
+        self.assertEqual((seen[0], held["state"], self.sent), (None, "held", []))
+        self.assertIn("one message per person per UTC day", held["why"][0])
+        self.assertIsNone(self.store.send_record(self.row["id"], dsar.KIND_ACCESS), "the answer slot stays free")
+
 
 class Rubric(unittest.TestCase):
     """The gate picks the rubric from the campaign by its own table; this lane ships the file it looks for."""
@@ -2181,6 +2790,30 @@ class Rubric(unittest.TestCase):
         self.assertIn("must not ask for a passport", text)
         self.assertIn("an acknowledgement must state the date by which we will answer", text)
         self.assertIn("if you are unsure, do not approve", text)
+
+    def test_the_rubric_allows_the_ownership_ask_the_copy_makes(self):
+        """A reviewer following rule 2 as it stood refuses a letter that asks for a link to an artist page: the rule
+        listed everything a message may ask for, and that was not on it."""
+        text = " ".join((ROOT / "policies" / "outbound-copy-rubric-gdpr.md").read_text(encoding="utf-8").split())
+        self.assertIn("a link to their own artist page on Spotify or Apple Music or to an official social account "
+                      "that matches the profile", text)
+        self.assertIn("a document from their label or management that names them", text)
+        self.assertIn("never an identity document", text)
+
+
+    def test_the_rubric_allows_the_new_thread_lead_and_subject_that_the_code_sends(self):
+        """Rule 8 bars an email address in the text. The one opening line and subject a new-thread letter carries
+        name our own mailbox, so the rubric says so in the words `copy.py` produces: a reviewer following a rubric
+        that is silent on them refuses the only letter 42 requests could receive."""
+        from gdpr_pipeline import copy as letter_copy
+        text = " ".join((ROOT / "policies" / "outbound-copy-rubric-gdpr.md").read_text(encoding="utf-8").split())
+        self.assertIn(letter_copy.new_thread_subject("privacy_erasure"), text)
+        lead = letter_copy.new_thread_lead("notices@muso.ai", "2026-11-11T00:00:00Z", "your deletion request")
+        self.assertIn(lead.replace("11 November 2026", "<date>"), text)
+        self.assertIn("legal@muso.ai", text)
+        for ruling in (letter_copy.NEW_THREAD_LEAD_RULING, letter_copy.NEW_THREAD_SUBJECT_RULING):
+            self.assertIn(ruling, text)
+        self.assertEqual(letter_copy.NEW_THREAD_SUBJECT_APPROVED_CLASSES, ("privacy_erasure",))
 
 
 class ClockCheck(unittest.TestCase):
@@ -2438,7 +3071,8 @@ class FirstReply(unittest.TestCase):
 
         def page_facts(pages, hid, cl, half=None, items=False):
             return [identity.Page(p["id"], found=True, name="Laczkovszki Arpad", hidden=False,
-                                  is_claimed=bool(cl.get(p["id"])), claim_user_ids=frozenset(cl.get(p["id"], ())))
+                                  is_claimed=bool(cl.get(p["id"])), claim_user_ids=frozenset(cl.get(p["id"], ())),
+                                  checked_claim_user_ids=frozenset(cl.get(p["id"], ())))
                     for p in pages]
 
         conv = {"contact_role": "user", "external_id": "ext-1", "customer_text": "please remove my page"}
@@ -2446,6 +3080,7 @@ class FirstReply(unittest.TestCase):
                 mock.patch.object(sources, "account_names", lambda ids: {i: ("Laczkovszki Arpad",) for i in ids}), \
                 mock.patch.object(sources, "processed_claims", lambda ids: {i: {7} for i in ids}), \
                 mock.patch.object(sources, "claim_proofs", lambda ids: {i: [_reviewed(7)] for i in ids}), \
+                mock.patch.object(sources, "profile_sources", _linked), \
                 mock.patch.object(sources, "page_facts", page_facts):
             self.run.decide_all(set(), conv_reader=lambda cid: conv, stale_hours=20,
                                 prefix_resolver=lambda prefixes: {})

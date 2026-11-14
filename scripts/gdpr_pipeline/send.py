@@ -514,6 +514,19 @@ def final_letter(row: dict, text: str) -> tuple[str, str, str]:
     return body, subject, target
 
 
+def reviewed_form(row: dict, body: str) -> tuple[str, str]:
+    """(text, subject) a reviewer must read for a ladder message on this row: the letter as it goes on the wire.
+
+    An in-thread reply is the authored body and no subject. A letter that opens a new thread is the approved lead
+    line, the authored body, and the approved subject (`final_letter`, so every byte is still `copy.py`'s). Until
+    2026-11-13 the gate was shown the body alone and `deliver` then refused every new-thread ladder letter because
+    its lead and subject were not what was reviewed: 42 requests written to notices@ / legal@ had an approved
+    message and no way to receive it. The author step and the send step both ask about THIS pair, so the verdict
+    is on what the person reads and one review round is enough."""
+    text, subject, _to = final_letter(row, body)
+    return text, subject
+
+
 def materialise(run, items: list[dict]) -> list[dict]:
     """Rewrite each item to the letter that will actually be sent, BEFORE the approval digest is computed.
 
@@ -524,6 +537,12 @@ def materialise(run, items: list[dict]) -> list[dict]:
         body, subject, to = final_letter(run.store.get(x["row"]) or {}, x["text"])
         x["text"], x["subject"], x["recipient"], x["letter_final"] = body, subject, to, True
     return items
+
+
+def day_hold(earlier: dict, what: str = "this one") -> str:
+    """Why a message is held by the one-message-per-person-per-UTC-day rule: the letter that holds the day."""
+    return (f"one message per person per UTC day: #{earlier['register_no']} {earlier['kind']} is "
+            f"{earlier['state']} at {earlier['at']}; {what} goes on a later day")
 
 
 def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False, slot: str | None = None) -> dict:
@@ -592,15 +611,24 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
         if not frozen or frozen["body_sha"] != body_sha(item["text"]):
             why = (f"the {slot} text is not the authored body on record for this request: a ladder message is sent "
                    f"only as the exact bytes that were put up for review")
-        elif channel == "mail_new_thread":
-            # A new thread carries a lead line and a subject of our own, and neither is part of the reviewed body.
-            why = ("this request can only be answered by opening a new mail thread, whose lead line and subject are "
-                   "not reviewed copy: held until a reviewed form exists for that route")
         if why:
             run.store.claim_send(rid, slot, "none", "", body_sha(item["text"]), "gate:none", "refused", detail=why,
                                  idem=idem_key(rid, slot, item["text"]))
             run.log(f"{who} row {rid}: not sent ({why})")
             return {"state": "refused", "why": why}
+
+    if not dry_run:
+        # One message per person per UTC day (standing rule, captain 2026-11-13), for EVERY customer message this
+        # function sends - a ladder letter and the older identity ask are both a message to that person. Not
+        # ledgered: nothing was refused, the slot stays free and the same message is offered again on a later day.
+        from datetime import datetime, timezone
+        # This read is the EARLY hold (it saves a gate call); the guard is the claim below, which asks again
+        # inside its own write transaction.
+        earlier = run.store.person_contacted_on(row, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        if earlier:
+            why = day_hold(earlier)
+            run.log(f"{who} row {rid}: held ({why})")
+            return {"state": "held", "why": why}
 
     # OPTION 2 (firstmate 073): a new thread from support@. The mandatory first line is part of the BODY, so it must be
     # in the text BEFORE the body sha and the idem key are computed: a changed body is a different letter, and the
@@ -652,9 +680,15 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
         # approval of this body is a hold - a pending verdict, a refusal, a rewrite, a gate that is missing or
         # cannot run - ledgered `refused` (retryable on the same slot once the verdict lands), never a send.
         # The campaign is the AUTHORED message's kind, read from the frozen row, never the caller's argument.
-        ans = copy_gate.check(frozen["kind"], item["text"], variant=frozen["variant"], slot=slot)
+        # `item["text"]` is the WIRE letter by now: for a new thread it carries the lead line, and the subject goes
+        # to the gate with it (`reviewed_form` is the same pair the author step asked about).
+        wire_subject = extra.get("subject", "")
+        ans = copy_gate.check(frozen["kind"], item["text"], variant=frozen["variant"], slot=slot,
+                              subject=wire_subject)
         changed = (frozen["gate_result"], frozen["verdict_id"]) != (ans.result, ans.verdict_id)
         run.store.update_message(rid, slot, "dsar_gate" if changed else "",
+                                 event_detail={"reviewed_sha": body_sha(item["text"]), "subject": wire_subject,
+                                               "channel": channel},
                                  state="approved" if ans.ok else "held", **ans.as_cols())
         if not ans.ok:
             why = f"copy gate {ans.result}: {ans.reason}"[:400]
@@ -670,7 +704,15 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
     # stood, and the claim below writes a row of its own.
     sends_before = run.store.sends(rid) if gated else []
     # CLAIM BEFORE SEND, carrying the letter's id: from here on a second attempt sees a claim and stands down.
-    run.store.claim_send(rid, slot, channel, target, body_sha(item["text"]), approved_by, "sending", idem=key)
+    # The claim is made only if this PERSON still has no letter today, in one write transaction
+    # (`Store.claim_send_for_person`): the slot is unique per request, so without it two workers on two requests
+    # from one requester could both pass the early read above and both send.
+    earlier = run.store.claim_send_for_person(row, rid, slot, channel, target, body_sha(item["text"]), approved_by,
+                                              idem=key)
+    if earlier:
+        why = day_hold(earlier)
+        run.log(f"{who} row {rid}: held ({why})")
+        return {"state": "held", "why": why}
     try:
         ref = adapter(channel)(target, item["text"], approved_by, dry_run=False, key=key, **extra)
     except Ambiguous as exc:

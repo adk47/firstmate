@@ -29,6 +29,7 @@ from unittest import mock
 SCRIPTS = os.path.join(os.path.dirname(__file__), "..", "scripts")
 sys.path.insert(0, SCRIPTS)
 
+from gdpr_pipeline import identity  # noqa: E402
 from gdpr_pipeline.store import Store  # noqa: E402
 
 HIDE_PATH = os.path.join(SCRIPTS, "ops_intake", "hide.py")
@@ -37,6 +38,16 @@ AARON = "U7RP6HKUZ"
 NICK = "U0AL36NADEY"
 PROFILE = "0d898512-1111-2222-3333-444455556666"
 OTHER = "11111111-2222-3333-4444-555555555555"
+
+
+def decided(verdict, pid=PROFILE):
+    """The detail `Run.decide_row` commits for a page. A pass carries the identity rules it was decided under - a pass
+    without that stamp is one the hide batch may not use (`identity.stale_pass`) - and the account and page it rests
+    on, which is what the hide guard re-reads the proof from."""
+    d = {"id": pid, "verdict": verdict, "why": "test"}
+    if verdict in identity.IDENTITY_PASS:
+        d.update({"rules": identity.RULES_V, "account": 80419, "owner_page": pid})
+    return json.dumps([d])
 
 
 def load_hide():
@@ -674,7 +685,7 @@ class HideHalf(Base):
                             "class": cls, "received_at": "2026-11-04T00:00:00Z",
                             "pages": [{"entity": "profile", "id": pid}]})
         st.update(rid, "decide", identity_verdict=verdict,
-                  verdict_detail=json.dumps([{"id": pid, "verdict": verdict, "why": "test"}]))
+                  verdict_detail=decided(verdict, pid))
         return st.get(rid)
 
     def test_a_page_shared_with_an_older_row_opens_the_pair_while_nothing_is_in_flight(self):
@@ -689,7 +700,7 @@ class HideHalf(Base):
                                 "received_at": "2026-11-04T00:00:00Z",
                                 "pages": [{"entity": "profile", "id": PROFILE}]})
             st.update(rid, "decide", identity_verdict="PASS_A",
-                      verdict_detail=json.dumps([{"id": PROFILE, "verdict": "PASS_A", "why": "test"}]))
+                      verdict_detail=decided("PASS_A"))
             return st.get(rid)
 
         older = row("notices:fc31a861")
@@ -774,7 +785,7 @@ class HideHalf(Base):
                                 "received_at": "2026-11-04T00:00:00Z",
                                 "pages": [{"entity": "profile", "id": pid}]})
             st.update(rid, "decide", identity_verdict="PASS_A",
-                      verdict_detail=json.dumps([{"id": pid, "verdict": "PASS_A", "why": "test"}]))
+                      verdict_detail=decided("PASS_A", pid))
         mine = [r for r in st.all("open") if r["pages"][0]["id"] == PROFILE]
         run = self.hide.Run(st, log=lambda *_a: None)
         seen = {}

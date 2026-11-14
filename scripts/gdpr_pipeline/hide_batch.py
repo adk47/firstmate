@@ -136,6 +136,17 @@ def add_to_erasure_test(text: str, entries: list[tuple]) -> tuple[str, list[str]
     return text, added
 
 
+def stale_passes(rows: list[dict]) -> list[int]:
+    """Register numbers of open rows that carry an identity pass decided under older identity rules.
+
+    While there is one, the register does not say what the hide set is: `plan` leaves the page out, and a batch built
+    without it would make `open_prs` close the live PR as "nothing still waiting" although the page may pass again
+    once the tick has decided it. So the caller touches no PR on that run."""
+    from gdpr_pipeline.identity import stale_pass
+    return sorted({r["register_no"] for r in rows if r["status"] == "open"
+                   and any(stale_pass(pv) for pv in r["verdict_detail"])})
+
+
 def plan(rows: list[dict], hdevops_ids: set[str], pdp_ids: set[str], in_flight: dict[str, set[str]],
          include_legal: bool = False) -> list[dict]:
     """Identity-PASS pages of open rows, most overdue first: [{id, entity, register_no, basis, due_at, need}].
@@ -146,7 +157,7 @@ def plan(rows: list[dict], hdevops_ids: set[str], pdp_ids: set[str], in_flight: 
     half only.
     Legal hide-first pages join only with include_legal (the captain owns legal matters; the daily batch is
     built from PASS rows)."""
-    from gdpr_pipeline.identity import IDENTITY_PASS, LEGAL_HIDE_FIRST
+    from gdpr_pipeline.identity import IDENTITY_PASS, LEGAL_HIDE_FIRST, stale_pass
     HIDE_ELIGIBLE = IDENTITY_PASS + ((LEGAL_HIDE_FIRST,) if include_legal else ())
     # A page the register is holding for the CAPTAIN's own call stays out of the routine batch even when a DIFFERENT
     # row decides that same page PASS: the batch hides pages whose owner asked for their own page, while a legal
@@ -164,6 +175,8 @@ def plan(rows: list[dict], hdevops_ids: set[str], pdp_ids: set[str], in_flight: 
             pid = pv["id"]
             if pv["verdict"] not in HIDE_ELIGIBLE or pid in seen or not UUID_RE.fullmatch(pid):
                 continue
+            if stale_pass(pv):
+                continue        # decided under older identity rules: not a pass until the tick decides it again
             if pid in held and not include_legal:
                 continue
             ent = next((p.get("entity") or "profile" for p in r["pages"] if p["id"] == pid), "profile")

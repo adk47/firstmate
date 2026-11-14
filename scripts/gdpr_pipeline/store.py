@@ -165,9 +165,17 @@ MIGRATIONS = (("removed_outside_process", "TEXT DEFAULT '[]'"), ("hidden_pages",
               # extension notice is ever selected: a count of requests is a ground, not a need.
               ("extension_need", "TEXT DEFAULT ''"), ("extension_need_ruling", "TEXT DEFAULT ''"),
               # The answer date a sent late update stated. The clock names it when it passes with no answer out.
-              ("answer_promised_at", "TEXT DEFAULT ''"))
+              ("answer_promised_at", "TEXT DEFAULT ''"),
+              # The date the ownership ask went out (a claim with no evidence on it: `dsar.NEED_CLAIM_EVIDENCE`).
+              # A note and nothing else: no statutory date is read from it or moved by it (ruling 2026-11-13).
+              ("ownership_ask_at", "TEXT DEFAULT ''"),
+              # The day the Art. 15 answer was deferred by the one-message-per-person-per-UTC-day rule. It is a
+              # RECORDED debt, not a log line: the tick reads it and delivers the answer on the next day the person
+              # has no message, rebuilding the copy first (firstmate 2026-11-14).
+              ("access_owed_at", "TEXT DEFAULT ''"))
 # What a sent ladder message may write to its request, and nothing else.
-MESSAGE_EFFECT_COLS = ("extended_until", "extension_reason", "extension_ruling", "answer_promised_at")
+MESSAGE_EFFECT_COLS = ("extended_until", "extension_reason", "extension_ruling", "answer_promised_at",
+                       "ownership_ask_at")
 
 
 SENDS_MIGRATIONS = (("idem", "TEXT DEFAULT ''"),     # the letter's id; the ledger is the double-send guard
@@ -627,6 +635,27 @@ class Store:
         """Every ledger row for this request, oldest first (plain dicts; no JSON columns to decode)."""
         return [dict(r) for r in self.db.execute("SELECT * FROM erasure_sends WHERE request_id=? ORDER BY id", (rid,))]
 
+    def person_contacted_on(self, row: dict, day: str) -> dict | None:
+        """The first letter that left, or may have left, for this PERSON on UTC `day` (YYYY-MM-DD), on any of their
+        requests; None when there is none. The person is whoever shares this row's address, Intercom contact or
+        conversation: one requester often has several rows. `sending` and `unknown` count, because a letter may be
+        out.
+
+        This read alone is an early hold, never the guard: a second worker can claim between it and the caller's
+        own claim. The guard is `claim_send_for_person`, which asks this inside the claim's transaction."""
+        email = str(row.get("requester_email") or "").strip().lower()
+        contact = str(row.get("contact_id") or "").strip()
+        conv = str(row.get("conversation_id") or "").strip()
+        r = self.db.execute(
+            "SELECT s.kind, s.state, s.at, q.register_no FROM erasure_sends s "
+            "JOIN erasure_requests q ON q.id = s.request_id "
+            "WHERE s.state IN ('sent','sending','unknown') AND substr(s.at,1,10)=? AND (q.id=? "
+            "OR (?<>'' AND (lower(trim(COALESCE(q.requester_email,'')))=? OR lower(s.target)=?)) "
+            "OR (?<>'' AND COALESCE(q.contact_id,'')=?) OR (?<>'' AND COALESCE(q.conversation_id,'')=?)) "
+            "ORDER BY s.at, s.id LIMIT 1",
+            (day, row.get("id") or 0, email, email, email, contact, contact, conv, conv)).fetchone()
+        return dict(r) if r else None
+
     # ---- the DSAR ladder's authored messages (`dsar_messages`)
     # ---- Art. 15 answers (gdpr_pipeline/access.py). Append-only: every build is a row, the newest is current.
     def put_access_answer(self, rid: int, account_id: int, raw: bytes, sha: str, summary: dict) -> dict:
@@ -742,6 +771,32 @@ class Store:
                         (channel, target, body_sha, approved_by, state, detail[:500], idem, now_iso(), rid, kind))
         self.db.commit()
 
+    def claim_send_for_person(self, row: dict, rid: int, kind: str, channel: str, target: str, body_sha: str,
+                              approved_by: str, detail: str = "", idem: str = "") -> dict | None:
+        """Claim the `sending` slot ONLY IF this person has no letter today: the read and the claim are one write
+        transaction. None when the slot is claimed; otherwise the letter that already holds the day
+        (`person_contacted_on`'s row), and nothing is written.
+
+        `erasure_sends` is unique per request+kind, which says nothing about the PERSON: two workers on two
+        requests from one requester could each read "no letter today", claim their own slot and both send.
+        BEGIN IMMEDIATE takes the database's write lock before the read, so the second worker waits for the
+        first one's claim and then sees it. A lock that cannot be had raises (sqlite3.OperationalError), as any
+        other write here would: nothing is claimed and nothing is sent."""
+        if self.db.in_transaction:
+            self.db.commit()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            earlier = self.person_contacted_on(row, now_iso()[:10])
+            if earlier:
+                self.db.rollback()
+                return earlier
+            self.claim_send(rid, kind, channel, target, body_sha, approved_by, "sending", detail=detail, idem=idem)
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.rollback()
+            raise
+        return None
+
     def finish_send(self, rid: int, kind: str, state: str, ref: str = "", detail: str = "") -> None:
         self.db.execute("UPDATE erasure_sends SET state=?, ref=?, detail=? WHERE request_id=? AND kind=?",
                         (state, ref[:500], detail[:500], rid, kind))
@@ -799,6 +854,9 @@ class Store:
         sent. Only `MESSAGE_EFFECT_COLS` can be written, whatever the message row says."""
         msg = self.message(rid, slot)
         cols = {k: v for k, v in ((msg or {}).get("effects") or {}).items() if k in MESSAGE_EFFECT_COLS and v}
+        if "ownership_ask_at" in cols:
+            # The date the ask WENT, not the date its body was written: a held body can wait days for its verdict.
+            cols["ownership_ask_at"] = now_iso()
         if cols:
             self.update(rid, "dsar_effect", commit=commit, **cols)
         return cols

@@ -67,7 +67,7 @@ Row #1 / Row #10 – not this flow.
 
    | path | what proves it |
    |---|---|
-   | A. claim | their account holds a processed claim on the page, or they claim it now |
+   | A. claim | their account holds a processed claim on the page that carries verification links and was processed after it was made (ruling 2026-11-13), or they claim it now and the claim carries such a link; a claim filed and processed in the same instant with no links does not confirm a hide (see `docs/support/gdpr-pipeline.md`) |
    | B. account email | they write from the email of a Muso account whose name matches the page |
    | C. their name on an unclaimed page | the page is unclaimed and its name is the legal name they give; big-name or high-credit pages go to a person |
    | D. official domain | they write from the artist's or label's own domain |

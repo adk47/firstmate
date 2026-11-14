@@ -1098,6 +1098,17 @@ sitemap `LEGAL_HIDDEN_ENTITY_IDS`); a person merges. Never `DELETE /api/v3/admin
 (legal hold 1350): both wrapper copies and `scripts/muso-prewrite-hook.sh` refuse that route as a removal
 (`MUSO_REMOVAL_NO_SELF_APPROVE`). Customer sends stay locked until Fable's GO lands in a PR.
 A track / album passes only through its ONE catalog artist's profile on the same paths (`identity.decide_item`).
+A claim ties a requester to a page only when it was processed after it was made AND one of its verification links
+names that page's own Spotify / Apple artist id or one of its linked social accounts (`sources.link_matches_profile`,
+applied in `sources.page_facts`; rulings 2026-11-13 and 2026-11-14; a website host or any other page-shaped link
+is not a match, and a profile that cannot be read matches nothing): 5,226 of the 5,798 claims processed in 30 days
+are filed by the account and processed the same instant. It still cannot measure WHO put the links on the profile.
+The hide batch reads the STORED verdict, so a rule that narrows a pass raises `identity.RULES_V` (now 3): an older
+pass is not hide-eligible, and while one is on file `hide-batch` touches no PR. An already-hidden page keeps
+`ALREADY_HIDDEN` on a re-decision: never un-hidden, never planned again.
+A requester whose own claim lacks that evidence gets the ownership ask (`dsar.NEED_CLAIM_EVIDENCE`: a matching link or a
+label / management document, never an identity document), sent at once and once; `ownership_ask_at` records when and
+moves no date. No code reads the reply yet: it is a person's to read.
 Each repo has one live batch PR carrying the whole set; a changed set opens a new PR and closes the old one, never a
 force-push. What Caroline answers, does and hands off for billing and hides, the refund caps and every undo:
 `docs/support/caroline-billing-and-hide.md` (pinned by `policies/caroline-billing-and-hide.json` + its test).
@@ -1111,7 +1122,8 @@ identity step asks the requester instead of the page waiting behind a hold. The 
 own last decision: a held or not-yet-judged page is never reported as "open/merge the hide batch PR", and a message
 made only of those lines names no person. Three things to keep:
 - **A processed claim is not ownership by itself.** It counts when it was reviewed (empty `reason` and a
-  verification link) or sits on the one muso-source profile that account created. `Run.decide_row` applies the same
+  verification link that matches the profile, by the identity step's own `sources.link_matches_profile`, read
+  again against the live profile at batch time, on a claim processed after it was made) or sits on the one muso-source profile that account created. `Run.decide_row` applies the same
   rule (`hide_guard.prove`), so an unproven claim is an `ASK_IDENTITY`, never a pass and never a silent hold.
 - **3 profiles per requester and 20 across the register per 24 h**; the rest are held, paged once and offered again.
   Raising either constant is a captain decision, not a tuning change.
@@ -1123,7 +1135,12 @@ made only of those lines names no person. Three things to keep:
 - **No verdict, no send.** An acknowledgement or status update reaches a writer only when
   `scripts/outbound_copy/gate.py` approves its exact bytes under the `gdpr` rubric
   (`gdpr_pipeline/copy_gate.py`, called inside `send.deliver`). A missing, pending, refused or unrunnable gate is a
-  hold. Never add a flag, env var or second path that sends a ladder kind without it.
+  hold. Never add a flag, env var or second path that sends a ladder kind without it. The bytes asked about are
+  the letter on the wire (`send.reviewed_form`): a notices@ / legal@ deletion request is answered in a new thread,
+  so its approved opening line and subject are reviewed with the body, and rule 8 of the rubric names them. One
+  customer message per person per UTC day (`store.person_contacted_on`, the Art. 15 answer included); the held one
+  goes the next day. A day-held Art. 15 answer is a recorded debt on the row (`access_owed_at`) that the tick
+  delivers before any ladder letter, rebuilding the copy first when it is past `access.FRESH_HOURS`.
 - **Identity is claim or authority, never a name and never a passport.** A name match is not a tie to a page
   (`identity.decide_page` paths B/C answer `ASK_IDENTITY`); no copy asks for an identity document (Art. 12(6)).
 - **The body carries dates only.** `policies/gdpr-dsar-copy.json` is fixed text per variant; code fills

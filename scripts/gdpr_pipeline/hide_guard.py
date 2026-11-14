@@ -12,7 +12,10 @@ verdict; nothing read the proof again when the hide was prepared, and nothing bo
      the profile's website is read from core now and must still be the sender's host, and `hide-batch` has the
      identity step decide every path-D row again first, because only that step reads whether the sender is
      verified. For A the claim is read from core now, not taken from the stored verdict, and it has to be one of:
-       - a reviewed claim: filed against an existing profile (empty `reason`) with verification links; or
+       - a reviewed claim: filed against an existing profile (empty `reason`), processed after it was made
+         (`updatedat > createdat`, the fact the identity step requires too), with a verification link that
+         names an account or artist the profile itself names (`sources.link_matches_profile`, the identity step's
+         rule; the profile is read again here, so a link changed after the pass is weighed as it reads now); or
        - the account's own profile: a claim made with no review counts only while the profile holds exactly one
          source, a muso one, created within SELF_CREATED_WINDOW_S of the claim. Measured: 4,429 of 4,432 instant
          claims are that. Two reached an artist's catalog page through a later merge; those are held.
@@ -101,20 +104,21 @@ def requester_key(row: dict, entry: dict) -> str:
     return f"request:{row['id']}"
 
 
-def _has_link(value) -> bool:
-    if isinstance(value, str):
-        return len(value.strip()) >= 4
-    if isinstance(value, dict):
-        return any(_has_link(v) for v in value.values())
-    if isinstance(value, list):
-        return any(_has_link(v) for v in value)
-    return False
+def reviewed(claim: dict, src: dict | None) -> bool:
+    """A claim filed against an existing profile, processed AFTER it was made (`processed_later`, the replica's
+    `updatedat > createdat`: a claim processed the second it was filed was looked at by nobody, whatever it links),
+    with a link on it that names THIS profile: the same Spotify / Apple artist id, or the same network and handle as a social account the profile links
+    (`sources.link_matches_profile`, the identity step's own rule - ruling 2026-11-14: an account or profile URL
+    on a recognised platform that matches the profile, never just any page-shaped link). Any other `reason`
+    ('created by user', 'company claim on add', one not seen yet) is a claim nobody reviewed.
 
-
-def reviewed(claim: dict) -> bool:
-    """A claim filed against an existing profile and processed with the claimant's links on it. Any other `reason`
-    ('created by user', 'company claim on add', one not seen yet) is a claim nobody reviewed."""
-    return not (claim.get("reason") or "").strip() and _has_link(claim.get("links"))
+    `src` is the profile as it reads NOW (`sources.profile_sources`). A claim whose links were changed since the
+    decision, or a profile whose own links were, is weighed on what is there at batch time. No profile, or one that
+    names no artist id and no social account, matches nothing."""
+    if (claim.get("reason") or "").strip() or claim.get("processed_later") is not True or not src:
+        return False
+    named = src.get("identity") or sources.ProfileIdentity()
+    return any(sources.link_matches_profile(link, named) for link in sources.claim_link_tokens(claim.get("links")))
 
 
 def own_profile(claim: dict, src: dict | None) -> bool:
@@ -135,13 +139,13 @@ def weigh(account: int, claims: list[dict], src: dict | None, src_read: bool) ->
     mine = [c for c in claims if c["account"] == account]
     if not mine:
         return "", "", NOT_HOLDER
-    for c in mine:
-        if reviewed(c):
-            return "reviewed_claim", c["claim_id"], ""
     if not src_read:
         raise sources.Unknown("the profile was not read for a claim that needs it")
     if src is None:
         return "", "", NOT_FOUND
+    for c in mine:
+        if reviewed(c, src):
+            return "reviewed_claim", c["claim_id"], ""
     for c in mine:
         if own_profile(c, src):
             return "own_profile", c["claim_id"], ""
@@ -168,11 +172,13 @@ def prove(facts: list, account: int | None, claim_reader=None, source_reader=Non
     for pid in mine:
         if pid not in claims:
             raise sources.Unknown(f"claims on {pid} were not read")
-    unreviewed = [pid for pid in mine if not any(c["account"] == account and reviewed(c) for c in claims[pid])]
-    srcs = (source_reader or sources.profile_sources)(unreviewed) if unreviewed else {}
+    # The profile is read for every page the requester holds a claim on: a link is evidence only against the
+    # profile's own artist ids and social accounts, so no claim can be weighed without it.
+    held_by_me = [pid for pid in mine if any(c["account"] == account for c in claims[pid])]
+    srcs = (source_reader or sources.profile_sources)(held_by_me) if held_by_me else {}
     unproven = set()
     for pid in mine:
-        _, _, reason = weigh(account, claims[pid], srcs.get(pid), pid in unreviewed)
+        _, _, reason = weigh(account, claims[pid], srcs.get(pid), pid in held_by_me)
         if reason == NOT_FOUND:
             raise sources.Unknown(f"profile {pid} was not returned for a claim that needs it")
         if reason:
@@ -180,7 +186,10 @@ def prove(facts: list, account: int | None, claim_reader=None, source_reader=Non
 
     def strip(p):
         if held(p) and p.entity_id in unproven:
+            # `checked_claim_user_ids` goes too: it was computed by `page_facts` from the same claim, and a class
+            # that reads it first (a takedown, a legal threat) would pass on a proof this read just refused.
             p = replace(p, claim_user_ids=p.claim_user_ids - {account},
+                        checked_claim_user_ids=p.checked_claim_user_ids - {account},
                         claim_unproven=p.claim_unproven | {account})
         if p.artists:
             p = replace(p, artists=tuple(strip(a) for a in p.artists))
@@ -268,14 +277,15 @@ def judge(batch: list[dict], rows: list[dict], history: list[dict], now: datetim
     for d in path_a:
         if d["owner_page"] not in claims:
             raise sources.Unknown(f"claims on {d['owner_page']} were not read")
-    unreviewed = sorted({d["owner_page"] for d in path_a
-                         if any(c["account"] == d["account"] for c in claims[d["owner_page"]])
-                         and not any(c["account"] == d["account"] and reviewed(c) for c in claims[d["owner_page"]])})
-    srcs = source_reader(unreviewed) if unreviewed else {}
+    # Read again at batch time, for every profile the requester holds a claim on: the stored pass says a link
+    # matched THEN. A claim whose links were changed since, or a profile whose were, is weighed on what is there now.
+    held_claims = sorted({d["owner_page"] for d in path_a
+                          if any(c["account"] == d["account"] for c in claims[d["owner_page"]])})
+    srcs = source_reader(held_claims) if held_claims else {}
     for d in path_a:
         owner = d["owner_page"]
         d["proof"], d["claim_id"], d["reason"] = weigh(d["account"], claims[owner], srcs.get(owner),
-                                                       owner in unreviewed)
+                                                       owner in held_claims)
     # Path D: the stored verdict says the sender's host WAS the profile's website. The website is read again here;
     # a profile whose site was changed or corrected since the decision is held, never admitted on the old answer.
     path_d = [d for d in out if not d["reason"] and d["basis"] == identity.PASS_D]
