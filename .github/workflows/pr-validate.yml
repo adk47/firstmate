@@ -2578,6 +2578,11 @@ jobs:
           # named error and changes no byte; a writer SQLite handed its read-only WAL fallback is reopened or
           # names the file that refused it; READ_ONLY_PROCESS never outlives the run that set it. Stdlib only.
           python3 scripts/tests/test_ledger_open.py
+          # precedent_v1's approvals reach the request ledger (credit_review/reconcile_approved.py): a
+          # result line moves its ids to APPROVED and moves none the second time; one move is one
+          # request_state_log row; the backfill moves nothing when core half answers; a count that
+          # could not be read is never 0. Runs against the LIVE schema, trigger included.
+          python3 scripts/tests/test_reconcile_approved.py
           # The outbound copy gate (scripts/outbound_copy/gate.py): a body with no SIGNED reviewer verdict on
           # its exact bytes is never approved; a stand-in reviewer can refuse and never approve; the sender
           # calls the gate between the claim and its one customer POST; a copy hold is a log, not a lock.
