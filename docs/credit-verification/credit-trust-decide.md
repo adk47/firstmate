@@ -47,6 +47,20 @@ Provisional approvals are never affected by these filters, and proof on file is 
 approve. The run line reports support rows before the filters, held for proof on file, held as already asked, deferred for the window, deferred for unknown
 proof status (including documentation-required approvals, below), and sent.
 
+**Documented requests already in `user_verification_needed`** (`hold_documented_uvn`, 2026-11-13). The run
+lists `status=unverified` only, and stage 2 (`credit-proof.py stage2`) takes its work only from this ledger's
+`proof on file` holds, so a document filed against a request that was already in `user_verification_needed` was
+never handed to stage 2. After its normal pass the run reads that status from the replica in one query
+(`UVN_REPLICA_SQL`; the admin list refuses that many pages) and records `hold`, `proof on file: human review`,
+for each request a document on file covers whose newest decider row is none, an ask or a deferral
+(`UVN_TAKE_DECISIONS`). Whole users at a time, paying first, `max_documented_uvn_users_per_run` users a run
+(10; 0 turns it off). It writes ledger rows only: no core write, no ask, no approval and no model call in any
+mode, and the rows are counted in the run line's own sentence, never as decided rows. A request with no
+document on file is not read; a request whose newest row is any other kind is left to that row's reader. A
+failed read is reported as `NOT READ`, never as zero, and a row-shaped replica line that does not parse is
+counted on the run line (`uvn_rejected`, carried by `UvnRows`) rather than dropped: the counts it reports
+cover only the lines that parsed. Measurements: `data/send-families-zero-sends-r1/report.md`.
+
 | Outcome | When | Write |
 |---|---|---|
 | **Approve (provisional)** | All of the conditions in the list below hold. | `approved` (Knock's "approved" notice) |

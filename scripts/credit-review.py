@@ -393,7 +393,8 @@ def cmd_decide(args: argparse.Namespace) -> int:
         judge.fallback = decide.CappedJudge(fb, run_cap_usd=args.budget_usd, daily_cap_usd=args.daily_budget_usd,
                                             spent_today_usd=decide.spent_today_usd(ledger.db, day))
     res = decide.run(admin_api.AdminClient(), ledger.db, judge, mode=args.mode, policy=policy,
-                     max_model_calls=args.max_model_calls, workers=args.workers, budget_s=args.budget_s)
+                     max_model_calls=args.max_model_calls, workers=args.workers, budget_s=args.budget_s,
+                     uvn_reader=decide.replica_uvn_rows)
     log("decide " + res.line())
     prod_ledger = "/var/lib/hydra/credit-review/ledger.sqlite3"
     if res.mode == "apply" and os.path.realpath(args.ledger or prod_ledger) == prod_ledger:

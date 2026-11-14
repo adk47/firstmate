@@ -1138,6 +1138,14 @@ Counts: `data/proof-processing-ovh-e1/tools/measure.py` on node-8.
   `approved: false` in `policies/credit-approval-automation.json`, `doc_approvals` is empty and core's
   `credit_document_verdicts` has 0 rows. Report the stages separately (filed, read, answered, decided, told);
   never report "proof processed" from the first three.
+- **Stage 2 judges only what the decider holds as `proof on file`** (`stage2.held_rows`), and the decider lists
+  `unverified` only. Documented requests already in `user_verification_needed` reach stage 2 through
+  `decide.hold_documented_uvn` (ledger rows only, capped per run) - the mechanism, its caps and its run-line
+  fields are owned by `docs/credit-verification/credit-trust-decide.md`; before it, 2,568 documented users
+  had no verdict path and the uvn-status lists held them forever
+  (`data/send-families-zero-sends-r1/report.md`).
+  A list that reads thousands and messages 0 is a list question first: attribute the drops per gate from the
+  tick's `-check.json` before touching a gate.
 - A ledger table that only one tool reads is created by that tool, never added to `verify_ledger.SCHEMA`: every
   read-only reader refuses a ledger that lacks a table `connect()` would add.
 

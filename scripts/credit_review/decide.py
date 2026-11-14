@@ -104,10 +104,13 @@ server stays the authority: an approval it refuses comes back
 
 from __future__ import annotations
 
+import csv
 import fcntl
 import hashlib
+import io
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import time
@@ -274,6 +277,10 @@ class Policy:
     # can decide in 12 minutes; this bounds the blast radius of a single bad run, and the two caps bite
     # in different places (this one cannot be re-read from the ledger, so it is counted on the run).
     max_ask_users_per_run: int = 100
+    # Distinct users whose DOCUMENTED user_verification_needed requests get their proof-on-file hold in
+    # ONE RUN (`hold_documented_uvn`). Stage 2 takes 40 users an hour and the decider runs four times an
+    # hour, so 10 keeps stage 2's queue no longer than it can drain. 0 turns the pass off.
+    max_documented_uvn_users_per_run: int = 10
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Policy":
@@ -300,6 +307,8 @@ class Policy:
                    max_approvals_per_user_per_day=int(d.get("max_approvals_per_user_per_day") or 200),
                    max_ask_users_per_day=_nonneg_int(d.get("max_ask_users_per_day", 100), "max_ask_users_per_day"),
                    max_ask_users_per_run=_nonneg_int(d.get("max_ask_users_per_run", 100), "max_ask_users_per_run"),
+                   max_documented_uvn_users_per_run=_nonneg_int(
+                       d.get("max_documented_uvn_users_per_run", 10), "max_documented_uvn_users_per_run"),
                    approve_arm=_bool(d.get("approve_arm", False), "approve_arm"))
 
 
@@ -2188,6 +2197,15 @@ class RunResult:
     cas_unreadable_refusals: int = 0
     coded_out: str = ""
     note: str = ""
+    # The documented user_verification_needed pass (`hold_documented_uvn`). None = the pass did not run
+    # (no reader, cap 0, or proof status unknown); `uvn_unread` = it ran and could not read, never a zero.
+    uvn_read: int | None = None        # requests the replica returned in user_verification_needed
+    uvn_rejected: int = 0              # row-shaped replica lines that did not parse (not in uvn_read)
+    uvn_documented: int = 0            # of those, covered by a document on file
+    uvn_held: int = 0                  # proof-on-file holds recorded this run (stage 2's input)
+    uvn_users: int = 0                 # distinct users those holds belong to
+    uvn_waiting: int = 0               # documented requests still without a hold after this run
+    uvn_unread: str = ""
 
     def line(self) -> str:
         # [key=decide-line-union] (firstmate 2026-11-12): the FIELD SET is data, the formatting is
@@ -2258,6 +2276,16 @@ class RunResult:
                           "(support-only arm)")
         if getattr(self, "doc_audit", ""):
             detail.append(f"doc class {self.doc_audit}")
+        if self.uvn_unread:
+            detail.append(f"documented user_verification_needed requests NOT READ ({self.uvn_unread}): "
+                          "no document was handed to stage 2 this run")
+        elif self.uvn_read is not None:
+            detail.append(f"{self.uvn_read} user_verification_needed requests read, {self.uvn_documented} with a "
+                          f"document on file: {self.uvn_held} held as proof on file for stage 2 "
+                          f"({self.uvn_users} user(s)), {self.uvn_waiting} still to hold")
+        if self.uvn_rejected and not self.uvn_unread:
+            detail.append(f"{self.uvn_rejected} replica line(s) of the user_verification_needed read did not "
+                          f"parse, so the counts above cover only the {self.uvn_read} row(s) that did")
         if self.note:
             detail.append(f"{self.note}")
         if self.write_errors:
@@ -2280,6 +2308,179 @@ def request_decision(req: dict[str, Any]) -> Decision:
 def _created(req: dict[str, Any]) -> str | None:
     v = req.get("createdAt")
     return str(v) if v else None
+
+
+# ── documented requests already in user_verification_needed ─────────────────────────────────────────
+# Measured 2026-11-13 (data/send-families-zero-sends-r1/): `held_rows` lists status=unverified only, and
+# stage 2 takes its work only from this ledger's "proof on file" holds. A request that reached
+# user_verification_needed any other way (79,508 of them, 54,505 last written before the decider's first
+# run on 2026-10-17) was never listed here, so a document its user filed was never handed to stage 2:
+# 19,028 of the 19,358 documented requests on the uvn-status list had no decider row and no verdict path.
+#
+# The fix is this pass and nothing wider. A request in user_verification_needed has ALREADY been asked
+# for proof, so the only decision left for the decider is the one `filter_support` makes for a support
+# row whose user has a document on file: HOLD, "proof on file: human review". That row is stage 2's input.
+# What stays out, and why:
+#   - a user_verification_needed request with NO document on file: it was asked once and a credit is
+#     asked about once, ever; there is nothing to hold and nothing to read;
+#   - approving or asking: this pass builds no evidence, calls no model and writes nothing to core in any
+#     mode. Approving requests in this status is a different registered automation (score-approve);
+#   - a request whose newest decider row is anything but an ask or a deferral (an approval, a per-role
+#     split, a close, a standing hold): those rows have their own readers and a newer row here would hide
+#     them. 651 of the 32,644 documented requests on 2026-11-13.
+# The read is the replica, never the admin list: 79,508 rows is page 398 of that list, and the list's own
+# refusal past offset 20,000 says to use Trino (firstmate 033: no bulk paging of prod admin APIs).
+UVN_REPLICA = os.environ.get("CREDIT_TRUST_TRINO_CMD", "/opt/hydra/scripts/trino-query.sh")
+UVN_REPLICA_TIMEOUT_S = 120
+UVN_REPLICA_SQL = (
+    "SELECT lower(CAST(cr.id AS varchar)), CAST(cr.userid AS varchar), to_iso8601(cr.createdat), "
+    "CAST(cr.profileid AS varchar), CAST(cr.trackid AS varchar), CAST(cr.credits AS varchar), "
+    "replace(replace(cr.spotifytracktitle, chr(10), ' '), chr(13), ' ') "
+    "FROM postgresql_core.public.credit_requests cr WHERE cr.deletedat IS NULL AND cr.userid IS NOT NULL "
+    f"AND cr.status = '{UVN}'")
+UVN_DOC_NOTE = f"already {UVN}: recorded so stage 2 reads the document"
+#: The newest decider row a request may have and still get the hold: none (""), or one that only asked
+#: or waited. An allow-list, so a decision kind added later is left alone until someone decides otherwise.
+UVN_TAKE_DECISIONS = ("", "support", "defer")
+_UVN_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+UVN_LOOKUP_CHUNK = 500
+
+
+class UvnUnread(RuntimeError):
+    """The user_verification_needed read did not answer. Never an empty list: "could not read" is not
+    "nobody is waiting"."""
+
+
+def _pg_array(v: str) -> list[str]:
+    v = (v or "").strip()
+    if v.startswith("[") and v.endswith("]") or v.startswith("{") and v.endswith("}"):
+        v = v[1:-1]
+    return [x.strip().strip('"') for x in next(csv.reader([v]), []) if x.strip().strip('"')] if v else []
+
+
+class UvnRows(list):
+    """The rows one replica read returned, plus how many row-shaped lines did not parse. A dropped line
+    narrows what the pass can hold, so the count is carried to the run line instead of vanishing."""
+    rejected: int = 0
+
+
+def replica_uvn_rows(run: Any = subprocess.run) -> UvnRows:
+    """Every credit request in user_verification_needed, from ONE replica read (3.5 s for 79,101 rows on
+    2026-11-13), shaped like the admin list rows `request_decision` reads. Raises `UvnUnread` when the
+    read fails or answers with no row at all: this status has never been empty, so an empty answer is a
+    reader that did not read. A row-shaped line that does not parse is never guessed: it is counted in
+    `UvnRows.rejected`."""
+    try:
+        p = run([UVN_REPLICA], input=UVN_REPLICA_SQL, capture_output=True, text=True,
+                timeout=UVN_REPLICA_TIMEOUT_S, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise UvnUnread(f"replica read did not run: {type(exc).__name__}") from exc
+    if p.returncode:
+        raise UvnUnread(f"replica read failed rc={p.returncode}: {(p.stderr or '').strip()[-160:]}")
+    out = UvnRows()
+    body = [ln for ln in p.stdout.splitlines() if ln.strip()]
+    if body and body[0].split(",")[0].strip().strip('"').lower() == "id":
+        body = body[1:]
+    for ln in body:
+        if not ln.startswith('"') and "," not in ln:
+            continue                      # a CLI banner/warning line, not a row
+        r = next(csv.reader([ln]), [])
+        if len(r) != 7 or not _UVN_ID.match(r[0]) or not r[1].isdigit():
+            out.rejected += 1
+            continue
+        out.append({"id": r[0], "userId": int(r[1]), "createdAt": r[2], "profileId": r[3], "trackId": r[4],
+                    "credits": _pg_array(r[5]), "spotifyTrackTitle": r[6], "status": UVN})
+    if not out:
+        raise UvnUnread("replica read returned no user_verification_needed row")
+    return out
+
+
+def _newest_rows(db: sqlite3.Connection, ids: list[str], modes: tuple[str, ...]) -> dict[str, tuple[str, str]]:
+    """request id -> (decision, reason) of its newest row in `modes`. One indexed probe per id
+    (`decisions_req`), in chunks; never a scan of the table."""
+    out: dict[str, tuple[str, str]] = {}
+    marks = ",".join("?" * len(modes))
+    for i in range(0, len(ids), UVN_LOOKUP_CHUNK):
+        part = ids[i:i + UVN_LOOKUP_CHUNK]
+        q = ("SELECT d.request_id, d.decision, d.reason FROM decisions d JOIN (SELECT MAX(id) AS m FROM decisions "
+             f"WHERE request_id IN ({','.join('?' * len(part))}) AND mode IN ({marks}) GROUP BY request_id) x "
+             "ON d.id = x.m")
+        for rid, decision, reason in db.execute(q, (*part, *modes)):
+            out[str(rid).lower()] = (str(decision or ""), str(reason or ""))
+    return out
+
+
+def documented_uvn(db: sqlite3.Connection, rows: list[dict[str, Any]], proof: ProofOnFile, mode: str
+                   ) -> tuple[list[Decision], int]:
+    """(the documented user_verification_needed requests that still need their proof-on-file hold,
+    how many requests a document covers). Pure selection: nothing is recorded here."""
+    covered: dict[str, Decision] = {}
+    for req in rows:
+        d = request_decision(req)
+        d.request_id = d.request_id.lower()
+        if d.user_id is None or not proof.covers(d) or proof.handed_to_ask(d):
+            continue          # no document, or stage 2 already judged it and released it to its ask
+        covered[d.request_id] = d
+    # Stage 2 reads apply and judge rows; a shadow run only ever looks at (and writes) its own.
+    modes = ("shadow",) if mode == "shadow" else ("apply", "judge")
+    newest = _newest_rows(db, sorted(covered), modes)
+    need = []
+    for rid, d in covered.items():
+        decision, _reason = newest.get(rid, ("", ""))
+        if decision not in UVN_TAKE_DECISIONS:
+            continue          # already stage 2's input (a proof-on-file hold), or a row with its own reader
+        need.append(d)
+    return need, len(covered)
+
+
+def hold_documented_uvn(db: sqlite3.Connection, res: "RunResult", mode: str, proof: ProofOnFile | None,
+                        paying: frozenset[int] | None, reader: Callable[[], list[dict[str, Any]]] | None,
+                        max_users: int, at: datetime) -> list[Decision]:
+    """Record the proof-on-file hold for documented requests that are already in
+    user_verification_needed, whole users at a time (stage 2 judges a user on their whole held set),
+    paid first, then the oldest request first, at most `max_users` users a run.
+
+    Writes decider ledger rows only. No core write, no ask, no approval, no model call, in any mode.
+    A read that fails is recorded on the run (`uvn_unread`) and never fails the run or reads as zero."""
+    if reader is None or max_users <= 0:
+        return []
+    if proof is None:
+        res.uvn_unread = "proof-on-file status unknown"
+        return []
+    try:
+        rows = reader()
+        need, res.uvn_documented = documented_uvn(db, rows, proof, mode)
+    except (UvnUnread, sqlite3.Error) as exc:
+        res.uvn_unread = str(exc)[:200]
+        log(f"decide: documented {UVN} requests not read ({res.uvn_unread}); nothing handed to stage 2")
+        return []
+    res.uvn_read = len(rows)
+    res.uvn_rejected = int(getattr(rows, "rejected", 0) or 0)
+    if res.uvn_rejected:
+        log(f"decide: {res.uvn_rejected} row-shaped line(s) of the {UVN} read did not parse; the {res.uvn_read} "
+            f"parsed row(s) are the whole of what this pass can hold")
+    by_user: dict[int, list[Decision]] = {}
+    for d in need:
+        by_user.setdefault(int(d.user_id), []).append(d)       # documented_uvn dropped rows with no user
+
+    def rank(uid: int) -> tuple[int, str, int]:
+        oldest = min((d.request_created_at or "" for d in by_user[uid]), default="")
+        return (0 if paying is not None and uid in paying else 1, oldest, uid)
+
+    out: list[Decision] = []
+    for uid in sorted(by_user, key=rank)[:max_users]:
+        for d in sorted(by_user[uid], key=lambda x: (x.request_created_at or "", x.request_id)):
+            _set(d, "hold", f"{DOC_ON_FILE_HOLD} (a document is already on file; never ask again) | {UVN_DOC_NOTE}")
+            d.paid_priority = None if paying is None else uid in paying
+            record_decision(db, res.run_id, mode, d, at)
+            out.append(d)
+        res.uvn_users += 1
+    res.uvn_held = len(out)
+    res.uvn_waiting = len(need) - len(out)
+    if out:
+        log(f"decide: {res.uvn_held} documented {UVN} request(s) of {res.uvn_users} user(s) held as proof on "
+            f"file for stage 2; {res.uvn_waiting} still to hold")
+    return out
 
 
 def held_rows(admin: admin_api.Admin, skip: set[str], page_size: int = 200, max_pages: int = 40) -> list[dict[str, Any]]:
@@ -2716,7 +2917,10 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         max_model_calls: int = 120,
         workers: int = 6, budget_s: int = 720, rows: list[dict[str, Any]] | None = None,
         clock: Callable[[], datetime] | None = None,
-        coded_out: Path | None = None) -> RunResult:
+        coded_out: Path | None = None,
+        uvn_reader: Callable[[], list[dict[str, Any]]] | None = None) -> RunResult:
+    # `uvn_reader` (credit-review.py passes `replica_uvn_rows`) turns on the documented
+    # user_verification_needed pass. A run without one behaves exactly as it did before that pass.
     # judge (Fable [key=l11b], 2026-10-27): exactly shadow - no approval PUT, no support/ask write,
     # no provisional approval - but the ledger rows carry mode='judge' so stage 2 (which reads
     # only apply and judge "proof on file" holds) gets input while the approve path stays off.
@@ -3198,6 +3402,9 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     res.deferred = sum(1 for d in decisions if d.decision == "defer")
     res.held = sum(1 for d in decisions if d.decision == "hold")
     res.partial = len(partial)
+    # Documented requests already in user_verification_needed: ledger rows only, counted on their own
+    # (`uvn_*`), never in `held`, the write lists or the coded output.
+    hold_documented_uvn(db, res, mode, proof, paying, uvn_reader, policy.max_documented_uvn_users_per_run, now)
     if partial and mode == "apply":
         for d in partial:
             record_outcome(db, res.run_id, d.request_id, PARTIAL, PARTIAL_REFUSED_OUTCOME, now)

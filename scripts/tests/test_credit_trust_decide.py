@@ -4053,6 +4053,315 @@ class PerRoleSplit(Base):
         self.assertNotIn("Mastering", d["approved_roles"])
 
 
+def uvn_row(rid, uid, created="2025-03-01T10:00:00.000Z", roles=("Mixing",)):
+    """One user_verification_needed request as `decide.replica_uvn_rows` shapes it."""
+    return {"id": rid, "userId": uid, "createdAt": created, "profileId": T.PID_GOOD, "trackId": "small",
+            "credits": list(roles), "spotifyTrackTitle": "A Song", "status": decide.UVN}
+
+
+def doc(uid, rid):
+    return {"user_id": uid, "request_id": rid, "kind": "pending_doc", "source": "intercom", "ref": "c1"}
+
+
+class DocumentedUvnReachesStage2(Base):
+    """2026-11-13 (data/send-families-zero-sends-r1/report.md): the decider listed status=unverified only,
+    so a document filed against a request already in user_verification_needed never got the proof-on-file
+    hold stage 2 takes its work from. Stage 2's own selection (`stage2.held_rows`) is the reader here."""
+
+    RID = uuid_of(900)
+
+    def stage2_input(self):
+        from credit_verify.proof import stage2
+        self.db.commit()
+        return [h.request_id for h in stage2.held_rows(str(Path(self.tmp) / "ledger.sqlite3"))]
+
+    def run_pass(self, rows, mode="judge", policy=POLICY, **kw):
+        return self.go([], mode=mode, policy=policy, uvn_reader=lambda: list(rows), **kw)
+
+    def test_a_documented_uvn_request_becomes_stage2_input(self):
+        self.proof([doc(910, self.RID)])
+        res, w = self.run_pass([uvn_row(self.RID, 910)])
+        row = self.decisions()[self.RID]
+        self.assertEqual(row["decision"], "hold")
+        self.assertTrue(row["reason"].startswith(decide.PROOF_ON_FILE_REASON), row["reason"])
+        self.assertIn(decide.UVN_DOC_NOTE, row["reason"])
+        self.assertEqual(row["mode"], "judge")
+        self.assertEqual(row["user_id"], 910)
+        self.assertEqual(self.stage2_input(), [self.RID])
+        self.assertEqual(res.uvn_read, 1)
+        self.assertEqual(res.uvn_documented, 1)
+        self.assertEqual(res.uvn_held, 1)
+        self.assertEqual(res.uvn_users, 1)
+        self.assertEqual(res.uvn_waiting, 0)
+        self.assertEqual(w.calls, [], "the pass writes nothing to core")
+
+    def test_the_old_selection_missed_the_same_request(self):
+        """Before: no user_verification_needed read at all. The same document and the same request
+        leave no decider row, so stage 2 has nothing to take."""
+        self.proof([doc(910, self.RID)])
+        res, _ = self.go([], mode="judge")
+        self.assertNotIn(self.RID, self.decisions())
+        self.assertEqual(self.stage2_input(), [])
+        self.assertIsNone(res.uvn_read)
+
+    def test_the_admin_list_the_decider_reads_never_returns_a_uvn_request(self):
+        on_core = req(self.RID, uid=910)
+        on_core["status"] = decide.UVN
+        still_unverified = req(uuid_of(901), uid=911)
+        admin = T.FakeAdmin([on_core, still_unverified], {}, PROFILES, TRACKS)
+        self.assertEqual([r["id"] for r in decide.held_rows(admin, set())], [uuid_of(901)])
+
+    def test_apply_mode_holds_it_and_writes_nothing_to_core(self):
+        self.proof([doc(910, self.RID)])
+        res, w = self.run_pass([uvn_row(self.RID, 910)], mode="apply")
+        self.assertEqual(self.decisions()[self.RID]["mode"], "apply")
+        self.assertEqual(self.stage2_input(), [self.RID])
+        self.assertEqual(w.calls, [])
+        self.assertEqual(res.held, 0, "counted on its own fields, never as a decided row")
+
+    def test_a_shadow_run_records_a_shadow_row_stage2_does_not_read(self):
+        self.proof([doc(910, self.RID)])
+        res, _ = self.run_pass([uvn_row(self.RID, 910)], mode="shadow")
+        self.assertEqual(self.decisions()[self.RID]["mode"], "shadow")
+        self.assertEqual(self.stage2_input(), [])
+        self.assertEqual(res.uvn_held, 1)
+
+    def test_a_uvn_request_with_no_document_gets_no_row(self):
+        self.proof([doc(910, self.RID)])
+        res, _ = self.run_pass([uvn_row(self.RID, 910), uvn_row(uuid_of(902), 912)])
+        self.assertNotIn(uuid_of(902), self.decisions())
+        self.assertEqual(self.stage2_input(), [self.RID])
+        self.assertEqual(res.uvn_read, 2)
+        self.assertEqual(res.uvn_documented, 1)
+
+    def test_a_request_scoped_document_does_not_cover_the_users_other_requests(self):
+        self.proof([doc(910, self.RID)])
+        self.run_pass([uvn_row(self.RID, 910), uvn_row(uuid_of(903), 910)])
+        self.assertNotIn(uuid_of(903), self.decisions())
+
+    def test_a_request_asked_or_deferred_by_the_decider_is_taken(self):
+        asked, waited = uuid_of(904), uuid_of(905)
+        self.proof([doc(910, asked), doc(910, waited)])
+        for rid, decision in ((asked, "support"), (waited, "defer")):
+            d = decide.request_decision(uvn_row(rid, 910))
+            decide._set(d, decision, "earlier run")
+            decide.record_decision(self.db, "run-old", "apply", d, T.NOW - timedelta(days=3))
+        res, _ = self.run_pass([uvn_row(asked, 910), uvn_row(waited, 910)])
+        self.assertEqual(sorted(self.stage2_input()), [asked, waited])
+        self.assertEqual(res.uvn_held, 2)
+        self.assertEqual(res.uvn_users, 1)
+
+    def test_a_request_with_any_other_newest_row_is_left_alone(self):
+        """An approval, a per-role split, a close or a standing hold has its own reader: a newer row
+        here would hide it. The allow-list keeps a decision kind added later out too."""
+        kinds = {uuid_of(910): ("approve", "n1"), uuid_of(911): ("hold", "score approval not now: proof path: engaged"),
+                 uuid_of(912): (decide.PARTIAL, "catalog split"), uuid_of(913): ("duplicate_noop", "dup"),
+                 uuid_of(914): ("a_kind_added_later", "x")}
+        self.proof([doc(910, rid) for rid in kinds])
+        for rid, (decision, reason) in kinds.items():
+            d = decide.request_decision(uvn_row(rid, 910))
+            decide._set(d, decision, reason)
+            decide.record_decision(self.db, "run-old", "judge", d, T.NOW - timedelta(days=3))
+        before = self.db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
+        res, _ = self.run_pass([uvn_row(rid, 910) for rid in kinds])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], before)
+        self.assertEqual(res.uvn_documented, 5)
+        self.assertEqual(res.uvn_held, 0)
+        self.assertEqual(res.uvn_waiting, 0)
+
+    def test_a_request_already_held_as_proof_on_file_is_not_recorded_twice(self):
+        self.proof([doc(910, self.RID)])
+        self.run_pass([uvn_row(self.RID, 910)])
+        res, _ = self.run_pass([uvn_row(self.RID, 910)])
+        n = self.db.execute("SELECT COUNT(*) FROM decisions WHERE request_id = ?", (self.RID,)).fetchone()[0]
+        self.assertEqual(n, 1)
+        self.assertEqual(res.uvn_held, 0)
+        self.assertEqual(self.stage2_input(), [self.RID])
+
+    def test_a_request_stage2_released_to_its_ask_is_not_held_again(self):
+        self.proof([doc(910, self.RID)])
+        stage2_row(str(decide.STAGE2_STORE), self.RID, "Mixing", 910, "no_document")
+        res, _ = self.run_pass([uvn_row(self.RID, 910)])
+        self.assertNotIn(self.RID, self.decisions())
+        self.assertEqual(res.uvn_documented, 0)
+
+    def test_the_cap_takes_whole_users_paying_first_then_the_oldest_request(self):
+        free_old, paid_a, paid_b, free_new = uuid_of(920), uuid_of(921), uuid_of(922), uuid_of(923)
+        self.proof([doc(930, free_old), doc(931, paid_a), doc(931, paid_b), doc(932, free_new)])
+        PaidUsersFirst.paying(self, "2026-10-11T02:30:00Z", ids=(931,))
+        rows = [uvn_row(free_old, 930, "2024-02-01T00:00:00.000Z"), uvn_row(paid_a, 931, "2026-01-01T00:00:00.000Z"),
+                uvn_row(paid_b, 931, "2026-02-01T00:00:00.000Z"), uvn_row(free_new, 932, "2025-02-01T00:00:00.000Z")]
+        two = dataclasses.replace(POLICY, max_documented_uvn_users_per_run=2)
+        res, _ = self.run_pass(rows, policy=two)
+        self.assertEqual(sorted(self.stage2_input()), [free_old, paid_a, paid_b])
+        self.assertEqual(res.uvn_users, 2)
+        self.assertEqual(res.uvn_held, 3)
+        self.assertEqual(res.uvn_waiting, 1)
+        self.assertEqual(self.decisions()[paid_a]["paid_priority"], 1)
+        self.assertEqual(self.decisions()[free_old]["paid_priority"], 0)
+        res, _ = self.run_pass(rows, policy=two)
+        self.assertEqual(sorted(self.stage2_input()), sorted([free_old, paid_a, paid_b, free_new]))
+        self.assertEqual(res.uvn_waiting, 0)
+
+    def test_a_cap_of_zero_turns_the_pass_off(self):
+        self.proof([doc(910, self.RID)])
+        calls = []
+        off = dataclasses.replace(POLICY, max_documented_uvn_users_per_run=0)
+        res, _ = self.go([], mode="judge", policy=off, uvn_reader=lambda: calls.append(1) or [uvn_row(self.RID, 910)])
+        self.assertEqual(calls, [])
+        self.assertNotIn(self.RID, self.decisions())
+        self.assertIsNone(res.uvn_read)
+
+    def test_a_read_that_fails_is_not_read_as_nobody_waiting(self):
+        self.proof([doc(910, self.RID)])
+
+        def reader():
+            raise decide.UvnUnread("replica read failed rc=1: boom")
+        res, _ = self.go([], mode="judge", uvn_reader=reader)
+        self.assertNotIn(self.RID, self.decisions())
+        self.assertIsNone(res.uvn_read)
+        self.assertIn("rc=1", res.uvn_unread)
+        self.assertIn("NOT READ", res.line())
+        self.assertNotIn("0 user_verification_needed requests read", res.line())
+
+    def test_unknown_proof_status_holds_nothing_and_says_so(self):
+        self.proof([doc(910, self.RID)], generated_at="2026-10-01T00:00:00Z")     # a stale export
+        res, _ = self.run_pass([uvn_row(self.RID, 910)])
+        self.assertNotIn(self.RID, self.decisions())
+        self.assertEqual(res.uvn_unread, "proof-on-file status unknown")
+        self.assertIn("NOT READ", res.line())
+
+    def test_the_run_line_reports_the_pass(self):
+        self.proof([doc(910, self.RID)])
+        res, _ = self.run_pass([uvn_row(self.RID, 910), uvn_row(uuid_of(902), 912)])
+        self.assertIn("2 user_verification_needed requests read, 1 with a document on file", res.line())
+        self.assertIn("1 held as proof on file for stage 2 (1 user(s))", res.line())
+
+    def test_rows_the_reader_could_not_parse_are_counted_on_the_run(self):
+        self.proof([doc(910, self.RID)])
+        rows = decide.UvnRows([uvn_row(self.RID, 910)])
+        rows.rejected = 3
+        res, _ = self.go([], mode="judge", uvn_reader=lambda: rows)
+        self.assertEqual(res.uvn_rejected, 3)
+        self.assertEqual(res.uvn_read, 1)
+        self.assertIn("3 replica line(s) of the user_verification_needed read did not parse", res.line())
+        self.assertIn("1 held as proof on file for stage 2", res.line())
+
+    def test_the_cli_run_turns_the_pass_on(self):
+        cli = T.load_cli()
+        tmp = Path(tempfile.mkdtemp())
+        cli.make_judge = lambda args, *a, **k: None
+        cli.Ledger = lambda path: type("L", (), {"db": None})()
+        cli.admin_api.AdminClient = lambda *a, **k: None
+
+        class Res:
+            mode, scanned, approved, support, write_errors, deferred, errors, note = "judge", 0, 0, 0, 0, 0, 0, ""
+            skipped_by_server: dict = {}
+
+            def line(self):
+                return "res"
+
+        seen = {}
+        replica = lambda: [uvn_row(self.RID, 910)]                              # noqa: E731
+        args = cli.parser().parse_args(["decide", "--mode", "judge"])
+        args.ledger = str(tmp / "l.sqlite3")
+        with mock.patch.multiple(decide, run=lambda admin, db, judge, *, mode, **kw: seen.update(kw, mode=mode)
+                                 or Res(), replica_uvn_rows=replica,
+                                 KILL_SWITCH=tmp / "writer.disabled",
+                                 JUDGE_KILL_SWITCH=tmp / "judge.disabled"), \
+                mock.patch.object(decide.Policy, "load",
+                                  classmethod(lambda cls, *a, **k: type("P", (), {"max_rows_per_run": 500})())):
+            self.assertEqual(cli.cmd_decide(args), 0)
+        self.assertIs(seen["uvn_reader"], replica, "the CLI hands the decider its replica reader")
+        self.assertEqual([r["id"] for r in seen["uvn_reader"]()], [self.RID])
+
+
+class ReplicaUvnRows(unittest.TestCase):
+    """The one replica read behind the pass. "Could not read" raises; it is never an empty list."""
+
+    class P:
+        def __init__(self, stdout="", returncode=0, stderr=""):
+            self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
+
+    LINE = ('"00000000-0000-4000-8000-000000000900","910","2025-03-01T10:00:00.000Z","p-1","t-1",'
+            '"[Mixing, Producer]","A ""Song"", Pt. 2"')
+
+    def read(self, proc=None, raises=None):
+        seen = {}
+
+        def run(argv, **kw):
+            seen.update(kw, argv=argv)
+            if raises:
+                raise raises
+            return proc
+        return decide.replica_uvn_rows(run), seen
+
+    def test_one_row_is_shaped_like_the_admin_list_row(self):
+        rows, _ = self.read(self.P("WARNING: jline\n" + self.LINE + "\n"))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], uuid_of(900))
+        self.assertEqual(rows[0]["userId"], 910)
+        self.assertEqual(rows[0]["credits"], ["Mixing", "Producer"])
+        self.assertEqual(rows[0]["spotifyTrackTitle"], 'A "Song", Pt. 2')
+        self.assertEqual(rows[0]["status"], decide.UVN)
+        d = decide.request_decision(rows[0])
+        self.assertEqual(d.user_id, 910)
+        self.assertEqual(d.request_created_at, "2025-03-01T10:00:00.000Z")
+
+    def test_the_statement_asks_for_user_verification_needed_once_on_stdin(self):
+        _, seen = self.read(self.P(self.LINE + "\n"))
+        self.assertIn("cr.status = 'user_verification_needed'", seen["input"])
+        self.assertIn("cr.deletedat IS NULL", seen["input"])
+        self.assertEqual(seen["argv"], [decide.UVN_REPLICA])
+        self.assertEqual(seen["timeout"], decide.UVN_REPLICA_TIMEOUT_S)
+
+    def test_a_malformed_line_is_dropped_not_guessed_and_counted(self):
+        rows, _ = self.read(self.P(self.LINE + '\n"not-a-uuid","910","x","p","t","[]","s"\n"only","three","cols"\n'))
+        self.assertEqual([r["id"] for r in rows], [uuid_of(900)])
+        self.assertEqual(rows.rejected, 2)
+
+    def test_a_warning_line_is_not_counted_as_a_request(self):
+        rows, _ = self.read(self.P("WARNING: jline is on\n" + self.LINE + "\n"))
+        self.assertEqual((len(rows), rows.rejected), (1, 0))
+
+    def test_the_cli_header_row_is_not_counted_as_a_request(self):
+        header = '"id","userid","createdat","profileid","trackid","credits","spotifytracktitle"'
+        rows, _ = self.read(self.P(header + "\n" + self.LINE + "\n"))
+        self.assertEqual((len(rows), rows.rejected), (1, 0))
+
+    def test_an_empty_answer_raises(self):
+        with self.assertRaises(decide.UvnUnread):
+            self.read(self.P(""))
+
+    def test_a_failed_read_raises(self):
+        with self.assertRaises(decide.UvnUnread):
+            self.read(self.P(self.LINE, returncode=1, stderr="Query failed"))
+
+    def test_a_timeout_raises(self):
+        import subprocess
+        with self.assertRaises(decide.UvnUnread):
+            self.read(raises=subprocess.TimeoutExpired("trino", 120))
+
+    def test_a_missing_wrapper_raises(self):
+        with self.assertRaises(decide.UvnUnread):
+            self.read(raises=FileNotFoundError("trino-query.sh"))
+
+
+class DocumentedUvnPolicy(unittest.TestCase):
+    def test_the_shipped_policy_caps_the_pass_at_stage2s_hourly_take(self):
+        p = decide.Policy.load()
+        self.assertEqual(p.max_documented_uvn_users_per_run, 10)
+
+    def test_a_negative_cap_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = json.loads(Path(decide.POLICY).read_text(encoding="utf-8"))
+            src["max_documented_uvn_users_per_run"] = -1
+            path = Path(tmp) / "p.json"
+            path.write_text(json.dumps(src))
+            with self.assertRaises(ValueError):
+                decide.Policy.load(path)
+
+
 if __name__ == "__main__":
     warnings.filterwarnings("ignore", category=ResourceWarning)
     unittest.main(verbosity=1, warnings="")

@@ -109,5 +109,7 @@
     "max_profiles_per_run": 150
   },
   "max_ask_users_per_run": 100,
+  "max_documented_uvn_users_per_run": 10,
+  "_doc_max_documented_uvn_users_per_run": "decide.hold_documented_uvn: distinct users per run whose requests ALREADY in user_verification_needed, with a document on file, get the decider's 'proof on file' hold (stage 2's only input). Ledger rows only: no core write, no ask, no approval. 10 a run is 40 an hour, which is what credit-verify-proof-stage2 takes (--max-users 40). 0 turns the pass off. Measured 2026-11-13: 28,688 such requests of 2,598 users had no hold (data/send-families-zero-sends-r1/report.md).",
   "approve_arm": false
 }
