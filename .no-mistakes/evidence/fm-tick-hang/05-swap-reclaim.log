@@ -1,0 +1,31 @@
+== swap: reclaim restores swap even when swapoff fails ==
+tick mode=apply tmp_before=3 tmp_after=3 moved=0 deleted=0 busy=0 protected=0 failures=1 actions=1 loop_gap=0s classes=none expire_pending=0 breaches=swap_pct=96>50,agent_count=222>160 top=fm-livetask:1,ak47-keep:1,held-dir:1
+
+VERDICT: 2 ceiling(s) breached - see the BREACH rows below.
+# ak47 budget - 12:16 PM ET (2026-11-14T17:16:28Z)
+
+METRIC         NOW        CEILING    STATE  REASON
+------         ---        -------    -----  ------
+load15         27.14      <= 32      ok     2x the 32 threads: above this the box is not keeping up and every agent turn slows
+swap_pct       96         <= 50      BREACH the 2026-11-10 lockup ran at 99% swap with 77 GB RAM free; 50% means real pressure, not idle paging
+mem_avail_gb   60         >= 15      ok     one full test suite plus a browser needs ~15 GB; below it a single run can stall every agent
+tmp_entries    3          <= 200000  ok     950k entries slowed every glob and test run at 14% disk; 200k keeps a top-level readdir under a second
+tmp_gb         1          <= 20      ok     a week of live scratch fits in 20 GB; the 163 GB today is leaked test scratch, not work in progress
+root_disk_pct  25         <= 85      ok     ext4 fragments badly past 85% and one large build can fill the volume; 540 GB of headroom remains
+tmux_core_pct  0          <= 100     ok     the tmux server idles at ~74% of one core with 81 panes; a whole core means it is competing with real work
+agent_count    222        <= 160     BREACH 160 agents at 90 MB-1.7 GB each is where per-agent CPU share and tmux cost cross the load ceiling
+pids_pct       40         <= 80      ok     2026-11-14 the uid hit 12000 of 12000 tasks and every fork failed for 5 h; 80% is where ordinary bursts still fit
+
+## last action
+  2026-11-14T17:16:28Z WARN swap-pressure swap=96% action failed; left alone
+
+## open findings (the table cannot settle these)
+  none
+
+## loop
+  last tick 1s ago (2026-11-14T17:16:28Z); log /tmp/ak47-demo.1Rci8v/state/devops.log
+--- commands actually run (swapoff failed, swapon still ran) ---
+swapoff called: -a
+swapon called: -a
+--- reap.log ---
+2026-11-14T17:16:28Z WARN swap-pressure swap=96% action failed; left alone

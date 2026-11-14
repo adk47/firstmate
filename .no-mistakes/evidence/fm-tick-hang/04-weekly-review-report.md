@@ -1,0 +1,44 @@
+# ak47 hygiene review - 20261114 (last 7 days)
+
+## what the box actually did
+
+METRIC                p05      p50      p95      max      n
+------                ---      ---      ---      ---      -
+load15                 30       30       30       30     20
+swap_pct              100      100      100      100     20
+tmp_gb                  0        0        0      433     20
+
+## tick health
+
+- no tick log at /tmp/ak47-demo.1Rci8v/state/devops.log
+- no action log at /tmp/ak47-demo.1Rci8v/state/reap.log
+- no findings log at /tmp/ak47-demo.1Rci8v/state/findings.log
+
+## proposed threshold changes
+
+```diff
+--- ak47/budget.conf
++++ ak47/budget.conf (proposed)
+@@ -21,7 +21,7 @@
+ # 2x the 32 threads. Above this the box is not keeping up: every agent turn
+ # slows, and the 2026-11-10 lockup peaked at 452. 32 is the point where the
+ # scheduler is still draining work faster than it arrives.
+-load15|32|max|load|2x the 32 threads: above this the box is not keeping up and every agent turn slows
++load15|38|max|load|2x the 32 threads: above this the box is not keeping up and every agent turn slows
+ 
+ # --- memory ------------------------------------------------------------------
+ # The 2026-11-10 lockup sat at 99-100% swap while 77 GB of RAM was free, because
+```
+
+- load15: 32 -> 38 (p95 30 is within 20% of 32; the reason text may need rewriting)
+
+## ceilings held, and why
+
+- HELD swap_pct: HELD - p95 100 is at the metric's own maximum (100%); raising a ceiling cannot help, this is a sustained-at-ceiling finding
+- HELD tmp_gb: HELD - p95 0 against a peak of 433: the sampler is not measuring
+
+## what this review will not do
+
+It will not apply the diff, add a class to the tick's table, or widen the
+tick's authority. A new action class needs the captain's word; a threshold
+change needs a human to accept the diff above.

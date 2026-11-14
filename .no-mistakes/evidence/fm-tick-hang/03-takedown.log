@@ -1,0 +1,25 @@
+== takedown: dry-run refusals then apply with revert ==
+--- dry run ---
+tmp-takedown: root=/tmp/ak47-demo.1Rci8v/tmp top=10 min_age=21600s max=20 apply=0
+tmp-takedown: quarantine=/tmp/ak47-demo.1Rci8v/state/quarantine/20261114-takedown
+tmp-takedown: DRY-RUN would quarantine /tmp/ak47-demo.1Rci8v/tmp/small-junk 4100KB idle=72h
+tmp-takedown: DRY-RUN would quarantine /tmp/ak47-demo.1Rci8v/tmp/big-junk 4100KB idle=72h
+tmp-takedown: held or unprovable, leaving alone: /tmp/ak47-demo.1Rci8v/tmp/held-dir (rc=0)
+tmp-takedown: moved=2 skipped=3 failures=0 freed_gb=0 quarantine=/tmp/ak47-demo.1Rci8v/state/quarantine/20261114-takedown
+--- apply ---
+tmp-takedown: root=/tmp/ak47-demo.1Rci8v/tmp top=10 min_age=21600s max=20 apply=1
+tmp-takedown: quarantine=/tmp/ak47-demo.1Rci8v/state/quarantine/20261114-takedown
+tmp-takedown: quarantine /tmp/ak47-demo.1Rci8v/tmp/small-junk -> /tmp/ak47-demo.1Rci8v/state/quarantine/20261114-takedown/small-junk 4100KB idle=72h revert='mv /tmp/ak47-demo.1Rci8v/state/quarantine/20261114-takedown/small-junk /tmp/ak47-demo.1Rci8v/tmp/small-junk'
+tmp-takedown: quarantine /tmp/ak47-demo.1Rci8v/tmp/big-junk -> /tmp/ak47-demo.1Rci8v/state/quarantine/20261114-takedown/big-junk 4100KB idle=72h revert='mv /tmp/ak47-demo.1Rci8v/state/quarantine/20261114-takedown/big-junk /tmp/ak47-demo.1Rci8v/tmp/big-junk'
+tmp-takedown: held or unprovable, leaving alone: /tmp/ak47-demo.1Rci8v/tmp/held-dir (rc=0)
+tmp-takedown: moved=2 skipped=3 failures=0 freed_gb=0 quarantine=/tmp/ak47-demo.1Rci8v/state/quarantine/20261114-takedown
+--- quarantine contents ---
+/tmp/ak47-demo.1Rci8v/state/quarantine/20261114-takedown
+/tmp/ak47-demo.1Rci8v/state/quarantine/20261114-takedown/big-junk
+/tmp/ak47-demo.1Rci8v/state/quarantine/20261114-takedown/big-junk/blob
+/tmp/ak47-demo.1Rci8v/state/quarantine/20261114-takedown/small-junk
+/tmp/ak47-demo.1Rci8v/state/quarantine/20261114-takedown/small-junk/blob
+--- entries left in /tmp root ---
+ak47-keep
+fm-livetask
+held-dir
