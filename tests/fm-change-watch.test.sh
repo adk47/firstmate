@@ -19,6 +19,15 @@
 # a hard bound, and the doctor states every failed pool read; a reused pid never
 # reads as a live drive; and a docs-only PR registers nothing at all.
 #
+# The beta stage has its own cases: a web-credits-next route change is read on
+# its beta target before any production target (asserted from the FM_CW_TRACE
+# read record, so reversing the stage fails the case), a change touching no
+# beta-served path completes clean with the reason stated, a beta regression is
+# reported as beta and arms no production watch, an unlanded rollout and an
+# unreadable fingerprint are unmeasured rather than passed, and the wait config
+# is bounded. The beta map is also exercised as a tab-separated line, as two
+# keys resolving to one target, and as two keys resolving to two targets.
+#
 # Every cluster and forge read is stubbed through the script's own seams
 # (FM_CW_FORGE_DIR, FM_CW_CLUSTER_DIR, FM_CW_ARM_CMD, FM_CW_SEND_CMD) or a
 # kubectl/ssh PATH shim, so no case reaches a cluster, the network, or the wiki.

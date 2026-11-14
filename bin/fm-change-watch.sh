@@ -286,7 +286,8 @@
 #                          way to resolve an application repository to a Deployment
 #   FM_CW_KUBECONFIG       kubeconfig file used for every cluster read
 #   FM_CW_CONFIG_DIR       directory replacing the home's config/ directory,
-#                          where change-watch-kubeconfig and change-watch-repos live
+#                          where change-watch-kubeconfig, change-watch-repos and
+#                          change-watch-beta live
 #   FM_CW_MAX_TARGETS      cap on Deployments watched for one repository (default 8)
 #   FM_CW_WORKLOADS_DIR    directory replacing the live image inventory: a file
 #                          workloads holds "ns<TAB>name<TAB>replicas<TAB>images",
@@ -313,8 +314,9 @@
 #                          is beta or prod: the read order is asserted from it
 #   FM_CW_BETA_WAIT_ATTEMPTS  fingerprint reads to wait for the beta rollout
 #                          to land before reading beta (default 4)
-#   FM_CW_BETA_POLL_SECONDS   pause between those reads (default 15); the
-#                          product is clamped to 60 seconds
+#   FM_CW_BETA_POLL_SECONDS   pause between those reads (default 15); either
+#                          value that is not a numeral falls back to its own
+#                          default, and the product is clamped to 60 seconds
 #   FM_CW_NO_WIKI          set to 1 to skip the wiki note with a printed notice
 set -u
 
