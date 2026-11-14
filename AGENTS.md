@@ -1279,19 +1279,45 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   `proof_required` / `no_sound_precedent` go to the ask path (`refused_to_ask`, emitted by
   `asks --plan P --out FILE` for `need_asks.py build --from-drain`, the one reviewed ask
   path), any unnamed reason stays held. Beside an ask reason, `validator_hold` is asked
-  too UNLESS its cause is hard (`HARD_HOLD_CAUSES`: fraud, impersonation, legal, a credit
-  the profile already has, an unfinished check - read from the request's stored verdict:
-  its `review_*` rules, `rule_errors`, `fraud_hold`, and the hard codes of
-  `hold_reason_codes`), unmeasured or unclassified. A velocity rule is the bands' band
-  B only on an editing burst (`editing_burst` on the plan row, from the bands'
+  too UNLESS the hold is one no document clears (`hold_blocks_ask`). **On this refusal
+  route, a cause no document clears is never asked, alone or under an askable hold, and
+  with or without core's `validator_hold`** (`never_asked_cause`): a hard cause
+  (`HARD_HOLD_CAUSES`, `_hold_on_error` included), any band C cause of the table
+  (`validation_error` and `_no_signal` included), a velocity cause outside an editing
+  burst or with unreadable roles, and a band table that cannot be read
+  (`bands_table_unreadable`). `hold_causes` not read from the snapshot
+  (`hold_cause_unmeasured`), a snapshot with no cause (`hold_cause_not_in_snapshot`) and
+  a cause in no list (`unclassified:<cause>`) hold only beside `validator_hold`; where
+  core lists no `validator_hold` those rows are asked. The band list itself is `band_c_rules` +
+  `band_c_error_keys` of `credit_trust_bands.json`, read at run time and never copied
+  (plus `fraud_hold`), found wherever the verdict records it (`rule_risk_percent`,
+  `rule_errors`, `hold_reason_codes`). Core says `validator_hold` only for `review_*` at 30
+  or more, so a `reject_*` rule arrives with no word from core. A velocity rule is the
+  bands' band B only on an editing burst (`editing_burst` on the plan row, from the bands'
   `high_risk_roles`); every other velocity hold is band C and stays held. Core never
   says which hold it is, so the cause comes from the snapshot (`hold_causes` on the plan
-  row): an old plan holds every such row, and "on the ask route" is not "asked" -
+  row): a plan made before that field existed, and a plan from an earlier version of this
+  code that carries `hold_causes` built from core's reading alone, both miss every band C
+  cause - build a new snapshot and plan after this deploys, before any apply - and "on the ask
+  route" is not "asked" -
   `need_asks.py` sends only where a document names a sendable need. The route has one source, the
   recorded `core_refusals` row, so a refusal whose route could not be recorded is held and
   never reported as waiting on an ask. No tier-2 or person queue for a refused approval,
   the run that meets those refusals is not an error (`held_by_core`, `errors` 0, exit 0),
   and a held row is never an incomplete run: `apply` exits 0 with the held counts printed.
+- **That band C rule covers the refusal route only, not the ladder's own ask rows.**
+  `plan()` keeps the snapshot's hold causes on `approve` rows only
+  (`held = _causes_tuple(causes) if outcome == "approve" else None`), and `asks --plan`
+  emits every ladder `ask` row without consulting `never_asked_cause()`, so a ladder
+  `ask` row carrying a band C cause is still offered to `need_asks.py`. The refused-approve
+  population that rule does classify is the smaller one (2,146 on the ask route of the
+  3,326 approve intents). The exposure, measured from the core replica 2026-11-14 12:46Z:
+  of 101,415 pending requests (8,245 users), 13,157 (1,319 users) carry a non-velocity
+  band C cause or a fraud hold (8,956 publisher/label credit, 1,862 impersonation, 1,566
+  held submitter, 1,244 fraud hold, 414 individual/org credit). That is all pending rows,
+  not the ladder's ask bucket, and how many of them an ask would actually be sent to is
+  not measured. Holding those ladder rows is the next change, already decided by the
+  owner, and is not in this one.
 - **The pass is small, and an `ask` is not a decision.** Measured on the live snapshot
   2026-11-11: 3,294 approve, 1,324 queued for a human, 856 `already_on_profile`
   (unmatched), 91,229 ask of 96,703. Never describe it as deciding the backlog; the table

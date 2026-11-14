@@ -1128,19 +1128,87 @@ class ReplicaSnapshotTests(unittest.TestCase):
              "not json", "{}", "t", "{Producer}"),
             ("r6", "1006", "p6", "user_verification_needed", "2026-11-01T00:00:00Z",
              vd(rule_risk_percent=[1, 2]), "{}", "t", "{Producer}"),
+            # band C outside core's review_* reading: reject rules, the error keys, the
+            # validator's own codes. A rule at zero did not fire; a reject rule the band
+            # table does not list is not a cause here.
+            ("r7", "1007", "p7", "user_verification_needed", "2026-11-01T00:00:00Z",
+             vd(rule_risk_percent={"reject_publisher_label_credit": 100,
+                                   "reject_deleted_catalog_track": 0,
+                                   "validation_error": 100,
+                                   "reject_a_rule_outside_the_table": 100},
+                rule_errors={"_no_signal": "x", "something_else": "y"},
+                hold_reason_codes=["reject_individual_org_credit",
+                                   "risk_score_at_or_above_threshold"]),
+             "{}", "t", "{Producer}"),
         ]
         with tempfile.TemporaryDirectory() as td:
             q, _calls = self._query(pending)
             rows = sd.snapshot_from_replica(q, ledger_path=self._ledger(td),
                                             proof_store_path=self._proof_store(td, []))
         self.assertEqual([r["hold_causes"] for r in rows], [
-            ["class_c", "review_big_track_without_trusted_credit", "review_hold_for_documents"],
+            ["class_c", "reject_artist_credit", "review_big_track_without_trusted_credit",
+             "review_hold_for_documents"],
             ["_hold_on_error", "fraud_hold", "review_held_submitter"],
             [],         # under both class C thresholds; a boolean is not a score; cleared
             None,       # no verdict on the row: not measured, never "holds nothing"
             None,       # unreadable JSON
             None,       # rules that are not a map
+            ["_no_signal", "reject_individual_org_credit", "reject_publisher_label_credit",
+             "validation_error"],
         ])
+
+    def test_every_band_c_cause_of_the_table_is_read_wherever_the_verdict_records_it(self):
+        """Core's reading shows ``review_*`` at 30 or more and nothing else, so a
+        ``reject_*`` rule and ``validation_error`` were invisible (review of #1976). The
+        list is the band table's own, read at run time."""
+        bands = json.loads((SCRIPTS / "credit_trust/credit_trust_bands.json").read_text())
+        table = set(bands["band_c_rules"]) | set(bands["band_c_error_keys"])
+        self.assertEqual(sd.band_c_causes(), table)
+        self.assertGreaterEqual(len(bands["band_c_rules"]), 12)
+        for cause in sorted(table):
+            for where, verdict in (
+                    ("rule", {"rule_risk_percent": {cause: 100}}),
+                    ("error", {"rule_risk_percent": {}, "rule_errors": {cause: "x"}}),
+                    ("code", {"rule_risk_percent": {}, "hold_reason_codes": [cause]})):
+                with self.subTest(cause=cause, where=where):
+                    self.assertIn(cause, sd.hold_causes(verdict))
+            with self.subTest(cause=cause, where="did not fire"):
+                self.assertEqual(sd.hold_causes({"rule_risk_percent": {cause: 0}}), [])
+            # a review_ rule holds from 30 up, as in core's reading; any other band C
+            # rule holds as soon as it fired
+            with self.subTest(cause=cause, where="low score"):
+                low = sd.hold_causes({"rule_risk_percent": {cause: 29}})
+                self.assertEqual(low, [] if cause.startswith("review_") else [cause])
+
+    def test_a_band_table_that_cannot_be_read_measures_nothing(self):
+        verdict = {"rule_risk_percent": {"review_big_track_without_trusted_credit": 40}}
+        kept = sd._BANDS
+        try:
+            for broken in ({}, {"band_c_rules": "x", "band_c_error_keys": []},
+                           {"band_c_rules": [], "band_c_error_keys": []},
+                           {"band_c_rules": ["reject_artist_credit"]},
+                           # an entry that is not a rule name: dropping it would leave a
+                           # shorter list that reads as complete (QA review of #1979)
+                           {"band_c_rules": [None], "band_c_error_keys": []},
+                           {"band_c_rules": [""], "band_c_error_keys": []},
+                           {"band_c_rules": ["  "], "band_c_error_keys": []},
+                           {"band_c_rules": ["reject_artist_credit", 5], "band_c_error_keys": []},
+                           {"band_c_rules": ["reject_artist_credit"], "band_c_error_keys": [None]},
+                           {"band_c_rules": ["reject_artist_credit"],
+                            "band_c_error_keys": ["_no_signal", {}]}):
+                with self.subTest(broken=broken):
+                    sd._BANDS = broken
+                    self.assertIsNone(sd.band_c_causes())
+                    self.assertIsNone(sd.hold_causes(verdict))
+                    self.assertEqual(sd.never_asked_cause((), None), "bands_table_unreadable")
+                    self.assertEqual(sd.core_refusal_route(["proof_required"], (), None), "hold")
+                    # the route a refused row takes, with and without core's validator_hold
+                    for reasons in (["proof_required"], ["proof_required", "validator_hold"]):
+                        self.assertEqual(sd.core_refusal_route(
+                            reasons, ("reject_publisher_label_credit",), None), "hold")
+        finally:
+            sd._BANDS = kept
+        self.assertEqual(sd.hold_causes(verdict), ["review_big_track_without_trusted_credit"])
 
     def test_the_fraud_class_and_the_hard_codes_rest_on_the_validator_s_own_record(self):
         """``hold_reason_codes`` is the validator's machine record of why a verdict was not
@@ -4276,11 +4344,73 @@ class WriteFailureTests(unittest.TestCase):
                               "validator_hold", "reject_rule")
         self.assertEqual(got[:3], ("validator_hold", "refused_by_core:validator_hold", "hold"))
 
-    def test_a_proof_refusal_with_no_validator_hold_ignores_the_causes(self):
-        """Core did not hold it, so the snapshot's causes are not consulted - a stale
-        cause must not hold a row core says is only waiting on a document."""
-        got = self._held_with(("review_held_submitter",), "proof_required", "high_risk_score")
-        self.assertEqual(got, ("proof_required", "refused_by_core:proof_required", "ask", None))
+    def test_a_proof_refusal_with_no_validator_hold_is_asked_unless_a_cause_no_document_clears(self):
+        """Core did not hold it, so an askable, unmeasured or missing cause is not
+        consulted - a stale cause must not hold a row core says is only waiting on a
+        document. A band C or hard cause still holds: core says ``validator_hold`` only
+        for its own ``review_*`` reading, so a ``reject_*`` rule arrives with no word from
+        core, and the ask would be one no document can clear."""
+        for causes in (("review_big_track_without_trusted_credit",), None, (),
+                       ("review_a_rule_added_later",)):
+            with self.subTest(causes=causes):
+                self.setUp()
+                got = self._held_with(causes, "proof_required", "high_risk_score")
+                self.assertEqual(got, ("proof_required", "refused_by_core:proof_required",
+                                       "ask", None))
+        for causes, note in ((("reject_publisher_label_credit",),
+                              "band_c:reject_publisher_label_credit"),
+                             (("validation_error",), "unmeasured:validation_error"),
+                             (("review_held_submitter",), "fraud:review_held_submitter"),
+                             (("fraud_hold",), "fraud:fraud_hold"),
+                             (("reject_deleted_catalog_track",
+                               "review_big_track_without_trusted_credit"),
+                              "band_c:reject_deleted_catalog_track")):
+            with self.subTest(causes=causes):
+                self.setUp()
+                got = self._held_with(causes, "proof_required", "high_risk_score")
+                # the outcome keeps core's own reason; the note says what holds the row
+                self.assertEqual(got, ("proof_required", "refused_by_core:proof_required",
+                                       "hold", note))
+                self.assertEqual(sd.refused_asks(self.db), [])
+                self.assertEqual(sd.failure_summary(self.db)["held_refusals"], 1)
+
+    def test_a_band_c_cause_under_an_askable_hold_is_never_asked(self):
+        """The mixed case: a hold a document answers, with a band C cause beneath it.
+        Every cause of the band table holds, alone or layered, with or without core's
+        ``validator_hold``; the velocity rules keep their one editing-burst exception."""
+        bands = json.loads((SCRIPTS / "credit_trust/credit_trust_bands.json").read_text())
+        errors = set(bands["band_c_error_keys"])
+        table = (set(bands["band_c_rules"]) | errors) - set(sd.velocity_hold_causes())
+        self.assertGreaterEqual(len(table), 12)
+        for cause in sorted(table):
+            kind = sd.HARD_HOLD_CAUSES.get(cause) or (
+                "unmeasured" if cause in errors else "band_c")
+            self.assertEqual(sd.hold_class(cause), kind)
+            for causes in ((cause,), ("review_big_track_without_trusted_credit", cause),
+                           ("class_c", "review_hold_for_documents", cause)):
+                for reasons in (("proof_required", "validator_hold"),
+                                ("no_sound_precedent", "validator_hold"),
+                                ("proof_required",)):
+                    with self.subTest(causes=causes, reasons=reasons):
+                        self.setUp()
+                        got = self._held_with(causes, *reasons)
+                        self.assertEqual((got[2], got[3]), ("hold", f"{kind}:{cause}"))
+                        self.assertEqual(sd.refused_asks(self.db), [])
+        # the same askable causes with no band C beneath them are still asked
+        self.setUp()
+        got = self._held_with(("class_c", "review_hold_for_documents"),
+                              "proof_required", "validator_hold")
+        self.assertEqual((got[2], got[3]), ("ask", "askable:class_c,review_hold_for_documents"))
+
+    def test_a_velocity_hold_with_no_word_from_core_keeps_its_editing_exception(self):
+        for cause in sorted(sd.velocity_hold_causes()):
+            for burst, want in ((True, ("ask", None)),
+                                (False, ("hold", f"band_c_velocity:{cause}")),
+                                (None, ("hold", f"velocity_roles_unmeasured:{cause}"))):
+                with self.subTest(cause=cause, burst=burst):
+                    self.setUp()
+                    got = self._held_with((cause,), "proof_required", editing_burst=burst)
+                    self.assertEqual((got[2], got[3]), want)
 
     def test_every_review_rule_the_validator_can_fire_is_classified_once(self):
         """A rule IDP adds later must fail here until someone says ask or hold for it."""
@@ -4300,9 +4430,14 @@ class WriteFailureTests(unittest.TestCase):
                 known.add(node)
         walk(bands)
         self.assertGreaterEqual(len(known), 14)
+        band_c = set(sd.band_c_causes())
         classified = (set(sd.ASKABLE_HOLD_CAUSES) | set(sd.HARD_HOLD_CAUSES)
-                      | set(sd.velocity_hold_causes()))
+                      | set(sd.velocity_hold_causes()) | band_c)
         self.assertEqual(known - classified, set())
+        # nothing the band table calls band C is on the list a document answers
+        self.assertEqual(set(sd.ASKABLE_HOLD_CAUSES) & band_c, set())
+        # every review_ rule this file names hard is band C in the table too
+        self.assertLessEqual({c for c in sd.HARD_HOLD_CAUSES if c.startswith("review_")}, band_c)
         self.assertEqual(set(sd.ASKABLE_HOLD_CAUSES) & set(sd.HARD_HOLD_CAUSES), set())
         self.assertEqual(set(sd.velocity_hold_causes()) & (
             set(sd.ASKABLE_HOLD_CAUSES) | set(sd.HARD_HOLD_CAUSES)), set())

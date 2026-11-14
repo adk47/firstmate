@@ -553,19 +553,39 @@ Five bounds follow from that record:
   audience for `need_asks.py build --from-drain`, the one reviewed sender). Any reason
   not named there stays held (`refused_held`), never asked, never queued to a person. No
   tier-2 or person queue exists for a refused approval.
-- **`validator_hold` beside an ask reason is asked unless the hold's cause is a hard one**
+- **`validator_hold` beside an ask reason is asked unless the hold's cause is one no
+  document clears**
   (owner decision 2026-11-14). Core lists `validator_hold` first on a proof row and never
   says which hold it is, so `snapshot` reads the cause from the request's own stored
-  verdict (`hold_causes()`: the same reading core's `validatorConflict` makes, plus the
-  validator's `fraud_hold` and the hard codes of its `hold_reason_codes`) and the plan
-  carries it on every approve row (`hold_causes`).
+  verdict (`hold_causes()`) and the plan carries it on every approve row (`hold_causes`).
+  Two readings are joined there: core's `validatorConflict` (a `review_*` rule at 30 or
+  more, the class C score signature, `rule_errors._hold_on_error`), and the validator's
+  own band C, taken from `credit_trust_bands.json` at run time (`band_c_causes()`:
+  `band_c_rules` and `band_c_error_keys`) wherever the verdict records it - a rule that
+  fired in `rule_risk_percent`, a key in `rule_errors`, a code in `hold_reason_codes` -
+  plus the validator's `fraud_hold`. Core's reading alone never shows a `reject_*` rule
+  or `validation_error`: they are not `review_*`.
   A document answers the validator's own proof rules and the class C score signature
   (`ASKABLE_HOLD_CAUSES`), so those rows are asked. A velocity rule is the bands' band B
   only on an editing burst (`proof_required.editing_burst_rules` on a role the bands'
   `high_risk_roles` calls editing); the plan carries that answer as `editing_burst` (read
   from the request's `claimed_roles` against the bands at run time), so an editing-burst
   hold is asked and every other velocity hold is held, as is one whose roles could not be
-  read. These stay held (`HARD_HOLD_CAUSES`), and `core_refusals.hold_note` says which:
+  read.
+- **On the refusal route, a band C cause is never asked, alone or under a hold that would
+  be, and with or without core's `validator_hold`** (`never_asked_cause()`; review of
+  #1976, 2026-11-14). This rule applies to an approve that core REFUSED
+  (`core_refusal_route` / `refused_asks`); it does not apply to the ladder's own ask rows
+  (see the scope note below).
+  Band C is the validator's "held for a reason the claimant cannot answer", so an ask
+  there is one no document clears. Core answers `validator_hold` only for its own
+  reading, so a row whose only hold is a `reject_*` rule is refused `proof_required`
+  with no `validator_hold` at all, and it is held all the same. The list is the band
+  table's, never a copy in this file: a rule added to `band_c_rules` holds with no change
+  here, and a table that cannot be read holds every refused row
+  (`bands_table_unreadable`). An entry that is not a rule name (null, a number, an empty
+  string) makes the whole table unreadable, never a shorter list. `HARD_HOLD_CAUSES` only names the class a few of them are
+  recorded under. `core_refusals.hold_note` says which cause held the row:
 
   | Class | Cause | Why it is not asked |
   | --- | --- | --- |
@@ -573,36 +593,66 @@ Five bounds follow from that record:
   | `impersonation` | `review_role_credited_to_other_at_trusted_source` | a trusted source credits the role to someone else |
   | `legal` | `review_operations_tombstone` | Muso Operations removed this credit earlier |
   | `already_held` | `review_duplicate_of_approved_credit` | the profile already has this credit approved or in flight: a proof ask would ask for a credit the customer has |
-  | `unmeasured` | `_hold_on_error`, a `fraud_hold` present but not a mapping with a decision | the validator could not complete a check |
+  | `unmeasured` | `_hold_on_error`, `_no_signal`, `validation_error` (the table's `band_c_error_keys`), a `fraud_hold` present but not a mapping with a decision | the validator could not complete a check |
+  | `band_c` | every other rule of `band_c_rules`: `reject_deleted_catalog_track`, `reject_high_risk_profile`, `reject_artist_credit`, `reject_individual_org_credit`, `reject_publisher_label_credit`, and any rule added there later | the validator's own table says the claimant cannot answer it |
   | `band C velocity` | `review_high_velocity_profile`, `review_hourly_velocity_profile` on a non-editing role (`band_c_velocity`) | a velocity hold is the bands' band B only on an editing burst |
   | `unmeasured velocity` | the same two rules with roles that could not be read (`velocity_roles_unmeasured`) | unmeasured is not an ask |
 
-  Any hard cause named in the verdict's `hold_reason_codes` is treated exactly like the
-  cause it names - fraud, impersonation, legal, `already_held` or `unmeasured` - because
-  that list is the validator's own machine record of why a verdict was not an approval.
-  Its score codes (`score:*`, `risk_score_at_or_above_threshold`) ride every askable row
-  and are not causes.
+  Any of those causes named in the verdict's `hold_reason_codes` is treated exactly like
+  the cause it names, because that list is the validator's own machine record of why a
+  verdict was not an approval. Its score codes (`score:*`,
+  `risk_score_at_or_above_threshold`) ride every askable row and are not causes.
+  A `review_*` rule counts from 30 up (core's threshold); any other band C rule counts
+  as soon as it fired (a score above 0).
 
-  Not measured is not an ask: a plan row with no causes (a plan made before the field
-  existed, or a verdict that could not be read) is `hold_cause_unmeasured`, a hold core
-  reports that the snapshot does not show is `hold_cause_not_in_snapshot`, and a rule
-  this code has never classified is `unclassified:<rule>` - all held. A test fails when
+  Not in the band table, so not held by this rule: `reject_high_velocity_profile`. It is
+  at 100 on 1,533 of the ask-route rows (143 users), mostly on verdicts from March to
+  July 2026. Whether that rule belongs in band C is the band table owner's call (IDP and
+  the hydra mirror change together).
+
+  Not measured is not an ask: a plan row whose `hold_causes` could not be read from the
+  snapshot (a plan made before the field existed, or a verdict that could not be read) is
+  `hold_cause_unmeasured`, a hold core reports that the snapshot does not show is
+  `hold_cause_not_in_snapshot`, and a rule this code has never classified is
+  `unclassified:<rule>` - those three hold only beside core's `validator_hold`, while on a
+  row core did not hold they are asked. A cause no document clears holds either way. On a
+  row core did NOT hold, only a never-asked cause is consulted: an askable cause, a
+  `hold_causes` that could not be read or an unclassified cause does not hold a row core
+  says is waiting on a document. A test fails when
   `credit_trust_bands.json` names a `review_*` rule that is in none of those lists. The
-  cause is as old as the snapshot, so plan from a fresh one; the send gate's own account-hold
+  cause is as old as the snapshot, so plan from a fresh one: a plan file written by an
+  earlier version of this code carries `hold_causes` built from core's reading alone and
+  therefore omits every band C cause, so after this deploys, build a new snapshot and plan
+  before any apply; the send gate's own account-hold
   read (`comm_state`) is still made at send time. A route already recorded as `hold` is
   not rewritten.
 - **On the ask route is not the same as asked.** `need_asks.py` sends the per-need ask
   only where a document was read and names a sendable need; every other row is listed as
-  `wait:no_sendable_document` and nothing is sent from this path. Measured 2026-11-14,
-  BEFORE this fix (so the velocity rule and the `hold_reason_codes` reading are not in
-  these numbers) on the 3,326 approve intents (core's answer re-derived from the replica,
-  not core's own):
-  2,774 would be refused `proof_required`; 2,140 of them carry no `validator_hold` and
-  were already on the ask route; 634 carry it, and this rule moves 412 (75 users) to the
-  ask route and keeps 222 (99 users) held - 127 `already_held`, 65 `fraud`, 29
-  `impersonation`, 1 `legal`. Of the 412, 175 (31 users) have a document with a sendable
-  need; 227 (43 users) have no document read, and 357 (54 users) have never been sent
-  any ask.
+  `wait:no_sendable_document` and nothing is sent from this path. Measured 2026-11-14
+  with this code on the 3,326 approve intents (core's answer re-derived from the replica,
+  not core's own; no approve has been sent under it):
+  2,774 would be refused `proof_required` (483 users). 634 of them carry `validator_hold`:
+  112 (37 users) go to the ask route and 522 (128 users) stay held - 300 velocity on a
+  non-editing role, 127 `already_held`, 65 `fraud`, 29 `impersonation`, 1 `legal`. The
+  other 2,140 carry no `validator_hold`: 2,034 go to the ask route and 106 (38 users) are
+  held on a band C cause core does not report - 87 `reject_publisher_label_credit`, 9
+  `validation_error`, 8 `reject_individual_org_credit`, 2 `reject_deleted_catalog_track`.
+  In all, 2,146 on the ask route (343 users) and 628 held (163 users). None of the 112 has
+  a band C cause beneath its askable hold. Of the 112, 52 (17 users) have a document with
+  a sendable need and 60 (20 users) have none; 75 (24 users) have never been sent any ask.
+- **The band C rule covers the refusal route only, not the ladder's own ask rows.**
+  `plan()` keeps the snapshot's hold causes on `approve` rows only
+  (`held = _causes_tuple(causes) if outcome == "approve" else None`), and `asks --plan`
+  emits every ladder `ask` row without consulting `never_asked_cause()`. A ladder `ask`
+  row whose stored verdict carries a band C cause therefore still reaches
+  `need_asks.py build --from-drain`, which is the population measured at 91,229 ask rows
+  of 96,703 - the larger channel, not this one. Exposure, measured from the core replica
+  2026-11-14 12:46Z: of 101,415 pending requests (8,245 users), 13,157 (1,319 users)
+  carry a non-velocity band C cause or a fraud hold (8,956 publisher/label credit, 1,862
+  impersonation, 1,566 held submitter, 1,244 fraud hold, 414 individual/org credit). That
+  is all pending rows, not the ladder's ask bucket, and how many of them an ask would
+  actually be sent to is not measured. Holding those ladder rows is the next change,
+  already decided by the owner, and is not in this one.
 - **`--max-writes N`** is the most API writes one run may start. This is the bounded
   batch: `--max-writes 25 --report batch.jsonl` gives 25 rows with request, user and result.
 - **The breaker** stops the run after 10 failed writes in a row with no success between
@@ -763,7 +813,7 @@ Every failed write carries a class, and the summary counts them in `error_classe
 | `drain_registry` | the run | the wrapper's registry check refused mid-run; `apply` stops (`stopped_reason`) |
 | `anchor_unverified`, `drain_gate_refused`, `approve_gate_refused` | the row | the wrapper's gate refused this write; nothing reached core |
 | `core_automation_not_registered` | the row | the write passed hydra's gate and **core** refused it (`agent_cannot_approve_declined`) with the reason `no_registered_automation` |
-| `core_row_refused` | the row | the same code with the row's own reasons (`no_sound_precedent`, `not_known_small`, `proof_required`, ...): core judged the row. Recorded as `refused_by_core:<reason>`, counted in `held_by_core` (not in `errors`), never by the breaker, and routed by that reason: `proof_required` / `no_sound_precedent` go to the ask path (`refused_to_ask`) - also beside `validator_hold`, unless the hold's cause is hard, unmeasured, unclassified or a velocity hold outside an editing burst (`hold_note`) - and everything else (an unnamed reason) is held. The route has one source, the recorded `core_refusals` row: a refusal whose route could not be recorded is held, never reported as waiting on an ask, and STOPS the run (`stop_reason` `ledger`) so no later approval is sent while its refusals record nothing |
+| `core_row_refused` | the row | the same code with the row's own reasons (`no_sound_precedent`, `not_known_small`, `proof_required`, ...): core judged the row. Recorded as `refused_by_core:<reason>`, counted in `held_by_core` (not in `errors`), never by the breaker, and routed by that reason: `proof_required` / `no_sound_precedent` go to the ask path (`refused_to_ask`) - also beside `validator_hold`, unless a hold keeps the row (`hold_blocks_ask`, `refusal_hold`, `never_asked_cause`, recorded in `hold_note`). WHICH causes hold, and each named, is owned by "On the refusal route, a band C cause is never asked" above; it is not repeated here. Everything else (an unnamed reason) is held. The route has one source, the recorded `core_refusals` row: a refusal whose route could not be recorded is held, never reported as waiting on an ask, and STOPS the run (`stop_reason` `ledger`) so no later approval is sent while its refusals record nothing |
 | `http_error`, `wrapper_failed`, `writer_exception` | the row | any other non-2xx or crash |
 | `unreconciled`, `ledger_error` | the row | an open intent could not be read back, or the ledger refused |
 
