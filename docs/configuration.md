@@ -1040,10 +1040,10 @@ The watch is read-only against Sentry and GitHub, makes no model calls, and boun
 That budget is shared fairly: each project's read gets the budget divided by the project count, at least 2 seconds and never more than `FM_SENTRY_WATCH_HTTP_TIMEOUT` (default 5), and the read order rotates round-robin every poll starting after the last project read, so a slow host starves no fixed tail and every project is read within a bounded number of polls.
 A project left unread for three consecutive polls is reported as `could-not-determine` on that transition.
 
-## Post-merge change watch (config/change-watch-kubeconfig, config/change-watch-repos)
+## Post-merge change watch (config/change-watch-kubeconfig, config/change-watch-repos, config/change-watch-beta)
 
-[`bin/fm-change-watch.sh`](../bin/fm-change-watch.sh) watches a merged change by effect for 12 hours; its header owns the commands, metrics, bars, schedule, target resolution, and test seams, and [`docs/architecture.md`](architecture.md) "Post-merge change watch" owns why it exists.
-This section owns only the two local, gitignored files that point its reads at this home's cluster and this home's repository map.
+[`bin/fm-change-watch.sh`](../bin/fm-change-watch.sh) watches a merged change by effect for 12 hours; its header owns the commands, metrics, bars, schedule, target resolution, the beta stage, and test seams, and [`docs/architecture.md`](architecture.md) "Post-merge change watch" owns why it exists.
+This section owns only the three local, gitignored files that point its reads at this home's cluster, this home's repository map, and this home's beta map.
 
 `config/change-watch-kubeconfig` holds one path on its first non-comment line: the kubeconfig every cluster read of a watch uses.
 Precedence is `FM_CW_KUBECONFIG`, then this file, then an operator's own `KUBECONFIG`, then `~/.kube/mcp-viewer.kubeconfig`, and only then the ambient `~/.kube/config` default.
@@ -1052,6 +1052,22 @@ A kubeconfig named here that cannot be read is reported, never silently replaced
 
 Every merge writes one durable row at `state/change-watch/rows/<watch-id>.json` with its +15m, +1h and +6h readings, its real-user check, and a terminal state of `proven`, `regressed`, or `unmeasurable-with-reason` (or `not-applicable` when the merge touched no deployable surface); `state/change-watch/` is not a task record, so teardown never removes it.
 `bin/fm-change-watch.sh gate <task-id>` exits non-zero while a task's watch is still running or ended unmeasurable, and `bin/fm-change-watch.sh audit [<days>]` fails on any `change-watch completed unmeasured` status line or any unmeasurable row inside the window; the row schema is owned by the `durable row` section of `bin/fm-change-watch.sh`, and the acceptance by [`docs/architecture.md`](architecture.md) "Post-merge change watch".
+
+`config/change-watch-beta` maps a changed path to the pre-production copy of the service that serves it, one entry per line, `<key> <namespace>/<deployment>`, where `<key>` is a repository name or a changed-path prefix.
+The beta stage runs at registration, before any production target is read, so a change that breaks something is caught while it is still only in beta rather than after it is live.
+A key matches a changed path when the path is the key or sits under it, and matches the repository name when no path does, so a route prefix and a repository name are both expressible.
+A line for a key replaces the built-in entry for that key rather than adding to it.
+Built in: `web-credits-next muso-dev/credits-gate`.
+
+Registration runs seconds after the merge, so the beta target is still running the pre-change code.
+The stage records the beta target's pre-merge pod fingerprint, captures its baseline from that pre-change state, waits for the merged sha to reach the target, and only then reads.
+The wait is bounded by `FM_CW_BETA_WAIT_ATTEMPTS` (default 4) times `FM_CW_BETA_POLL_SECONDS` (default 15), clamped to at most 60 seconds because registration runs on the merge path and in process inside the watcher's merged-poll landing path after that cycle's beat, where a longer wait would leave the watcher beacon stale; a rollout that has not landed inside that bound is stated as unmeasured rather than read as a pass, and so is a target whose pre-merge pod fingerprint could not be read at registration, because an unproven landing is never treated as landed.
+It then reads `restarts`, `oomkilled`, `rss_ratio`, `http_5xx_per_min`, and `p95_ms` on each resolved beta target through the same reader a sample uses, scored against that beta baseline rather than an absolute bar, because an absolute bar on a dev environment is not evidence about the change; the beta bars are the ones its header states.
+A metric whose baseline could not be read is left unscored and named, never scored absolutely.
+Its verdict is recorded in the watch's `beta` record and reads `beta clean: <n> metric(s) read on <target>, none crossed its bar`, `beta clean: <n> of <total> metric(s) read on <target>, none crossed its bar; unmeasured: <metrics>`, `beta clean: nothing to measure: no changed path is served by a beta target (<map>)`, `beta unmeasured: <reason> (targets: <target>)`, or `beta regressed on <metric> (<value> vs baseline <baseline>) at <target>`.
+A change touching no beta-served path completes the stage clean with that reason stated in the output and in the durable row, and the production watch arms as before.
+A beta failure is a beta failure: it is recorded as that verdict and as the merge's `regressed` row, reported on its own `check: change-watch <task-id> <pr-url> beta <metric> regressed` wake and its own steer, and the production watch is never armed for it, so it can be neither read as a production regression nor upgraded to a production pass.
+`FM_CW_TRACE` names a file every metric read appends `<stage><TAB><metric><TAB><target>` to, where stage is `beta` or `prod`; the ordering is asserted from that record rather than inferred from the outcome.
 
 `config/change-watch-repos` maps a repository to the things a watch should sample, one repository per line, `<repo> <spec>...`, where `<repo>` is the GitHub repository name and each spec is one of:
 

@@ -19,6 +19,15 @@
 # a hard bound, and the doctor states every failed pool read; a reused pid never
 # reads as a live drive; and a docs-only PR registers nothing at all.
 #
+# The beta stage has its own cases: a web-credits-next route change is read on
+# its beta target before any production target (asserted from the FM_CW_TRACE
+# read record, so reversing the stage fails the case), a change touching no
+# beta-served path completes clean with the reason stated, a beta regression is
+# reported as beta and arms no production watch, an unlanded rollout and an
+# unreadable fingerprint are unmeasured rather than passed, and the wait config
+# is bounded. The beta map is also exercised as a tab-separated line, as two
+# keys resolving to one target, and as two keys resolving to two targets.
+#
 # Every cluster and forge read is stubbed through the script's own seams
 # (FM_CW_FORGE_DIR, FM_CW_CLUSTER_DIR, FM_CW_ARM_CMD, FM_CW_SEND_CMD) or a
 # kubectl/ssh PATH shim, so no case reaches a cluster, the network, or the wiki.
@@ -59,6 +68,7 @@ run_cw() {
     FM_CW_FORGE_DIR="$home/forge" FM_CW_CLUSTER_DIR="${CW_CLUSTER_DIR-$home/cluster}" \
     FM_CW_ARM_CMD="$home/arm.sh" FM_CW_ARM_LOG="$home/arm.log" \
     FM_CW_SEND_CMD="$home/send.sh" FM_CW_SEND_LOG="$home/send.log" \
+    FM_CW_TRACE="$home/trace" \
     FM_CW_NO_WIKI=1 FM_CW_SLEEP_CMD="${CW_SLEEP:-true}" \
     "$CW" "$@"
 }
@@ -983,10 +993,14 @@ case " $* " in
   *" get pods "*)
     app=$(printf '%s' "$*" | sed -n 's/.*app=\([^ ]*\).*/\1/p')
     [ -z "${FM_CW_SHIM_PODS_FAIL:-}" ] || exit 1
+    hash=${FM_CW_SHIM_HASH:-h1}
+    if [ -n "${FM_CW_SHIM_HASH_FILE:-}" ] && [ -f "$FM_CW_SHIM_HASH_FILE" ]; then
+      hash=$(cat "$FM_CW_SHIM_HASH_FILE")
+    fi
     last='{}'
     [ -z "${FM_CW_SHIM_OOM_AT:-}" ] || last="{\"terminated\":{\"reason\":\"OOMKilled\",\"finishedAt\":\"$(date -u -d "@$FM_CW_SHIM_OOM_AT" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '1970-01-01T00:00:00Z')\"}}"
     printf '{"items":[{"metadata":{"name":"%s-1","labels":{"pod-template-hash":"%s"}},"spec":{"containers":[{"name":"c","image":"%s","resources":{"limits":{"memory":"512Mi"}}}]},"status":{"containerStatuses":[{"name":"c","restartCount":0,"lastState":%s}]}}]}\n' \
-      "$app" "${FM_CW_SHIM_HASH:-h1}" "${FM_CW_SHIM_IMAGE:-}" "$last"
+      "$app" "$hash" "${FM_CW_SHIM_IMAGE:-}" "$last"
     ;;
   *" top pods "*) printf '%s-1   c   100m   128Mi\n' "$(printf '%s' "$*" | sed -n 's/.*app=\([^ ]*\).*/\1/p')" ;;
   *" logs "*) : ;;
@@ -1683,3 +1697,400 @@ grep -q "run/Muso-AI/hydra" "$HOME_WN/wiki.log" \
 grep -qE "5xx|OOMKilled|pool-wait" "$HOME_WN/wiki.log" \
   && fail "the wiki note claimed metrics this watch never read: $(cat "$HOME_WN/wiki.log")"
 pass "a clean wiki note names only the metrics and targets the watch measured"
+
+# ---------------------------------------------------------------------------
+# The beta stage: a merged change is read against the pre-production copy of the
+# service that serves it before any production target is read.
+# ---------------------------------------------------------------------------
+
+# beta_before_prod <trace-file> prints ok when every beta read happened before the
+# first production read, or the reason the ordering was broken.
+beta_before_prod() {  # <trace-file>
+  awk -F'\t' '
+    $1 == "prod" && !seen_prod { seen_prod = NR }
+    $1 == "beta" {
+      seen_beta = 1
+      if (seen_prod) {
+        printf "beta read after the production read on line %d: %s %s\n", seen_prod, $2, $3
+        bad = 1
+        exit
+      }
+    }
+    END {
+      if (bad) exit
+      if (!seen_beta) print "no beta read was made at all"
+      else if (!seen_prod) print "no production read was made at all, so the ordering proves nothing"
+      else print "ok"
+    }
+  ' "$1"
+}
+
+# seed_beta_world <name> prints a home whose merged PR is a web-credits-next
+# route change, with one production Deployment of that image, a kubectl shim
+# whose pod-template hash is the beta target's rollout fingerprint, and a
+# rollout script that flips that hash the way a real deploy would.
+seed_beta_world() {
+  local home
+  home=$(cluster_world "$1")
+  mkdir -p "$home/workloads"
+  printf 'src/routes/credits.ts\n' > "$home/forge/files.txt"
+  printf '%s\n' 1790000000 > "$home/forge/merge-epoch"
+  printf '%s\n' deadbeef > "$home/forge/head-ref"
+  : > "$home/forge/diff.txt"
+  printf 'muso-prod\tcredits-gate\t2\tregistry.muso.ai/muso/web-credits-next:1.2.3\n' \
+    > "$home/workloads/workloads"
+  # The beta target runs the pre-merge pods until the rollout lands.
+  printf 'h1\n' > "$home/hash"
+  cat > "$home/rollout.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'h2\n' > "$FM_CW_SHIM_HASH_FILE"
+SH
+  chmod +x "$home/rollout.sh"
+  printf '%s\n' "$home"
+}
+
+# run_beta <home> <now> <args...> runs the watch with its metric series seeded
+# and a kubectl shim answering the beta target's pod fingerprint, with the
+# rollout script standing in for the pause between fingerprint reads.
+run_beta() {
+  local home=$1 now=$2
+  shift 2
+  CW_SLEEP="$home/rollout.sh" \
+  PATH="$home/bin:$PATH" FM_CW_SHIM_LOG="$home/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$home/workloads/workloads" \
+  FM_CW_SHIM_IMAGE='registry.muso.ai/muso/web-credits-next:1.2.3' \
+  FM_CW_SHIM_HASH_FILE="$home/hash" \
+  FM_CW_WORKLOADS_DIR="$home/workloads" \
+  FM_CW_BETA_WAIT_ATTEMPTS="${BETA_ATTEMPTS:-5}" \
+  run_cw "$home" "$now" "$@"
+}
+
+# seed_beta_series <home> <metric> <baseline> <sample> seeds the beta target's
+# pre-rollout reading and its post-rollout reading.
+seed_beta_series() {
+  printf '%s\n' "$3" > "$1/cluster/$2.muso-dev_credits-gate.baseline"
+  printf '%s\n' "$4" > "$1/cluster/$2.muso-dev_credits-gate.sample"
+}
+
+# seed_clean_beta <home> seeds a beta target that is healthy before and after.
+seed_clean_beta() {
+  seed_beta_series "$1" restarts 0 0
+  seed_beta_series "$1" oomkilled 0 0
+  seed_beta_series "$1" rss_ratio 0.4 0.4
+  seed_beta_series "$1" http_5xx_per_min 0 0
+  seed_beta_series "$1" p95_ms 100 100
+}
+
+# seed_beta_regression <home> <metric> <baseline> <sample> seeds a healthy beta
+# target whose one metric moved after the rollout.
+seed_beta_regression() {
+  seed_clean_beta "$1"
+  seed_beta_series "$1" "$2" "$3" "$4"
+}
+
+# (a) A web-credits-next route change is read in beta before any production
+# target is read, and the ordering is asserted from the read record rather than
+# inferred from the outcome.
+HOME_B1=$(seed_beta_world b1)
+seed_clean_beta "$HOME_B1"
+out=$(run_beta "$HOME_B1" 1790000000 register b1 \
+  'https://github.com/Muso-AI/web-credits-next/pull/77') || fail "beta register failed"
+
+case "$out" in
+  *"registered b1-77"*"beta: beta clean: 5 metric(s) read on muso-dev/credits-gate, none crossed its bar"*)
+    pass "a web-credits-next route change records a healthy beta reading" ;;
+  *) fail "unexpected registration line: $out" ;;
+esac
+
+[ -f "$HOME_B1/trace" ] || fail "no metric read was traced"
+[ "$(beta_before_prod "$HOME_B1/trace")" = ok ] \
+  || fail "the beta stage did not read before production: $(beta_before_prod "$HOME_B1/trace")"
+pass "a web-credits-next route change is read in beta before any production target"
+
+[ "$(head -1 "$HOME_B1/trace" | cut -f1)" = beta ] \
+  || fail "the first read was not a beta read: $(head -1 "$HOME_B1/trace")"
+[ "$(head -1 "$HOME_B1/trace" | cut -f3)" = 'muso-dev/credits-gate' ] \
+  || fail "the first beta read was not muso-dev/credits-gate: $(head -1 "$HOME_B1/trace")"
+pass "the first read of the whole registration is the beta target muso-dev/credits-gate"
+
+grep -q '^prod	' "$HOME_B1/trace" \
+  || fail "no production target was read at all, so the ordering proves nothing"
+pass "the production watch still reads its own targets after the beta stage"
+
+BETA_B1="$HOME_B1/state/change-watch/b1-77/beta"
+[ -f "$BETA_B1" ] || fail "the beta stage recorded no reading"
+[ "$(awk -F'\t' '$1 == "verdict" { print $2 }' "$BETA_B1")" \
+  = 'beta clean: 5 metric(s) read on muso-dev/credits-gate, none crossed its bar' ] \
+  || fail "unexpected beta verdict: $(cat "$BETA_B1")"
+pass "a healthy beta target records a beta clean verdict naming what it read"
+
+# The stage proves the rollout instead of assuming it: it re-reads the beta
+# target's fingerprint until the merged sha arrives.
+[ "$(grep -c 'get pods' "$HOME_B1/shim.log" 2>/dev/null || printf 0)" -ge 3 ] \
+  || fail "the beta stage did not re-read the pod fingerprint: $(cat "$HOME_B1/shim.log")"
+pass "the beta stage re-reads the pod fingerprint until the rollout lands"
+
+# (b) A change touching no beta-served path completes clean with the reason in
+# the output, never a silent pass.
+HOME_B2=$(new_world b2)
+seed_pr "$HOME_B2" "$MANIFEST" /dev/null "src/routes/feed.ts"
+out=$(run_cw "$HOME_B2" 1790000000 register b2 "$PR_URL") || fail "no-beta-path register failed"
+case "$out" in
+  *"beta clean: nothing to measure: no changed path is served by a beta target"*"web-credits-next -> muso-dev/credits-gate"*)
+    pass "a change touching no beta-served path completes clean with the reason stated" ;;
+  *) fail "nothing-beta-served did not state its reason: $out" ;;
+esac
+ROW_B2="$HOME_B2/state/change-watch/rows/b2-3317.json"
+[ -f "$ROW_B2" ] || fail "a change with nothing deployable recorded no durable row"
+grep -q 'nothing to measure: no changed path is served by a beta target' "$ROW_B2" \
+  || fail "the durable row did not carry the beta reason: $(cat "$ROW_B2")"
+pass "the reason a change measured nothing beta-served is durable, not only printed"
+
+# (c) A beta failure is labelled beta, and it never reaches a production target.
+HOME_B3=$(seed_beta_world b3)
+seed_beta_regression "$HOME_B3" http_5xx_per_min 0 50
+out=$(run_beta "$HOME_B3" 1790000000 register b3 \
+  'https://github.com/Muso-AI/web-credits-next/pull/78') || fail "beta-failure register failed"
+
+case "$out" in
+  *"beta stage failed: beta regressed on http_5xx_per_min (50 vs baseline 0) at muso-dev/credits-gate"*)
+    pass "a beta regression is reported as a beta failure" ;;
+  *) fail "a beta regression was not reported as a beta failure: $out" ;;
+esac
+grep -q '^prod	' "$HOME_B3/trace" 2>/dev/null \
+  && fail "a beta failure read a production target: $(cat "$HOME_B3/trace")"
+pass "a beta failure reads no production target at all"
+[ -s "$HOME_B3/arm.log" ] && fail "a beta failure armed a production watch: $(cat "$HOME_B3/arm.log")"
+pass "a beta failure arms no production watch"
+
+verdict=$(run_beta "$HOME_B3" 1790000000 verdict b3-78)
+[ "$verdict" = 'change-watch beta regressed on http_5xx_per_min (50 vs baseline 0) at muso-dev/credits-gate' ] \
+  || fail "the verdict did not read as a beta failure: $verdict"
+run_beta "$HOME_B3" 1790000000 verdict b3-78 >/dev/null 2>&1 \
+  && fail "a beta failure exited zero from verdict"
+pass "the verdict states the beta failure and exits non-zero"
+
+status=$(run_beta "$HOME_B3" 1790000000 status b3-78)
+case "$status" in
+  *"beta: beta regressed on http_5xx_per_min"*) ;;
+  *) fail "status did not state the beta failure: $status" ;;
+esac
+case "$status" in
+  *prod*) fail "status reported the beta failure as a production result: $status" ;;
+esac
+pass "status states the beta failure and never as a production result"
+
+grep -qF "check: change-watch b3 https://github.com/Muso-AI/web-credits-next/pull/78 beta http_5xx_per_min regressed" \
+  "$HOME_B3/state/.wake-queue" \
+  || fail "no beta wake was queued for the beta failure: $(cat "$HOME_B3/state/.wake-queue" 2>/dev/null)"
+pass "a beta failure queues its own beta wake"
+steer=$(cat "$HOME_B3/send.log" 2>/dev/null || true)
+case "$steer" in
+  *"failed the beta stage: beta regressed on http_5xx_per_min"*) ;;
+  *) fail "the lane was not steered about the beta failure: $steer" ;;
+esac
+case "$steer" in
+  *"production watch was not armed"*) ;;
+  *) fail "the steer did not say the production watch was not armed: $steer" ;;
+esac
+pass "the lane is steered with the beta failure and that no production watch was armed"
+
+# A rollout that never lands is stated, never read as a pass, and the
+# production watch still arms.
+HOME_B5=$(seed_beta_world b5)
+seed_clean_beta "$HOME_B5"
+printf '#!/usr/bin/env bash\n:\n' > "$HOME_B5/rollout.sh"
+out=$(run_beta "$HOME_B5" 1790000000 register b5 \
+  'https://github.com/Muso-AI/web-credits-next/pull/80') || fail "unlanded-beta register failed"
+case "$out" in
+  *"beta: beta unmeasured: awaiting the deploy:"*)
+    pass "a beta rollout that has not landed is stated as unmeasured" ;;
+  *) fail "an unlanded beta rollout was read anyway: $out" ;;
+esac
+case "$out" in
+  *"beta clean"*) fail "an unlanded beta rollout was reported clean: $out" ;;
+esac
+[ "$(awk -F'\t' '$1 == "reading" && $4 != "" { n++ } END { print n + 0 }' \
+  "$HOME_B5/state/change-watch/b5-80/beta")" = 0 ] \
+  || fail "a beta reading was scored before the rollout landed"
+pass "an unlanded beta rollout scores nothing"
+[ -s "$HOME_B5/arm.log" ] || fail "an unlanded beta rollout stopped the production watch from arming"
+pass "an unlanded beta rollout still arms the production watch"
+# The wait can never outlive the watcher beacon grace, so a configured bound
+# above a minute is clamped: register also runs in process inside the watcher.
+out=$(BETA_ATTEMPTS=400 run_beta "$HOME_B5" 1790000000 register b5 \
+  'https://github.com/Muso-AI/web-credits-next/pull/85') || fail "clamped-wait register failed"
+case "$out" in
+  *"awaiting the deploy:"*"after 4 attempt(s)"*)
+    pass "a beta wait configured above a minute is clamped to the four-attempt bound" ;;
+  *) fail "the beta wait was not clamped to a minute: $out" ;;
+esac
+out=$(FM_CW_BETA_POLL_SECONDS=600 BETA_ATTEMPTS=10 run_beta "$HOME_B5" 1790000000 register b5 \
+  'https://github.com/Muso-AI/web-credits-next/pull/86') || fail "clamped-poll register failed"
+case "$out" in
+  *"awaiting the deploy:"*"after 1 attempt(s)"*)
+    pass "a beta poll longer than the ceiling is clamped so the whole wait stays inside it" ;;
+  *) fail "a long beta poll escaped the wait ceiling: $out" ;;
+esac
+# A configured bound that is not a usable count cannot opt out of the ceiling.
+out=$(BETA_ATTEMPTS=4x run_beta "$HOME_B5" 1790000000 register b5 \
+  'https://github.com/Muso-AI/web-credits-next/pull/87') || fail "non-numeric-bound register failed"
+case "$out" in
+  *"awaiting the deploy:"*"after 4 attempt(s)"*)
+    pass "a non-numeric beta wait bound falls back to the default" ;;
+  *) fail "a non-numeric beta wait bound was honoured: $out" ;;
+esac
+out=$(FM_CW_BETA_POLL_SECONDS=0 BETA_ATTEMPTS=400 run_beta "$HOME_B5" 1790000000 register b5 \
+  'https://github.com/Muso-AI/web-credits-next/pull/88') || fail "zero-poll register failed"
+case "$out" in
+  *"awaiting the deploy:"*"after 60 attempt(s)"*)
+    pass "a zero beta poll still bounds the wait by the ceiling" ;;
+  *) fail "a zero beta poll left the beta wait unbounded: $out" ;;
+esac
+# A numeral with a leading zero is a decimal count, not an octal literal: it must
+# neither abort the script nor escape the ceiling.
+out=$(FM_CW_BETA_POLL_SECONDS=08 BETA_ATTEMPTS=400 run_beta "$HOME_B5" 1790000000 register b5 \
+  'https://github.com/Muso-AI/web-credits-next/pull/90') || fail "leading-zero poll register failed"
+case "$out" in
+  *"awaiting the deploy:"*"after 7 attempt(s)"*)
+    pass "a leading-zero beta poll is read as decimal and still bounded" ;;
+  *) fail "a leading-zero beta poll broke the wait bound: $out" ;;
+esac
+# A count wider than the ceiling cannot be a usable bound.
+out=$(BETA_ATTEMPTS=99999999999999999999 run_beta "$HOME_B5" 1790000000 register b5 \
+  'https://github.com/Muso-AI/web-credits-next/pull/91') || fail "overflowing-bound register failed"
+case "$out" in
+  *"awaiting the deploy:"*"after 4 attempt(s)"*)
+    pass "an overflowing beta wait bound is clamped" ;;
+  *) fail "an overflowing beta wait bound escaped the ceiling: $out" ;;
+esac
+# A beta fingerprint that could not be read is no proof the merged sha landed,
+# so the stage states an unmeasured beta instead of reading the pre-change pods.
+HOME_B9=$(seed_beta_world b9)
+seed_clean_beta "$HOME_B9"
+out=$(FM_CW_SHIM_PODS_FAIL=1 run_beta "$HOME_B9" 1790000000 register b9 \
+  'https://github.com/Muso-AI/web-credits-next/pull/84') || fail "unreadable-fingerprint register failed"
+case "$out" in
+  *"beta: beta unmeasured: deploy landing unreadable:"*)
+    pass "a beta fingerprint that cannot be read is stated as unmeasured" ;;
+  *"beta clean"*) fail "an unproven beta rollout was read as clean: $out" ;;
+  *) fail "an unreadable beta fingerprint was not stated: $out" ;;
+esac
+
+# The beta reason is durable, not only printed: a merge that DOES have production
+# targets but no beta-served path records the reason in its registration row and
+# again in its terminal rewrite, so the row alone states why nothing was measured
+# in beta.
+HOME_B10=$(new_world b10)
+seed_pr "$HOME_B10" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_B10" "$MANIFEST" "$FEED_LINE"
+run_cw "$HOME_B10" 1790000000 register b10 "$PR_URL" >/dev/null \
+  || fail "production-with-no-beta register failed"
+ROW_B10="$HOME_B10/state/change-watch/rows/b10-3317.json"
+grep -q '"terminal_state": "open"' "$ROW_B10" \
+  || fail "a merge with production targets did not record an open row: $(cat "$ROW_B10")"
+grep -q 'nothing to measure: no changed path is served by a beta target' "$ROW_B10" \
+  || fail "the open row did not carry the beta reason: $(cat "$ROW_B10")"
+run_cw "$HOME_B10" 1790044000 drive b10-3317 >/dev/null || true
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_B10" \
+  || fail "the drive did not rewrite the row's terminal state: $(cat "$ROW_B10")"
+grep -q 'nothing to measure: no changed path is served by a beta target' "$ROW_B10" \
+  || fail "the terminal row dropped the beta reason: $(cat "$ROW_B10")"
+pass "the beta reason is durable in both the registration and terminal row"
+
+# A beta target already above the absolute bar but unchanged is clean: the
+# verdict is relative to the beta baseline, never to an absolute bar.
+HOME_B6=$(seed_beta_world b6)
+seed_beta_series "$HOME_B6" restarts 0 0
+seed_beta_series "$HOME_B6" oomkilled 2 2
+seed_beta_series "$HOME_B6" rss_ratio 0.86 0.86
+seed_beta_series "$HOME_B6" http_5xx_per_min 40 40
+seed_beta_series "$HOME_B6" p95_ms 900 900
+out=$(run_beta "$HOME_B6" 1790000000 register b6 \
+  'https://github.com/Muso-AI/web-credits-next/pull/81') || fail "unchanged-baseline register failed"
+case "$out" in
+  *"beta: beta clean: 5 metric(s) read on muso-dev/credits-gate"*)
+    pass "a beta target already above the absolute bar but unchanged is clean" ;;
+  *) fail "the beta verdict used an absolute bar instead of the beta baseline: $out" ;;
+esac
+
+# Every beta target a change is served by keeps its own fingerprint and
+# baseline, so a second matching key cannot displace the first target's records.
+HOME_B8=$(seed_beta_world b8)
+seed_clean_beta "$HOME_B8"
+printf 'src muso-dev/web\n' > "$HOME_B8/config/change-watch-beta"
+printf 'muso-dev\tweb\t2\tregistry.muso.ai/muso/web:1.0.0\n' >> "$HOME_B8/workloads/workloads"
+for m in restarts oomkilled rss_ratio http_5xx_per_min p95_ms; do
+  case "$m" in
+    rss_ratio) b=0.4; v=0.4 ;;
+    p95_ms) b=100; v=100 ;;
+    *) b=0; v=0 ;;
+  esac
+  printf '%s\n' "$b" > "$HOME_B8/cluster/$m.muso-dev_web.baseline"
+  printf '%s\n' "$v" > "$HOME_B8/cluster/$m.muso-dev_web.sample"
+done
+out=$(run_beta "$HOME_B8" 1790000000 register b8 \
+  'https://github.com/Muso-AI/web-credits-next/pull/83') || fail "multi-target beta register failed"
+case "$out" in
+  *"beta: beta clean: 10 metric(s) read on muso-dev/credits-gate, muso-dev/web"*)
+    pass "every matching beta target is read, not only the last one" ;;
+  *) fail "a matching beta target lost its baseline or fingerprint: $out" ;;
+esac
+[ "$(awk -F'\t' 'NF { n++ } END { print n + 0 }' "$HOME_B8/state/change-watch/b8-83/beta-landed")" = 2 ] \
+  || fail "the beta fingerprints overwrote one another: $(cat "$HOME_B8/state/change-watch/b8-83/beta-landed")"
+[ "$(awk -F'\t' 'NF { n++ } END { print n + 0 }' "$HOME_B8/state/change-watch/b8-83/beta-baseline")" = 10 ] \
+  || fail "the beta baselines overwrote one another: $(cat "$HOME_B8/state/change-watch/b8-83/beta-baseline")"
+pass "each matched beta target keeps its own fingerprint and baseline"
+
+# Two keys can name the same beta target: here the built-in repository key and a
+# home path prefix both resolve to muso-dev/credits-gate. The target is one
+# deployment to fingerprint, wait for, and read, so it is read once.
+HOME_B11=$(seed_beta_world b11)
+seed_clean_beta "$HOME_B11"
+printf 'src/routes/credits muso-dev/credits-gate\n' > "$HOME_B11/config/change-watch-beta"
+out=$(run_beta "$HOME_B11" 1790000000 register b11 \
+  'https://github.com/Muso-AI/web-credits-next/pull/84') || fail "same-target beta register failed"
+case "$out" in
+  *"beta: beta clean: 5 metric(s) read on muso-dev/credits-gate, none crossed its bar"*)
+    pass "two keys resolving to one beta target read it once" ;;
+  *) fail "a beta target named by two keys was read twice: $out" ;;
+esac
+[ "$(awk -F'\t' 'NF { n++ } END { print n + 0 }' "$HOME_B11/state/change-watch/b11-84/beta-landed")" = 1 ] \
+  || fail "one beta target was fingerprinted more than once: $(cat "$HOME_B11/state/change-watch/b11-84/beta-landed")"
+[ "$(awk -F'\t' 'NF { n++ } END { print n + 0 }' "$HOME_B11/state/change-watch/b11-84/beta-baseline")" = 5 ] \
+  || fail "one beta target kept more than one baseline: $(cat "$HOME_B11/state/change-watch/b11-84/beta-baseline")"
+pass "one beta target keeps exactly one fingerprint and baseline"
+
+# The beta map is hand-edited, so any whitespace separates a key from its target:
+# a tab-separated entry resolves the target it names instead of silently
+# completing clean with nothing to measure.
+HOME_B12=$(seed_beta_world b12)
+seed_clean_beta "$HOME_B12"
+printf 'web-credits-next\tmuso-dev/credits-gate\n' > "$HOME_B12/config/change-watch-beta"
+out=$(run_beta "$HOME_B12" 1790000000 register b12 \
+  'https://github.com/Muso-AI/web-credits-next/pull/89') || fail "tab-map beta register failed"
+case "$out" in
+  *"beta: beta clean: 5 metric(s) read on muso-dev/credits-gate, none crossed its bar"*)
+    pass "a tab-separated beta map entry resolves its target" ;;
+  *) fail "a tab-separated beta map entry measured nothing: $out" ;;
+esac
+
+# A metric with no readable baseline is unmeasured, never scored against an
+# absolute bar, because an absolute bar is not evidence about the change.
+HOME_B7=$(seed_beta_world b7)
+seed_clean_beta "$HOME_B7"
+rm -f "$HOME_B7/cluster/p95_ms.muso-dev_credits-gate.baseline"
+out=$(run_beta "$HOME_B7" 1790000000 register b7 \
+  'https://github.com/Muso-AI/web-credits-next/pull/82') || fail "no-baseline register failed"
+case "$out" in
+  *"beta: beta clean: 4 of 5 metric(s) read on muso-dev/credits-gate, none crossed its bar; unmeasured: p95_ms"*)
+    pass "a metric with no readable beta baseline is unmeasured, not scored absolutely" ;;
+  *) fail "a metric with no beta baseline was scored anyway: $out" ;;
+esac
+
+BETA_B7="$HOME_B7/state/change-watch/b7-82/beta"
+[ "$(awk -F'\t' '$1 == "reading" && $2 == "p95_ms" { print $4 }' "$BETA_B7")" = '' ] \
+  || fail "the metric with no baseline was given a value anyway"
+grep -q 'no beta baseline was readable' "$BETA_B7" \
+  || fail "the record did not state why the metric could not be scored"
+pass "the record states why a metric with no beta baseline could not be scored"
