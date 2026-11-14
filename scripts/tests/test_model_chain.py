@@ -802,8 +802,11 @@ class TestDocVerifyTransport(unittest.TestCase):
             meta={"model_reported": reported})
 
     def post(self):
+        # The floor, not 100: a budget under the reasoning floor is a NON-BILLABLE
+        # skip on the metered tier now, so a sub-floor number here would test the
+        # skip instead of the transport semantics each of these cases is about.
         return self.ex.chain_post({"messages": [{"role": "user", "content": "read this"}],
-                                   "max_tokens": 100}, "key", 30)
+                                   "max_tokens": mc.MIN_MAX_TOKENS_REASONING}, "key", 30)
 
     def test_the_free_tier_is_the_subscription_alone_and_is_recorded(self):
         """The free tier runs as its own single-tier chain call, so a $0 answer
@@ -1091,7 +1094,7 @@ class TestDocVerifyTransport(unittest.TestCase):
                               codex_helper=Path(__file__),
                               opener=FakeOpenRouter([openrouter_ok("hello")]),
                               subscription_runner=FakeCodex([(0, json.dumps({"text": "  "}), "")]))
-        res = chain.call("hi", schema=None, max_tokens=100)
+        res = chain.call("hi", schema=None, max_tokens=mc.MIN_MAX_TOKENS_REASONING)
         self.assertTrue(res.ok)
         self.assertEqual(res.tier, mc.TIER_FALLBACK)
         self.assertEqual(res.text, "hello")
@@ -1194,6 +1197,121 @@ class TestLedgerFailClosed(ChainBase):
         self.assertFalse(res.ok)
         self.assertEqual(orouter.requests, [], "an unrecordable spend must not happen")
         self.assertIn("accounting unavailable", res.attempts[-1]["reason"])
+
+    # ── QA 2026-11-08 findings on PR 1855 ────────────────────────────────────
+
+    class LoseChargeOnce(mc.UsageLedger):
+        """The reservation lands, then the CHARGE row's append fails once and
+        everything after it succeeds - a transient disk-full, or a mount that
+        comes back mid-call. That asymmetry is the whole finding."""
+
+        def __init__(self, path):
+            self.lost = False
+            self.interleaved = False
+            super().__init__(path)
+
+        def _append(self, line):
+            # ONLY the metered tier's charge row: the subscription's own row is a
+            # legitimate earlier append and must not be the one that eats the fault.
+            if not self.lost and '"tier": "deepseek"' in line \
+                    and '"outcome": "reserve"' not in line:
+                self.lost = True
+                raise OSError(28, "No space left on device (simulated transient append failure)")
+            super()._append(line)
+
+        def append_stamped(self, stamped):
+            ok = super().append_stamped(stamped)
+            if not ok and not self.interleaved and stamped.get("tier") == mc.TIER_FALLBACK:
+                # QA 2026-11-08 (Critical, second round): a CONCURRENT request's
+                # subscription row lands right now and, by succeeding, CLEARS the
+                # shared `broken` flag. That interleaving is the whole bug - a
+                # caller that reads the flag concludes its own charge was durable.
+                self.interleaved = True
+                mc.UsageLedger.record(self, {"tier": mc.TIER_SUBSCRIPTION,
+                                             "outcome": "ok", "cost_usd": 0.0})
+            return ok
+
+    @staticmethod
+    def reasoning_exhausted():
+        """Empty content with the budget eaten by reasoning. This is
+        REASONING_EXHAUSTED, not a provider returning nothing, and the two used
+        to collapse into BAD_ANSWER (ak47 2026-11-06)."""
+        return {"model": mc.FALLBACK_MODEL,
+                "usage": {"prompt_tokens": 700, "completion_tokens": 30, "cost": 0.0003,
+                          "completion_tokens_details": {"reasoning_tokens": 28}},
+                "choices": [{"finish_reason": "length", "message": {"content": ""}}]}
+
+    def test_a_budget_below_the_reasoning_floor_is_a_non_billable_skip(self):
+        """QA 2026-11-08 Critical 1: validate_generation raised INSIDE
+        call_deepseek - after admit() had reserved spend and outside the transport
+        error handler - so a caller with a budget under the floor crashed with a
+        leaked reservation instead of yielding a decision."""
+        orouter = FakeOpenRouter([openrouter_ok('{"verdict": "ok"}')])
+        res = self.chain(subscription_runner=FakeCodex([(0, "", "")]), opener=orouter).call(
+            "judge this", schema=SCHEMA, max_tokens=mc.MIN_MAX_TOKENS_REASONING - 1)
+        self.assertFalse(res.ok)
+        self.assertEqual(orouter.requests, [], "a refused budget must never reach the provider")
+        last = res.attempts[-1]
+        self.assertEqual((last["tier"], last["outcome"]), (mc.TIER_FALLBACK, "skipped"))
+        self.assertIn("floor", last["reason"])
+        rows = [json.loads(x) for x in self.ledger_path.read_text().splitlines() if x.strip()]
+        metered = [r for r in rows if r.get("tier") == mc.TIER_FALLBACK]
+        self.assertEqual([r for r in metered if r.get("outcome") in ("reserve", "settle")], [],
+                         "nothing was sent, so nothing may be reserved or released")
+        self.assertEqual([r for r in metered if isinstance(r.get("cost_usd"), (int, float))], [],
+                         "a refused budget must never be charged for")
+
+    def test_a_lost_charge_row_keeps_its_reservation_and_refuses_recovery(self):
+        """QA 2026-11-08 Critical 2: the charge row's append fails, the following
+        settle append succeeds, and a successful append CLEARS `broken` - leaving
+        reserve + release with no cost between them, so the day read low and the
+        next paid call was admitted under it."""
+        ledger = self.LoseChargeOnce(self.ledger_path)
+        res = mc.ModelChain("test-surface", ledger=ledger, sleep=lambda s: None,
+                            log=self.lines.append, codex_helper=Path(__file__),
+                            subscription_runner=FakeCodex([(0, "", "")]),
+                            opener=FakeOpenRouter([openrouter_ok('{"verdict": "ok"}')])) \
+            .call("judge this", schema=SCHEMA)
+        self.assertTrue(res.ok, "a ledger failure must not fail the user's answer")
+        rows = [json.loads(x) for x in self.ledger_path.read_text().splitlines() if x.strip()]
+        self.assertTrue(ledger.interleaved, "the concurrent row must actually have landed")
+        self.assertEqual(len([r for r in rows if r.get("outcome") == "reserve"]), 1,
+                         "the reservation was admitted; it is the CHARGE row the stub dropped")
+        self.assertEqual([r for r in rows if r.get("outcome") == "ok"
+                          and r.get("tier") == mc.TIER_FALLBACK], [],
+                         "the charge row is the one the stub dropped")
+        self.assertEqual([r for r in rows if r.get("outcome") == "settle"], [],
+                         "releasing a reservation whose charge was lost erases a real charge")
+        # The concurrent row cleared `broken`, so the flag CANNOT be the signal:
+        # the reservation must survive on this row's own append result alone.
+        self.assertIsNone(ledger.broken, "the interleaved row cleared the shared flag")
+        self.assertGreater(ledger.spent_today_usd(), 0.0,
+                           "the day must still carry the reservation, not read low")
+
+    def test_a_reasoning_exhausted_answer_retries_once_at_a_raised_budget(self):
+        """QA 2026-11-08 Important 3: RETRY_WITH_MORE_TOKENS had no reader, so an
+        empty deepseek answer exhausted the chain instead of taking the larger
+        budget the docstring promised."""
+        orouter = FakeOpenRouter([self.reasoning_exhausted(), openrouter_ok('{"verdict": "ok"}')])
+        res = self.chain(subscription_runner=FakeCodex([(0, "", "")]), opener=orouter).call(
+            "judge this", schema=SCHEMA, max_tokens=mc.MIN_MAX_TOKENS_REASONING)
+        self.assertTrue(res.ok)
+        self.assertEqual(mc.raised_budget(mc.MIN_MAX_TOKENS_REASONING), 4096)
+        self.assertEqual([r["body"]["max_tokens"] for r in orouter.requests],
+                         [mc.MIN_MAX_TOKENS_REASONING, 4096],
+                         "the retry must re-request with the raised budget")
+
+    def test_the_raised_budget_retry_is_bounded(self):
+        """A model that reasons past EVERY budget must not walk the reservation,
+        and must not loop: one rung, then the chain is honestly exhausted."""
+        orouter = FakeOpenRouter([self.reasoning_exhausted()])
+        res = self.chain(subscription_runner=FakeCodex([(0, "", "")]), opener=orouter).call(
+            "judge this", schema=SCHEMA, max_tokens=mc.MIN_MAX_TOKENS_REASONING)
+        self.assertFalse(res.ok)
+        self.assertEqual(len(orouter.requests), 2, "exactly one raised-budget retry")
+        top = mc.MAX_MAX_TOKENS_RAISED
+        self.assertEqual(mc.raised_budget(top), top, "the ceiling is fixed, not doubled past")
+        self.assertLessEqual(mc.raised_budget(top * 4), top)
 
     def test_an_unpriceable_success_keeps_its_reservation_instead_of_reading_as_free(self):
         """A provider that omits `usage.cost` must not look free: the reservation

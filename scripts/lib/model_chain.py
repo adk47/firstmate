@@ -86,7 +86,29 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 CODEX_HELPER = Path(os.environ.get("MODEL_CHAIN_CODEX_HELPER", SCRIPTS / "lib" / "codex-judge-exec.sh"))
 OPENROUTER_URL = os.environ.get("MODEL_CHAIN_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
 KEY_FILE = os.environ.get("MODEL_CHAIN_KEY_FILE", "/opt/hydra/secrets/llm-provider-keys.json")
-LEDGER_PATH = os.environ.get("MODEL_CHAIN_LEDGER", "/var/lib/hydra/model-chain/calls.jsonl")
+def _default_ledger_path() -> str:
+    """Where the usage ledger lives when nothing overrides it.
+
+    NOT /var/lib/hydra. That directory is root-owned and does not exist on a
+    plain host, so ``mkdir`` raised PermissionError, ``record()`` latched
+    ``broken``, and ``admit()`` then refused EVERY metered call with
+    "accounting unavailable" - a total outage that read as an OpenRouter
+    problem (ak47, 2026-11-06: 500 credit rows, 0 model calls, $0.00 spent).
+
+    A user-writable default means the ledger works on any host without a
+    privileged step. A systemd unit that wants /var/lib should declare
+    ``StateDirectory=hydra/model-chain`` and set MODEL_CHAIN_LEDGER explicitly;
+    that is the only case where a root-owned path is correct.
+    """
+    override = os.environ.get("MODEL_CHAIN_LEDGER")
+    if override:
+        return override
+    state = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state")
+    return os.path.join(state, "hydra", "model-chain", "calls.jsonl")
+
+
+LEDGER_PATH = _default_ledger_path()
 
 # Tier 1 = the subscription the fleet already runs on (openclaw agents are on
 # gpt-6-sol / gpt-6-luna). Tier 2 = the captain's standing fallback model.
@@ -181,6 +203,78 @@ def validate_routing(block: Any) -> dict[str, Any]:
 # otherwise be discovered by a customer's document.
 validate_routing(ZDR_ROUTING)
 
+
+# ── generation floors (Fable ruling 2026-11-06) ──────────────────────────────
+# A reasoning model shares ONE budget between thinking and answering. Measured
+# on ak47 2026-11-06: deepseek-1017 at max_tokens=60 returned content "" with
+# 58 reasoning tokens; at 200 it answered. An empty answer is indistinguishable
+# from a model failure downstream, so the floor is enforced HERE and not left to
+# a caller that does not know the model reasons.
+MIN_MAX_TOKENS_REASONING = 2048
+# A fraud judgment on one source is not corroboration. Below 3 results the judge
+# cannot cross-check, so a web request is refused rather than answered weakly.
+MIN_WEB_MAX_RESULTS = 3
+MAX_WEB_MAX_RESULTS = 10
+# Models that spend tokens thinking before they answer. A new reasoning model
+# must be added here, or its floor is not enforced.
+REASONING_MODELS = frozenset({
+    "deepseek/deepseek-v4.1-flash-1017",
+    "deepseek/deepseek-v4.1-flash",
+    "deepseek/deepseek-v4-pro-0813",
+})
+
+
+def is_reasoning_model(model: str | None) -> bool:
+    """True when this model reasons before answering. Matched on the id with any
+    ``:online``/``:nitro`` suffix stripped, so the suffix cannot dodge the floor."""
+    base = (model or "").split(":", 1)[0]
+    return base in REASONING_MODELS
+
+
+def validate_generation(model: str | None, *, max_tokens: int, web: bool,
+                       web_max_results: int) -> None:
+    """Refuse a request whose budget cannot produce a usable answer.
+
+    Callers may RAISE these numbers; they cannot lower them. The floor is a
+    property of the model and the task, not of the caller's intent, so it lives
+    next to ``validate_routing`` and not in ``credit_review/``.
+    """
+    if is_reasoning_model(model) and int(max_tokens) < MIN_MAX_TOKENS_REASONING:
+        raise ValueError(
+            f"max_tokens={max_tokens} is below the {MIN_MAX_TOKENS_REASONING} floor for "
+            f"reasoning model {model}: the reasoning budget would consume the answer "
+            "and return empty content (ak47 2026-11-06)")
+    if web:
+        if int(web_max_results) < MIN_WEB_MAX_RESULTS:
+            raise ValueError(
+                f"web_max_results={web_max_results} is below the {MIN_WEB_MAX_RESULTS} "
+                "floor: one source is not corroboration for a fraud judgment")
+        if int(web_max_results) > MAX_WEB_MAX_RESULTS:
+            raise ValueError(
+                f"web_max_results={web_max_results} exceeds the {MAX_WEB_MAX_RESULTS} "
+                "ceiling: search cost scales linearly and buys nothing past it")
+
+
+# ── the raised-budget retry (QA 2026-11-08 finding 3) ────────────────────────
+# REASONING_EXHAUSTED was declared retryable with a larger budget and NOTHING
+# read the set, so an empty deepseek answer walked the chain to exhaustion while
+# the docstring promised a retry. It is wired in call()/call_fallback() now, and
+# BOUNDED twice: at most MORE_TOKENS_RETRIES rungs, and never above a ceiling, so
+# a model that reasons past every budget cannot walk the reservation up.
+MORE_TOKENS_RETRIES = 1
+MAX_MAX_TOKENS_RAISED = 8192
+
+
+def raised_budget(current: int) -> int:
+    """The next budget to retry a reasoning-exhausted answer at.
+
+    Doubles, but never below twice the floor (an answer that consumed the whole
+    budget needs real room for both thinking and the answer) and never above
+    MAX_MAX_TOKENS_RAISED. Returns ``current`` unchanged when there is no room
+    left, which the caller reads as "do not retry"."""
+    return min(max(int(current) * 2, MIN_MAX_TOKENS_REASONING * 2), MAX_MAX_TOKENS_RAISED)
+
+
 # A new METERED rung needs its own ceiling: before this module the credit paths
 # were either $0 (codex/Jev) or capped by their own caller. DeepSeek is cheap but
 # not free, and a wedged loop must not be able to spend without bound.
@@ -225,6 +319,12 @@ TIMEOUT = "timeout"
 UNAVAILABLE = "unavailable"
 UNSAFE = "unsafe"
 BAD_ANSWER = "bad_answer"
+# The answer was empty because the model's REASONING consumed the whole token
+# budget. Distinct from bad_answer so the caller can retry at a larger budget
+# instead of treating a too-small max_tokens as a model failure (ak47
+# 2026-11-06: deepseek-1017 at max_tokens=60 returned "" with 58 reasoning
+# tokens - indistinguishable from an outage downstream).
+REASONING_EXHAUSTED = "reasoning_exhausted"
 # Skips that mean "the subscription CANNOT do this request", not "the
 # subscription failed": a fallback behind one of these is expected paid usage, not
 # an outage, so it must never be counted as fallback pressure (QA 2026-11-03).
@@ -238,7 +338,7 @@ CAPABILITY_SKIPS = frozenset({
 # An attempt the provider could have charged for: a served answer, or a served but
 # unusable one (truncated / unparseable). A `skipped` attempt never left the box and
 # a transport error (429/5xx/timeout) consumed nothing.
-BILLABLE_KINDS = frozenset({BAD_ANSWER})
+BILLABLE_KINDS = frozenset({BAD_ANSWER, REASONING_EXHAUSTED})
 
 
 def _billable_row(row: dict) -> bool:
@@ -248,6 +348,9 @@ def _billable_row(row: dict) -> bool:
 CHAIN_EXHAUSTED = "chain_exhausted"
 
 RETRY_SAME_TIER = frozenset({RATE_LIMITED, SERVER_ERROR, TIMEOUT})
+# A reasoning-exhausted answer is retried on the SAME tier at a larger budget:
+# the model was fine, the ceiling was not.
+RETRY_WITH_MORE_TOKENS = frozenset({REASONING_EXHAUSTED})
 # Never fall back after these: the answer was refused for a safety reason, and
 # re-asking a different model the same question would launder the refusal.
 ABORT_CHAIN = frozenset({UNSAFE})
@@ -317,9 +420,9 @@ class UsageLedger:
         cap never bound across processes. So a metered call must be preceded by a
         row that survives, and the actual cost is settled against it afterwards
         (``settle``), keeping the ledger append-only and its sum exact."""
-        self.record({"surface": surface, "step": step, "tier": TIER_FALLBACK,
-                     "outcome": "reserve", "cost_usd": float(amount)})
-        return self.broken is None
+        return self.append_stamped(self.stamp(
+            {"surface": surface, "step": step, "tier": TIER_FALLBACK,
+             "outcome": "reserve", "cost_usd": float(amount)}))
 
     def admit(self, cap: float, amount: float, *, surface: str, step: str) -> str | None:
         """Atomically check the cap AND reserve, across processes.
@@ -333,9 +436,10 @@ class UsageLedger:
 
         Returns ``None`` when admitted, else the reason to log."""
         if cap <= 0:
-            self.record({"surface": surface, "step": step, "tier": TIER_FALLBACK,
-                         "outcome": "reserve", "cost_usd": float(amount)})
-            return None if self.broken is None else f"accounting unavailable ({self.broken})"
+            ok = self.append_stamped(self.stamp(
+                {"surface": surface, "step": step, "tier": TIER_FALLBACK,
+                 "outcome": "reserve", "cost_usd": float(amount)}))
+            return None if ok else f"accounting unavailable ({self.broken})"
         lock_path = self.path.with_suffix(self.path.suffix + ".lock")
         try:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -346,9 +450,10 @@ class UsageLedger:
                     if spent + amount > cap:
                         return (f"daily cap ${cap:.2f} reached (spent ${spent:.2f}, "
                                 f"next call reserves ${amount:.2f})")
-                    self.record({"surface": surface, "step": step, "tier": TIER_FALLBACK,
-                                 "outcome": "reserve", "cost_usd": float(amount)})
-                    if self.broken is not None:
+                    ok = self.append_stamped(self.stamp(
+                        {"surface": surface, "step": step, "tier": TIER_FALLBACK,
+                         "outcome": "reserve", "cost_usd": float(amount)}))
+                    if not ok:
                         return f"accounting unavailable ({self.broken})"
                     return None
                 finally:
@@ -369,11 +474,34 @@ class UsageLedger:
 
     def __post_init__(self) -> None:
         # Overridable so a test, a staging copy or a canary can point the DEFAULT
-        # ledger somewhere writable instead of inheriting the host's
-        # /var/lib/hydra. An explicit path always wins over the environment.
+        # ledger somewhere writable instead of inheriting the host's default.
+        # An explicit path always wins over the environment.
         override = os.environ.get("MODEL_CHAIN_LEDGER_PATH")
         if override and str(self.path) == LEDGER_PATH:
             self.path = Path(override)
+        self.preflight()
+
+    def preflight(self) -> None:
+        """Prove the ledger is writable BEFORE the first metered call.
+
+        ak47 2026-11-06: the directory did not exist and could not be created,
+        so the failure surfaced as "accounting unavailable" on every call and
+        was misread as an OpenRouter outage for hours. Failing here names the
+        literal path and the errno, so the next reader sees a filesystem
+        problem and not a provider problem.
+
+        Sets ``broken`` rather than raising: a non-metered caller (a read-only
+        report, a test) must still import and run. ``admit()`` is what refuses
+        the spend, and it now carries this message.
+        """
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path, "a", encoding="utf-8"):
+                pass
+        except OSError as exc:
+            self.broken = f"ledger unwritable: {self.path} ({type(exc).__name__}: {exc})"
+            print(f"[model-chain] {self.broken} - metered tier disabled",
+                  file=sys.stderr, flush=True)
 
     def _append(self, line: str) -> None:
         """The only write. Separate so a test can make WRITES fail while READS
@@ -383,18 +511,49 @@ class UsageLedger:
         with open(self.path, "a", encoding="utf-8") as fh:
             fh.write(line)
 
-    def record(self, row: dict[str, Any]) -> dict[str, Any]:
-        row = {"ts": utcnow(), "epoch": int(time.time()), **row}
+    @staticmethod
+    def stamp(row: dict[str, Any]) -> dict[str, Any]:
+        """Add the fields every row carries. Split out of ``record()`` so a caller
+        that must know whether ITS OWN row landed can write that row itself."""
+        return {"ts": utcnow(), "epoch": int(time.time()), **row}
+
+    def append_stamped(self, stamped: dict[str, Any]) -> bool:
+        """Append an already-stamped row and report whether THAT append landed.
+
+        ak47 2026-11-08 (QA Critical): ``record()`` reports the process-wide
+        ``broken`` flag, which is not the same question. Two requests interleave -
+        A's charge append fails, B's subscription row succeeds and CLEARS ``broken``
+        - and A then believes its charge is durable. It settled its reservation, so
+        the ledger held +reserve and -reserve with no cost between them, the day
+        read low, and the next paid call was admitted under that total. The return
+        value here is per-append, so it cannot be laundered by someone else's write.
+        """
         try:
-            self._append(json.dumps(row, default=str) + "\n")
+            self._append(json.dumps(stamped, default=str) + "\n")
         except OSError as exc:
             # A ledger failure must not break a user-request path, but it must
             # also not silently disable the daily cap: the cost of this call is
             # no longer countable, so the METERED tier stops until it is.
-            self.broken = f"{type(exc).__name__}: {exc}"
-            print(f"[model-chain] ledger write failed — metered tier disabled: {self.broken}",
+            self.broken = f"ledger unwritable: {self.path} ({type(exc).__name__}: {exc})"
+            print(f"[model-chain] {self.broken} - metered tier disabled",
                   file=sys.stderr, flush=True)
-        return row
+            return False
+        # RECOVER, do not latch forever. A transient failure (disk full,
+        # a mount that came back) must not disable the metered tier for the
+        # life of the process: the next successful write proves accounting
+        # works again, and the cap is enforceable from that row onward.
+        if self.broken is not None:
+            print(f"[model-chain] ledger recovered: {self.path}",
+                  file=sys.stderr, flush=True)
+            self.broken = None
+        return True
+
+    def record(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Append a row. Use ``append_stamped()`` when the caller has to know
+        whether this particular row is durable (spend rows do)."""
+        stamped = self.stamp(row)
+        self.append_stamped(stamped)
+        return stamped
 
     def calls(self, since_epoch: float = 0.0) -> list[dict[str, Any]]:
         return read_calls(self.path, since_epoch, strict=True)
@@ -754,6 +913,9 @@ def call_deepseek(messages: Sequence[dict[str, Any]], *, schema: dict[str, Any] 
     ``data_collection: deny``: every caller of this helper feeds it user
     material (claims, documents, support text)."""
     model = model or FALLBACK_MODEL
+    # Refuse a budget that cannot produce an answer BEFORE spending on it.
+    validate_generation(model, max_tokens=max_tokens, web=web,
+                        web_max_results=web_max_results)
     body: dict[str, Any] = {"model": model, "messages": list(messages), "temperature": temperature,
                             "max_tokens": max_tokens, "usage": {"include": True}}
     if schema:
@@ -819,6 +981,19 @@ def call_deepseek(messages: Sequence[dict[str, Any]], *, schema: dict[str, Any] 
                             # report (QA 2026-11-03).
                             "model_reported": reported})
     if not text.strip():
+        # Distinguish "the model thought until the budget ran out" from "the
+        # model returned nothing". The first is retryable at a larger budget;
+        # the second is a provider fault. Collapsing them made a too-small
+        # max_tokens look like an outage (ak47 2026-11-06).
+        details = usage.get("completion_tokens_details") or {}
+        reasoning_tokens = details.get("reasoning_tokens") if isinstance(details, dict) else None
+        if (isinstance(reasoning_tokens, int) and reasoning_tokens > 0) \
+                or choice.get("finish_reason") == "length":
+            att.kind = REASONING_EXHAUSTED
+            att.reason = (f"reasoning consumed the budget (reasoning_tokens={reasoning_tokens}, "
+                          f"max_tokens={max_tokens}, finish_reason={choice.get('finish_reason')})")[:200]
+            att.meta["reasoning_tokens"] = reasoning_tokens
+            return att
         att.kind, att.reason = BAD_ANSWER, "empty completion"
         return att
     if choice.get("finish_reason") == "length":
@@ -910,10 +1085,14 @@ class ModelChain:
         capability = False
         for tier in self.tiers:
             attempt_no = 0
+            # The budget is per TIER and may grow: a reasoning-exhausted answer is
+            # retried on the same tier with more room (RETRY_WITH_MORE_TOKENS).
+            budget = int(max_tokens)
+            more_tokens_used = 0
             while True:
                 attempt_no += 1
                 att = self._attempt(tier, prompt_text, msgs, schema=schema, images=images, web=web,
-                                    max_tokens=max_tokens, temperature=temperature, timeout_s=timeout_s,
+                                    max_tokens=budget, temperature=temperature, timeout_s=timeout_s,
                                     sensitive=sensitive, exclude_domains=exclude_domains,
                                     web_max_results=web_max_results, step=step, capability=capability,
                                     frequency_penalty=frequency_penalty)
@@ -937,6 +1116,14 @@ class ModelChain:
                     self._log(f"[model-chain] surface={self.surface} step={step} tier={att.tier} "
                               f"outcome=aborted kind={att.kind} reason={att.reason}")
                     return res
+                if att.kind in RETRY_WITH_MORE_TOKENS and more_tokens_used < MORE_TOKENS_RETRIES:
+                    raised = raised_budget(budget)
+                    if raised > budget:
+                        more_tokens_used += 1
+                        budget = raised
+                        self._log(f"[model-chain] surface={self.surface} step={step} tier={tier} "
+                                  f"kind={att.kind} retrying at max_tokens={budget}")
+                        continue
                 if att.outcome == "error" and att.kind in RETRY_SAME_TIER and attempt_no < self.retries:
                     self._sleep(self._backoff(attempt_no))
                     continue
@@ -975,10 +1162,12 @@ class ModelChain:
         prompt_text = prompt if isinstance(prompt, str) else messages_text(msgs)
         res = ChainResult(ok=False, prompt_sha256=sha256_text(prompt_text))
         attempt_no = 0
+        budget = int(max_tokens)
+        more_tokens_used = 0
         while True:
             attempt_no += 1
             att = self._attempt(TIER_FALLBACK, prompt_text, msgs, schema=schema, images=images, web=web,
-                                max_tokens=max_tokens, temperature=temperature, timeout_s=timeout_s,
+                                max_tokens=budget, temperature=temperature, timeout_s=timeout_s,
                                 sensitive=sensitive, exclude_domains=exclude_domains,
                                 web_max_results=web_max_results, step=step,
                                 frequency_penalty=frequency_penalty)
@@ -996,6 +1185,14 @@ class ModelChain:
             if att.kind in ABORT_CHAIN:
                 res.error, res.error_kind = f"{att.tier}: {att.reason}", att.kind
                 return res
+            if att.kind in RETRY_WITH_MORE_TOKENS and more_tokens_used < MORE_TOKENS_RETRIES:
+                raised = raised_budget(budget)
+                if raised > budget:
+                    more_tokens_used += 1
+                    budget = raised
+                    self._log(f"[model-chain] surface={self.surface} step={step} "
+                              f"kind={att.kind} retrying at max_tokens={budget}")
+                    continue
             if att.outcome == "error" and att.kind in RETRY_SAME_TIER and attempt_no < self.retries:
                 self._sleep(self._backoff(attempt_no))
                 continue
@@ -1031,6 +1228,19 @@ class ModelChain:
         # The reservation is this REQUEST's ceiling, not a flat guess: reserving a
         # flat $0.05 let a call admitted at $9.95 settle at $10.05, so the "hard
         # $10/day" was only a floor (QA 2026-11-03).
+        # Refuse a budget that cannot produce an answer BEFORE reserving for it
+        # (QA 2026-11-08 Critical 1). validate_generation raises, and it used to
+        # raise INSIDE call_deepseek - i.e. after admit() had reserved spend and
+        # outside the transport error handler - so every caller with a budget
+        # under the reasoning floor (Judge.payload's 1200) crashed with a leaked
+        # reservation instead of yielding a decision. This is a NON-BILLABLE
+        # skip: nothing was sent, so nothing is charged, and the caller sees why.
+        try:
+            validate_generation(self.fallback_model, max_tokens=kw["max_tokens"], web=kw["web"],
+                                web_max_results=kw["web_max_results"])
+        except ValueError as exc:
+            return TierAttempt(TIER_FALLBACK, "skipped", model=self.fallback_model,
+                               kind=UNAVAILABLE, reason=str(exc)[:300])
         estimate = estimate_upper_usd(
             self.fallback_model, prompt_text, max_tokens=kw["max_tokens"],
             web_results=kw["web_max_results"] if kw["web"] else 0)
@@ -1077,11 +1287,24 @@ class ModelChain:
         att.meta = {**(att.meta or {}), "_reserve_usd": reserve}
         return att
 
-    def _release(self, reserved: float | None, actual: float | None, step: str) -> None:
-        """Release a reservation ONLY after the attempt's charge row is durable, so
-        the ledger's running total never dips below what was actually spent."""
-        if reserved is not None:
-            self.ledger.settle(float(reserved), actual, surface=self.surface, step=step)
+    def _release_or_keep(self, reserved: float | None, actual: float | None, step: str,
+                        *, charge_durable: bool) -> None:
+        """Release a reservation ONLY when the attempt's charge row is durable.
+
+        A release is a NEGATIVE row: if the charge it balances was never written,
+        the pair nets to zero and the day's total loses a charge that really was
+        incurred. When the charge is not durable the reservation is KEPT (the cap
+        then reads at or above the truth) and the ledger stays ``broken``, so the
+        metered tier refuses rather than spending on a falsely low total."""
+        if reserved is None:
+            return
+        if not charge_durable:
+            self._log(f"[model-chain] surface={self.surface} step={step} "
+                      f"reservation ${float(reserved):.4f} KEPT: the charge row is not durable "
+                      f"({self.ledger.broken or 'ledger broken'}), so releasing it would erase a "
+                      "real charge from the daily total")
+            return
+        self.ledger.settle(float(reserved), actual, surface=self.surface, step=step)
 
     def _record(self, att: TierAttempt, prompt_sha: str, step: str, attempt_no: int,
                 *, capability: bool = False, defer_ok: bool = False) -> None:
@@ -1090,12 +1313,17 @@ class ModelChain:
         if defer_ok and att.outcome == "ok":
             # The caller decides whether this answer was usable; a success row it
             # never confirms would inflate the subscription denominator.
-            self._release(reserved, att.cost_usd, step)
+            self._release_or_keep(reserved, att.cost_usd, step,
+                                  charge_durable=self.ledger.broken is None)
             self._log(f"[model-chain] surface={self.surface} step={step} tier={att.tier} "
                       f"model={att.model} outcome=ok attempt={attempt_no} latency_ms="
                       f"{att.latency_ms or 0} served_row=deferred")
             return
-        self.ledger.record({
+        # THIS row's own append result, not the process-wide `broken` flag: a
+        # concurrent request's subscription row could clear `broken` between our
+        # failed append and the read, and we would settle against a charge that
+        # never landed (QA 2026-11-08 Critical, second round).
+        charge_durable = self.ledger.append_stamped(self.ledger.stamp({
             "surface": self.surface, "step": step, "tier": att.tier, "model": att.model,
             "outcome": att.outcome, "kind": att.kind, "reason": att.reason,
             "prompt_sha256": prompt_sha, "attempt": attempt_no,
@@ -1103,8 +1331,16 @@ class ModelChain:
             "cost_usd": att.cost_usd, "latency_ms": att.latency_ms,
             "citations": len(att.citations or []), "meta": meta or None,
             **({"capability": True} if capability else {}),
-        })
-        self._release(reserved, att.cost_usd, step)
+        }))
+        # Release ONLY once that charge row is durably on disk (QA 2026-11-08
+        # Critical 2). Releasing unconditionally let a transient append failure
+        # lose the charge while the following settle row succeeded - and a
+        # successful row CLEARS `broken` - leaving reserve + release with no cost
+        # in between. The day's total then read low and the next paid call was
+        # admitted under it. Keeping the reservation errs EXPENSIVE, which is the
+        # only safe direction for a cap, and `broken` stays set until a human
+        # reconciles, so recovery is refused rather than assumed.
+        self._release_or_keep(reserved, att.cost_usd, step, charge_durable=charge_durable)
         self._log(f"[model-chain] surface={self.surface} step={step} tier={att.tier} model={att.model} "
                   f"outcome={att.outcome} attempt={attempt_no} latency_ms={att.latency_ms or 0}"
                   + (f" kind={att.kind} reason={att.reason}" if att.outcome != "ok" else ""))

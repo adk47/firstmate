@@ -466,7 +466,11 @@ class Judge:
             "model": self.model,
             "messages": build_messages(mode, evidence),
             "temperature": 0,
-            "max_tokens": 1200,
+            # The reasoning floor, imported rather than restated: deepseek-1017 at
+            # 1200 returned empty content (the reasoning budget ate the answer),
+            # and a hardcoded budget here is how the credit path drifted below a
+            # floor declared 200 lines away (QA 2026-11-08 Critical 1).
+            "max_tokens": model_chain.MIN_MAX_TOKENS_REASONING,
             "usage": {"include": True},
             # The ONE ZDR block (captain 2026-11-04), on BOTH transports: the
             # chain path re-applies it inside call_deepseek, and the legacy
@@ -526,7 +530,8 @@ class Judge:
         plugin = (body.get("plugins") or [{}])[0] if isinstance(body.get("plugins"), list) else {}
         r = self.chain().call(
             messages=body.get("messages") or [], web=bool(body.get("plugins")),
-            max_tokens=int(body.get("max_tokens") or 1200), temperature=0.0,
+            max_tokens=int(body.get("max_tokens") or model_chain.MIN_MAX_TOKENS_REASONING),
+            temperature=0.0,
             timeout_s=timeout or self.timeout,
             web_max_results=int(plugin.get("max_results") or self.web_max_results),
             exclude_domains=plugin.get("exclude_domains") or ())
@@ -569,7 +574,7 @@ class Judge:
         body = self.payload(mode, {})
         aliases = batch_aliases(n)
         body["messages"] = build_batch_messages(mode, evidences, aliases)
-        body["max_tokens"] = min(6000, 1200 + 700 * (n - 1))
+        body["max_tokens"] = min(6000, model_chain.MIN_MAX_TOKENS_REASONING + 700 * (n - 1))
         base.prompt_sha256 = messages_sha256(body["messages"])
         data = self._post(body, base, timeout=self.timeout + 30 * (n - 1))
         out: dict[str, JudgeResult] = {}
