@@ -1683,6 +1683,23 @@ precedent_v1 approves in core from a pod that cannot open node-8's SQLite ledger
 - **The one-time gap is `precedent_ledger.py backfill` (a plan), then `--apply`, run by hand on node-8 after a
   deploy.** Until it runs, the ledger holds only the approvals of the timer's 6 h window onward.
 
+## "Never asked" is a join by request id, and it is mostly a reading backlog
+
+Measured 2026-11-15, with the tool that reproduces it: `data/never-asked-canary-r1/report.md`.
+
+- **Count it as pending requests no verify-ledger row names, joined by request id.** `pending - ledger ids` as two
+  totals subtracts ledger ids that are no longer pending (17,539 that day) and counts no population: 9,078 by
+  subtraction, 26,617 by the join.
+- **Requests are not customers, and most are not owed an ask.** Of the 26,617: core asked 7,456 itself, 14,756 sit
+  behind a proof entry already on file, 413 have no user. A first contact was owed to 238 customers.
+- **`metadata.freshDspCapture` is a receipt, never a live state**: approved requests carry the same `partial` /
+  `enqueued` values. In flight is an open `dsp_captures` row (`closed = 0`) in `dsp-verify.sqlite`.
+- **A refusal rate read from ledger rows alone reads 0.** No `uvn-status` refusal has written a ledger row since
+  2026-11-03; they are in the tick's `uvn-status-*-check.json`. Count the check's refusals too.
+- `scripts/credit_review/never_asked_digest.py` is an audience and a canary rule (one digest per customer, 500
+  measured, continue only under 2%), wired to no sender. A send through it is a decision on copy and campaign,
+  not a merge.
+
 ## The standing review reads; it never steers
 
 `scripts/standing_review/review.py` (tick `scripts/standing-review-tick.sh`, every 2 h on ak47, the only box that

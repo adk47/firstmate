@@ -2667,6 +2667,9 @@ jobs:
           # the verification scale drain (data/verification-scale-plan.md): the deterministic ladder, the
           # idempotency key, sharding, byte-identical re-runs and the kill -9 chaos proof. Stdlib only.
           python3 scripts/tests/test_scale_drain.py
+          # the never-asked digest audience and its canary rule (credit_review/never_asked_digest.py; wired to no
+          # sender): one digest per customer, who is left out and why, and continue only under 2% over 500.
+          python3 scripts/tests/test_never_asked_digest.py
           # the anchor verifier behind both scale-drain gates: the checks themselves, the pinned admin
           # source (a caller CREDIT_REVIEW_ADMIN_SCRIPT is denied), and the file run as the wrapper runs it.
           python3 scripts/tests/test_verify_anchor.py
