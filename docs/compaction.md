@@ -37,7 +37,8 @@ more than `trigger` can never finish, however many times it is compacted.
 {
   "compaction": {
     "enabled": true,
-    "defaults": { "reserveTokens": 64000, "keepRecentTokens": 20000 },
+    "reserveTokens": 64000,
+    "keepRecentTokens": 20000,
     "modelOverrides": {
       "token-pool/claude-fable-5-2": { "reserveTokens": 300000, "keepRecentTokens": 60000 }
     }
@@ -45,8 +46,9 @@ more than `trigger` can never finish, however many times it is compacted.
 }
 ```
 
-`defaults` applies to every model without an override.
-An absent `defaults` block means the harness defaults, 64000 and 20000.
+The top-level `reserveTokens` and `keepRecentTokens` apply to every model
+without an override.
+Absent top-level values mean the harness defaults, 16384 and 20000.
 `modelOverrides` is keyed `provider/model`, exactly as the model catalog names
 it.
 
@@ -55,7 +57,7 @@ it.
 Every session start prints them, per model, in the `BOOTSTRAP` section:
 
 ```
-compaction: enabled=true default reserveTokens=64000 keepRecentTokens=20000 (harness defaults; /home/aaron/.pi/agent/settings.json)
+compaction: enabled=true default reserveTokens=16384 keepRecentTokens=20000 (harness defaults; /home/aaron/.pi/agent/settings.json)
   token-pool/claude-fable-5-2 reserve=300000 keepRecent=60000 context=1000000 trigger=700000
   openrouter-named/deepseek/deepseek-v4.1-flash-1017 reserve=700000 keepRecent=30000 context=1048576 trigger=348576
 ```

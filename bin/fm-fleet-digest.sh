@@ -80,6 +80,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 MAX_BYTES=${FM_FLEET_DIGEST_MAX_BYTES:-60000}
 case "$MAX_BYTES" in ''|*[!0-9]*|0) MAX_BYTES=60000 ;; esac
@@ -270,6 +272,7 @@ utc_stamp() {
 # printed first and the byte cap can only ever omit routine work.
 EXC_ROWS=
 ROU_ROWS=
+DELTA_ROU_ROWS=
 ORPHAN_ROWS=
 EXC_COUNT=0
 ROU_COUNT=0
@@ -296,7 +299,10 @@ build_row() {
   state=$(state_of "$verb")
   # A done task whose recorded PR already delivered its merge outcome is
   # landed: the only work left is cleanup, so it is routine, not a gate.
-  if [ "$state" = "done" ] && [ -n "$pr" ] && [ -f "$STATE/$id.pr-poll-merge-notified" ]; then
+  if [ "$state" = "done" ] && [ -n "$pr" ] \
+    && fm_pr_url_parse "$pr" \
+    && fm_pr_poll_merge_already_notified "$STATE" "$id" \
+      "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER"; then
     state=landed
   fi
   mtime=$(file_mtime "$status")
@@ -376,9 +382,12 @@ collect_rows() {
     if [ -n "$ROW_EXC" ]; then
       EXC_ROWS="$EXC_ROWS$ROW_LINE"$'\n'
       EXC_COUNT=$((EXC_COUNT + 1))
-    elif [ "$MODE" != since ] || [ "$ROW_CHANGED" -eq 1 ]; then
+    else
       ROU_ROWS="$ROU_ROWS$ROW_LINE"$'\n'
       ROU_COUNT=$((ROU_COUNT + 1))
+      if [ "$MODE" != since ] || [ "$ROW_CHANGED" -eq 1 ]; then
+        DELTA_ROU_ROWS="$DELTA_ROU_ROWS$ROW_LINE"$'\n'
+      fi
     fi
   done
   for status in "$STATE"/*.status; do
@@ -542,7 +551,7 @@ while IFS= read -r line; do
   printf '%s\n' "$line"
   used=$((used + ${#line} + 1))
   printed=$((printed + 1))
-done <<< "$ROU_ROWS"
+done <<< "$DELTA_ROU_ROWS"
 
 if [ "$omitted" -gt 0 ]; then
   printf '(%s more task(s) omitted by the %s-byte cap - bin/fm-fleet-digest.sh --since, or --drill <id> for one task)\n' \

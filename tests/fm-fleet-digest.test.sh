@@ -101,7 +101,13 @@ EXC_HEADER=$(printf '%s\n' "$OUT" | sed -n 's/^fleet digest: .* \([0-9][0-9]*\) 
 
 # A done task whose merge outcome was already delivered is landed, not a gate.
 write_task "task-landed" ship "done: PR https://github.com/Muso-AI/hydra/pull/999 checks green" "https://github.com/Muso-AI/hydra/pull/999"
-printf 'fm-pr-poll-merge-notified-v1\ngithub\ngithub.com\n' > "$STATE/task-landed.pr-poll-merge-notified"
+printf 'fm-pr-poll-merge-notified-v1\ngithub\ngithub.com\nMuso-AI/hydra\n999\n' > "$STATE/task-landed.pr-poll-merge-notified"
+chmod 600 "$STATE/task-landed.pr-poll-merge-notified"
+# A marker from an earlier PR for the same task must not classify a new
+# awaiting-gate PR as landed.
+write_task "task-stale" ship "done: PR https://github.com/Muso-AI/hydra/pull/1234 checks green" "https://github.com/Muso-AI/hydra/pull/1234"
+printf 'fm-pr-poll-merge-notified-v1\ngithub\ngithub.com\nMuso-AI/hydra\n999\n' > "$STATE/task-stale.pr-poll-merge-notified"
+chmod 600 "$STATE/task-stale.pr-poll-merge-notified"
 # A working task whose status log has not moved is stalled, and stalled is an
 # exception even though its newest event says working.
 write_task "task-stalled" ship "working: long-running step"
@@ -112,12 +118,15 @@ printf 'working: orphan\n' > "$STATE/orphan-lane.status"
 
 OUT=$("$DIGEST" --now "$NOW" 2>&1) || fail "digest exited non-zero"
 assert_contains "$OUT" "task-landed | landed | ship |" "a done task with a delivered merge outcome must read landed"
+assert_contains "$OUT" "task-stale | done | ship |" "a stale merge marker must not classify a new PR as landed"
+assert_not_contains "$OUT" "task-stale | landed | ship |" "a stale merge marker must leave the new PR awaiting gate"
 assert_contains "$OUT" "task-stalled | working | ship | 2h |" "a stalled task must report its age"
 STALLED_EXC=$(printf '%s\n' "$OUT" | sed -n 's/^fleet digest: .* \([0-9][0-9]*\) exception(s).*/\1/p')
-[ "$STALLED_EXC" = 121 ] || fail "a stalled working task must count as an exception, got $STALLED_EXC"
+[ "$STALLED_EXC" = 122 ] || fail "a stalled working task and an awaiting-gate stale-marker task must count as exceptions, got $STALLED_EXC"
 assert_contains "$OUT" "orphan status log(s)" "an orphan status log must be counted"
 assert_not_contains "$OUT" "orphan-lane |" "an orphan status log must not take a task row"
 rm -f "$STATE/task-landed.meta" "$STATE/task-landed.status" "$STATE/task-landed.pr-poll-merge-notified"
+rm -f "$STATE/task-stale.meta" "$STATE/task-stale.status" "$STATE/task-stale.pr-poll-merge-notified"
 rm -f "$STATE/task-stalled.meta" "$STATE/task-stalled.status" "$STATE/orphan-lane.status"
 
 # --- 3. the delta path ------------------------------------------------------
@@ -189,6 +198,14 @@ assert_contains "$LEDGER_BODY" "## Exceptions" "the ledger must carry the except
 assert_contains "$LEDGER_BODY" "## Tasks" "the ledger must carry the task table"
 assert_contains "$LEDGER_BODY" "task-11 | done | ship |" "the ledger must carry one line per task"
 assert_contains "$LEDGER_BODY" "state is the newest status EVENT" "the ledger must say its state is not a live read"
+
+# --since only filters stdout: the shared ledger must still hold every task.
+LEDGER_ROWS_BEFORE=$(grep -c '^task-[0-9][0-9]* |' "$LEDGER")
+"$DIGEST" --since --no-advance --now "$((NOW + 900))" >/dev/null 2>&1 || fail "digest --since exited non-zero"
+"$DIGEST" --since --no-advance --now "$((NOW + 960))" >/dev/null 2>&1 || fail "digest --since exited non-zero"
+LEDGER_ROWS_AFTER=$(grep -c '^task-[0-9][0-9]* |' "$LEDGER")
+[ "$LEDGER_ROWS_BEFORE" = "$LEDGER_ROWS_AFTER" ] ||
+  fail "a no-change --since run must leave the ledger row count unchanged ($LEDGER_ROWS_BEFORE -> $LEDGER_ROWS_AFTER)"
 
 # The ledger is rewritten, not appended: a second run must not double it.
 "$DIGEST" --now "$NOW" >/dev/null 2>&1 || fail "digest exited non-zero"

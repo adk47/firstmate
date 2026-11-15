@@ -873,6 +873,7 @@ print_work_under_way_compact() {
     # An exception row: keep the capped head only for a decision, blocker, or
     # failure, whose text is what the supervisor acts on, and annotate the cheap
     # endpoint presence read.
+    [ "$line" = "(none)" ] && continue
     id=${line%% | *}
     rest=${line#* | }
     state=${rest%% | *}
@@ -903,7 +904,7 @@ print_work_under_way_compact() {
 # reasoning; this function owns the numbers.
 FM_PI_SETTINGS=${FM_PI_SETTINGS:-$HOME/.pi/agent/settings.json}
 FM_PI_MODELS=${FM_PI_MODELS:-$HOME/.pi/agent/models.json}
-FM_COMPACTION_DEFAULT_RESERVE=64000
+FM_COMPACTION_DEFAULT_RESERVE=16384
 FM_COMPACTION_DEFAULT_KEEP=20000
 print_compaction_effective() {
   local settings=$FM_PI_SETTINGS models=$FM_PI_MODELS enabled reserve keep
@@ -916,8 +917,8 @@ print_compaction_effective() {
     return 0
   fi
   enabled=$(jq -r '.compaction.enabled // true' "$settings" 2>/dev/null) || enabled=unknown
-  reserve=$(jq -r '.compaction.defaults.reserveTokens // empty' "$settings" 2>/dev/null) || reserve=
-  keep=$(jq -r '.compaction.defaults.keepRecentTokens // empty' "$settings" 2>/dev/null) || keep=
+  reserve=$(jq -r '.compaction.reserveTokens // empty' "$settings" 2>/dev/null) || reserve=
+  keep=$(jq -r '.compaction.keepRecentTokens // empty' "$settings" 2>/dev/null) || keep=
   case "$reserve" in ''|*[!0-9]*) reserve=$FM_COMPACTION_DEFAULT_RESERVE ;; esac
   case "$keep" in ''|*[!0-9]*) keep=$FM_COMPACTION_DEFAULT_KEEP ;; esac
   printf 'compaction: enabled=%s default reserveTokens=%s keepRecentTokens=%s (harness defaults; %s)\n' \
