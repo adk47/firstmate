@@ -998,6 +998,10 @@ ONE place that says what Caroline did: `scripts/caroline_monitor/rules.py` holds
 "she said a person is coming" pattern. Do not write a second classifier; read
 `/var/lib/hydra/support-backlog.json` or `caroline-monitor.py report`. Full doc: `docs/support/caroline-monitor.md`.
 
+- **The 30-minute struggle reading is `scripts/caroline_coach.py`** (`caroline-coach.timer`,
+  `docs/support/caroline-coach.md`): which touched or waiting threads show a repeated ask, frustration, a loop,
+  "I can't ..." (and what), an unbacked promise. It imports `rules` / `collect` / `backlog` and restates none of
+  them; a signal is a reason to open a thread, never a verdict, and its files hold ids and signal names only.
 - **The number is hand-offs with nobody assigned per week** (1,078 on 2026-11-11, rising). It pages
   `#clio_devops`; a tick that could not read Intercom pages too and never rewrites the file. The first
   unreadable tick is recorded and posts `NOT MEASURED` without paging; `monitor.blind_ticks_to_page`

@@ -475,6 +475,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/intercom-legal-unanswered-watchdog.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/caroline-monitor.py" ]] \
   || fail "$HYDRA_ROOT/scripts/caroline-monitor.py missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/caroline_coach.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/caroline_coach.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/legal-intake.py" ]] \
   || fail "$HYDRA_ROOT/scripts/legal-intake.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh" ]] \
@@ -963,6 +965,58 @@ cm=caroline-monitor.timer
 systemctl enable "$cm" >/dev/null 2>&1 || log "WARN: could not enable $cm"
 systemctl start "$cm" >/dev/null 2>&1 || log "WARN: could not start $cm"
 log "  $cm: $(systemctl is-active "$cm" 2>/dev/null || echo unknown)"
+
+# ─── Caroline coach: where a customer or Caroline got stuck, read every 30 minutes ──────────
+# scripts/caroline_coach.py tick reads the conversations touched in the last 30 minutes and the
+# ones a customer has waited on for 1 to 7 days (Intercom search and GET only), and counts
+# struggle signals: the same ask sent again, frustration, a request for a person, Caroline
+# repeating herself, Caroline saying she cannot do something (and what), a promise of a person
+# with nobody assigned, the output guard's fallback, a customer left unanswered. It writes the
+# reading to $cc_state/latest.json and $cc_state/ticks/ (conversation ids and signal names,
+# never message text; 14 days kept). It sends nothing, assigns nothing and pages nobody: the
+# reading is input for the fix that follows, one per pattern.
+# SuccessExitStatus 0 2: exit 2 is "could not read Intercom", which the tick has ALREADY written
+# to latest.json as NOT MEASURED with no number in it. That is a recorded reading, not a failed
+# unit, so one Intercom blip is not a page. The script uses exit 2 for that alone: a fault in the
+# reader, or a record it did not expect, is raised (exit 1) and reaches the unit pager.
+# StandardOutput=null: the reading is the file, and a 13 KB JSON line every 30 minutes is not
+# journal material. State lives under /var/lib/hydra, NOT /opt/hydra (the deploy rsync
+# overwrites that). See docs/support/caroline-coach.md.
+cc_state="${CAROLINE_COACH_STATE_DIR:-/var/lib/hydra/caroline-coach}"
+install -d -m 700 "$cc_state"
+cat > /etc/systemd/system/caroline-coach.service << CAROLINECOACHSVC
+[Unit]
+Description=Caroline coach: struggle signals in the conversations of the last 30 minutes
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+TimeoutStartSec=10min
+SuccessExitStatus=0 2
+StandardOutput=null
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/caroline_coach.py tick --out $cc_state
+CAROLINECOACHSVC
+
+cat > /etc/systemd/system/caroline-coach.timer << CAROLINECOACHTMR
+[Unit]
+Description=Run the Caroline coach reading every 30 minutes
+
+[Timer]
+OnBootSec=7min
+OnUnitActiveSec=30min
+Unit=caroline-coach.service
+
+[Install]
+WantedBy=timers.target
+CAROLINECOACHTMR
+
+systemctl daemon-reload
+cc=caroline-coach.timer
+systemctl enable "$cc" >/dev/null 2>&1 || log "WARN: could not enable $cc"
+systemctl start "$cc" >/dev/null 2>&1 || log "WARN: could not start $cc"
+log "  $cc: $(systemctl is-active "$cc" 2>/dev/null || echo unknown)"
 
 # ─── GDPR erasure pipeline (register + identity + 410 read-back + due-date watchdog) ─
 # Hourly. scripts/gdpr-pipeline.py tick: intake (open data-deletion / data-export tickets
@@ -4889,6 +4943,7 @@ done
 # OnFailure= at itself is an infinite loop.
 AUX_ONFAILURE_UNITS=(
   caroline-behavior-digest.service
+  caroline-coach.service
   caroline-monitor.service
   caroline-safety-daily.service
   claim-list-build.service

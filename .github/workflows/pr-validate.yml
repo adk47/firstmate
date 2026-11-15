@@ -2351,6 +2351,10 @@ jobs:
           python3 scripts/check-caroline-shapes.py
           python3 -m unittest -v tests.test_caroline_monitor
           python3 -m unittest -v tests.test_caroline_commitments
+          # scripts/caroline_coach.py: the 30-minute struggle reading. It imports the monitor's rules and
+          # Intercom reads and never restates them; these hold its message walk to the monitor's, its
+          # output to ids and signal names (no message text), and "could not read" to NOT MEASURED.
+          python3 -m unittest -v tests.test_caroline_coach
       - name: Run Ops summarize/resolve surface tests
         # scripts/ops_intake/ is the first coded path for the Ops bot's 112 "summarize + suggest a
         # resolution" asks per 14 days, each followed by "do resolution then update the user". The
