@@ -21,13 +21,18 @@
 #   (i) a head that moved off the expected commit refuses
 #   (j) an unreadable verdict refuses rather than merging blind
 #   (k) a green head with a qa-review GO passes and reports what it verified
-#   (l) an explicitly named red check may be allowed, and is reported
+#   (l) an unattested red-check allow is rejected by the interface
 #   (m) bin/fm-pr-merge.sh refuses before the merge call and records nothing
+#       for every refusal case above, so the wiring itself is proven
 #   (n) --override-gate records the reason, the operator, and the time, then
 #       merges
 #   (o) bin/fm-go-queue-run.sh merges only through the gate, and a refused row
 #       is reported and skipped
 #   (p) bin/fm-go-queue-run.sh --dry-run reports the decision without merging
+#   (q) an unreadable twin list refuses rather than passing
+#   (r) an unreadable twin PR referenced by the body refuses
+#   (s) a repeated qa-review check reports its worst conclusion
+#   (t) an unrelated issue reference is not read as a twin
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -188,6 +193,17 @@ run_gate() {
   return "$rc"
 }
 
+# run_refusal_via_merge <case_dir> [args...]: drive the real merge entry point
+# and prove the refusal leaves the forge merge call unmade.
+run_refusal_via_merge() {
+  local case_dir=$1
+  shift
+  write_gh_axi_mock "$case_dir"
+  extend_gh_mock_for_outcome "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  run_pr_merge "$case_dir" task-x1 "https://github.com/$REPO/pull/9" "$@"
+}
+
 # --- (a) a qa-review NO-GO on the current head refuses ----------------------
 
 test_gate_refuses_qa_no_go() {
@@ -197,10 +213,11 @@ test_gate_refuses_qa_no_go() {
   write_pr_view "$case_dir" checks='qa-review:FAILURE,unit-tests:SUCCESS'
 
   set +e
-  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  run_refusal_via_merge "$case_dir" -- --squash
   rc=$?
   set -e
   expect_code 1 "$rc" "a qa-review NO-GO must refuse"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
   assert_contains "$(cat "$case_dir/err")" "qa-review verdict on head $HEAD is FAILURE" \
     "the refusal must name the verdict and the head it was read on"
   assert_contains "$(cat "$case_dir/err")" "refusing to merge $REPO#9" \
@@ -217,10 +234,11 @@ test_gate_refuses_absent_qa_verdict() {
   write_pr_view "$case_dir" checks='unit-tests:SUCCESS'
 
   set +e
-  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  run_refusal_via_merge "$case_dir" -- --squash
   rc=$?
   set -e
   expect_code 1 "$rc" "an absent qa-review verdict must refuse"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
   assert_contains "$(cat "$case_dir/err")" "no qa-review verdict exists on head $HEAD" \
     "the refusal must say the verdict is absent, not that it passed"
   pass "an absent qa-review verdict refuses"
@@ -234,12 +252,15 @@ test_gate_refuses_verdict_on_older_head() {
   write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" checks='qa-review:SUCCESS,unit-tests:SUCCESS'
 
+  printf 'pr_head=%s\n' "$OLD_HEAD" >> "$case_dir/state/task-x1.meta"
+
   # The verdict was read on OLD_HEAD; the pull request is now at HEAD.
   set +e
-  run_gate "$case_dir" "$REPO" 9 "$HEAD" --recorded-head "$OLD_HEAD"
+  run_refusal_via_merge "$case_dir" -- --squash
   rc=$?
   set -e
   expect_code 1 "$rc" "a verdict recorded against an older head must refuse"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
   assert_contains "$(cat "$case_dir/err")" "the recorded head $OLD_HEAD is not the current head $HEAD" \
     "the refusal must name both heads so the stale verdict is visible"
   pass "a verdict recorded against an older head refuses"
@@ -254,10 +275,11 @@ test_gate_refuses_red_check() {
   write_pr_view "$case_dir" checks='qa-review:SUCCESS,unit-tests:FAILURE'
 
   set +e
-  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  run_refusal_via_merge "$case_dir" -- --squash
   rc=$?
   set -e
   expect_code 1 "$rc" "a red check must refuse"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
   assert_contains "$(cat "$case_dir/err")" "the check unit-tests is FAILURE on head $HEAD" \
     "the refusal must name the red check"
   pass "a red check refuses"
@@ -292,10 +314,11 @@ test_gate_refuses_credit_guard_for_other_author() {
     checks='qa-review:SUCCESS,credit-approval-guard:FAILURE'
 
   set +e
-  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  run_refusal_via_merge "$case_dir" -- --squash
   rc=$?
   set -e
   expect_code 1 "$rc" "the credit-approval-guard allow is adk47's alone"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
   assert_contains "$(cat "$case_dir/err")" "the check credit-approval-guard is FAILURE" \
     "the refusal must name the check"
   pass "the credit-approval-guard red refuses for any other author"
@@ -312,10 +335,11 @@ test_gate_refuses_unmerged_develop_twin() {
   write_pr_list "$case_dir" 12 develop OPEN null
 
   set +e
-  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  run_refusal_via_merge "$case_dir" -- --squash
   rc=$?
   set -e
   expect_code 1 "$rc" "a master twin with an unmerged develop counterpart must refuse"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
   assert_contains "$(cat "$case_dir/err")" "pull request #12 targets develop and is not merged" \
     "the refusal must name the unmerged twin"
   pass "a master twin with an unmerged develop counterpart refuses"
@@ -348,10 +372,11 @@ test_gate_refuses_moved_head() {
   write_pr_view "$case_dir" checks='qa-review:SUCCESS,unit-tests:SUCCESS'
 
   set +e
-  run_gate "$case_dir" "$REPO" 9 "$OLD_HEAD"
+  run_refusal_via_merge "$case_dir" -- --squash --match-head-commit "$OLD_HEAD"
   rc=$?
   set -e
   expect_code 1 "$rc" "a head that moved off the expected commit must refuse"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
   assert_contains "$(cat "$case_dir/err")" "the head moved: expected $OLD_HEAD, the pull request is at $HEAD" \
     "the refusal must name both heads"
   pass "a head that moved off the expected commit refuses"
@@ -366,10 +391,11 @@ test_gate_refuses_unreadable_verdict() {
   # No pr-view.json: the read fails, and a failed read is not a GO.
 
   set +e
-  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  run_refusal_via_merge "$case_dir" -- --squash
   rc=$?
   set -e
   expect_code 1 "$rc" "an unreadable verdict must refuse"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
   assert_contains "$(cat "$case_dir/err")" "could not be read" \
     "the refusal must say the read failed rather than implying a verdict"
   pass "an unreadable verdict refuses"
@@ -395,11 +421,11 @@ test_gate_passes_green_with_qa_go() {
   pass "a green head with a qa-review GO passes and reports what it verified"
 }
 
-# --- (l) an explicitly named red check may be allowed ----------------------
+# --- (l) an unattested red-check allow is rejected by the interface --------
 
-test_gate_allows_named_red_check() {
+test_gate_rejects_unrecorded_red_allow() {
   local case_dir rc
-  case_dir=$(make_case named-red)
+  case_dir=$(make_case unrecorded-red-allow)
   write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" checks='qa-review:SUCCESS,verify-twin-label:FAILURE'
 
@@ -407,10 +433,88 @@ test_gate_allows_named_red_check() {
   run_gate "$case_dir" "$REPO" 9 "$HEAD" --allow-red verify-twin-label
   rc=$?
   set -e
-  expect_code 0 "$rc" "an explicitly allowed red check must not refuse"
-  assert_contains "$(cat "$case_dir/out")" "allowed reds=verify-twin-label" \
-    "the pass must report the red it allowed"
-  pass "an explicitly named red check may be allowed, and is reported"
+  expect_code 2 "$rc" "a bare --allow-red must be an unknown option, not an escape hatch"
+  assert_contains "$(cat "$case_dir/err")" "unknown merge gate option: --allow-red" \
+    "the refusal must name the unsupported option"
+  pass "an unrecorded red-check allow is rejected"
+}
+
+# --- (q) an unreadable twin list refuses rather than passing ---------------
+
+test_gate_refuses_unreadable_twin_list() {
+  local case_dir rc
+  case_dir=$(make_case unreadable-twin-list)
+  write_workflows "$case_dir" qa-review.yml
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    checks='qa-review:SUCCESS,unit-tests:SUCCESS'
+
+  set +e
+  run_refusal_via_merge "$case_dir" -- --squash
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a failed twin-list read must refuse"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
+  assert_contains "$(cat "$case_dir/err")" "twin list could not be read" \
+    "the refusal must say the twin state was unreadable"
+  pass "an unreadable twin list refuses"
+}
+
+# --- (r) an unreadable twin referenced by the body refuses -----------------
+
+test_gate_refuses_unreadable_body_twin() {
+  local case_dir rc
+  case_dir=$(make_case unreadable-body-twin)
+  write_workflows "$case_dir" qa-review.yml
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    body='twin develop #42' checks='qa-review:SUCCESS,unit-tests:SUCCESS'
+  printf '[]\n' > "$case_dir/fixtures/pr-list.json"
+
+  set +e
+  run_refusal_via_merge "$case_dir" -- --squash
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "an unreadable body-referenced twin must refuse"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
+  assert_contains "$(cat "$case_dir/err")" "pull request #42 referenced by the body could not be read" \
+    "the refusal must say the twin could not be read"
+  pass "an unreadable body-referenced twin refuses"
+}
+
+# --- (s) a repeated qa-review check reports its worst conclusion -----------
+
+test_gate_duplicate_qa_reports_worst_conclusion() {
+  local case_dir rc
+  case_dir=$(make_case duplicate-qa)
+  write_workflows "$case_dir" qa-review.yml
+  write_pr_view "$case_dir" checks='qa-review:SUCCESS,qa-review:PENDING'
+
+  set +e
+  run_refusal_via_merge "$case_dir" -- --squash
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a later pending duplicate must outrank an earlier success"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
+  assert_contains "$(cat "$case_dir/err")" "qa-review verdict on head $HEAD is PENDING" \
+    "the refusal must report the worst duplicate conclusion"
+  pass "a repeated qa-review check reports its worst conclusion"
+}
+
+# --- (t) an unrelated issue reference is not read as a twin ----------------
+
+test_gate_ignores_unrelated_issue_reference() {
+  local case_dir rc
+  case_dir=$(make_case unrelated-issue)
+  write_workflows "$case_dir" qa-review.yml
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    body='Closes #7.' checks='qa-review:SUCCESS,unit-tests:SUCCESS'
+  printf '[]\n' > "$case_dir/fixtures/pr-list.json"
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "an unrelated issue reference must not be treated as a twin"
+  pass "an unrelated issue reference is not read as a twin"
 }
 
 # A backfill over past merges needs the verdict of a pull request that already
@@ -662,8 +766,12 @@ test_gate_allows_merged_develop_twin
 test_gate_refuses_moved_head
 test_gate_refuses_unreadable_verdict
 test_gate_passes_green_with_qa_go
-test_gate_allows_named_red_check
+test_gate_rejects_unrecorded_red_allow
 test_gate_check_only_audits_a_merged_pull_request
+test_gate_refuses_unreadable_twin_list
+test_gate_refuses_unreadable_body_twin
+test_gate_duplicate_qa_reports_worst_conclusion
+test_gate_ignores_unrelated_issue_reference
 test_pr_merge_refuses_before_merge_call
 test_pr_merge_override_records_and_merges
 test_go_queue_refuses_row_and_continues

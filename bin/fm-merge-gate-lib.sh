@@ -13,13 +13,12 @@
 #     on the current head is not success - a NO-GO, a pending review, a review
 #     that never ran, and a review left on an older head all refuse, because
 #     absent is not GO;
-#   - any check on the current head is red, except a name passed with
-#     --allow-red, and except credit-approval-guard when the pull request author
-#     is adk47 (the by-design self-authorship check);
+#   - any check on the current head is red, except credit-approval-guard when
+#     the pull request author is adk47 (the by-design self-authorship check);
 #   - the pull request is a master/main twin whose develop/beta counterpart is
 #     not merged.
 # It passes otherwise and prints the head, the qa-review conclusion, and the
-# allowed reds, so the merge record carries what was actually verified.
+# standing allowed red, so the merge record carries what was actually verified.
 #
 # Silence means refuse: a read that cannot be completed, a missing gh, and an
 # unparseable payload are all refusals, never a pass. There is no environment
@@ -32,10 +31,9 @@
 # pre-merge guards already require a successful pipeline at the exact head.
 #
 # Usage (sourced): fm_merge_gate <owner/repo> <pr-number> <expected-head> \
-#                    [--allow-red <check-name>]... [--recorded-head <sha>]
+#                    [--recorded-head <sha>]
 # Usage (direct):  fm-merge-gate-lib.sh <owner/repo> <pr-number> <expected-head> \
-#                    [--allow-red <check-name>]... [--recorded-head <sha>] \
-#                    [--check-only]
+#                    [--recorded-head <sha>] [--check-only]
 # The direct form is the audit entry point; it never merges anything.
 # --check-only evaluates the verdict and checks even on a pull request that is
 # already merged, which is what a backfill over past merges needs: the ordinary
@@ -53,13 +51,6 @@ FM_MERGE_GATE_STANDING_ALLOW_AUTHOR=adk47
 fm_merge_gate_is_red() {
   case "$1" in
     FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED|STARTUP_FAILURE|STALE|ERROR) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-fm_merge_gate_is_green() {
-  case "$1" in
-    SUCCESS|NEUTRAL|SKIPPED) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -146,9 +137,23 @@ FIELDS
   FM_MERGE_GATE_CHECKS=$checks
 }
 
+# Rank a conclusion so the worst of a repeated check wins: red is worse than
+# pending or unknown, which is worse than green.
+fm_merge_gate_conclusion_rank() {
+  if fm_merge_gate_is_red "$1"; then
+    printf '3'
+  else
+    case "$1" in
+      SUCCESS|NEUTRAL|SKIPPED) printf '1' ;;
+      *) printf '2' ;;
+    esac
+  fi
+}
+
 # The conclusion of the named check on the current head, or empty when the head
 # carries no such check. A check that appears more than once is reported as the
-# worst of its conclusions, so a stale success cannot outvote a later failure.
+# worst of its conclusions, so a stale success cannot outvote a later pending or
+# failed verdict.
 fm_merge_gate_check_conclusion() {
   local want=$1 line name conclusion found=''
   while IFS= read -r line; do
@@ -158,7 +163,7 @@ fm_merge_gate_check_conclusion() {
     [ "$name" = "$want" ] || continue
     if [ -z "$found" ]; then
       found=$conclusion
-    elif fm_merge_gate_is_red "$conclusion"; then
+    elif [ "$(fm_merge_gate_conclusion_rank "$conclusion")" -gt "$(fm_merge_gate_conclusion_rank "$found")" ]; then
       found=$conclusion
     fi
   done <<CHECKS
@@ -220,19 +225,24 @@ fm_merge_gate_unmerged_twin() {
       done <<ROWS
 $rows
 ROWS
+    else
+      found="the develop/beta twin list could not be read"
     fi
   fi
   [ -z "$found" ] || { printf '%s' "$found"; return 0; }
 
-  # Body references, deduplicated and bounded so a long body cannot turn the
-  # gate into an unbounded number of forge reads.
-  refs=$(printf '%s' "$body" | grep -oE '(pull/[0-9]+|#[0-9]+)' | grep -oE '[0-9]+' | sort -un | head -10 || true)
+  # Body references, limited to the numbers the body names alongside develop or
+  # beta, deduplicated and bounded so an unrelated issue reference is not read as
+  # a twin and a long body cannot turn the gate into an unbounded number of
+  # forge reads.
+  refs=$(printf '%s' "$body" | grep -oiE '(develop|beta)([^0-9]{1,40})#?[0-9]+' | grep -oE '[0-9]+' | sort -un | head -10 || true)
   for ref in $refs; do
     n=$ref
     if ! line=$(gh api "repos/$repo/pulls/$n" \
       --jq '((.base.ref // "") + "|" + (.state // "") + "|" + ((.merged // false) | tostring))' \
       2>/dev/null) || [ -z "$line" ]; then
-      continue
+      found="pull request #$n referenced by the body could not be read"
+      break
     fi
     base=${line%%|*}
     line=${line#*|}
@@ -255,7 +265,7 @@ ROWS
 # error. Every refusal is one plain-English line naming the exact reason.
 fm_merge_gate() {
   local repo='' number='' expected='' recorded=''
-  local allow_reds='' arg
+  local arg
   local refusals='' allowed='' qa='' qa_required=0 qa_rc=0
   local line name conclusion twin='' check_only=false
 
@@ -270,17 +280,6 @@ fm_merge_gate() {
   while [ "$#" -gt 0 ]; do
     arg=$1
     case "$arg" in
-      --allow-red)
-        [ "$#" -ge 2 ] || { echo "error: --allow-red needs a check name" >&2; return 2; }
-        allow_reds="$allow_reds$2
-"
-        shift 2
-        ;;
-      --allow-red=*)
-        allow_reds="$allow_reds${arg#--allow-red=}
-"
-        shift
-        ;;
       --recorded-head)
         [ "$#" -ge 2 ] || { echo "error: --recorded-head needs a commit" >&2; return 2; }
         recorded=$2
@@ -360,8 +359,7 @@ fm_merge_gate() {
     fi
   fi
 
-  # Red checks, with the standing adk47 self-authorship allow and any explicit
-  # --allow-red names.
+  # Red checks, with only the standing adk47 self-authorship allow.
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     name=${line%%|*}
@@ -373,16 +371,6 @@ fm_merge_gate() {
 "
       continue
     fi
-    case "
-$allow_reds" in
-      *"
-$name
-"*)
-        allowed="$allowed$name
-"
-        continue
-        ;;
-    esac
     refusals="$refusals  - the check $name is $conclusion on head $FM_MERGE_GATE_HEAD
 "
   done <<CHECKS
