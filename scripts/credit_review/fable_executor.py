@@ -15,7 +15,7 @@ Every row passes, at write time, against FRESH server facts (Trino on postgresql
   - a reject_* rule the ruling relies on still fires in verificationData (a close never invents a reason);
   - the track is known NOT big: server popularity 1..59 and not client-supplied metadata (unknown = big = refused);
   - the account gate answers allow (hold / unknown / timeout = refused) and the account is not watchlisted;
-  - NEITHER kill file is present and the registry entry is approved (re-read before every write);
+  - NEITHER kill file is present and the registry entry is approved AND apply-enabled (re-read before every write);
   - the daily cap (100 writes/day, counted from the audit file) is not exhausted.
 Every write goes through muso-admin-api.sh PUT /admin/credit-requests/conditional-status with expectedStatus
 (the compare-and-set fence), is read back from Postgres, and writes one audit line per row (request id, user,
@@ -74,6 +74,25 @@ APPROVE_STATUS = "approved"
 APPROVABLE_FROM = ("unverified", "user_verification_needed", "rejected")   # rejected: the 880d34b3 correction
 APPROVE_CAP = 50                    # Fable r3 (4): approvals <= 50/day
 APPROVE_IDENTITY = "fable"          # agent-fable@muso.ai: core binds fable-decider approvals to Fable's OWN account
+# The approve FILTER (Fable ruling via the captain, 2026-11-15): "a rate cap only slows how fast wrong approvals are
+# written", so an approve needs more than the switch and a cap. The registry entry carries `apply_filter` beside
+# `apply_enabled`, and this code holds the floor: a missing, malformed or weaker block refuses every approve.
+#   outcome                        the one outcome admitted: a credit-anchored-approve row (rule ANCHORED_RULE_ID,
+#                                  citing a dsp_verdicts row), which is what credit-anchored-approve.py builds
+#   exclude_bands                  must hold "none": no band_hint on the request = no band = refused
+#   exclude_conflict_rule_failures another user's request on the same track with an overlapping credit, approved
+#                                  or awaiting verification
+#   exclude_self_duplicate_groups  the same user's own other open request for the same track and credits
+#   per_run_cap                    approves one run may write (1..APPROVE_CAP)
+#   batch_id_required              every approve write is tagged; the audit carries the id on every line
+APPLY_FILTER_OUTCOME = "credit-anchored-approve"
+ANCHORED_RULE_ID = "C4:anchored/v1"            # credit_review/anchored_feed.RULE_ID (pinned equal by a test)
+APPLY_FILTER_KEYS = frozenset({"outcome", "exclude_bands", "exclude_conflict_rule_failures",
+                               "exclude_self_duplicate_groups", "per_run_cap", "batch_id_required"})
+CONFLICT_STATUSES = ("approved", "user_verification_needed")
+SELF_DUPLICATE_STATUSES = ("unverified", "user_verification_needed")
+BATCH_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{5,63}")
+TRACK_ID_RE = re.compile(r"^[A-Za-z0-9]{1,64}$")
 #: The send template each action's write fires (one per (user, profile) group per call).
 TEMPLATE = {"reject": "credits_rejected", "approve": "credits_accepted"}
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -153,6 +172,13 @@ class Facts:
     #: (batch0 incident 880d34b3: a processed org claim = the label-credits APPROVE population).
     owns_profile: bool | None = None
 
+
+@dataclass(frozen=True)
+class FilterFacts:
+    """What the approve filter needs to know about one request. None = could not be measured = refused."""
+    band: str | None                  # verificationdata.band_hint, lower-cased; "none" when the request has none
+    conflict: bool | None             # the conflict rule fails for this request
+    self_duplicate: bool | None       # the request sits in a self-duplicate group
 
 
 def load_tray(path: str, now: datetime | None = None) -> Tray:
@@ -373,9 +399,43 @@ def target_status(tray: "Tray") -> str:
     return APPROVE_STATUS if tray.action == "approve" else CLOSE_STATUS
 
 
-def approve_refusal(row: TrayRow, facts: Facts | None, gate: account_gate.GateResult, expected: str) -> str | None:
+def batch_refusal(batch_id: Any) -> str | None:
+    if not isinstance(batch_id, str) or not BATCH_ID_RE.fullmatch(batch_id):
+        return f"an approve write needs a batch id matching {BATCH_ID_RE.pattern} (got {batch_id!r})"
+    return None
+
+
+def filter_refusal(row: TrayRow, apply_filter: dict[str, Any], ff: FilterFacts | None) -> str | None:
+    """Why the approve filter keeps this row out, or None. Unmeasured is its own refusal, never a pass."""
+    if row.rule != ANCHORED_RULE_ID or not row.coded_outcome.startswith("dsp_verdicts:"):
+        return "outcome_not_credit_anchored_approve"
+    if ff is None:
+        return "apply_filter_unmeasured"
+    if ff.band is None:
+        return "band_unmeasured"
+    if ff.band in apply_filter["exclude_bands"]:
+        return f"band_excluded:{ff.band}"
+    if ff.conflict is None:
+        return "conflict_rule_unmeasured"
+    if ff.conflict:
+        return "conflict_rule_failure"
+    if ff.self_duplicate is None:
+        return "self_duplicate_unmeasured"
+    if ff.self_duplicate:
+        return "self_duplicate_group"
+    return None
+
+
+def approve_refusal(row: TrayRow, facts: Facts | None, gate: account_gate.GateResult, expected: str,
+                    apply_enabled: bool = False, apply_filter: dict[str, Any] | None = None,
+                    filter_facts: FilterFacts | None = None) -> str | None:
     """Why this row must NOT be approved now, or None (the executor's own guards; core's FABLE_RULED scope then
-    re-checks the anchor set, the rules and the claim inside the approving UPDATE). Fail closed."""
+    re-checks the anchor set, the rules and the claim inside the approving UPDATE). Fail closed: the switch, then
+    a valid filter block, then the row guards, then the filter itself."""
+    if not apply_enabled:
+        return "approve_not_enabled"
+    if apply_filter is None:
+        return "apply_filter_invalid"
     if facts is None:
         return "row_not_found"
     if facts.deleted:
@@ -392,11 +452,28 @@ def approve_refusal(row: TrayRow, facts: Facts | None, gate: account_gate.GateRe
     watch = gate.payload.get("watch") if isinstance(gate.payload, dict) else None
     if watch or any("watchlist" in r.lower() or "deny" in r.lower() for r in gate.reasons):
         return "watchlisted_account"
-    return None
+    return filter_refusal(row, apply_filter, filter_facts)
 
 
-def refusal_for(tray: "Tray") -> Callable[..., str | None]:
-    return approve_refusal if tray.action == "approve" else refusal
+def refusal_for(tray: "Tray", registry_path: str = REGISTRY, ids: Iterable[str] = (),
+                filter_fn: Callable[[list[str]], dict[str, "FilterFacts"]] | None = None,
+                ) -> Callable[..., str | None]:
+    """The row guard for this tray. For an approve tray it binds the switch, the filter block and ONE read of the
+    filter facts for `ids`; that read is made only when the switch is on and the block is valid (otherwise every
+    row is refused before it would be used). A failed read leaves every row unmeasured, which refuses it."""
+    if tray.action != "approve":
+        return refusal
+    enabled = registry_apply_enabled(registry_path)
+    apply_filter, _ = registry_apply_filter(registry_path)
+    measured: dict[str, FilterFacts] = {}
+    ids = list(ids)
+    if enabled and apply_filter is not None and ids:
+        try:
+            measured = {k.lower(): v for k, v in (filter_fn or approve_filter_facts)(ids).items()}
+        except Exception:  # noqa: BLE001 - an unreadable filter refuses every row (apply_filter_unmeasured)
+            measured = {}
+    return lambda row, facts, gate, expected: approve_refusal(
+        row, facts, gate, expected, enabled, apply_filter, measured.get(row.request_id.lower()))
 
 
 def _num(v: Any) -> float | None:
@@ -494,6 +571,92 @@ where lower(cast(cr.id as varchar)) in ({quoted})"""
     return facts
 
 
+def parse_credits(text: str) -> frozenset[str] | None:
+    """core stores credit_requests.credits as a Postgres array literal read back as text: `{Producer}`,
+    `{"Mixing Engineer",Producer}`. The roles, lower-cased, or None when the text is not that shape."""
+    text = (text or "").strip()
+    if len(text) < 2 or text[0] != "{" or text[-1] != "}":
+        return None
+    inner = text[1:-1]
+    if not inner.strip():
+        return frozenset()
+    try:
+        cells = next(csv.reader([inner], quotechar='"', escapechar="\\", doublequote=False))
+    except (csv.Error, StopIteration):
+        return None
+    roles = frozenset(c.strip().lower() for c in cells)
+    return None if "" in roles else roles
+
+
+def _quoted_rows(out: str, width: int, what: str) -> list[list[str]]:
+    rows = list(csv.reader(io.StringIO("\n".join(l for l in out.splitlines() if l.startswith('"')))))
+    for rec in rows:
+        if len(rec) != width:
+            raise RuntimeError(f"trino {what} row has {len(rec)} columns, expected {width}")
+    return rows
+
+
+def approve_filter_facts(ids: Iterable[str], run: TrinoRunner | None = None) -> dict[str, FilterFacts]:
+    """The approve filter's facts for exactly these ids, from postgresql_core (read-only, two reads). Raises on a
+    failed read. Kept out of fetch_facts on purpose: the close paths never pay for the sibling read.
+
+    conflict        another user's non-deleted request on the same Spotify track, approved or awaiting
+                    verification, with at least one credit in common (the conflict rule as measured 2026-11-15:
+                    5,509 of 80,139 pending; metadata.precedent_blocked is on none of them and is not the source)
+    self_duplicate  the same user's own other open request for the same track and the same credits (grouping
+                    pending rows that way gives the recorded 2,441 groups; `unverified` is included here too)
+    A request with no usable track id, or unreadable credits on it or on a sibling, is unmeasured (None)."""
+    ids = [i.lower() for i in ids if UUID_RE.match(i)]
+    if not ids:
+        return {}
+    quoted = ",".join(f"'{i}'" for i in ids)
+    out = (run or _trino)(f"""
+select cast(cr.id as varchar), cast(cr.userid as varchar), coalesce(cr.spotifytrackid, ''),
+  coalesce(cast(cr.credits as varchar), ''),
+  coalesce(json_extract_scalar(cr.verificationdata, '$.band_hint'), '')
+from postgresql_core.public.credit_requests cr
+where lower(cast(cr.id as varchar)) in ({quoted})""")
+    own: dict[str, tuple[int | None, str, frozenset[str] | None, str]] = {}
+    for rid, uid, track, credits, band in _quoted_rows(out, 5, "filter"):
+        own[rid.lower()] = (int(uid) if uid.isdigit() else None, track, parse_credits(credits),
+                            band.strip().lower() or "none")
+    tracks = sorted({t for _, t, _, _ in own.values() if TRACK_ID_RE.match(t)})
+    siblings: dict[str, list[tuple[str, int | None, str, frozenset[str] | None]]] = {}
+    if tracks:
+        statuses = ",".join(f"'{x}'" for x in sorted(set(CONFLICT_STATUSES) | set(SELF_DUPLICATE_STATUSES)))
+        in_tracks = ",".join(f"'{t}'" for t in tracks)
+        out = (run or _trino)(f"""
+select cast(cr.id as varchar), cast(cr.userid as varchar), cr.spotifytrackid, cr.status,
+  coalesce(cast(cr.credits as varchar), '')
+from postgresql_core.public.credit_requests cr
+where cr.spotifytrackid in ({in_tracks})
+  and cr.deletedat is null and cr.status in ({statuses})""")
+        for rid, uid, track, status, credits in _quoted_rows(out, 5, "sibling"):
+            siblings.setdefault(track, []).append(
+                (rid.lower(), int(uid) if uid.isdigit() else None, status, parse_credits(credits)))
+    facts: dict[str, FilterFacts] = {}
+    for rid, (uid, track, roles, band) in own.items():
+        if uid is None or roles is None or not TRACK_ID_RE.match(track):
+            facts[rid] = FilterFacts(band, None, None)
+            continue
+        conflict: bool | None = False
+        dup: bool | None = False
+        for sid, suid, status, sroles in siblings.get(track, []):
+            if sid == rid:
+                continue
+            if suid is None or sroles is None:
+                # a sibling we cannot read could be either: both answers are unmeasured unless already true
+                conflict = conflict or None
+                dup = dup or None
+                continue
+            if suid != uid and status in CONFLICT_STATUSES and roles & sroles:
+                conflict = True
+            if suid == uid and status in SELF_DUPLICATE_STATUSES and roles == sroles:
+                dup = True
+        facts[rid] = FilterFacts(band, conflict, dup)
+    return facts
+
+
 DSP_STORE = os.environ.get("CREDIT_DSP_VERIFY_STORE", "/var/lib/hydra-credit-verify/dsp-verify.sqlite")
 
 
@@ -578,7 +741,8 @@ def closed_today(path: str = AUDIT_PATH, now: datetime | None = None, action: st
 
 
 def _eligible(tray: "Tray", rows: list["TrayRow"], facts_fn: Callable, gate_fn: Any, anchor_fn: Callable,
-              outcome_fn: Callable, evidence_fn: Callable, audit_path: str, at: datetime) -> set[int]:
+              outcome_fn: Callable, evidence_fn: Callable, audit_path: str, at: datetime,
+              registry_path: str = REGISTRY, filter_fn: Callable | None = None) -> set[int]:
     """id() of every row that passes the full guard chain right now (the slot pre-read)."""
     facts = facts_fn([r.request_id for r in rows])
     closed = closed_today(audit_path, at, tray.action)
@@ -587,9 +751,10 @@ def _eligible(tray: "Tray", rows: list["TrayRow"], facts_fn: Callable, gate_fn: 
     outcomes = outcome_fn([r.coded_outcome for r in rows])
     evidence = evidence_fn(rows) if tray.recheck_evidence else {}
     ok: set[int] = set()
+    refuse = refusal_for(tray, registry_path, [r.request_id for r in rows], filter_fn)
     for r in rows:
         f = facts.get(r.request_id.lower())
-        why = refusal_for(tray)(r, f, gate(r.user_id), tray.expected_status)
+        why = refuse(r, f, gate(r.user_id), tray.expected_status)
         if not why:
             why = same_day_refusal(r, closed)
         if not why:
@@ -630,6 +795,56 @@ def registry_approved(path: str = REGISTRY) -> bool:
         return False
     return bool(entry.get("approved") is True and str(entry.get("approved_by") or "").strip()
                 and str(entry.get("approval_ref") or "").strip())
+
+
+def registry_apply_enabled(path: str = REGISTRY) -> bool:
+    """The entry's apply switch, fail closed: absent, unreadable or not the literal true = off."""
+    try:
+        entry = json.loads(Path(path).read_text())["automations"][AUTOMATION_ID]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return entry.get("apply_enabled") is True
+
+
+def registry_apply_filter(path: str = REGISTRY) -> tuple[dict[str, Any] | None, str]:
+    """(the entry's approve filter, "") when it is at least the floor, else (None, why). The floor is code: a
+    registry edit can tighten the filter (a lower per-run cap, more excluded bands) and cannot loosen it."""
+    try:
+        flt = json.loads(Path(path).read_text())["automations"][AUTOMATION_ID].get("apply_filter")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None, "registry unreadable"
+    if not isinstance(flt, dict):
+        return None, "no apply_filter block"
+    if set(flt) != APPLY_FILTER_KEYS:
+        return None, f"apply_filter keys are {sorted(flt)}, not {sorted(APPLY_FILTER_KEYS)}"
+    if flt["outcome"] != APPLY_FILTER_OUTCOME:
+        return None, f"outcome must be {APPLY_FILTER_OUTCOME}"
+    bands = flt["exclude_bands"]
+    if (not isinstance(bands, list) or not all(isinstance(b, str) and b and b == b.strip().lower() for b in bands)
+            or "none" not in bands):
+        return None, 'exclude_bands must be a list of lower-case bands holding "none"'
+    for key in ("exclude_conflict_rule_failures", "exclude_self_duplicate_groups", "batch_id_required"):
+        if flt[key] is not True:
+            return None, f"{key} must be true"
+    cap = flt["per_run_cap"]
+    if not isinstance(cap, int) or isinstance(cap, bool) or not 1 <= cap <= APPROVE_CAP:
+        return None, f"per_run_cap must be an integer 1..{APPROVE_CAP}"
+    return flt, ""
+
+
+def batch_rows(batch_id: str, path: str = AUDIT_PATH) -> list[str]:
+    """Request ids the audit shows WRITTEN under this batch id, in write order (read-only). Returning a batch is
+    one conditional-status PUT of these ids; a person makes it, this module has no revert."""
+    out: list[str] = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and rec.get("batch_id") == batch_id and rec.get("outcome") == "written":
+                out.append(str(rec.get("request_id", "")).lower())
+    return out
 
 
 # ── the write ───────────────────────────────────────────────────────────────
@@ -673,12 +888,17 @@ class Result:
     refused: dict[str, int] = field(default_factory=dict)
     not_moved: int = 0
     stopped: str = ""
+    batch_id: str | None = None       # approve runs only
+    server_reported: int = 0          # ids the server's own answer named as updated (approve runs only)
 
     def as_dict(self) -> dict[str, Any]:
-        return {"tray": self.tray, "mode": self.mode, "rows": self.rows, "written": self.written,
-                "written_paid": self.written_paid, "written_free": self.written - self.written_paid,
-                "refused": dict(sorted(self.refused.items())), "not_moved": self.not_moved,
-                "stopped": self.stopped}
+        out = {"tray": self.tray, "mode": self.mode, "rows": self.rows, "written": self.written,
+               "written_paid": self.written_paid, "written_free": self.written - self.written_paid,
+               "refused": dict(sorted(self.refused.items())), "not_moved": self.not_moved,
+               "stopped": self.stopped}
+        if self.batch_id is not None:
+            out.update(batch_id=self.batch_id, server_reported=self.server_reported)
+        return out
 
 
 @contextlib.contextmanager
@@ -700,8 +920,10 @@ def _locked(path: str, wait_s: float = 600):
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
-def _base(tray: Tray, run_id: str, r: TrayRow, f: Facts | None, now: datetime, mode: str) -> dict[str, Any]:
-    return {"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "run_id": run_id, "automation": AUTOMATION_ID,
+def _base(tray: Tray, run_id: str, r: TrayRow, f: Facts | None, now: datetime, mode: str,
+          batch_id: str | None = None) -> dict[str, Any]:
+    return {**({"batch_id": batch_id} if batch_id else {}),
+            "ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "run_id": run_id, "automation": AUTOMATION_ID,
             "tray": tray.path, "tray_sha256": tray.sha256, "request_id": r.request_id, "user_id": r.user_id,
             "paid": bool(f.paid) if f else r.paid, "rule": r.rule, "ruling_id": r.ruling_id,
             "before": f.status if f else None, "mode": mode, "action": tray.action,
@@ -734,13 +956,29 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
         sleep: Callable[[float], None] = time.sleep,
         outcome_fn: Callable[[list[str]], dict[str, dict[str, Any]]] = ledger_outcomes,
         evidence_fn: Callable[[list["TrayRow"]], dict[str, str]] | None = None,
+        batch_id: str | None = None,
+        filter_fn: Callable[[list[str]], dict[str, FilterFacts]] | None = None,
         ) -> Result:
     """Execute (apply) or dry-run one tray. In apply mode EVERY batch re-reads its rows' facts and the account gate
     immediately before its PUT (no fact or gate answer outlives its batch, QA #1475), under one lock from the cap
     check to the final audit, with a durable reservation line per row written BEFORE the PUT. Stops at the first
     surprise: a refused/failed write, a row the server reports not moved, a read-back failure, an unwritable audit,
-    the kill file, the cap or the fan-out check."""
-    res = Result(tray.path, "apply" if apply else "dry-run", rows=len(tray.rows))
+    the kill file, the cap or the fan-out check.
+
+    An APPROVE apply also needs a batch id (carried on every audit line of the run) and stops before any write
+    without one; it writes at most the filter's per_run_cap rows; and the server's own count of updated ids must
+    equal the count sent, or the run stops there."""
+    if batch_id is not None and tray.action != "approve":
+        raise ValueError("a batch id tags approve writes only")
+    res = Result(tray.path, "apply" if apply else "dry-run", rows=len(tray.rows), batch_id=batch_id)
+    per_run_cap: int | None = None
+    if apply and tray.action == "approve":
+        why = batch_refusal(batch_id)
+        if why:
+            res.stopped = why
+            return res
+        flt, _ = registry_apply_filter(registry_path)      # invalid = every row refused below, nothing written
+        per_run_cap = flt["per_run_cap"] if flt else None
     evidence_fn = evidence_fn or (lambda rs: coded_evidence(rs, tray.recheck_evidence))
     daily_cap = tray.daily_cap if daily_cap is None else daily_cap
     run_id = uuid.uuid4().hex[:12]
@@ -755,8 +993,9 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
         outcomes = outcome_fn([r.coded_outcome for r in rows])
         evidence = evidence_fn(rows) if tray.recheck_evidence else {}
         closed = closed_today(audit_path, now(), tray.action)
+        refuse = refusal_for(tray, registry_path, [r.request_id for r in rows], filter_fn)
         for r in rows:
-            why = refusal_for(tray)(r, facts.get(r.request_id.lower()), gate(r.user_id), tray.expected_status)
+            why = refuse(r, facts.get(r.request_id.lower()), gate(r.user_id), tray.expected_status)
             if not why:
                 why = same_day_refusal(r, closed)
             if not why:
@@ -786,7 +1025,8 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
     # eligible one): one pre-read of the whole tray decides the paid-first slot order; every batch still re-reads
     # fresh facts before its PUT, and a row that turned ineligible since simply leaves its slot unused.
     try:
-        pre = _eligible(tray, rows, facts_fn, gate_fn, anchor_fn, outcome_fn, evidence_fn, audit_path, now())
+        pre = _eligible(tray, rows, facts_fn, gate_fn, anchor_fn, outcome_fn, evidence_fn, audit_path, now(),
+                        registry_path, filter_fn)
     except (OSError, TimeoutError) as exc:
         res.stopped = f"audit/lock failure: {str(exc)[:200]}"
         return res
@@ -818,6 +1058,12 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                 if room <= 0:
                     res.stopped = f"daily cap {daily_cap} reached"
                     return res
+                if per_run_cap is not None:
+                    left = per_run_cap - res.written - res.not_moved
+                    if left <= 0:
+                        res.stopped = f"per-run cap {per_run_cap} reached"
+                        return res
+                    room = min(room, left)
                 # FRESH facts + gate for this batch only, right before the PUT. Inside the room: this user's rows
                 # among the first `room` pending rows in tray order (paid first across users).
                 order = {id(r): n for n, r in enumerate(rows)}
@@ -836,13 +1082,14 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                 outcomes = outcome_fn([r.coded_outcome for r in window])
                 evidence = evidence_fn(window) if tray.recheck_evidence else {}
                 chunk: list[TrayRow] = []
+                refuse = refusal_for(tray, registry_path, [r.request_id for r in window], filter_fn)
                 for r in window:
                     if len(chunk) >= room:
                         waiting += 1        # never a second PUT for this user today: the rest waits a day
                         _bump(res, "user_rows_over_room_wait_for_another_day")
                         continue
                     f = facts.get(r.request_id.lower())
-                    why = refusal_for(tray)(r, f, gate(r.user_id), tray.expected_status)
+                    why = refuse(r, f, gate(r.user_id), tray.expected_status)
                     if not why:
                         why = same_day_refusal(r, closed)
                     if not why:
@@ -853,7 +1100,7 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                         why = _evidence_refusal(evidence.get(r.request_id.lower(), "unknown"))
                     if why:
                         _bump(res, why)
-                        audit({**_base(tray, run_id, r, f, now(), "apply"), "outcome": "refused",
+                        audit({**_base(tray, run_id, r, f, now(), "apply", batch_id), "outcome": "refused",
                                "reason": why, "after": f.status if f else None}, audit_path)
                         continue
                     chunk.append(r)
@@ -863,7 +1110,7 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                 ruling = batch_ruling(chunk)
                 # durable reservation BEFORE the PUT: if this cannot be written, nothing is sent
                 for r in chunk:
-                    audit({**_base(tray, run_id, r, facts.get(r.request_id.lower()), now(), "apply"),
+                    audit({**_base(tray, run_id, r, facts.get(r.request_id.lower()), now(), "apply", batch_id),
                            "outcome": "reserved"}, audit_path)
                 try:
                     body = (writer(ids, tray.expected_status, ruling, run_id, tray.path, APPROVE_STATUS)
@@ -890,7 +1137,7 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                 for r in chunk:
                     moved = r.request_id.lower() in landed
                     f = facts.get(r.request_id.lower())
-                    audit({**_base(tray, run_id, r, f, now(), "apply"), "before": tray.expected_status,
+                    audit({**_base(tray, run_id, r, f, now(), "apply", batch_id), "before": tray.expected_status,
                            "server_reported_updated": r.request_id.lower() in reported,
                            "after": target_status(tray) if moved else "unchanged_or_unknown",
                            "outcome": "written" if moved else "not_moved"}, audit_path)
@@ -900,6 +1147,13 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                         moved_rows.append((r.request_id, r.user_id, f.profile_id if f else None))
                     else:
                         res.not_moved += 1
+                if tray.action == "approve":
+                    # the server's own count of updated rows must equal the count sent (the UPDATE's RETURNING)
+                    sent = {i.lower() for i in ids}
+                    res.server_reported += len(reported & sent)
+                    if reported != sent and not res.stopped:
+                        res.stopped = (f"server reported {len(reported)} updated id(s) for {len(sent)} sent in "
+                                       f"batch {batch_id}; stopping")
         except (OSError, TimeoutError) as exc:
             res.stopped = (res.stopped + "; " if res.stopped else "") + f"audit/lock failure: {str(exc)[:200]}"
             return res
@@ -923,6 +1177,8 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
     held = res.refused.get("user_rows_over_room_wait_for_another_day", 0)
     if held and writes_today(audit_path, now(), tray.action) >= daily_cap:
         res.stopped = f"daily cap {daily_cap} reached; {held} row(s) wait for another day"
+    elif held and per_run_cap is not None and res.written + res.not_moved >= per_run_cap:
+        res.stopped = f"per-run cap {per_run_cap} reached; {held} row(s) wait for another run"
     return res
 
 
@@ -937,13 +1193,17 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
                  anchor_fn: Callable[[list[str]], dict[str, str]] = dsp_anchors,
                  outcome_fn: Callable[[list[str]], dict[str, dict[str, Any]]] = ledger_outcomes,
                  evidence_fn: Callable[[list["TrayRow"]], dict[str, str]] | None = None,
-                 audit_path: str = AUDIT_PATH, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                 audit_path: str = AUDIT_PATH, registry_path: str = REGISTRY,
+                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                 filter_fn: Callable[[list[str]], dict[str, FilterFacts]] | None = None,
                  ) -> str | None:
     """Re-check ONE batch at the wrapper boundary, independently of the run that asked for it. None = allowed,
     else why not. The wrapper calls this for every fable-decider close, so a caller who sets the env flags and
     skips the executor still meets: a loadable tray naming every id under this ruling and status, a fresh
     'reserved' audit line per id from this run, the tray's daily cap counted over today's reservations, and every
-    row guard on fresh facts + the account gate (+ the DSP-anchor guard when the tray asks for it)."""
+    row guard on fresh facts + the account gate (+ the DSP-anchor guard when the tray asks for it). An approve
+    batch also needs ONE valid batch id on its reservations, the run's reservations inside the filter's per-run
+    cap, and every row through the approve filter on a fresh read."""
     try:
         tray = load_tray(tray_path)
     except (TrayError, OSError) as exc:
@@ -969,6 +1229,8 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
         return "one PUT per user: this batch spans several users"
     cutoff = now().timestamp() - RESERVATION_MAX_AGE_S
     reserved: set[str] = set()
+    batches: dict[str, Any] = {}
+    run_reserved: set[str] = set()          # every id this run reserved on this tray, at any age
     try:
         with open(audit_path, encoding="utf-8") as fh:
             for line in fh:
@@ -982,8 +1244,13 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
                     ts = datetime.strptime(str(rec.get("ts")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
                 except ValueError:
                     continue
-                if ts.timestamp() >= cutoff and rec.get("tray_sha256") == tray.sha256:
-                    reserved.add(str(rec.get("request_id", "")).lower())
+                if rec.get("tray_sha256") != tray.sha256:
+                    continue
+                rid = str(rec.get("request_id", "")).lower()
+                run_reserved.add(rid)
+                if ts.timestamp() >= cutoff:
+                    reserved.add(rid)
+                    batches[rid] = rec.get("batch_id")
     except OSError as exc:
         return f"audit unreadable: {exc}"
     missing = [i for i in want if i not in reserved]
@@ -991,6 +1258,13 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
         return f"{len(missing)} id(s) have no fresh reservation from run {run_id} on this tray"
     if writes_today(audit_path, now(), tray.action) > tray.daily_cap:
         return f"daily cap {tray.daily_cap} exceeded by today's reservations"
+    if tray.action == "approve":
+        tags = {json.dumps(batches.get(i)) for i in want}
+        if len(tags) != 1 or batch_refusal(batches.get(want[0])):
+            return "the approve reservations do not carry one valid batch id"
+        flt, _ = registry_apply_filter(registry_path)     # invalid = refused by the row guard below
+        if flt is not None and len(run_reserved) > flt["per_run_cap"]:
+            return f"per-run cap {flt['per_run_cap']} exceeded by the reservations of run {run_id}"
     facts = facts_fn(want)
     gate = account_gate.Cached(gate_fn)
     closed = closed_today(audit_path, now(), tray.action, own_batch=(run_id, want))
@@ -998,9 +1272,10 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
     outcomes = outcome_fn([rows[i].coded_outcome for i in want])
     evidence_fn = evidence_fn or (lambda rs: coded_evidence(rs, tray.recheck_evidence))
     evidence = evidence_fn([rows[i] for i in want]) if tray.recheck_evidence else {}
+    refuse = refusal_for(tray, registry_path, want, filter_fn)
     for i in want:
         r = rows[i]
-        why = refusal_for(tray)(r, facts.get(i), gate(r.user_id), tray.expected_status)
+        why = refuse(r, facts.get(i), gate(r.user_id), tray.expected_status)
         if not why:
             why = same_day_refusal(r, closed)
         if not why:

@@ -273,7 +273,7 @@ def apply_refusal(pol: dict[str, Any], kill_files: Iterable[str] = KILL_FILES) -
         if os.path.exists(k):
             return f"kill file {k}"
     if pol.get("apply_enabled") is not True:
-        return "policy apply_enabled is not true (shadow first; live only on r5 GO after the shadow read)"
+        return "policy apply_enabled is not true; apply is decided by this rule's policy switch"
     if not pol.get("approved_by") or not pol.get("approval_ref"):
         return "policy has no approved_by / approval_ref"
     return None

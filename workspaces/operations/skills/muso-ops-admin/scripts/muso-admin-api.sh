@@ -1297,7 +1297,8 @@ is_credit_trust_score_approval() {
 # The L12 executor's APPROVALS (executor PR 2; core FABLE_RULED scope #11010/#11011): the one agent shape past
 # this gate for a validator-declined row. Fable's own login (MUSO_ADMIN_IDENTITY=fable = agent-fable@muso.ai),
 # fable-decider requester + header, PUT conditional-status approved from unverified / user_verification_needed /
-# rejected, <= 50 unique ids, a Fable ruling id, the registry entry approved, the kill file absent, and the same
+# rejected, <= 50 unique ids, a Fable ruling id, the registry entry approved with apply_enabled true, the kill file
+# absent, and the same
 # boundary re-check as the closes (verify_batch on a clean env, with the approve tray's guards). Core then admits
 # only rows with a server-held anchor set (the UPDATE pins it); nothing here can widen that.
 is_fable_decider_approval() {
@@ -1316,10 +1317,11 @@ is_fable_decider_approval() {
     }
     jq -e '.automations["fable-decider"]
            | .approved == true
+             and .apply_enabled == true
              and ((.approved_by // "") | tostring | length > 0)
              and ((.approval_ref // "") | tostring | length > 0)' \
         "$CREDIT_APPROVAL_REGISTRY" >/dev/null 2>&1 || {
-        echo "fable_decider: fable-decider is not approved in $CREDIT_APPROVAL_REGISTRY - refusing" >&2
+        echo "fable_decider: fable-decider is not approved with apply_enabled true in $CREDIT_APPROVAL_REGISTRY - refusing" >&2
         return 1
     }
     printf '%s' "$body" | jq -e '

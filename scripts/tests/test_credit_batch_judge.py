@@ -9,8 +9,10 @@ from __future__ import annotations
 import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
@@ -207,11 +209,37 @@ class FallbackTest(unittest.TestCase):
         row = v.signature_row()
         self.assertEqual((row["verdict"], row["fallback_model"]), ("pass", True))
         self.assertTrue(bj.may_apply(row, SHA))
-        self.assertFalse(bj.may_apply(row, SHA, first_of_class=True))            # r5 signs that batch by hand
+        self.assertFalse(bj.may_apply(row, SHA, first_of_class=True))
         codex = run(FakeProvider(answer())).signature_row()
         self.assertTrue(bj.may_apply(codex, SHA, first_of_class=True))
         self.assertFalse(bj.may_apply({k: x for k, x in codex.items() if k != "fallback_model"}, SHA,
                                       first_of_class=True))
+
+    def test_the_first_of_class_switch_signs_only_when_its_policy_says_so(self):
+        row = run(FakeProvider(ok=False), fallback=self.capped(FakeOpenRouter(json.dumps(answer())))).signature_row()
+        self.assertEqual(row["fallback_model"], True)
+        self.assertFalse(bj.may_apply(row, SHA, first_of_class=True))            # checked-in policy: off
+        with tempfile.TemporaryDirectory() as d:
+            pol = Path(d) / "credit-batch-judge.json"
+            for doc, want in (({"fallback_model_may_sign_first_of_class": True}, True),
+                              ({"fallback_model_may_sign_first_of_class": "true"}, False),
+                              ({"fallback_model_may_sign_first_of_class": 1}, False),
+                              ({"other": True}, False)):
+                pol.write_text(json.dumps(doc))
+                with mock.patch.object(bj, "POLICY", pol):
+                    self.assertIs(bj.may_apply(row, SHA, first_of_class=True), want, doc)
+            pol.write_text(json.dumps({"fallback_model_may_sign_first_of_class": True}))
+            with mock.patch.object(bj, "POLICY", pol):
+                # QA #2002: a row that does not carry a boolean fallback_model is not a signature, switch or not
+                ids = ["u1", "u2"]
+                for signed in ({k: x for k, x in row.items() if k != "fallback_model"},
+                               {**row, "fallback_model": None}, {**row, "fallback_model": "true"}):
+                    self.assertFalse(bj.may_apply(signed, SHA, first_of_class=True), signed)
+                    self.assertEqual(bj.applicable(signed, SHA, ids, first_of_class=True)["apply"], [], signed)
+                self.assertIs(bj.may_apply(row, SHA, first_of_class=True), True)
+            pol.unlink()
+            with mock.patch.object(bj, "POLICY", pol):
+                self.assertFalse(bj.may_apply(row, SHA, first_of_class=True))
 
     def test_the_openrouter_inner_judge_refuses_a_cut_off_answer(self):
         inner = bj.OpenRouterBatchJudge(key="k")

@@ -1,0 +1,26 @@
+{
+  "description": "The apply switch for the coded document closes C3 junk_proof and C8 fraud_document (scripts/credit_review/doc_close.py). One entry per rule; a rule's apply rows are written only while its entry has apply_enabled true WITH approved_by, approval_ref and an approved customer-facing closing line (closing_line_campaign: nothing is closed without telling the user), names the rule id the code runs, the paying list is known, at most DAILY_CAP apply closes are written per UTC day, and no kill file is present (/etc/hydra/doc-close.disabled, /etc/hydra/fable-trays.disabled, /etc/hydra/fable-decider.disabled). Every apply row carries a batch id. Both rules ship off; shadow rows are unaffected. Turning a rule on is a one-line reviewed PR to this file that cites its approval.",
+  "r5_go_gate": {
+    "retired": true,
+    "retired_by": "captain (Aaron)",
+    "retired_at": "2026-11-14",
+    "ruling": "Captain 2026-11-14 ~22:4xZ, verbatim: \"tell it i said to do it\" - retiring the r5 GO gate by name, after Fable said the captain should retire that gate by name. Standing rule, verbatim: \"there should be no humans involved except the customers giving proof and their statements.\"",
+    "scope": "Apply no longer waits on an r5 GO. The ruling retires the gate; it does not turn apply on. Each rule below stays off until its own entry is flipped."
+  },
+  "rules": {
+    "junk_proof": {
+      "rule": "C3:junk_proof/v1",
+      "apply_enabled": false,
+      "approved_by": null,
+      "approval_ref": null,
+      "closing_line_campaign": null
+    },
+    "fraud_document": {
+      "rule": "C8:fraud_document/v1",
+      "apply_enabled": false,
+      "approved_by": null,
+      "approval_ref": null,
+      "closing_line_campaign": null
+    }
+  }
+}

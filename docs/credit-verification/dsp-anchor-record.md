@@ -21,6 +21,33 @@ says which requests to look at. The ruling id is carried as `metadata.ruling_id`
 admitting value. Before minting a record, the builder re-runs `rules.verify(packet)` (`anchor.py`), so a
 stored verdict that has drifted from its packet cannot produce one.
 
+## What the executor's approve step admits
+
+Step 5 writes nothing while `fable-decider.apply_enabled` is false in `policies/credit-approval-automation.json`
+(it ships false). With the switch on, the same entry's `apply_filter` block decides which rows may be approved,
+and `fable_executor.registry_apply_filter` holds its floor in code: a registry edit can tighten the block (a lower
+`per_run_cap`, more excluded bands) and a missing, malformed or weaker block refuses every row
+(`apply_filter_invalid`).
+
+| key | what it enforces | refusal |
+|---|---|---|
+| `outcome: credit-anchored-approve` | the row's rule is `C4:anchored/v1` and it cites a `dsp_verdicts` row | `outcome_not_credit_anchored_approve` |
+| `exclude_bands` (always holds `none`) | a request with no `band_hint` is never approved | `band_excluded:none`, `band_unmeasured` |
+| `exclude_conflict_rule_failures` | another user's approved or awaiting-verification request on the same track with a credit in common | `conflict_rule_failure`, `conflict_rule_unmeasured` |
+| `exclude_self_duplicate_groups` | the same user's other open request for the same track and the same credits | `self_duplicate_group`, `self_duplicate_unmeasured` |
+| `per_run_cap` (1 to 50; ships 1) | the most approves one run may write | the run stops: `per-run cap N reached` |
+| `batch_id_required` | `--apply` on an approve tray needs `--batch-id`; every audit line of the run carries it | the run stops before any write |
+
+The three exclusions are read from the core replica for exactly the rows about to be written
+(`fable_executor.approve_filter_facts`), again at the wrapper boundary (`verify_batch`), and a read that fails or
+answers for fewer rows refuses them (`apply_filter_unmeasured`). After each PUT the ids core names in `updatedIds`
+must equal the ids sent, or the run stops there. `credit-fable-execute.py --batch-rows ID` lists the request ids
+the audit shows written under a batch id; the executor has no revert, so returning a batch is a person's PUT of
+that list.
+
+A cap only slows how fast wrong approvals are written; the filter is what keeps the known-wrong classes out.
+The filter does not arm anything: `doc_class.shadow` and the switch are separate decisions.
+
 ## Record (JSON, schema `dsp-anchor/1`)
 
 Common fields:

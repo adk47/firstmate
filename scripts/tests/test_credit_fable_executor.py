@@ -23,6 +23,14 @@ RID = "11111111-1111-4111-8111-111111111111"
 RID2 = "22222222-2222-4222-8222-222222222222"
 NOW = datetime(2026, 10, 28, 22, 0, tzinfo=timezone.utc)
 ALLOW = account_gate.GateResult("allow", ("no account-level signal",), {"decision": "allow"})
+BATCH = "batch-test-01"
+FILTER = {"outcome": "credit-anchored-approve", "exclude_bands": ["none"], "exclude_conflict_rule_failures": True,
+          "exclude_self_duplicate_groups": True, "per_run_cap": 50, "batch_id_required": True}
+CLEAN = fx.FilterFacts("b", False, False)
+
+
+def clean(ids):
+    return {i: CLEAN for i in ids}
 
 
 def facts(**over) -> fx.Facts:
@@ -188,9 +196,12 @@ class RunTest(unittest.TestCase):
         self.set_registry(True)
         self.calls = []
 
-    def set_registry(self, approved):
-        Path(self.registry).write_text(json.dumps({"automations": {"fable-decider": {
-            "approved": approved, "approved_by": "captain", "approval_ref": "captain-1028-213x"}}}))
+    def set_registry(self, approved, apply_enabled=True, apply_filter=FILTER, **filter_over):
+        entry = {"approved": approved, "apply_enabled": apply_enabled, "approved_by": "captain",
+                 "approval_ref": "captain-1028-213x"}
+        if apply_filter is not None:
+            entry["apply_filter"] = {**apply_filter, **filter_over}
+        Path(self.registry).write_text(json.dumps({"automations": {"fable-decider": entry}}))
 
     def tray(self, n=2, cap=100):
         ids = [f"{i:08d}-1111-4111-8111-111111111111" for i in range(n)]
@@ -783,7 +794,7 @@ class QaRound2Test(RunTest):
         self.assertIn("daily cap", self._verify(path, [RID]))
 
 
-APPROVE_ROW = {"request_id": RID, "user_id": 42, "coded_outcome": "decisions:1", "ruling_id": "label-credits-a", "rule": "R-LABEL-ANCHOR",
+APPROVE_ROW = {"request_id": RID, "user_id": 42, "coded_outcome": "dsp_verdicts:1", "ruling_id": "label-credits-a", "rule": fx.ANCHORED_RULE_ID,
                "evidence": "org-label-anchor A: DSP label line names the org; processed org claim", "paid": True}
 
 
@@ -820,9 +831,15 @@ class ApproveTrayTest(unittest.TestCase):
                 fx.load_tray(self.write(doc))
 
     def test_approve_guards(self):
-        r = fx.TrayRow(RID, 42, "label-credits-a", "R-LABEL-ANCHOR", True, "x" * 30)
+        r = fx.TrayRow(RID, 42, "label-credits-a", fx.ANCHORED_RULE_ID, True, "x" * 30, coded_outcome="dsp_verdicts:1")
         ok = facts(owns_profile=True, rules={"reject_publisher_label_credit": 100.0})
-        self.assertIsNone(fx.approve_refusal(r, ok, ALLOW, "unverified"))      # a held claim is fine for approvals
+        on = dict(apply_enabled=True, apply_filter=FILTER, filter_facts=CLEAN)
+        self.assertIsNone(fx.approve_refusal(r, ok, ALLOW, "unverified", **on))      # a held claim is fine for approvals
+        self.assertEqual(fx.approve_refusal(r, ok, ALLOW, "unverified", apply_filter=FILTER, filter_facts=CLEAN),
+                         "approve_not_enabled")
+        # the switch alone is not enough: no valid filter block, no approve
+        self.assertEqual(fx.approve_refusal(r, ok, ALLOW, "unverified", apply_enabled=True, filter_facts=CLEAN),
+                         "apply_filter_invalid")
         cases = [
             (None, ALLOW, "row_not_found"), (facts(deleted=True), ALLOW, "row_deleted"),
             (facts(status="approved"), ALLOW, "status_changed"), (facts(user_id=7), ALLOW, "user_mismatch"),
@@ -833,13 +850,13 @@ class ApproveTrayTest(unittest.TestCase):
              "watchlisted_account"),
         ]
         for f, g, want in cases:
-            self.assertTrue((fx.approve_refusal(r, f, g, "unverified") or "").startswith(want), want)
+            self.assertTrue((fx.approve_refusal(r, f, g, "unverified", **on) or "").startswith(want), want)
 
 
 class ApproveRunTest(RunTest):
     def approve_tray(self, n=2):
-        rows = tuple(fx.TrayRow(f"{i:08d}-1111-4111-8111-111111111111", 42, "label-credits-a", "R-LABEL-ANCHOR",
-                                True, "x" * 30) for i in range(n))
+        rows = tuple(fx.TrayRow(f"{i:08d}-1111-4111-8111-111111111111", 42, "label-credits-a", fx.ANCHORED_RULE_ID,
+                                True, "x" * 30, coded_outcome=f"dsp_verdicts:{i + 1}") for i in range(n))
         return fx.Tray(str(self.tmp / "a.json"), "0" * 64, "approve", "unverified", rows, 50)
 
     def test_writes_approved_reads_back_approved_and_audits_the_action(self):
@@ -856,7 +873,8 @@ class ApproveRunTest(RunTest):
         t = self.approve_tray()
         res = fx.run(t, apply=True, facts_fn=lambda ids: {i: facts() for i in ids}, gate_fn=lambda u: ALLOW,
                      writer=write, readback=readback, audit_path=self.audit, registry_path=self.registry,
-                     kill_files=(self.kill,), now=lambda: NOW, lock_path=str(self.tmp / "lock"), sleep=lambda s: None)
+                     kill_files=(self.kill,), now=lambda: NOW, lock_path=str(self.tmp / "lock"), sleep=lambda s: None,
+                     batch_id=BATCH, filter_fn=clean)
         self.assertEqual((res.written, seen["status"], seen["rb"]), (2, "approved", "approved"))
         lines = self.audit_lines()
         self.assertTrue(all(l["action"] == "approve" for l in lines))
@@ -880,9 +898,28 @@ class ApproveRunTest(RunTest):
         res = fx.run(t, apply=True, facts_fn=lambda ids: {i: facts() for i in ids}, gate_fn=lambda u: ALLOW,
                      writer=write, readback=lambda s, ids: set(ids), audit_path=self.audit,
                      registry_path=self.registry, kill_files=(self.kill,), now=lambda: NOW,
-                     lock_path=str(self.tmp / "lock"), sleep=lambda s: None)
+                     lock_path=str(self.tmp / "lock"), sleep=lambda s: None, batch_id=BATCH, filter_fn=clean)
         self.assertEqual(sum(len(c) for c in self.calls), 1)
         self.assertIn("daily cap", res.stopped)
+
+    def test_an_approve_is_refused_while_the_apply_switch_is_off(self):
+        def write(ids, expected, ruling, run_id, tray_path, status="rejected"):
+            self.calls.append(list(ids))
+            return {"updatedIds": ids}
+
+        def run():
+            return fx.run(self.approve_tray(), apply=True, facts_fn=lambda ids: {i: facts() for i in ids},
+                          gate_fn=lambda u: ALLOW, writer=write, readback=lambda s, ids: set(ids),
+                          audit_path=self.audit, registry_path=self.registry, kill_files=(self.kill,),
+                          now=lambda: NOW, lock_path=str(self.tmp / "lock"), sleep=lambda s: None,
+                          batch_id=BATCH, filter_fn=clean)
+
+        self.set_registry(True, apply_enabled=False)
+        res = run()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(res.refused, {"approve_not_enabled": 2})
+        self.set_registry(True)
+        self.assertEqual(run().written, 2)
 
     def test_boundary_uses_the_approve_guards(self):
         doc = {"action": "approve", "expected_status": "unverified", "rows": [dict(APPROVE_ROW)]}
@@ -891,9 +928,11 @@ class ApproveRunTest(RunTest):
         sha = fx.load_tray(str(p)).sha256
         with open(self.audit, "a") as fh:
             fh.write(json.dumps({"ts": "2026-10-28T21:58:00Z", "run_id": "r1", "outcome": "reserved",
-                                 "request_id": RID, "tray_sha256": sha, "action": "approve"}) + "\n")
+                                 "request_id": RID, "tray_sha256": sha, "action": "approve",
+                                 "batch_id": BATCH}) + "\n")
         kw = dict(facts_fn=lambda xs: {x: facts(owns_profile=True) for x in xs}, gate_fn=lambda u: ALLOW,
-                  anchor_fn=lambda xs: {}, audit_path=self.audit, now=lambda: NOW)
+                  anchor_fn=lambda xs: {}, audit_path=self.audit, registry_path=self.registry, now=lambda: NOW,
+                  filter_fn=clean)
         self.assertIsNone(fx.verify_batch(str(p), "label-credits-a", "r1", [RID], "unverified", status="approved", **kw))
         # a close-shaped body can never ride an approve tray's reservations, nor the reverse
         self.assertIn("not what this approve tray writes",
@@ -1041,6 +1080,433 @@ class CodedCloseEndToEndTest(RunTest):
             res = self.go_real(self.tray_with([(RID2, oc)]))
             self.assertEqual((res.written, list(res.refused)), (0, [why]), oc)
         self.assertEqual(self.calls, [])
+
+
+class ApplyFilterPolicyTest(unittest.TestCase):
+    """The approve filter block of the registry entry: the code holds the floor, the policy may only tighten it."""
+
+    def read(self, entry):
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump({"automations": {"fable-decider": entry}}, f)
+        f.close()
+        return fx.registry_apply_filter(f.name)
+
+    def test_the_floor_is_accepted_and_may_be_tightened(self):
+        self.assertEqual(self.read({"apply_filter": FILTER}), (FILTER, ""))
+        tighter = {**FILTER, "exclude_bands": ["none", "c"], "per_run_cap": 1}
+        self.assertEqual(self.read({"apply_filter": tighter}), (tighter, ""))
+
+    def test_a_missing_or_unreadable_block_is_no_filter(self):
+        self.assertEqual(self.read({}), (None, "no apply_filter block"))
+        self.assertEqual(self.read({"apply_filter": "on"}), (None, "no apply_filter block"))
+        self.assertEqual(fx.registry_apply_filter("/nonexistent/registry.json"), (None, "registry unreadable"))
+
+    def test_every_weaker_block_is_refused(self):
+        weaker = [
+            ({k: v for k, v in FILTER.items() if k != "exclude_self_duplicate_groups"}, "keys"),
+            ({**FILTER, "skip": True}, "keys"),
+            ({**FILTER, "outcome": "any"}, "outcome"),
+            ({**FILTER, "exclude_bands": []}, "exclude_bands"),
+            ({**FILTER, "exclude_bands": ["c"]}, "exclude_bands"),
+            ({**FILTER, "exclude_bands": "none"}, "exclude_bands"),
+            ({**FILTER, "exclude_bands": ["none", "C"]}, "exclude_bands"),
+            ({**FILTER, "exclude_conflict_rule_failures": False}, "exclude_conflict_rule_failures"),
+            ({**FILTER, "exclude_self_duplicate_groups": "true"}, "exclude_self_duplicate_groups"),
+            ({**FILTER, "batch_id_required": False}, "batch_id_required"),
+            ({**FILTER, "per_run_cap": 0}, "per_run_cap"),
+            ({**FILTER, "per_run_cap": fx.APPROVE_CAP + 1}, "per_run_cap"),
+            ({**FILTER, "per_run_cap": True}, "per_run_cap"),
+            ({**FILTER, "per_run_cap": None}, "per_run_cap"),
+        ]
+        for block, word in weaker:
+            got, why = self.read({"apply_filter": block})
+            self.assertIsNone(got, block)
+            self.assertIn(word, why)
+
+    def test_the_checked_in_entry_is_off_and_carries_a_valid_filter(self):
+        path = Path(__file__).resolve().parents[2] / "policies" / "credit-approval-automation.json"
+        entry = json.loads(path.read_text())["automations"]["fable-decider"]
+        self.assertIs(entry["apply_enabled"], False)
+        flt, why = fx.registry_apply_filter(str(path))
+        self.assertEqual(why, "")
+        self.assertEqual(flt["per_run_cap"], 1)
+        self.assertFalse(fx.registry_apply_enabled(str(path)))
+
+    def test_the_admitted_outcome_is_the_anchored_feeds_rule(self):
+        from credit_review import anchored_feed
+        self.assertEqual(fx.ANCHORED_RULE_ID, anchored_feed.RULE_ID)
+
+
+class FilterRefusalTest(unittest.TestCase):
+    def row(self, **over):
+        base = dict(request_id=RID, user_id=42, ruling_id="dsp_verdicts-1", rule=fx.ANCHORED_RULE_ID, paid=True,
+                    evidence="x" * 30, coded_outcome="dsp_verdicts:1")
+        base.update(over)
+        return fx.TrayRow(**base)
+
+    def test_a_clean_anchored_row_passes(self):
+        self.assertIsNone(fx.filter_refusal(self.row(), FILTER, CLEAN))
+
+    def test_only_the_credit_anchored_approve_outcome_is_admitted(self):
+        for r in (self.row(rule="R-LABEL-ANCHOR"), self.row(coded_outcome="decisions:1"),
+                  self.row(coded_outcome="dv_outcomes:1"), self.row(coded_outcome="")):
+            self.assertEqual(fx.filter_refusal(r, FILTER, CLEAN), "outcome_not_credit_anchored_approve")
+
+    def test_each_exclusion_and_each_unmeasured_fact_refuses(self):
+        F = fx.FilterFacts
+        for ff, want in (
+            (None, "apply_filter_unmeasured"),
+            (F(None, False, False), "band_unmeasured"),
+            (F("none", False, False), "band_excluded:none"),
+            (F("b", None, False), "conflict_rule_unmeasured"),
+            (F("b", True, False), "conflict_rule_failure"),
+            (F("b", False, None), "self_duplicate_unmeasured"),
+            (F("b", False, True), "self_duplicate_group"),
+        ):
+            self.assertEqual(fx.filter_refusal(self.row(), FILTER, ff), want)
+        self.assertEqual(fx.filter_refusal(self.row(), {**FILTER, "exclude_bands": ["none", "c"]},
+                                           F("c", False, False)), "band_excluded:c")
+
+    def test_the_filter_runs_after_the_switch_and_the_row_guards(self):
+        dirty = fx.FilterFacts("none", True, True)
+        kw = dict(apply_filter=FILTER, filter_facts=dirty)
+        self.assertEqual(fx.approve_refusal(self.row(), facts(), ALLOW, "unverified", **kw), "approve_not_enabled")
+        self.assertEqual(fx.approve_refusal(self.row(), facts(status="approved"), ALLOW, "unverified",
+                                            apply_enabled=True, **kw), "status_changed:approved")
+        self.assertEqual(fx.approve_refusal(self.row(), facts(), ALLOW, "unverified", apply_enabled=True, **kw),
+                         "band_excluded:none")
+
+
+class ApproveFilterFactsTest(unittest.TestCase):
+    """approve_filter_facts over a fake replica: two reads, the overlap decided in Python."""
+
+    A, B, C, D = (f"{n}{n}{n}{n}{n}{n}{n}{n}-1111-4111-8111-111111111111" for n in "abcd")
+
+    @staticmethod
+    def csv(rows):
+        return "\n".join(",".join('"' + str(c).replace('"', '""') + '"' for c in r) for r in rows)
+
+    def read(self, own, siblings=()):
+        seen = []
+
+        def run(sql):
+            seen.append(sql)
+            return self.csv(own if len(seen) == 1 else siblings)
+        return fx.approve_filter_facts([r[0] for r in own], run=run), seen
+
+    def test_parse_credits(self):
+        self.assertEqual(fx.parse_credits("{Producer}"), frozenset({"producer"}))
+        self.assertEqual(fx.parse_credits('{"Mixing Engineer",Producer}'), frozenset({"mixing engineer", "producer"}))
+        self.assertEqual(fx.parse_credits("{}"), frozenset())
+        for bad in ("", "Producer", "{Producer", "{Producer,}", None):
+            self.assertIsNone(fx.parse_credits(bad), bad)
+
+    def test_a_request_alone_on_its_track_is_clean_and_keeps_its_band(self):
+        got, seen = self.read([(self.A, 42, "trk1", "{Producer}", "B")],
+                              [(self.A, 42, "trk1", "user_verification_needed", "{Producer}")])
+        self.assertEqual(got, {self.A: fx.FilterFacts("b", False, False)})
+        self.assertEqual(len(seen), 2)
+        self.assertIn(self.A, seen[0])
+        self.assertIn("'trk1'", seen[1])
+        self.assertIn("deletedat is null", seen[1])
+
+    def test_no_band_hint_reads_as_band_none(self):
+        got, _ = self.read([(self.A, 42, "trk1", "{Producer}", "")])
+        self.assertEqual(got[self.A].band, "none")
+
+    def test_another_users_overlapping_credit_is_a_conflict(self):
+        own = [(self.A, 42, "trk1", '{"Mixing Engineer",Producer}', "B")]
+        for status in ("approved", "user_verification_needed"):
+            got, _ = self.read(own, [(self.B, 7, "trk1", status, "{Producer}")])
+            self.assertEqual(got[self.A], fx.FilterFacts("b", True, False), status)
+
+    def test_what_is_not_a_conflict(self):
+        own = [(self.A, 42, "trk1", "{Producer}", "B")]
+        for sib in ((self.B, 7, "trk1", "approved", "{Songwriter}"),          # no credit in common
+                    (self.B, 7, "trk1", "unverified", "{Producer}"),          # not approved, not awaiting
+                    (self.B, 7, "trk2", "approved", "{Producer}"),            # another track
+                    (self.B, 42, "trk1", "approved", "{Producer}")):          # the same user's own approval
+            got, _ = self.read(own, [sib])
+            self.assertIs(got[self.A].conflict, False, sib)
+
+    def test_the_same_users_open_twin_is_a_self_duplicate(self):
+        own = [(self.A, 42, "trk1", '{Producer,"Mixing Engineer"}', "B")]
+        for status in ("unverified", "user_verification_needed"):
+            got, _ = self.read(own, [(self.B, 42, "trk1", status, '{"Mixing Engineer",Producer}')])
+            self.assertEqual(got[self.A], fx.FilterFacts("b", False, True), status)
+        for sib in ((self.B, 42, "trk1", "user_verification_needed", "{Producer}"),    # different credits
+                    (self.B, 42, "trk1", "approved", '{"Mixing Engineer",Producer}'),  # not open
+                    (self.B, 7, "trk1", "unverified", '{"Mixing Engineer",Producer}')):  # another user, not open-conflict
+            got, _ = self.read(own, [sib])
+            self.assertIs(got[self.A].self_duplicate, False, sib)
+
+    def test_two_tray_rows_that_are_each_others_twin_are_both_out(self):
+        got, _ = self.read([(self.A, 42, "trk1", "{Producer}", "B"), (self.B, 42, "trk1", "{Producer}", "B")],
+                           [(self.A, 42, "trk1", "user_verification_needed", "{Producer}"),
+                            (self.B, 42, "trk1", "user_verification_needed", "{Producer}")])
+        self.assertTrue(got[self.A].self_duplicate and got[self.B].self_duplicate)
+
+    def test_what_cannot_be_read_is_unmeasured_never_clean(self):
+        got, seen = self.read([(self.A, 42, "", "{Producer}", "B"), (self.B, 42, "trk1", "not-an-array", "B"),
+                               (self.C, "", "trk1", "{Producer}", "B")])
+        for rid in (self.A, self.B, self.C):
+            self.assertEqual(got[rid], fx.FilterFacts("b", None, None), rid)
+        got, _ = self.read([(self.A, 42, "trk1", "{Producer}", "B")],
+                           [(self.B, 7, "trk1", "approved", "garbage")])
+        self.assertEqual(got[self.A], fx.FilterFacts("b", None, None))
+        # a readable conflict still wins over an unreadable sibling
+        got, _ = self.read([(self.A, 42, "trk1", "{Producer}", "B")],
+                           [(self.B, 7, "trk1", "approved", "garbage"), (self.C, 8, "trk1", "approved", "{Producer}")])
+        self.assertEqual(got[self.A], fx.FilterFacts("b", True, None))
+
+    def test_no_track_no_sibling_read_and_a_track_id_is_never_spliced_raw(self):
+        got, seen = self.read([(self.A, 42, "x' or '1'='1", "{Producer}", "B")])
+        self.assertEqual((got[self.A].conflict, len(seen)), (None, 1))
+        self.assertEqual(fx.approve_filter_facts(["not-a-uuid"], run=lambda sql: self.fail("no read")), {})
+
+    def test_a_malformed_replica_row_raises(self):
+        with self.assertRaisesRegex(RuntimeError, "columns"):
+            fx.approve_filter_facts([self.A], run=lambda sql: '"a","b"')
+
+    def test_a_row_the_replica_does_not_return_has_no_facts(self):
+        got, _ = self.read([(self.A, 42, "trk1", "{Producer}", "B")])
+        self.assertNotIn(self.B, got)
+
+
+class ApproveFilterRunTest(ApproveRunTest):
+    """The filter, the per-run cap, the batch id and the server's count on the write path itself."""
+
+    def tray_of(self, users):
+        rows = tuple(fx.TrayRow(f"{i:08d}-1111-4111-8111-111111111111", u, f"dsp_verdicts-{i}", fx.ANCHORED_RULE_ID,
+                                True, "x" * 30, coded_outcome=f"dsp_verdicts:{i + 1}") for i, u in enumerate(users))
+        return fx.Tray(str(self.tmp / "a.json"), "0" * 64, "approve", "unverified", rows, 50)
+
+    def approve(self, tray, *, batch_id=BATCH, filter_fn=clean, reported=None, **kw):
+        def write(ids, expected, ruling, run_id, tray_path, status="rejected"):
+            self.calls.append(list(ids))
+            return {"updatedIds": ids if reported is None else reported(ids)}
+        return fx.run(tray, apply=kw.pop("apply", True),
+                      facts_fn=lambda ids: {i: facts(user_id=u) for i in ids
+                                            for u in [next(r.user_id for r in tray.rows if r.request_id == i)]},
+                      gate_fn=lambda u: ALLOW, writer=write, readback=lambda s, ids: set(ids), audit_path=self.audit,
+                      registry_path=self.registry, kill_files=(self.kill,), now=lambda: NOW,
+                      lock_path=str(self.tmp / "lock"), sleep=lambda s: None, batch_id=batch_id,
+                      filter_fn=filter_fn, **kw)
+
+    def test_an_approve_apply_without_a_batch_id_writes_and_audits_nothing(self):
+        for bad in (None, "", "short", "Has-Capitals-01", "spaces in it", 7):
+            res = self.approve(self.tray_of([42]), batch_id=bad)
+            self.assertIn("batch id", res.stopped, bad)
+        self.assertEqual((self.calls, self.audit_lines()), ([], []))
+
+    def test_a_batch_id_never_tags_a_close_tray(self):
+        with self.assertRaisesRegex(ValueError, "approve writes only"):
+            self.go(self.tray(), batch_id=BATCH)
+
+    def test_every_audit_line_of_the_run_carries_the_batch_id(self):
+        res = self.approve(self.tray_of([42, 42, 7]),
+                           filter_fn=lambda ids: {i: (fx.FilterFacts("none", False, False)
+                                                      if i.startswith("00000001") else CLEAN) for i in ids})
+        self.assertEqual((res.written, res.batch_id, res.server_reported), (2, BATCH, 2))
+        lines = self.audit_lines()
+        self.assertEqual({l["outcome"] for l in lines}, {"refused", "reserved", "written"})
+        self.assertTrue(all(l["batch_id"] == BATCH for l in lines))
+        self.assertEqual(sorted(fx.batch_rows(BATCH, self.audit)),
+                         ["00000000-1111-4111-8111-111111111111", "00000002-1111-4111-8111-111111111111"])
+        self.assertEqual(fx.batch_rows("batch-other-01", self.audit), [])
+        self.assertEqual(res.as_dict()["batch_id"], BATCH)
+
+    def test_filtered_rows_are_refused_audited_and_never_sent(self):
+        F = fx.FilterFacts
+        by_row = {0: F("none", False, False), 1: F("b", True, False), 2: F("b", False, True), 3: CLEAN}
+        t = self.tray_of([42, 42, 42, 42])
+        res = self.approve(t, filter_fn=lambda ids: {i: by_row[int(i[:8])] for i in ids})
+        self.assertEqual(self.calls, [["00000003-1111-4111-8111-111111111111"]])
+        self.assertEqual(res.refused, {"band_excluded": 1, "conflict_rule_failure": 1, "self_duplicate_group": 1})
+        refused = {l["request_id"][:8]: l["reason"] for l in self.audit_lines() if l["outcome"] == "refused"}
+        self.assertEqual(refused, {"00000000": "band_excluded:none", "00000001": "conflict_rule_failure",
+                                   "00000002": "self_duplicate_group"})
+
+    def test_a_row_that_is_not_a_credit_anchored_approve_is_never_sent(self):
+        rows = (fx.TrayRow(RID, 42, "label-credits-a", "R-LABEL-ANCHOR", True, "x" * 30, coded_outcome="decisions:1"),)
+        res = self.approve(fx.Tray(str(self.tmp / "a.json"), "0" * 64, "approve", "unverified", rows, 50))
+        self.assertEqual((self.calls, res.refused), ([], {"outcome_not_credit_anchored_approve": 1}))
+
+    def test_an_unreadable_filter_refuses_every_row(self):
+        def boom(ids):
+            raise RuntimeError("trino failed rc=1")
+        res = self.approve(self.tray_of([42, 7]), filter_fn=boom)
+        self.assertEqual((self.calls, res.written, res.refused), ([], 0, {"apply_filter_unmeasured": 2}))
+        # a read that answers for fewer rows than asked leaves the rest unmeasured
+        res = self.approve(self.tray_of([42, 7]), filter_fn=lambda ids: {})
+        self.assertEqual((self.calls, res.refused), ([], {"apply_filter_unmeasured": 2}))
+
+    def test_a_missing_or_weaker_filter_block_refuses_every_row_with_the_switch_on(self):
+        for kw in (dict(apply_filter=None), dict(exclude_bands=[]), dict(per_run_cap=0),
+                   dict(exclude_conflict_rule_failures=False), dict(batch_id_required=False)):
+            self.set_registry(True, **kw)
+            reads = []      # a counter, not self.fail: refusal_for swallows what the read raises
+            res = self.approve(self.tray_of([42, 7]), filter_fn=lambda ids: reads.append(ids) or clean(ids))
+            self.assertEqual((self.calls, res.refused, reads), ([], {"apply_filter_invalid": 2}, []), kw)
+
+    def test_the_filter_is_not_read_while_the_switch_is_off_nor_for_a_close(self):
+        self.set_registry(True, apply_enabled=False)
+        reads = []          # a counter, not self.fail: refusal_for swallows what the read raises
+        spy = lambda ids: reads.append(list(ids)) or clean(ids)
+        res = self.approve(self.tray_of([42]), filter_fn=spy)
+        self.assertEqual((self.calls, res.refused, reads), ([], {"approve_not_enabled": 1}, []))
+        self.set_registry(True)
+        self.assertEqual((self.go(self.tray(), filter_fn=spy).written, reads), (2, []))
+        # the same spy IS called once the switch is on, so the two assertions above are not vacuous
+        self.approve(self.tray_of([42]), filter_fn=spy)
+        self.assertTrue(reads)
+
+    def test_the_per_run_cap_bounds_one_run_across_users(self):
+        self.set_registry(True, per_run_cap=2)
+        res = self.approve(self.tray_of([42, 7, 8, 9]))
+        self.assertEqual((res.written, len(self.calls)), (2, 2))
+        # the run stops AT the cap: the third user is never read, and no row is mislabelled as waiting on the day
+        self.assertEqual((res.stopped, res.refused), ("per-run cap 2 reached", {}))
+        self.assertEqual(len([l for l in self.audit_lines() if l["outcome"] == "reserved"]), 2)
+
+    def test_the_per_run_cap_bounds_one_users_put(self):
+        self.set_registry(True, per_run_cap=1)
+        res = self.approve(self.tray_of([42, 42, 42]))
+        self.assertEqual((res.written, self.calls), (1, [["00000000-1111-4111-8111-111111111111"]]))
+        self.assertIn("per-run cap 1 reached; 2 row(s) wait", res.stopped)
+
+    def test_a_filtered_row_does_not_use_the_per_run_cap(self):
+        self.set_registry(True, per_run_cap=1)
+        res = self.approve(self.tray_of([42, 7]),
+                           filter_fn=lambda ids: {i: (fx.FilterFacts("b", True, False)
+                                                      if i.startswith("00000000") else CLEAN) for i in ids})
+        self.assertEqual(self.calls, [["00000001-1111-4111-8111-111111111111"]])
+        self.assertEqual(res.written, 1)
+
+    def test_a_server_count_that_differs_from_the_count_sent_stops_the_run(self):
+        res = self.approve(self.tray_of([42, 42, 7]), reported=lambda ids: ids[:1])
+        self.assertEqual(len(self.calls), 1)                      # user 7's PUT is never made
+        self.assertIn(f"server reported 1 updated id(s) for 2 sent in batch {BATCH}", res.stopped)
+        self.assertEqual(res.server_reported, 1)
+        written = [l for l in self.audit_lines() if l["outcome"] == "written"]
+        self.assertEqual([l["server_reported_updated"] for l in written], [True, False])
+
+    def test_a_server_count_naming_an_id_that_was_not_sent_stops_the_run(self):
+        res = self.approve(self.tray_of([42, 7]), reported=lambda ids: ids + [RID2])
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("server reported 2 updated id(s) for 1 sent", res.stopped)
+
+    def test_a_dry_run_needs_no_batch_id_and_applies_the_filter(self):
+        res = self.approve(self.tray_of([42, 7]), apply=False, batch_id=None,
+                           filter_fn=lambda ids: {i: (fx.FilterFacts("none", False, False)
+                                                      if i.startswith("00000000") else CLEAN) for i in ids})
+        self.assertEqual((self.calls, res.refused), ([], {"band_excluded": 1, "would_write": 1}))
+
+
+class ApproveFilterBoundaryTest(RunTest):
+    """verify_batch re-applies the filter, the batch id and the per-run cap at the wrapper boundary."""
+
+    def setUp(self):
+        super().setUp()
+        self.ids = [f"{i:08d}-1111-4111-8111-111111111111" for i in range(3)]
+        doc = {"action": "approve", "expected_status": "unverified", "rows": [
+            {**APPROVE_ROW, "request_id": i, "coded_outcome": f"dsp_verdicts:{n + 1}"}
+            for n, i in enumerate(self.ids)]}
+        self.path = self.tmp / "approve.json"
+        self.path.write_text(json.dumps(doc))
+        self.sha = fx.load_tray(str(self.path)).sha256
+
+    def reserve(self, rid, batch_id=BATCH, run_id="r1", ts="2026-10-28T21:58:00Z"):
+        rec = {"ts": ts, "run_id": run_id, "outcome": "reserved", "request_id": rid, "tray_sha256": self.sha,
+               "action": "approve"}
+        if batch_id is not None:
+            rec["batch_id"] = batch_id
+        with open(self.audit, "a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    def verify(self, ids, filter_fn=clean):
+        return fx.verify_batch(str(self.path), "label-credits-a", "r1", ids, "unverified", status="approved",
+                               facts_fn=lambda xs: {x: facts() for x in xs}, gate_fn=lambda u: ALLOW,
+                               anchor_fn=lambda xs: {}, audit_path=self.audit, registry_path=self.registry,
+                               now=lambda: NOW, filter_fn=filter_fn)
+
+    def test_a_tagged_clean_batch_is_allowed(self):
+        for i in self.ids[:2]:
+            self.reserve(i)
+        self.assertIsNone(self.verify(self.ids[:2]))
+
+    def test_a_reservation_without_one_valid_batch_id_is_refused(self):
+        self.reserve(self.ids[0], batch_id=None)
+        self.assertIn("one valid batch id", self.verify(self.ids[:1]))
+        Path(self.audit).unlink()
+        self.reserve(self.ids[0], batch_id="short")
+        self.assertIn("one valid batch id", self.verify(self.ids[:1]))
+        Path(self.audit).unlink()
+        self.reserve(self.ids[0])
+        self.reserve(self.ids[1], batch_id="batch-test-02")
+        self.assertIn("one valid batch id", self.verify(self.ids[:2]))
+
+    def test_the_filter_is_re_read_at_the_boundary(self):
+        self.reserve(self.ids[0])
+        dirty = {"band_excluded:none": fx.FilterFacts("none", False, False),
+                 "conflict_rule_failure": fx.FilterFacts("b", True, False),
+                 "self_duplicate_group": fx.FilterFacts("b", False, True)}
+        for want, ff in dirty.items():
+            self.assertIn(want, self.verify(self.ids[:1], filter_fn=lambda xs, ff=ff: {x: ff for x in xs}))
+
+        def boom(xs):
+            raise RuntimeError("replica down")
+        self.assertIn("apply_filter_unmeasured", self.verify(self.ids[:1], filter_fn=boom))
+
+    def test_the_per_run_cap_counts_every_reservation_of_the_run(self):
+        self.set_registry(True, per_run_cap=2)
+        self.reserve(self.ids[0], ts="2026-10-28T20:00:00Z")      # an earlier batch of this run, past the fresh window
+        self.reserve(self.ids[1])
+        self.assertIsNone(self.verify(self.ids[1:2]))
+        self.reserve(self.ids[2])
+        self.assertIn("per-run cap 2 exceeded", self.verify(self.ids[2:3]))
+
+    def test_a_weaker_filter_block_refuses_at_the_boundary(self):
+        self.reserve(self.ids[0])
+        self.set_registry(True, exclude_self_duplicate_groups=False)
+        self.assertIn("apply_filter_invalid", self.verify(self.ids[:1]))
+        self.set_registry(True, apply_enabled=False)
+        self.assertIn("approve_not_enabled", self.verify(self.ids[:1]))
+
+
+class BatchCliTest(unittest.TestCase):
+    CLI = Path(__file__).resolve().parents[1] / "credit-fable-execute.py"
+
+    def cli(self, *argv, env=None):
+        import os
+        import subprocess
+        return subprocess.run([sys.executable, str(self.CLI), *argv], capture_output=True, text=True, timeout=60,
+                              env={**os.environ, **(env or {})})
+
+    def test_batch_rows_lists_what_the_audit_shows_written(self):
+        with tempfile.TemporaryDirectory() as d:
+            audit = Path(d) / "audit.jsonl"
+            audit.write_text("\n".join(json.dumps(r) for r in (
+                {"batch_id": BATCH, "outcome": "reserved", "request_id": RID},
+                {"batch_id": BATCH, "outcome": "written", "request_id": RID},
+                {"batch_id": BATCH, "outcome": "not_moved", "request_id": RID2},
+                {"batch_id": "batch-test-02", "outcome": "written", "request_id": RID2},
+                {"outcome": "written", "request_id": RID2})) + "\nnot json\n")
+            out = self.cli("--batch-rows", BATCH, env={"FABLE_DECIDER_AUDIT": str(audit)})
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(json.loads(out.stdout), {"batch_id": BATCH, "written": 1, "request_ids": [RID]})
+            out = self.cli("--batch-rows", BATCH, env={"FABLE_DECIDER_AUDIT": f"{d}/missing.jsonl"})
+            self.assertEqual(out.returncode, 2)
+
+    def test_a_batch_id_on_a_close_tray_is_refused_before_anything_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            tray = Path(d) / "close.json"
+            tray.write_text(json.dumps({"action": "reject", "expected_status": "unverified", "rows": [
+                {"request_id": RID, "user_id": 42, "coded_outcome": "decisions:1", "ruling_id": "u10k-3",
+                 "rule": "reject_publisher_label_credit"}]}))
+            out = self.cli(str(tray), "--batch-id", BATCH)
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("approve trays only", out.stdout)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,4 @@
+{
+  "description": "The batch judge's policy switches (scripts/credit_review/batch_judge.py). The judge approves nothing: a pass means no stop found, and the tick applies only on may_apply/applicable. fallback_model_may_sign_first_of_class decides whether a pass from the metered fallback model may be the signature of the FIRST batch of a class; shipped off, and any absent, unreadable or non-true value is off (fail closed). Turning it on is a one-line reviewed PR to this file that cites its approval.",
+  "fallback_model_may_sign_first_of_class": false
+}

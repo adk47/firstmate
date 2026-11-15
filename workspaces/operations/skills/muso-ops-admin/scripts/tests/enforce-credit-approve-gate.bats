@@ -1288,7 +1288,7 @@ api_setup() {
 # ── fable-decider APPROVALS (L12 executor PR 2; core FABLE_RULED #11010/#11011) ─────────────────────────────────
 fda_setup() {
     export CREDIT_APPROVAL_REGISTRY="$TEST_ROOT/registry.json"
-    printf '%s' '{"automations":{"fable-decider":{"approved":true,"approved_by":"captain","approval_ref":"captain-1028-213x"}}}' \
+    printf '%s' '{"automations":{"fable-decider":{"approved":true,"apply_enabled":true,"approved_by":"captain","approval_ref":"captain-1028-213x"}}}' \
         > "$CREDIT_APPROVAL_REGISTRY"
     export FABLE_DECIDER_KILL_FILE="$TEST_ROOT/fable-decider.disabled"
     FDA_PATH=/admin/credit-requests/conditional-status
@@ -1348,9 +1348,25 @@ fda_run() {  # fda_run <path> <body> [extra env assignments...]  (verifier stubb
     run fda_run "$FDA_PATH" "$FDA_BODY"
     [ "$status" -ne 0 ]
     rm -f "$FABLE_DECIDER_KILL_FILE"
-    printf '%s' '{"automations":{"fable-decider":{"approved":false,"approved_by":"captain","approval_ref":"x"}}}' > "$CREDIT_APPROVAL_REGISTRY"
+    printf '%s' '{"automations":{"fable-decider":{"approved":false,"apply_enabled":true,"approved_by":"captain","approval_ref":"x"}}}' > "$CREDIT_APPROVAL_REGISTRY"
     run fda_run "$FDA_PATH" "$FDA_BODY"
     [ "$status" -ne 0 ]
+}
+
+@test "fable-decider approve: the apply switch is required and defaults off" {
+    fda_setup
+    for reg in \
+        '{"automations":{"fable-decider":{"approved":true,"apply_enabled":false,"approved_by":"captain","approval_ref":"x"}}}' \
+        '{"automations":{"fable-decider":{"approved":true,"approved_by":"captain","approval_ref":"x"}}}' \
+        '{"automations":{"fable-decider":{"approved":true,"apply_enabled":"true","approved_by":"captain","approval_ref":"x"}}}'; do
+        printf '%s' "$reg" > "$CREDIT_APPROVAL_REGISTRY"
+        run fda_run "$FDA_PATH" "$FDA_BODY"
+        [ "$status" -ne 0 ]
+        [[ "$output" == *"apply_enabled"* ]]
+    done
+    printf '%s' '{"automations":{"fable-decider":{"approved":true,"apply_enabled":true,"approved_by":"captain","approval_ref":"x"}}}' > "$CREDIT_APPROVAL_REGISTRY"
+    run fda_run "$FDA_PATH" "$FDA_BODY"
+    [ "$status" -eq 0 ]
 }
 
 @test "fable-decider approve: more than 50 ids, duplicates or extra keys refuse" {

@@ -1,13 +1,14 @@
 """The agreed coded-close / coded-decision columns of the decider ledger's `decisions` table
 (data/doc-verify-build-b1/coded-close-row-shape.md, Fable [key=coded-close-store]). Additive and idempotent: every
-coded writer (C3/C5/C8, the stale-velocity re-validate) calls ensure_columns before its first insert."""
+coded writer (C3/C5/C8, the stale-velocity re-validate) calls ensure_columns before its first insert.
+`batch_id` is NULL on every row except an apply row whose writer tags its batch (doc_close: C3/C8)."""
 from __future__ import annotations
 
 import sqlite3
 
 CODED_CLOSE_COLUMNS = (("reason_code", "TEXT"), ("rule_version", "TEXT"), ("expected_status", "TEXT"),
                        ("gate_state", "TEXT"), ("v9_anchor", "TEXT"), ("intake_ids", "TEXT"),
-                       ("evidence_json", "TEXT"))
+                       ("evidence_json", "TEXT"), ("batch_id", "TEXT"))
 
 
 def ensure_columns(db: sqlite3.Connection) -> None:

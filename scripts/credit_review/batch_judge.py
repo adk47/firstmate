@@ -5,7 +5,7 @@ STOP-ONLY. The judge reads COPY + CONSISTENCY only - every body against the appr
 number agreement, facts <-> body <-> first-hits - never a credit fact. The coded gates make a batch sendable; this
 judge can only stop it ('pass' means "no stop found", never "approved").
 
-What p1 + r5 did by hand per outbound batch - read the rendered bodies against the facts, the copy ref, the barred
+What human reviewers once did by hand per outbound batch - read the rendered bodies against the facts, the copy ref, the barred
 phrases and the class rules - becomes one judge-only call on node-8:
 
   * the call goes through ``credit_trust.llm.Provider`` (Codex on the subscription via codex-judge-exec.sh, tool-less,
@@ -19,8 +19,9 @@ phrases and the class rules - becomes one judge-only call on node-8:
 Fail closed, everywhere -> the batch verdict is 'stop' (NO APPLY): a call that failed, timed out, was cut off
 (finish=length) or did not parse; a model outside ALLOWED_MODELS; an answer for another batch sha; an input body that
 is empty, carries a duplicate id or the section markers; a body missing from the answer, duplicated or unknown; any body or batch verdict
-other than 'pass' (``UNKNOWN = stop``). A fallback-model pass on the FIRST batch of a class is not enough: that
-batch keeps r5's hand signature (``may_apply(first_of_class=True)``). The instructions (facts row + copy ref + barred list + class rules, one verdict per body) are b1's;
+other than 'pass' (``UNKNOWN = stop``). A fallback-model pass on the FIRST batch of a class is not a signature unless
+``policies/credit-batch-judge.json`` says so (``fallback_model_may_sign_first_of_class``, shipped off; an absent or
+unreadable file is off). The instructions (facts row + copy ref + barred list + class rules, one verdict per body) are b1's;
 this module builds the ID-bound rendered-body section itself (render_prompt) and owns the call path, the verdict
 contract and the rail predicate.
 
@@ -40,6 +41,7 @@ from typing import Any, Iterable
 from credit_trust import llm
 
 STEP = "batch_judge"
+POLICY = Path(__file__).resolve().parents[2] / "policies" / "credit-batch-judge.json"
 # Constants, never env (the [key=unattended] bar): the only models whose answer can sign a batch.
 CODEX_MODEL = "gpt-6.1-sol"
 CODEX_FALLBACK_MODEL = "gpt-6-sol"
@@ -256,12 +258,31 @@ def may_apply(row: dict[str, Any] | None, batch: str, *, first_of_class: bool = 
     """The #1541 rail predicate (h2's tick calls it before any apply): True ONLY for a recorded verdict row for THIS
     batch sha, verdict 'pass', no stop ids, a model on ALLOWED_MODELS and this module's approval ref. A missing row, a
     'stop', an unknown verdict, another batch's row -> no apply. On the FIRST batch of a class a fallback-model pass
-    is not a signature (r5 signs that batch by hand)."""
+    is not a signature unless the policy switch says so; a row that does not carry a boolean `fallback_model` never
+    signs it."""
     return (isinstance(row, dict) and isinstance(batch, str) and len(batch) == 64 and row.get("batch_sha") == batch
             and row.get("verdict") == "pass" and row.get("approval_ref") == APPROVAL_REF
             and _id_list(row.get("stop_ids")) == [] and _id_list(row.get("reasons")) is not None
             and _allowed_model(row.get("model"))
-            and not (first_of_class and row.get("fallback_model") is not False))
+            and _first_of_class_signature_ok(row, first_of_class))
+
+
+def fallback_may_sign_first_of_class(path: Path | None = None) -> bool:
+    """The policy switch, read fail closed from the module's own policies directory: absent or unreadable = off."""
+    try:
+        pol = json.loads((POLICY if path is None else path).read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(pol, dict) and pol.get("fallback_model_may_sign_first_of_class") is True
+
+
+def _first_of_class_signature_ok(row: dict[str, Any], first_of_class: bool) -> bool:
+    """On the FIRST batch of a class only a row that SAYS which model signed it can be a signature: `fallback_model`
+    False (the primary codex) signs, True signs only when the policy switch says so, and an absent or non-bool value
+    is not a measurement and never signs."""
+    if not first_of_class or row.get("fallback_model") is False:
+        return True
+    return row.get("fallback_model") is True and fallback_may_sign_first_of_class()
 
 
 def _allowed_model(model: Any) -> bool:
@@ -278,7 +299,7 @@ def _id_list(value: Any) -> list[str] | None:
     return [str(x) for x in value]
 
 
-# r5 + p1 judge rail FINAL for 29b (10-31 21:4xZ): per-BODY verdicts. A body-level stop holds only that body; these are
+# The judge rail FINAL for 29b (10-31 21:4xZ): per-BODY verdicts. A body-level stop holds only that body; these are
 # the only reasons a per-body apply tolerates - anything else is a batch-level failure and holds every body.
 PER_BODY_REASONS = frozenset({"body_stop", "batch_stop"})
 WHOLE_HOLD_SHARE = 0.10                        # >= 10 % of the bodies stopped: a rule gap, the whole batch is hand-read
@@ -304,8 +325,8 @@ def applicable(row: dict[str, Any] | None, batch: str, body_ids: Iterable[str], 
         return whole("no_verdict_for_this_batch")
     if row.get("approval_ref") != APPROVAL_REF or not _allowed_model(row.get("model")):
         return whole("verdict_not_a_signature")
-    if first_of_class and row.get("fallback_model") is not False:
-        return whole("first_of_class_fallback_model")          # r5 signs that batch by hand
+    if not _first_of_class_signature_ok(row, first_of_class):
+        return whole("first_of_class_fallback_model")
     bodies = row.get("bodies") if isinstance(row.get("bodies"), list) else []
     by_id = {str(b.get("id")): b for b in bodies if isinstance(b, dict)}
     if len(bodies) != len(ids) or sorted(by_id) != sorted(ids):

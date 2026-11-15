@@ -9,8 +9,8 @@ Inputs, all read-only:
   - the doc-verify store (artifact kinds; the forged_positive outcomes and their history);
   - proof_intake (the filings);
   - core facts (Trino replica, fable_executor.fetch_facts), V9 anchors, the account gate, the R8 hold set.
-It never writes a credit status. Apply is not offered here: it comes after the shadow read and r5's GO, with t01b's
-executor consuming the apply rows. Summary JSON on stdout.
+It never writes a credit status. Apply is decided by the per-rule policy switch (policies/credit-doc-close.json) and is
+not offered by this CLI yet, with t01b's executor consuming the apply rows. Summary JSON on stdout.
 """
 from __future__ import annotations
 

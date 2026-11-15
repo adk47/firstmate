@@ -200,7 +200,7 @@ class RecordTest(unittest.TestCase):
         self.db.close()
         self.td.cleanup()
 
-    def test_shadow_rows_in_the_coded_close_shape_once_and_never_apply(self):
+    def test_shadow_rows_in_the_coded_close_shape_once(self):
         rows, _ = JunkTest().run_junk()
         hold, _ = JunkTest().run_junk(tied=False)
         out = dc.record(self.db, "run-1", dc.JUNK, rows + hold, NOW)
@@ -214,9 +214,143 @@ class RecordTest(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT action, outcome FROM decision_outcomes").fetchall(),
                          [("close", "shadow")])
         self.assertEqual(dc.record(self.db, "run-2", dc.JUNK, rows, NOW)["duplicate"], 1)   # never decided twice
-        with self.assertRaises(ValueError):
-            dc.record(self.db, "run-3", dc.JUNK, rows, NOW, mode="apply")
+        self.assertEqual(self.db.execute("SELECT count(*) FROM decisions WHERE batch_id IS NOT NULL").fetchone()[0], 0)
         self.assertNotEqual(dc.rule_version(dc.JUNK), dc.rule_version(dc.FRAUD))
+        with self.assertRaises(ValueError):
+            dc.record(self.db, "run-3", dc.JUNK, rows, NOW, mode="live")              # not a mode
+        with self.assertRaises(ValueError):
+            dc.record(self.db, "run-3", dc.JUNK, rows, NOW, batch_id="batch-20261114")  # a batch id is apply's
+
+
+def rule_entry(kind, **over):
+    return {"rule": dc.RULE_IDS[kind], "apply_enabled": True, "approved_by": "captain", "approval_ref": "ref-1",
+            "closing_line_campaign": "doc-close-line", **over}
+
+
+def close_row(rid, uid, paid=True):
+    return dc.Row(rid, uid, "close", "junk_proof", "a junk document", "rejected", 30, paid, "allow", "no_anchor")
+
+
+class ApplyTest(unittest.TestCase):
+    """Apply rows are written only where the policy switch allows the rule and the caller names a batch."""
+    BATCH = "batch-20261114-a"
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.db = sqlite3.connect(str(Path(self.td.name) / "ledger.sqlite3"))
+        self.policy = Path(self.td.name) / "credit-doc-close.json"
+        self.saved = (dc.POLICY, dc.KILL_FILES)
+        dc.POLICY, dc.KILL_FILES = str(self.policy), ()
+        self.rows, _ = JunkTest().run_junk()
+        self.hold, _ = JunkTest().run_junk(tied=False)
+
+    def tearDown(self):
+        dc.POLICY, dc.KILL_FILES = self.saved
+        self.db.close()
+        self.td.cleanup()
+
+    def enable(self, *kinds, **over):
+        self.policy.write_text(json.dumps({"rules": {k: rule_entry(k, **over) for k in kinds}}), encoding="utf-8")
+
+    def written(self):
+        from credit_review import coded_close
+        coded_close.ensure_columns(self.db)
+        return self.db.execute("SELECT count(*) FROM decisions").fetchone()[0]
+
+    def refused(self, kind=dc.JUNK, batch_id=BATCH, rows=None):
+        with self.assertRaises(dc.ApplyRefused) as cm:
+            dc.record(self.db, "run-a", kind, self.rows if rows is None else rows, NOW, mode="apply",
+                      batch_id=batch_id)
+        self.assertEqual(self.written(), 0)                                  # a refusal writes nothing
+        return str(cm.exception)
+
+    def test_the_checked_in_policy_has_both_rules_off(self):
+        dc.POLICY = self.saved[0]
+        pol = dc.policy()
+        self.assertEqual(set(pol["rules"]), set(dc.RULE_IDS))
+        for kind in dc.RULE_IDS:
+            self.assertIn("apply_enabled is not true", dc.apply_refusal(pol, kind, kill_files=()))
+            self.assertIn("apply_enabled is not true", self.refused(kind))
+            self.assertIsNone(pol["rules"][kind]["closing_line_campaign"])   # nothing is closed untold
+
+    def test_apply_needs_an_approved_closing_line(self):
+        for none in (None, "", 0):
+            self.enable(dc.JUNK, closing_line_campaign=none)
+            self.assertIn("approved closing line", self.refused())
+
+    def test_apply_needs_a_known_paying_list(self):
+        self.enable(dc.JUNK)
+        self.assertIn("paying-user status unknown", self.refused(rows=[close_row("r-1", 42, paid=None)]))
+        self.assertEqual(self.written(), 0)
+
+    def test_apply_closes_are_capped_per_utc_day(self):
+        self.enable(dc.JUNK)
+        tomorrow = NOW + timedelta(days=1)
+        rows = [close_row(f"r-{i}", 40 + i) for i in range(dc.DAILY_CAP + 1)]
+        first = dc.record(self.db, "run-a", dc.JUNK, rows, NOW, mode="apply", batch_id=self.BATCH)
+        self.assertEqual((first["close"], first["hold"]), (dc.DAILY_CAP, {"daily_cap": 1}))
+        last = f"r-{dc.DAILY_CAP}"
+        self.assertEqual(self.db.execute("SELECT decision, reason_code FROM decisions WHERE request_id=?", (last,))
+                         .fetchone(), ("hold", "daily_cap"))
+        second = dc.record(self.db, "run-b", dc.JUNK, [close_row(last, 40 + dc.DAILY_CAP)], tomorrow,
+                           mode="apply", batch_id=self.BATCH)
+        self.assertEqual(second["close"], 1)                               # a new UTC day has its own room
+
+    def test_no_policy_or_a_broken_one_refuses(self):
+        self.assertIn("no entry", self.refused())                            # no file
+        self.policy.write_text("{not json", encoding="utf-8")
+        self.assertIn("no entry", self.refused())
+        self.policy.write_text("[]", encoding="utf-8")
+        self.assertIn("no entry", self.refused())
+
+    def test_the_switch_is_per_rule_and_per_rule_version(self):
+        self.enable(dc.FRAUD)
+        self.assertIn("no entry for junk_proof", self.refused())             # fraud's approval is not junk's
+        self.enable(dc.JUNK, rule="C3:junk_proof/v0")
+        self.assertIn("names rule", self.refused())                          # another version's approval
+        for missing in ("approved_by", "approval_ref"):
+            self.enable(dc.JUNK, **{missing: ""})
+            self.assertIn("approved_by / approval_ref", self.refused())
+        self.enable(dc.JUNK, apply_enabled="true")                           # only the JSON true is on
+        self.assertIn("apply_enabled is not true", self.refused())
+
+    def test_a_kill_file_refuses_an_enabled_rule(self):
+        self.enable(dc.JUNK)
+        kill = Path(self.td.name) / "doc-close.disabled"
+        kill.write_text("", encoding="utf-8")
+        dc.KILL_FILES = (str(kill),)
+        self.assertIn("kill file", self.refused())
+
+    def test_apply_needs_a_batch_id(self):
+        self.enable(dc.JUNK)
+        for bad in (None, "", "short", "Batch-20261114", "batch 20261114", "x" * 65, 20261114):
+            self.assertIn("batch id", self.refused(batch_id=bad))
+
+    def test_apply_rows_carry_the_batch_and_are_what_the_executor_accepts(self):
+        self.enable(dc.JUNK)
+        out = dc.record(self.db, "run-a", dc.JUNK, self.rows + self.hold, NOW, mode="apply", batch_id=self.BATCH)
+        self.assertEqual((out["close"], out["hold"], out["duplicate"]), (1, {"not_tied": 1}, 0))
+        got = self.db.execute("SELECT id, decision, mode, batch_id, request_id FROM decisions ORDER BY id").fetchall()
+        self.assertEqual([g[1:4] for g in got], [("close", "apply", self.BATCH), ("hold", "apply", self.BATCH)])
+        # the outcome is the executor's to record: an apply close writes no decision_outcomes line
+        self.assertEqual(self.db.execute("SELECT count(*) FROM decision_outcomes").fetchone()[0], 0)
+        close_id, rid = got[0][0], got[0][4]
+        outcome = {f"decisions:{close_id}": {"request_id": rid, "decision": "close", "mode": "apply"}}
+        tray = type("T", (), {"action": "reject"})()
+        row = type("R", (), {"coded_outcome": f"decisions:{close_id}", "request_id": rid})()
+        self.assertIsNone(fx.coded_outcome_refusal(tray, row, outcome))
+        outcome[f"decisions:{close_id}"]["mode"] = "shadow"
+        self.assertEqual(fx.coded_outcome_refusal(tray, row, outcome), "coded_outcome_not_apply:shadow")
+
+    def test_apply_and_shadow_are_deduplicated_apart(self):
+        self.enable(dc.JUNK)
+        self.assertEqual(dc.record(self.db, "run-s", dc.JUNK, self.rows, NOW)["close"], 1)
+        first = dc.record(self.db, "run-a", dc.JUNK, self.rows, NOW, mode="apply", batch_id=self.BATCH)
+        self.assertEqual((first["close"], first["duplicate"]), (1, 0))       # a shadow row never blocks the apply
+        again = dc.record(self.db, "run-b", dc.JUNK, self.rows, NOW, mode="apply", batch_id="batch-20261115-b")
+        self.assertEqual((again["close"], again["duplicate"]), (0, 1))       # one apply close per request, any batch
+        self.assertEqual(self.db.execute("SELECT batch_id FROM decisions WHERE mode='apply'").fetchall(),
+                         [(self.BATCH,)])
 
 
 if __name__ == "__main__":

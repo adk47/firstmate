@@ -4,6 +4,12 @@
   credit-fable-execute.py <tray.json>                 dry run (default): fresh facts + guards, writes nothing
   credit-fable-execute.py <tray.json> --apply --limit 1   the ONE-row end-to-end check before a tray
   credit-fable-execute.py <tray.json> --apply         the tray, paid first, capped, stopping on the first surprise
+  credit-fable-execute.py <approve tray> --apply --batch-id ID   an approve tray: every write is tagged with ID
+  credit-fable-execute.py --batch-rows ID             the request ids the audit shows written under ID (read-only)
+
+An approve tray writes only while the registry entry has apply_enabled true AND a valid apply_filter block
+(fable_executor.registry_apply_filter): credit-anchored-approve rows only, never a request with no band, a
+conflict-rule failure or a self-duplicate group, at most per_run_cap rows a run, and never without --batch-id.
 
 Never scheduled (scripts/check-credit-approval-automation.sh NEVER_SCHEDULED). Kill file:
 /etc/hydra/fable-decider.disabled. Audit: /var/lib/hydra/credit-review/fable-decider-audit.jsonl.
@@ -139,6 +145,9 @@ def main() -> int:
     ap.add_argument("--expected")
     ap.add_argument("--status", default="rejected", help="(wrapper boundary) the body's target status")
     ap.add_argument("--ids", help="comma-separated request ids")
+    ap.add_argument("--batch-id", help="(approve trays) the id every write of this run is tagged with; an approve "
+                                       "--apply without one stops before any write")
+    ap.add_argument("--batch-rows", metavar="ID", help="print the request ids written under this batch id and exit")
     ap.add_argument("--claims", action="store_true",
                     help="the tray is a claim-decline tray (action reject_claim; Fable claim-route-zero)")
     a = ap.parse_args()
@@ -146,6 +155,14 @@ def main() -> int:
         if a.tray and a.tray != a.tray_opt:
             ap.error("tray given twice with different values")
         a.tray = a.tray_opt
+    if a.batch_rows:
+        try:
+            ids = fx.batch_rows(a.batch_rows)
+        except OSError as exc:
+            print(f"batch-rows: audit unreadable: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps({"batch_id": a.batch_rows, "written": len(ids), "request_ids": ids}))
+        return 0
     if a.verify_batch:
         if not all([a.tray, a.ruling, a.run_id, a.expected, a.ids]):
             print("verify-batch: --tray, --ruling, --run-id, --expected and --ids are all required", file=sys.stderr)
@@ -159,6 +176,9 @@ def main() -> int:
     if not a.tray:
         ap.error("tray is required")
     if a.claims:
+        if a.batch_id is not None:
+            print(json.dumps({"tray": a.tray, "refused": "--batch-id tags approve trays only"}))
+            return 2
         try:
             ctray = cx.load_claim_tray(a.tray)
         except (cx.TrayError, OSError) as exc:
@@ -173,6 +193,9 @@ def main() -> int:
     except (fx.TrayError, OSError) as exc:
         print(json.dumps({"tray": a.tray, "refused": str(exc)}))
         return 2
+    if a.batch_id is not None and tray.action != "approve":
+        print(json.dumps({"tray": a.tray, "refused": "--batch-id tags approve trays only"}))
+        return 2
     template = fx.TEMPLATE[tray.action]
 
     def between(rows: list[tuple[str, int, str | None]], since: datetime) -> str | None:
@@ -182,7 +205,7 @@ def main() -> int:
         # a close: core's own credits_rejected email may already be the decline (decline-copy-ruling.md §3.2)
         return decline_plan(rows, since) if a.decline_plan else None
 
-    res = fx.run(tray, apply=a.apply, limit=a.limit,
+    res = fx.run(tray, apply=a.apply, limit=a.limit, batch_id=a.batch_id,
                  between_batches=None if (a.no_fanout_check or not a.apply) else between)
     print(json.dumps({**res.as_dict(), "tray_sha256": tray.sha256, "daily_cap": tray.daily_cap,
                       "cap_ruling_id": tray.cap_ruling_id}))

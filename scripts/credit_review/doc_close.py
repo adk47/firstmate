@@ -2,8 +2,20 @@
 [key=coded-close-store]). They are deterministic, use no model and make no per-item ruling (CAPTAIN 16:0xZ).
 
 Both write decider rows in the coded-close shape (data/doc-verify-build-b1/coded-close-row-shape.md,
-credit_review/coded_close.py) to the ledger's append-only `decisions`. This module writes SHADOW only. Apply is
-refused until a shadow day and r5's GO, then a policy flip in a later PR. t01b's executor consumes the apply rows.
+credit_review/coded_close.py) to the ledger's append-only `decisions`, in one of two modes.
+
+  shadow   the default. A close also gets a decision_outcomes 'shadow' line; nothing reads the row as a decision.
+  apply    rows t01b's executor accepts as a coded outcome (`decisions:<id>`, mode 'apply'). Whether apply rows may
+           be written is decided in POLICY, per rule, and not in this code: `apply_refusal` refuses unless the
+           rule's entry is `apply_enabled: true` with `approved_by`, `approval_ref` and an approved customer-facing
+           closing line (`closing_line_campaign`: nothing is closed without telling the user), names this rule id,
+           the paying list is known, at most DAILY_CAP apply closes are written per UTC day, and no kill file is
+           present. Every apply row carries the caller's batch id (`decisions.batch_id`), so the rows of one batch
+           can be listed together. The policy ships with both rules off.
+
+The r5 GO that used to stand between shadow and apply was retired by name (captain 2026-11-14); the record is in
+policies/credit-doc-close.json (`r5_go_gate`). An apply row changes no credit by itself: it reaches core only
+through an executor tray that cites it, and this module builds no tray.
 
 C3 `junk_proof`: a request closes only when ALL of the following hold.
   - EVERY filed document on the request is junk by `artifacts.classify` (`artifacts.junk_list`: a request with any
@@ -37,6 +49,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -49,6 +63,17 @@ FRAUD_HOLD = timedelta(hours=24)
 JUNK = "junk_proof"
 FRAUD = "fraud_document"
 RULE_IDS = {JUNK: "C3:junk_proof/v1", FRAUD: "C8:fraud_document/v1"}
+MODES = ("shadow", "apply")
+# The apply switch. Found from this file's own location: no env var and no argument moves it.
+POLICY = str(Path(__file__).resolve().parents[2] / "policies" / "credit-doc-close.json")
+KILL_FILES = ("/etc/hydra/doc-close.disabled", "/etc/hydra/fable-trays.disabled",
+              "/etc/hydra/fable-decider.disabled")
+BATCH_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{5,63}")
+DAILY_CAP = 100
+
+
+class ApplyRefused(RuntimeError):
+    """An apply write that policy, a kill file or a missing batch id does not allow. Nothing was written."""
 
 
 def rule_version(kind: str) -> str:
@@ -248,12 +273,75 @@ def evaluate_fraud(deny: list[dict[str, Any]], since_fn: Callable[[int], str | N
     return rows, skipped
 
 
+def policy() -> dict[str, Any]:
+    """The apply policy; unreadable or malformed = {} = every apply refused."""
+    try:
+        pol = json.loads(Path(POLICY).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return pol if isinstance(pol, dict) else {}
+
+
+def apply_refusal(pol: dict[str, Any], kind: str, kill_files: Iterable[str] = KILL_FILES) -> str | None:
+    """Why apply rows of `kind` may not be written now, or None. The switch is per rule: one rule's approval never
+    carries to the other, and an entry naming another rule id (an older version's approval) is not this rule's."""
+    for k in kill_files:
+        if os.path.exists(k):
+            return f"kill file {k}"
+    rules = pol.get("rules")
+    entry = rules.get(kind) if isinstance(rules, dict) else None
+    if not isinstance(entry, dict):
+        return f"policy has no entry for {kind}"
+    if entry.get("rule") != RULE_IDS[kind]:
+        return f"policy entry for {kind} names rule {entry.get('rule')!r}, not {RULE_IDS[kind]}"
+    if entry.get("apply_enabled") is not True:
+        return f"policy apply_enabled is not true; apply is decided by this rule's policy switch ({kind})"
+    if not entry.get("approved_by") or not entry.get("approval_ref"):
+        return f"policy entry for {kind} has no approved_by / approval_ref"
+    if not isinstance(entry.get("closing_line_campaign"), str) or not entry["closing_line_campaign"]:
+        return (f"policy entry for {kind} has no approved closing line (closing_line_campaign): "
+                "nothing is closed without telling the user")
+    return None
+
+
+def paid_refusal(rows: Iterable[Row]) -> str | None:
+    """Apply needs a KNOWN paying list (paid-first under the cap, QA #1559); unknown = refused."""
+    unknown = sum(1 for r in rows if r.decision == "close" and r.paid is None)
+    return f"paying-user status unknown for {unknown} close row(s): apply refused" if unknown else None
+
+
+def applied_today(db: sqlite3.Connection, kind: str, now: datetime) -> int:
+    day = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    return db.execute("SELECT count(*) FROM decisions WHERE mode = 'apply' AND decision = 'close' "
+                      "AND evidence_kind = ? AND decided_at >= ?", (kind, day)).fetchone()[0]
+
+
+def batch_refusal(batch_id: str | None) -> str | None:
+    if not isinstance(batch_id, str) or not BATCH_ID_RE.fullmatch(batch_id):
+        return f"apply needs a batch id matching {BATCH_ID_RE.pattern} (got {batch_id!r})"
+    return None
+
+
 def record(db: sqlite3.Connection, run_id: str, kind: str, rows: list[Row], now: datetime,
-           mode: str = "shadow") -> dict[str, Any]:
-    """Append every row (one transaction) in the coded-close shape; a shadow close also gets a decision_outcomes
-    'shadow' line. A request with a close row of this rule in this mode is never decided twice. SHADOW only here."""
-    if mode != "shadow":
-        raise ValueError("doc_close writes shadow rows only; apply comes after the shadow read and r5's GO")
+           mode: str = "shadow", batch_id: str | None = None) -> dict[str, Any]:
+    """Append every row (one transaction) in the coded-close shape. A request with a close row of this rule in this
+    mode is never decided twice.
+
+    shadow: a close also gets a decision_outcomes 'shadow' line; a batch id is not accepted.
+    apply:  refused (ApplyRefused, nothing written) unless `apply_refusal`, `paid_refusal` and `batch_refusal` all
+            pass. They are read here, at the write, so no caller can skip them. At most DAILY_CAP closes per UTC
+            day; the rest are written as holds 'daily_cap'. Every row carries `batch_id`; a close
+            gets no decision_outcomes line, because the outcome is the executor's to record."""
+    if mode not in MODES:
+        raise ValueError(f"doc_close mode must be one of {MODES}, not {mode!r}")
+    pol: dict[str, Any] = {}
+    if mode == "apply":
+        pol = policy()
+        why = apply_refusal(pol, kind, KILL_FILES) or paid_refusal(rows) or batch_refusal(batch_id)
+        if why:
+            raise ApplyRefused(why)
+    elif batch_id is not None:
+        raise ValueError("a batch id tags apply rows only; a shadow run has none")
     from credit_review import coded_close
     coded_close.ensure_columns(db)
     ver = rule_version(kind)
@@ -265,25 +353,32 @@ def record(db: sqlite3.Connection, run_id: str, kind: str, rows: list[Row], now:
         done = {str(r).lower() for (r,) in db.execute(
             "SELECT request_id FROM decisions WHERE decision = 'close' AND evidence_kind = ? AND mode = ?",
             (kind, mode))}
+        room = DAILY_CAP - applied_today(db, kind, now) if mode == "apply" else None
         for r in rows:
             if r.decision == "close" and r.request_id in done:
                 out["duplicate"] += 1
                 continue
+            decision, reason_code, reason = r.decision, r.reason_code, r.reason
+            if decision == "close" and room is not None and room <= 0:
+                decision, reason_code, reason = "hold", "daily_cap", "daily_cap"
             db.execute(
                 "INSERT INTO decisions (run_id, decided_at, request_id, user_id, popularity, big_track, decision, "
                 "reason, evidence_kind, paid_priority, mode, reason_code, rule_version, expected_status, gate_state, "
-                "v9_anchor, intake_ids, evidence_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "v9_anchor, intake_ids, evidence_json, batch_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run_id, at, r.request_id, r.user_id, r.popularity, 1 if (r.popularity or 0) >= BIG_POPULARITY else 0,
-                 r.decision, r.reason[:600], kind, None if r.paid is None else int(r.paid), mode,
-                 r.reason_code, ver, r.expected_status, r.gate_state, r.v9, json.dumps(r.intake_ids),
-                 json.dumps(r.evidence, default=str)))
-            if r.decision == "close":
+                 decision, reason[:600], kind, None if r.paid is None else int(r.paid), mode,
+                 reason_code, ver, r.expected_status, r.gate_state, r.v9, json.dumps(r.intake_ids),
+                 json.dumps(r.evidence, default=str), batch_id))
+            if decision == "close":
                 out["close"] += 1
                 done.add(r.request_id)
-                db.execute("INSERT INTO decision_outcomes (run_id, at, request_id, action, outcome) "
-                           "VALUES (?,?,?,?,?)", (run_id, at, r.request_id, "close", "shadow"))
+                if room is not None:
+                    room -= 1
+                if mode == "shadow":
+                    db.execute("INSERT INTO decision_outcomes (run_id, at, request_id, action, outcome) "
+                               "VALUES (?,?,?,?,?)", (run_id, at, r.request_id, "close", "shadow"))
             else:
-                out["hold"][r.reason_code] = out["hold"].get(r.reason_code, 0) + 1
+                out["hold"][reason_code] = out["hold"].get(reason_code, 0) + 1
         db.commit()
     except BaseException:
         db.rollback()
