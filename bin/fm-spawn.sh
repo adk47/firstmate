@@ -25,35 +25,36 @@
 #   refused as a flag value.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
-#   task's own recorded endpoint and worktree instead of creating either. It is
-#   the launch half of the control plane (bin/fm-control.sh relaunch), which
-#   owns the checkpoint, the progress note, stopping the previous agent, and the
-#   transaction; call fm-control rather than this flag directly unless you are
-#   deliberately re-launching an already-stopped task. Every identity axis -
-#   backend, kind, project or home, worktree, endpoint - comes from the task's
-#   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
-#   positional, and batch pairs are all refused alongside it; only harness,
-#   model, and effort may change, which is what makes a harness switch one
-#   ordinary relaunch. It refuses unless the recorded endpoint is positively
-#   agent-free, which its backend classifier proves as `dead` (a live process
-#   scan below the endpoint found no agent) - or, for tmux only, `missing` (the
-#   recorded window is gone, so nothing can be running there) - on a backend
-#   with a proven in-place relaunch (tmux or herdr),
-#   refuses unless the endpoint's shell is sitting in the recorded worktree,
-#   and clears the previous harness's per-task wiring before arming the new
-#   incarnation. A tmux task whose recorded window reads `missing` has that
-#   window recreated in its recorded session, under its recorded name, starting
-#   in the recorded worktree - but only once the worktree is proven free of any
-#   live copy (no window of that session in it, no agent process working in
-#   it), since a renamed window is missing by name while still holding an agent;
-#   the cwd proof then reads the window the relaunch just created. Orca is the
-#   other exception to "same endpoint": when its
-#   classifier reports the recorded terminal `missing` (a stale handle, e.g.
-#   after an Orca or host restart) or `dead` (still listed, with an empty or
-#   shell-only pty), the replacement launches in a NEW terminal created in the
-#   task's recorded Orca worktree, whose path must match the recorded
-#   worktree, and the record is republished with that terminal; a live,
-#   ambiguous, or unreadable Orca terminal still refuses. Every structural
+#   task's own recorded worktree: a backend that relaunches in place adopts the
+#   recorded endpoint, and only the proven gone-endpoint cases below replace
+#   it. It is the launch half of the control plane (bin/fm-control.sh
+#   relaunch), which owns the checkpoint, the progress note, stopping the
+#   previous agent, and the transaction; call fm-control rather than this flag
+#   directly unless you are deliberately re-launching an already-stopped task.
+#   Every identity axis - backend, kind, project or home, worktree, endpoint -
+#   comes from the task's validated state/<id>.meta, so --backend, --scout,
+#   --secondmate, a project positional, and batch pairs are all refused
+#   alongside it; only harness, model, and effort may change, which is what
+#   makes a harness switch one ordinary relaunch. It refuses unless the
+#   recorded endpoint is positively agent-free, which its backend classifier
+#   proves as `dead` (a live process scan below the endpoint found no agent) -
+#   or, for tmux only, `missing` (the recorded window is absent from a
+#   successful session inventory) - on a backend with a proven in-place
+#   relaunch (tmux or herdr), refuses unless the endpoint's shell is sitting in
+#   the recorded worktree, and clears the previous harness's per-task wiring
+#   before arming the new incarnation. A tmux task whose recorded window reads
+#   `missing` has that window recreated in its recorded session, under its
+#   recorded name, starting in the recorded worktree - but only once the
+#   worktree is proven free of any live copy (no window of that session in it,
+#   no agent process working in it), since a renamed window is missing by name
+#   while still holding an agent; the cwd proof then reads the window the
+#   relaunch just created. Orca is the other exception to "same endpoint":
+#   when its classifier reports the recorded terminal `missing` (a stale
+#   handle, e.g. after an Orca or host restart) or `dead` (still listed, with
+#   an empty or shell-only pty), the replacement launches in a NEW terminal
+#   created in the task's recorded Orca worktree, whose path must match the
+#   recorded worktree, and the record is republished with that terminal; a
+#   live, ambiguous, or unreadable Orca terminal still refuses. Every structural
 #   refusal in --relaunch exits 2, distinct from the 1 a retryable launch
 #   failure reports, so a supervisor such as bin/fm-watchdog-worker.sh can tell
 #   "cannot succeed" from "try again".
