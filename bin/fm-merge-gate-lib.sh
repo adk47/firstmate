@@ -236,7 +236,7 @@ fm_merge_gate_no_qa_config() {
 # Whether the repository is declared no-QA. adk47/firstmate is the built-in
 # default so this repo merges correctly when the local config file is absent.
 fm_merge_gate_is_no_qa_repo() {
-  local repo=$1 file line declared
+  local repo=$1 file line
   repo=$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')
   [ "$repo" = adk47/firstmate ] && return 0
   file=$(fm_merge_gate_no_qa_config)
