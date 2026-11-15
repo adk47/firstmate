@@ -266,9 +266,17 @@ from jobs that already write outcomes into threads.
 
 ### The outbox
 
-A promise coming due is enqueued in `commitment_outbox` (same `monitor.sqlite`, written by every
-good tick in the same transaction that syncs the ledger). One row per due cycle, keyed
-`(conversation_id, promised_at, due_at)`; a second tick in the same cycle adds nothing. The row
+A promise coming due is enqueued in `commitment_outbox` (same `monitor.sqlite`) by every good tick,
+and there are two writers with different transactions. Reading a thread enqueues inside the same
+transaction that syncs that thread's ledger row (`Store.keep`), so a thread is never stored with its
+promises describing an older read. The per-tick sweep below enqueues in its OWN transaction, after
+the re-reads (`Store.enqueue_due`), so a sweep that fails rolls back alone and never the facts just
+stored. One row per due cycle, keyed
+`(conversation_id, promised_at, due_at)`; a second tick in the same cycle adds nothing. Every good
+tick also sweeps the whole ledger for open commitments past their due time, because a promise
+nobody kept is a thread on which nothing happens, so that thread is never read again: at
+2026-11-12T13:34:36Z, the first production tick, the ledger held 3,475 open promises past their
+due time and 2 outbox rows. The sweep skips a conversation this tick tried to read and could not. The row
 holds the kind, the owner, the request type, and the line it calls for **by reference only** —
 request type plus state `waiting` in `policies/request-status-lines.json`. Never message text.
 
@@ -310,7 +318,7 @@ conversation of any age plus everything touched in the last 26 hours, not on the
 | `promises_kept_24h` | times we came back inside the due time, last 24h | 49 |
 | `promises_broken_24h` | due times that passed with nothing sent, last 24h | 380 |
 | `messages_queued` | due cycles whose status line is sendable and waiting for the driver | 0 |
-| `messages_held` | due cycles held by a switch, with the count per reason in `messages_held_by_reason` | all of them today |
+| `messages_held` | due cycles held by a switch, with the count per reason in `messages_held_by_reason` | 0 |
 | `written_at` | when the tick that wrote it ran | |
 
 Rules of the file:

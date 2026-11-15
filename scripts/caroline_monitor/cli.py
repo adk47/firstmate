@@ -134,6 +134,7 @@ def refresh(store, register, now, token, collector=collect.collect):
     if got["gone"]:
         store.delete_facts(got["gone"])
     store.close_unlisted(r["id"] for r in got["listed"])
+    store.enqueue_due(register, now, skip=got["errors"])   # after the re-reads: a moved thread is current
     store.set("inbox", {"whole_inbox": not errors, "as_of": now, "created_since": start, "touched_since": since,
                         "listed": len(got["listed"]), "intercom_total_count": got.get("total_count"),
                         "read_errors": errors})

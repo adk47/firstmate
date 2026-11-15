@@ -312,6 +312,36 @@ def _outbox_enqueue(db, conversation_id, c, kind, row, policy, now):
          row.get("request_type"), "waiting", "held" if reason else "queued", reason or None))
 
 
+def enqueue_due(db, register, now, policy=None, skip=()):
+    """Enqueue the line owed on every open commitment whose due time has passed. Returns how many.
+
+    `sync` runs only when a thread is read again, and a promise nobody kept is the thread on
+    which nothing happens, so it is never read again: at 2026-11-12T13:34:36Z, the first
+    production tick, the ledger held 3,475 open promises past their due time and 2 outbox rows.
+    So every good tick also sweeps the ledger itself. One row per due cycle, the same key
+    `sync` uses, so the two never double up.
+
+    `skip` is the conversations this tick tried to read and could not: their rows may describe a
+    thread that has since been answered, and a line is not owed on a guess.
+    """
+    policy = load_request_lines() if policy is None else policy
+    skip = {str(i) for i in skip}
+    due = db.execute(
+        "SELECT c.conversation_id, c.promised_at, c.due_at, c.shape FROM commitments c "
+        "WHERE c.closed_at IS NULL AND c.due_at IS NOT NULL AND c.due_at <= ? AND NOT EXISTS ("
+        "SELECT 1 FROM commitment_outbox o WHERE o.conversation_id = c.conversation_id "
+        "AND o.promised_at = c.promised_at AND o.due_at = c.due_at)", (now,)).fetchall()
+    added = 0
+    for conversation_id, promised_at, due_at, shape in due:
+        if conversation_id in skip:
+            continue
+        kind, row = kind_of(register, shape)
+        _outbox_enqueue(db, conversation_id,
+                        {"closed_at": None, "due_at": due_at, "promised_at": promised_at}, kind, row, policy, now)
+        added += 1
+    return added
+
+
 def outbox_counts(db):
     """The outbox rows still waiting on a send, for support-backlog.json."""
     out = {"messages_queued": 0, "messages_held": 0, "messages_held_by_reason": {}}

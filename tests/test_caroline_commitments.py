@@ -372,6 +372,42 @@ class Outbox(unittest.TestCase):
         self.assertEqual(commitments.outbox_counts(self.store.db),
                          {"messages_queued": 0, "messages_held": 0, "messages_held_by_reason": {}})
 
+    def test_a_promise_that_comes_due_on_a_thread_nobody_reads_again_is_enqueued(self):
+        self.keep(fact(1, ask_and_promise()), T0 + HOUR, self.OPEN)      # read once, not due yet
+        self.assertEqual(self.rows(), [])
+        later = T0 + 2 * DAY                                             # nothing happened on the thread since
+        self.assertEqual(self.store.enqueue_due(REGISTER, later, self.OPEN), 1)
+        self.assertEqual(self.store.enqueue_due(REGISTER, later + HOUR, self.OPEN), 0)
+        (row,) = self.rows()
+        self.assertEqual((row["conversation_id"], row["due_at"], row["state"]), ("1", T0 + 60 + DAY, "queued"))
+        self.assertEqual((row["kind"], row["owner"], row["request_type"]),
+                         ("credit_verification", "job:request-comms", "credit"))
+
+    def test_the_sweep_and_a_re_read_of_the_same_cycle_make_one_row(self):
+        self.keep(fact(1, ask_and_promise()), T0 + HOUR, self.OPEN)
+        self.store.enqueue_due(REGISTER, T0 + 2 * DAY, self.OPEN)
+        self.keep(fact(1, ask_and_promise()), T0 + 2 * DAY + HOUR, self.OPEN)
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_the_sweep_leaves_a_kept_promise_and_one_not_yet_due_alone(self):
+        kept = ask_and_promise() + [[T0 + 2 * HOUR, A]]
+        self.keep(fact(1, kept), T0 + 3 * HOUR, self.OPEN)
+        self.keep(fact(2, ask_and_promise(T0 + 2 * DAY)), T0 + 2 * DAY + HOUR, self.OPEN)
+        self.assertEqual(self.store.enqueue_due(REGISTER, T0 + 2 * DAY + 2 * HOUR, self.OPEN), 0)
+        self.assertEqual(self.rows(), [])
+
+    def test_the_sweep_skips_a_thread_this_tick_could_not_read(self):
+        self.keep(fact(1, ask_and_promise()), T0 + HOUR, self.OPEN)
+        self.keep(fact(2, ask_and_promise()), T0 + HOUR, self.OPEN)
+        self.assertEqual(self.store.enqueue_due(REGISTER, T0 + 2 * DAY, self.OPEN, skip={"1": "http 503"}), 1)
+        self.assertEqual([r["conversation_id"] for r in self.rows()], ["2"])
+
+    def test_the_sweep_holds_an_unowned_promise_with_its_reason(self):
+        self.keep(fact(1, ask_and_promise(), shape="stats_wrong"), T0 + HOUR, self.OPEN)
+        self.store.enqueue_due(REGISTER, T0 + 2 * DAY, self.OPEN)
+        (row,) = self.rows()
+        self.assertEqual((row["state"], row["held_reason"]), ("held", "no_owner"))
+
     def test_an_unowned_kind_is_held_and_says_why(self):
         self.keep(fact(1, ask_and_promise(), shape="stats_wrong"), T0 + 2 * DAY, self.OPEN)
         (row,) = self.rows()
@@ -540,7 +576,7 @@ def caroline(ts, body):
 
 class FakeIntercom:
     def __init__(self, threads, fail=None):
-        self.threads, self.fail = threads, fail
+        self.threads, self.fail, self.fetched = threads, fail, []
 
     def __call__(self, token, start, end, skip=None, since_ts=None):
         if self.fail:
@@ -549,6 +585,7 @@ class FakeIntercom:
         listed = [t for t in self.threads
                   if start <= t["created_at"] < end or t["open"] or (since_ts and t["updated_at"] >= since_ts)]
         fetch = [t for t in listed if skip.get(t["id"]) != t["updated_at"]]
+        self.fetched.append([t["id"] for t in fetch])
         return {"listed": [{"id": t["id"], "created_at": t["created_at"], "updated_at": t["updated_at"],
                             "open": t["open"]} for t in listed],
                 "total_count": len(listed), "threads": fetch,
@@ -606,6 +643,21 @@ class Tick(unittest.TestCase):
         self.tick(FakeIntercom(threads), later)
         self.assertEqual(commitments.thread_for("contact_a", "credit", REGISTER, path), "")
         self.assertEqual(json.load(open(self.out))["commitments_open"], 0)
+
+    def test_a_promise_that_comes_due_between_ticks_is_enqueued_though_its_thread_never_moved(self):
+        now = T0 + 30 * DAY
+        threads = [thread(1, now - 2 * HOUR, [caroline(now - 2 * HOUR + 60, self.HANDOFF)])]
+        intercom = FakeIntercom(threads)
+        self.tick(intercom, now)
+        first = json.load(open(self.out))
+        self.assertEqual((first["commitments_open"], first["commitments_overdue"], first["messages_held"]), (1, 0, 0))
+        later = now + 26 * HOUR
+        self.tick(intercom, later)                             # same thread, same updated_at: not read again
+        self.assertEqual(intercom.fetched[-1], [])
+        doc = json.load(open(self.out))
+        self.assertEqual((doc["commitments_overdue"], doc["messages_queued"], doc["messages_held"]), (1, 0, 1))
+        self.tick(intercom, later + 2 * HOUR)
+        self.assertEqual(json.load(open(self.out))["messages_held"], 1)
 
     def test_a_conversation_that_left_the_listing_is_no_longer_open(self):
         now = T0 + 30 * DAY

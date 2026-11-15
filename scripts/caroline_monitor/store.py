@@ -94,6 +94,17 @@ class Store:
             raise
         self.db.commit()
 
+    def enqueue_due(self, register, now, policy=None, skip=()):
+        """The line owed on every open commitment that is past its due time, whether or not its
+        thread was read on this tick. Returns how many rows were added."""
+        try:
+            added = commitments.enqueue_due(self.db, register, now, policy, skip)
+        except BaseException:
+            self.db.rollback()
+            raise
+        self.db.commit()
+        return added
+
     def delete_facts(self, ids):
         self.db.executemany("DELETE FROM facts WHERE id = ?", [(i,) for i in ids])
         commitments.forget(self.db, ids)
