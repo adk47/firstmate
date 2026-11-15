@@ -2204,6 +2204,20 @@ grep -q -- '-l app=demo' "$HOME_SEL2/shim.log" \
   || fail "an app-labelled Deployment was not read by its own selector: $(cat "$HOME_SEL2/shim.log")"
 pass "an app-labelled Deployment still measures through its own selector"
 
+# One selector read per Deployment per sample: the per-sample memo is stored with
+# a real tab separator, so the lookup hits and the metrics that follow reuse the
+# read instead of spending the sample's budget on one cluster call per metric.
+HOME_SEL3=$(selector_world sel3 'app.kubernetes.io/name=demo')
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:old' FM_CW_SHIM_HASH=h1 \
+  run_selector_cw "$HOME_SEL3" 1790000000 register sel3 \
+  'https://github.com/Muso-AI/demo-service/pull/9' >/dev/null || fail "memo register failed"
+: > "$HOME_SEL3/shim.log"
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:new' FM_CW_SHIM_HASH=h2 \
+  run_selector_cw "$HOME_SEL3" 1790000300 sample sel3-9 300 >/dev/null || fail "memo sample failed"
+[ "$(grep -c -- ' get deployment ' "$HOME_SEL3/shim.log" || true)" = 1 ] \
+  || fail "the selector memo did not hit: one sample read the Deployment $(grep -c -- ' get deployment ' "$HOME_SEL3/shim.log" || true) times"
+pass "one sample reads a Deployment's selector once"
+
 # --- an application repository is scoped to what its diff can affect -----------
 # muso-messaging holds notify-gateway, preferences, send-gateway and the email
 # templates. A change under scripts/ touches none of them, so it deploys nothing
@@ -2263,6 +2277,86 @@ out=$(run_cw "$HOME_MS3" 1790000000 register ms3 \
 [ "$(cat "$HOME_MS3/state/change-watch/ms3-92/targets")" = "$(printf 'messaging\tnotify-gateway')" ] \
   || fail "a one-service diff did not scope to that one Deployment: $(cat "$HOME_MS3/state/change-watch/ms3-92/targets" 2>/dev/null)"
 pass "a monorepo diff is scoped to the one service it touches"
+
+# seed_files <home> <path>... seeds the merged PR's touched paths.
+seed_files() {
+  local home=$1
+  shift
+  printf '%s
+' "$@" > "$home/forge/files.txt"
+  printf '%s\n' 1790000000 > "$home/forge/merge-epoch"
+  printf '%s\n' deadbeef > "$home/forge/head-ref"
+  : > "$home/forge/diff.txt"
+}
+
+# A monorepo that keeps its services a directory down places them the same way:
+# services/<name>/... names <name>, so the nested layout is not read as a diff
+# that touches no service at all.
+HOME_MS4=$(new_world ms4)
+seed_files "$HOME_MS4" 'services/send-gateway/src/queue.ts'
+out=$(run_cw "$HOME_MS4" 1790000000 register ms4 \
+  'https://github.com/Muso-AI/muso-messaging/pull/93') || fail "nested register failed: $out"
+[ "$(cat "$HOME_MS4/state/change-watch/ms4-93/targets")" = "$(printf 'messaging\tsend-gateway')" ] \
+  || fail "a nested service path did not place its Deployment: $(cat "$HOME_MS4/state/change-watch/ms4-93/targets" 2>/dev/null)"
+pass "a service kept one directory down is still placed by its name"
+
+# A path every Deployment of the repository consumes stays in scope: a root-level
+# build input is not a diff that touches no deployable path, and concluding clean
+# on it would hide a rollout failure the change really could cause.
+HOME_MS5=$(new_world ms5)
+seed_files "$HOME_MS5" 'package.json'
+out=$(run_cw "$HOME_MS5" 1790000000 register ms5 \
+  'https://github.com/Muso-AI/muso-messaging/pull/94') || fail "root-shared register failed: $out"
+[ "$(printf '%s\n' "$(cat "$HOME_MS5/state/change-watch/ms5-94/targets" 2>/dev/null)" | grep -c '^messaging	')" = 3 ] \
+  || fail "a root-shared path concluded clean instead of watching the Deployments that consume it: $(cat "$HOME_MS5/state/change-watch/ms5-94/targets" 2>/dev/null)"
+pass "a root-shared path keeps every Deployment that consumes it in scope"
+
+# The map's path: prefix says where the services and their shared build inputs
+# live. A path under it that names a service scopes to that service; one that
+# names none is shared by all of them.
+HOME_MS6=$(new_world ms6)
+mkdir -p "$HOME_MS6/config"
+printf 'muso-messaging path:services messaging/notify-gateway messaging/send-gateway\n' \
+  > "$HOME_MS6/config/change-watch-repos"
+seed_files "$HOME_MS6" 'services/notify-gateway/src/send.ts'
+out=$(FM_CW_CONFIG_DIR="$HOME_MS6/config" run_cw "$HOME_MS6" 1790000000 register ms6 \
+  'https://github.com/Muso-AI/muso-messaging/pull/95') || fail "prefix register failed: $out"
+[ "$(cat "$HOME_MS6/state/change-watch/ms6-95/targets")" = "$(printf 'messaging\tnotify-gateway')" ] \
+  || fail "a mapped path prefix did not scope to the one service under it: $(cat "$HOME_MS6/state/change-watch/ms6-95/targets" 2>/dev/null)"
+HOME_MS7=$(new_world ms7)
+mkdir -p "$HOME_MS7/config"
+printf 'muso-messaging path:services messaging/notify-gateway messaging/send-gateway\n' \
+  > "$HOME_MS7/config/change-watch-repos"
+seed_files "$HOME_MS7" 'services/shared/logger.ts'
+out=$(FM_CW_CONFIG_DIR="$HOME_MS7/config" run_cw "$HOME_MS7" 1790000000 register ms7 \
+  'https://github.com/Muso-AI/muso-messaging/pull/96') || fail "prefix-shared register failed: $out"
+[ "$(printf '%s\n' "$(cat "$HOME_MS7/state/change-watch/ms7-96/targets" 2>/dev/null)" | grep -c '^messaging	')" = 2 ] \
+  || fail "a shared path under the map's prefix concluded clean: $(cat "$HOME_MS7/state/change-watch/ms7-96/targets" 2>/dev/null)"
+pass "a mapped path prefix scopes its own services and keeps their shared paths in scope"
+
+# A single-service application repository is not exempt from the same rule: a diff
+# of documentation, tests, and non-deploy CI deploys nothing and says so, while a
+# build or script path still measures the rollout.
+HOME_SS=$(new_world ss)
+mkdir -p "$HOME_SS/config"
+printf 'demo-service image:demo-service sentry:demo\n' > "$HOME_SS/config/change-watch-repos"
+printf '[]\n' > "$HOME_SS/sentry/issues-demo.json"
+seed_files "$HOME_SS" 'README.md' 'docs/setup.md' 'tests/smoke.ts' '.github/workflows/lint.yml'
+out=$(FM_CW_CONFIG_DIR="$HOME_SS/config" FM_CW_SENTRY_DIR="$HOME_SS/sentry" \
+  run_cw "$HOME_SS" 1790000000 register ss1 \
+  'https://github.com/Muso-AI/demo-service/pull/97') || fail "docs-only register failed: $out"
+[ -e "$HOME_SS/state/change-watch/ss1-97/targets" ] \
+  && fail "a docs-only diff in a single-service repository still watched a Deployment"
+pass "a single-service repository concludes a docs-only diff deploys nothing"
+
+HOME_SS2=$(selector_world ss2 'app=demo')
+seed_files "$HOME_SS2" 'scripts/release.sh'
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:old' \
+  run_selector_cw "$HOME_SS2" 1790000000 register ss2 \
+  'https://github.com/Muso-AI/demo-service/pull/98' >/dev/null || fail "script-path register failed"
+[ "$(cat "$HOME_SS2/state/change-watch/ss2-98/targets" 2>/dev/null)" = "$(printf 'muso-prod\tdemo')" ] \
+  || fail "a script path in a single-service repository was reported as deploying nothing"
+pass "a single-service repository still measures a build or script change"
 
 # --- a deploy run has to carry the merged commit -------------------------------
 # hydra deploys from a daily schedule and a manual dispatch, never a push, so the

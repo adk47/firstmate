@@ -751,7 +751,7 @@ CACHE
   if [ -n "$url" ]; then
     sha=$(cw_forge_merge_sha "$url" 2>/dev/null || true)
   fi
-  CW_MERGE_SHA_CACHE="$CW_MERGE_SHA_CACHE$key\t$sha
+  CW_MERGE_SHA_CACHE="$CW_MERGE_SHA_CACHE$key	$sha
 "
   [ -n "$sha" ] || return 0
   printf '%s\n' "$sha"
@@ -855,6 +855,10 @@ cw_live_workloads() {
 #   run:<owner>/<repo>#<workflow-path>   the repository's deploy workflow
 #                                  (a path such as .github/workflows/deploy.yml,
 #                                  so the spec stays one whitespace-free token)
+#   path:<prefix>              where a monorepo keeps its service directories,
+#                                  such as services or apps; a deployable path
+#                                  under it that names no service is shared build
+#                                  input every service of that repository consumes
 
 # The home's repository map with comments removed. A `#` starts a comment only at
 # the start of a line or after whitespace, because a `run:` spec carries one
@@ -920,7 +924,7 @@ cw_spec_targets() {  # <spec>
       return 0
       ;;
     image:*) arg=${spec#image:} ;;
-    '') return 0 ;;
+    path:*|'') return 0 ;;
     */*) ns=${spec%%/*}; name=${spec#*/}
       cw_target_eligible "$ns" "$name" || return 0
       printf 'target\t%s\t%s\n' "$ns" "$name"
@@ -966,20 +970,6 @@ cw_spec_targets() {  # <spec>
         [ -n "$ns" ] || continue
         printf 'target\t%s\t%s\n' "$ns" "$name"
       done
-}
-
-# Resolve an application repository to its whole target set from the map: the
-# Deployments that run its image, its Sentry project, and its deploy workflow.
-# Prints "target<TAB>ns<TAB>name", "sentry<TAB>slug", "run<TAB>repo<TAB>workflow",
-# and "note<TAB>text" lines. LIVE QUERY (cluster inventory).
-cw_repo_targets() {  # <repo>
-  local repo=$1 specs spec
-  specs=$(cw_repo_specs "$repo")
-  [ -n "$specs" ] || return 1
-  for spec in $specs; do
-    cw_spec_targets "$spec"
-  done
-  return 0
 }
 
 # Resolve an application repository's name to "target<TAB>namespace<TAB>name"
@@ -1089,22 +1079,84 @@ PATHS
 cw_spec_service() {  # <spec>
   local spec=$1
   case "$spec" in
-    sentry:*|run:*) return 0 ;;
+    sentry:*|run:*|path:*) return 0 ;;
     image:*) printf '%s\n' "${spec#image:}" ;;
     */*) printf '%s\n' "${spec#*/}" ;;
     *) printf '%s\n' "$spec" ;;
   esac
 }
 
-# True when the merged diff touches a path inside <service>'s own directory: the
-# same path-to-service placement cw_place_changed_lines makes for a manifest's
-# Deployment documents. A path outside every service directory (scripts/, docs/,
-# a root file) belongs to no Deployment.
-cw_diff_touches_service() {  # <files> <service>
-  printf '%s\n' "$1" | awk -v s="$2" '
-    { p = $0; sub(/^\.\//, "", p); n = split(p, part, "/")
-      if (n >= 2 && part[1] == s) found = 1 }
-    END { exit(found ? 0 : 1) }'
+# The path prefix a repository maps its services under, when it declares one.
+cw_repo_prefix() {  # <specs>
+  local spec out=''
+  for spec in $1; do
+    case "$spec" in path:*) out=${spec#path:} ;; esac
+  done
+  printf '%s\n' "$out"
+}
+
+# What a merged diff can reach in a repository, printed as one conclusion per
+# line: "deployable" when any touched path is not documentation, a test, or a CI
+# file other than the repository's own deploy workflow; "shared" when it touches
+# a path every Deployment of the repository consumes (a root-level file, or one
+# under the map's path: prefix that names no service); and "service <name>" per
+# mapped service a touched path names as any of its path segments, so
+# services/<name>/ and apps/<name>/ place a service the same way a top-level
+# <name>/ does, or as the segment directly under the map's path: prefix. A diff
+# that touches no deployable path prints nothing at all, and so does a change
+# under a directory no service lives in.
+cw_diff_scope() {  # <files> <services> <prefix> <workflows>
+  printf '%s\n' "$1" | CW_DIFF_SERVICES="$2" CW_DIFF_PREFIX="$3" CW_DIFF_WORKFLOWS="$4" awk '
+    BEGIN {
+      ns = split(ENVIRON["CW_DIFF_SERVICES"], sv, " ")
+      nw = split(ENVIRON["CW_DIFF_WORKFLOWS"], wf, " ")
+      pre = ENVIRON["CW_DIFF_PREFIX"]
+      sub(/\/+$/, "", pre)
+    }
+    {
+      p = $0
+      sub(/^\.\//, "", p)
+      sub(/^\/+/, "", p)
+      if (p == "") next
+      n = split(p, part, "/")
+      base = part[n]
+      dep = 1
+      if (part[1] == "docs" || part[1] == "doc" || part[1] == "tests" || part[1] == "test") dep = 0
+      else if (base ~ /\.mdx?$/) dep = 0
+      else if (part[1] == ".github") {
+        dep = 0
+        for (i = 1; i <= nw; i++) if (wf[i] == p) dep = 1
+      }
+      if (!dep) next
+      deployable = 1
+      if (n == 1) shared = 1
+      # Where the path sits relative to the map path prefix, when it declares
+      # one: the segment just under the prefix names the service, and a deployable
+      # path under the prefix that names no service is shared by all of them.
+      inp = 0
+      if (pre != "") {
+        np = split(pre, pp, "/")
+        inp = (n >= np)
+        for (i = 1; i <= np && inp; i++) if (part[i] != pp[i]) inp = 0
+      }
+      if (inp) {
+        svc = (n > np) ? part[np + 1] : ""
+        matched = 0
+        for (j = 1; j <= ns; j++)
+          if (svc != "" && sv[j] == svc) { hit[j] = 1; matched = 1 }
+        if (!matched) shared = 1
+      } else {
+        for (i = 1; i <= n; i++)
+          for (j = 1; j <= ns; j++)
+            if (sv[j] != "" && part[i] == sv[j]) hit[j] = 1
+      }
+    }
+    END {
+      if (!deployable) exit 0
+      printf "deployable\n"
+      if (shared) printf "shared\n"
+      for (j = 1; j <= ns; j++) if (hit[j]) printf "service %s\n", sv[j]
+    }'
 }
 
 # An application repository's targets: its image family from the live cluster,
@@ -1113,14 +1165,18 @@ cw_diff_touches_service() {  # <files> <service>
 # diff actually touches are cluster targets: a change under scripts/ deploys
 # nothing and says so, instead of reporting an unproven rollout of every service
 # in the map. A repository whose map names one service is that service, so any
-# diff in it is in scope. The Sentry project and the deploy workflow are always
-# kept, because those reads never touch the cluster. Falls back to the local
-# H-DevOps checkout's Deployment names when the inventory resolves no Deployment
-# for an in-scope service, so a repository whose image name is unknown is still
-# watched rather than silently unwatched.
+# path the diff touches that can deploy anything is in scope, while a diff of
+# documentation, tests, and non-deploy CI deploys nothing and says so too. A
+# touched path every Deployment of the repository consumes - a root-level file,
+# or a path under the map's path: prefix - keeps all of them in scope rather than
+# concluding clean. The Sentry project and the deploy workflow are always kept,
+# because those reads never touch the cluster. Falls back to the local H-DevOps
+# checkout's Deployment names when the inventory resolves no Deployment for an
+# in-scope service, so a repository whose image name is unknown is still watched
+# rather than silently unwatched.
 cw_app_targets() {  # <repo> <files>
   local repo=$1 files=$2 specs spec service services='' scoped='' out targets
-  local touched=0
+  local touched=0 single=0 prefix workflows='' scope shared=0
   specs=$(cw_repo_specs "$repo")
   if [ -z "$specs" ]; then
     # No map entry names this repository, so it is its own single service and the
@@ -1128,31 +1184,42 @@ cw_app_targets() {  # <repo> <files>
     cw_service_targets "$repo" || true
     return 0
   fi
+  prefix=$(cw_repo_prefix "$specs")
   for spec in $specs; do
-    case "$spec" in sentry:*|run:*) continue ;; esac
+    case "$spec" in
+      path:*) continue ;;
+      run:*)
+        spec=${spec#run:}
+        case "$spec" in *'#'*) workflows="$workflows ${spec#*#}" ;; esac
+        continue
+        ;;
+      sentry:*) continue ;;
+    esac
     service=$(cw_spec_service "$spec")
     [ -n "$service" ] || continue
     case " $services " in *" $service "*) ;; *) services="$services $service" ;; esac
   done
-  # One service: the whole repository is that service, so every spec is in
-  # scope. More than one: each cluster spec is its own service and the diff must
-  # touch it.
-  if [ "$(printf '%s' "$services" | awk '{ print NF }')" -le 1 ]; then
-    scoped=$specs
-    touched=1
-  else
-    for spec in $specs; do
-      case "$spec" in
-        sentry:*|run:*) scoped="$scoped $spec" ;;
-        *)
-          if cw_diff_touches_service "$files" "$(cw_spec_service "$spec")"; then
-            scoped="$scoped $spec"
-            touched=1
-          fi
-          ;;
-      esac
-    done
-  fi
+  scope=$(cw_diff_scope "$files" "${services# }" "$prefix" "${workflows# }")
+  case "$scope" in *shared*) shared=1 ;; esac
+  [ "$(printf '%s' "$services" | awk '{ print NF }')" -le 1 ] && single=1
+  # One service: every cluster spec is in scope as soon as the diff touches any
+  # deployable path. More than one: each cluster spec is its own service and only
+  # a path that names it, or one every service consumes, reaches it.
+  for spec in $specs; do
+    case "$spec" in
+      path:*) continue ;;
+      sentry:*|run:*) scoped="$scoped $spec" ;;
+      *)
+        if [ "$single" -eq 1 ]; then
+          case "$scope" in *deployable*) scoped="$scoped $spec"; touched=1 ;; esac
+        elif [ "$shared" -eq 1 ] \
+          || printf '%s\n' "$scope" | grep -qxF "service $(cw_spec_service "$spec")"; then
+          scoped="$scoped $spec"
+          touched=1
+        fi
+        ;;
+    esac
+  done
   out=''
   for spec in $scoped; do
     out="$out$(cw_spec_targets "$spec")
@@ -1507,7 +1574,7 @@ CACHE
     | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' \
     | sort | paste -sd ',' -)
   [ -n "$sel" ] || sel="app=$deploy"
-  CW_SELECTOR_CACHE="$CW_SELECTOR_CACHE$key\t$sel
+  CW_SELECTOR_CACHE="$CW_SELECTOR_CACHE$key	$sel
 "
   printf '%s\n' "$sel"
 }
@@ -2425,8 +2492,8 @@ cw_capture_baseline() {  # <watch-id> <baseline-epoch>
   cluster=$(cw_cluster_probe || true)
   cw_resolve_pools "$id"
   [ -z "$cluster" ] || cw_record_reason "$id" "baseline" "cluster read failed: $cluster"
-  [ -n "$cluster" ] || cw_prime_pod_facts "$id"
   [ -n "$cluster" ] || cw_prime_selectors "$id"
+  [ -n "$cluster" ] || cw_prime_pod_facts "$id"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     metric=$(cw_key_metric "$key")
@@ -2527,8 +2594,11 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
   # whole budget on reads that each failed the same way, and every watch
   # completed unmeasured while its record still looked like a normal watch.
   cluster=$(cw_cluster_probe || true)
-  [ -n "$cluster" ] || cw_prime_pod_facts "$id"
+  # Selectors before pod facts: the pod reads want each target's selector, and a
+  # memo written inside a command substitution is lost, so priming it after them
+  # spends a second cluster read on the same Deployment.
   [ -n "$cluster" ] || cw_prime_selectors "$id"
+  [ -n "$cluster" ] || cw_prime_pod_facts "$id"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     metric=$(cw_key_metric "$key")
