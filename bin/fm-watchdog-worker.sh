@@ -1243,12 +1243,12 @@ task_pass() {
             task_relaunch_refused "$id" "$state"
             continue
           fi
+          relaunches=$(csv_append "$relaunches" "$now")
           if [ "$rc" -ne 0 ]; then
             task_store "$id"
             continue
           fi
           strikes=$(csv_append "$strikes" "$now")
-          relaunches=$(csv_append "$relaunches" "$now")
         elif [ "$woke" != true ]; then
           printf 'watchdog: %s stuck on a connection error and out of relaunches; asking firstmate\n' "$id"
           wake_firstmate "watchdog-conn-$id" \
@@ -1302,6 +1302,11 @@ task_pass() {
             fi
             stage=2
             stage_at=$now
+          elif [ "$woke" != true ]; then
+            printf 'watchdog: %s stalled and out of relaunches; asking firstmate\n' "$id"
+            wake_firstmate "watchdog-$id" \
+              "check: watchdog $id is stalled after a re-ring and its hourly relaunch budget ($RELAUNCH_PER_HOUR) is spent; it needs a hand"
+            woke=true
           fi
           ;;
         2)
@@ -1323,6 +1328,11 @@ task_pass() {
             fi
             stage=3
             stage_at=$now
+          elif [ "$woke" != true ]; then
+            printf 'watchdog: %s stalled and out of relaunches; asking firstmate\n' "$id"
+            wake_firstmate "watchdog-$id" \
+              "check: watchdog $id is still stalled after a stall relaunch and its hourly relaunch budget ($RELAUNCH_PER_HOUR) is spent; it needs a hand or a reassignment"
+            woke=true
           fi
           ;;
         *)

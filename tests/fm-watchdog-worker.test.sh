@@ -1042,7 +1042,7 @@ test_a_dry_run_reports_a_suppressed_relaunch() {
   pass "a dry run plans no relaunch while a refusal suppresses it"
 }
 
-test_a_connection_relaunch_failure_is_not_charged_against_the_budget() {
+test_a_connection_relaunch_failure_is_charged_against_the_budget() {
   local home now
   home=$(make_home conn-transient); fake_tools "$home"
   CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
@@ -1055,14 +1055,45 @@ test_a_connection_relaunch_failure_is_not_charged_against_the_budget() {
   tick "$home" "$((now + 710))" >/dev/null
   tick "$home" "$((now + 720))" >/dev/null
   tick "$home" "$((now + 730))" >/dev/null
-  assert_eq "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" "0" \
-    "a connection relaunch that never happened was charged against the hourly budget"
+  assert_eq "1" "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" \
+    "a connection relaunch attempt that failed was not charged against the hourly budget"
   tick "$home" "$((now + 740))" >/dev/null
-  assert_eq "$(counter "$home" '^control w1 relaunch')" "2" \
+  assert_eq "2" "$(counter "$home" '^control w1 relaunch')" \
     "a transient connection relaunch failure was not retried"
-  assert_eq "$(wakes "$home" | grep -c 'hourly relaunch budget')" "0" \
-    "relaunches that never happened were reported as a spent budget"
-  pass "a transient connection relaunch failure spends no budget and is retried"
+  tick "$home" "$((now + 830))" >/dev/null
+  assert_eq "3" "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" \
+    "the connection ladder did not charge every attempt against the budget"
+  tick "$home" "$((now + 930))" >/dev/null
+  tick "$home" "$((now + 1030))" >/dev/null
+  assert_eq "3" "$(counter "$home" '^control w1 relaunch')" \
+    "a spent relaunch budget still retried the connection relaunch"
+  assert_eq "1" "$(wakes "$home" | grep -c 'hourly relaunch budget')" \
+    "a spent connection relaunch budget did not escalate exactly once"
+  pass "a connection relaunch failure is charged, retried, then escalated once the budget is spent"
+}
+
+test_a_stall_ladder_escalates_once_its_relaunch_budget_is_spent() {
+  local home now
+  home=$(make_home ladder-budget); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 alive
+  pane "$home" w1 busy 'a tool call that never returns'
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 1900))" >/dev/null
+  tick "$home" "$((now + 2600))" >/dev/null
+  tick "$home" "$((now + 3200))" >/dev/null
+  tick "$home" "$((now + 3800))" >/dev/null
+  tick "$home" "$((now + 4400))" >/dev/null
+  tick "$home" "$((now + 5000))" >/dev/null
+  assert_eq "3" "$(counter "$home" '^control w1 relaunch')" \
+    "a spent relaunch budget still retried the stalled lane's relaunch"
+  assert_eq "1" "$(wakes "$home" | grep -c 'hourly relaunch budget')" \
+    "a stalled lane whose relaunches all failed never reached firstmate"
+  assert_eq "1" "$(jq -r '.tasks.w1.stage' "$home/state/.watchdog-worker.json")" \
+    "a failed relaunch claimed the stall rung"
+  pass "a stall ladder retries its failed relaunch on the budget, then escalates once"
 }
 
 test_a_transient_relaunch_failure_is_not_a_refusal() {
@@ -1120,7 +1151,7 @@ test_a_dead_worker_comes_back_in_one_pass_with_no_wake
 test_an_unread_steer_is_interrupted_then_relaunched_once_each
 test_a_transient_inbox_relaunch_failure_is_not_announced_as_done
 test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model
-test_a_connection_relaunch_failure_is_not_charged_against_the_budget
+test_a_connection_relaunch_failure_is_charged_against_the_budget
 test_a_pi_lane_is_never_asked_to_move_to_a_model_it_cannot_reach
 test_a_review_seat_keeps_its_model_and_a_permanent_error_is_never_retried
 test_in_flight_backlog_items_without_a_record_are_reported_once
@@ -1131,6 +1162,7 @@ test_a_reboot_rebuilds_the_fleet_and_starts_the_chair_last
 test_the_same_boot_is_not_a_boot_twice
 test_a_new_boot_identity_runs_the_boot_pass_again
 test_a_transient_stall_relaunch_failure_does_not_climb_the_ladder
+test_a_stall_ladder_escalates_once_its_relaunch_budget_is_spent
 test_a_stalled_worker_climbs_the_ladder_and_escalates_once
 test_progress_and_status_lines_reset_the_ladder
 test_the_relaunch_cap_escalates_once_instead_of_looping
