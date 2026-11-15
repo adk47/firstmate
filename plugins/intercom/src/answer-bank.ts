@@ -25,7 +25,7 @@
  * `node --experimental-strip-types` to dump the bank, with no plugin build.
  */
 
-export const BANK_VERSION = "2026-11-11.1";
+export const BANK_VERSION = "2026-11-14.2";
 
 export interface BankEntry {
   /** Stable id: the guard's flags, the red-team cases and the ledger name it. */
@@ -45,7 +45,7 @@ export interface BankEntry {
   /**
    * A fact that must hold at send for this line to be true (Fable r5 [key=status-chase-fact]).
    * FAIL CLOSED: only a code-sourced known-true fact lets the line through; false or unknown
-   * blocks it to the hand-off line.
+   * blocks it (the customer then gets BLOCKED_REPLY_FALLBACK, which promises no person).
    */
   requiresFact?: "open_request";
   /**
@@ -61,9 +61,21 @@ export interface BankEntry {
   lead?: string;
 }
 
+/**
+ * Detection only (captain 2026-11-14): the sentence a model reply may still carry, removed at send
+ * by unbacked-handoff.ts and refused by the output guard. Nothing sends it.
+ */
 export const HANDOFF_LINE = "I'm pulling in a teammate to take this from here.";
-/** SOUL.md honesty fallback (sanitize-handoff-claim.ts): intent, never a completed-action claim. */
-export const HONEST_FALLBACK = "I'll make sure this gets to the team.";
+/**
+ * SOUL.md honesty fallback (sanitize-handoff-claim.ts, escalation-action.ts, outbound.ts).
+ */
+export const HONEST_FALLBACK = "I have recorded this and will update you here as soon as there is news.";
+/**
+ * The same intent line without the completed-action claim, for the send whose owed-follow-up record
+ * could NOT be written. Saying "I have recorded this" when nothing was recorded is the lie the
+ * honesty rule exists to stop.
+ */
+export const HONEST_FALLBACK_UNRECORDED = "I will update you here as soon as there is news.";
 /**
  * What the customer gets when a code gate stopped Caroline's own reply (intercom-no-human-assignment-k1).
  * It promises no person, no outcome and no time, because none is true: the conversation stays in
@@ -210,16 +222,6 @@ export const ANSWER_BANK: readonly BankEntry[] = [
     text: "you'll hear in this conversation and by email",
   },
   {
-    id: "handoff_line",
-    intents: ["handoff"],
-    // The SYSTEM's line (escalation-action.ts farewell, merge-reply-guard.ts fallback). Since
-    // ai-support-quality-v1 the doctrine teaches it only as that: Caroline never writes it, and
-    // unbacked-handoff.ts removes it from a model-written reply. Text unchanged, so no version bump.
-    source: "#1451 hand-off-only doctrine",
-    anchor: "AGENTS.md",
-    text: HANDOFF_LINE,
-  },
-  {
     id: "ai_queue_fallback",
     intents: ["reply_blocked"],
     source: "intercom-no-human-assignment-k1 (captain 2026-11-11: no human assignment by default)",
@@ -229,15 +231,23 @@ export const ANSWER_BANK: readonly BankEntry[] = [
   {
     id: "honest_fallback",
     intents: ["handoff_without_ticket"],
-    source: "SOUL.md honesty rule (sanitize-handoff-claim.ts FALLBACK)",
+    source: "SOUL.md honesty rule (firstmate inbox 010, 2026-11-14); sanitize-handoff-claim.ts FALLBACK",
     anchor: "SOUL.md",
     // SOUL.md quotes it without the full stop; the gate matches the sentence, the guard masks it.
     text: HONEST_FALLBACK.replace(/\.$/, ""),
   },
+  {
+    id: "honest_fallback_unrecorded",
+    intents: ["handoff_without_record"],
+    source: "firstmate inbox 011 (2026-11-14): an unrecorded send must not claim it recorded anything",
+    anchor: "SOUL.md",
+    text: HONEST_FALLBACK_UNRECORDED.replace(/\.$/, ""),
+  },
 ];
 
 /**
- * What the output guard posts in place of a blocked reply. Until 2026-11-11 this was the hand-off
+ * What the output guard posts in place of a blocked reply, and what an emptied merge reply becomes.
+ * Until 2026-11-11 this was the hand-off
  * line, made true by reassigning the conversation to a person in the same step; that reassignment
  * was 85% of one teammate's inbox (404 of 478 plugin assignments in 14 days). A blocked reply is
  * the model's mistake, not a reason for a person to own the thread, so the conversation now stays

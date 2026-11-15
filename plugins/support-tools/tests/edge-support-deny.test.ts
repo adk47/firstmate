@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import pluginEntry from "../src/index.js";
 
 // Captain 2026-10-28 12:1xZ / 12:3xZ: Caroline (edge agent `support`) keeps her look-up, billing,
 // subscription, order, founding, retention and ticket tools, but NOTHING that verifies, claims,
@@ -15,13 +16,33 @@ const edge = JSON.parse(readFileSync(resolve(root, "openclaw-edge.json"), "utf8"
 const support = (edge.agents?.list ?? []).find((a: any) => a.id === "support");
 const deny: string[] = support?.tools?.deny ?? [];
 
+// The tool names the plugin actually registers, captured from its real register() call.
+function registeredNames(): string[] {
+  const registered: string[] = [];
+  const api = {
+    pluginConfig: {
+      musoApiBase: "https://api.muso.ai",
+      adminEmail: "admin@muso.ai", adminPassword: "pw", clickupApiKey: "k", clickupListId: "list",
+      clickupProfileIdFieldId: "pf", clickupUserEmailFieldId: "ef",
+    },
+    registerTool: (_factory: any, opts: { name: string }) => { registered.push(opts.name); },
+  };
+  (pluginEntry as any).register(api);
+  return registered;
+}
+const REGISTERED = registeredNames();
+
 const SUPPORT_DENY = [
   "exec",
   "credits_verify", "profiles_claim_self", "profiles_consolidate",
   "profile_credits_status", "dedupe_check", "remove_credits",
   "credit_status_lookup", "document_intake", "merge_request_intake", "credit_trust_handoff",
-  "merge_intake", "proof_on_file",
+  "merge_intake",
 ];
+// proof_on_file left the deny list on 2026-11-14 (caroline-read-state-tools-r1): support-tools
+// registers NO tool under that name - it is a FIELD of credit_verification_check's result - so the
+// entry denied nothing Caroline could invoke. The last test here fails if a tool is ever registered
+// under that name while it is off this list, so putting one there cannot slip past review.
 // ai-support-quality-v1 (2026-11-12): TWO reads are hers again. Measured over 24h: 146 of 417
 // conversations did not close because she could not read the customer's own request state, and 56
 // more because the output guard needs a code-measured open_request fact that these reads write
@@ -43,9 +64,13 @@ const KEPT = [
 ];
 
 describe("openclaw-edge.json: Caroline hands off verification and merging", () => {
-  it("denies exec and the 12 verification / claim / merge / proof tools to the support agent", () => {
+  it("denies exec and the 11 verification / claim / merge tools to the support agent", () => {
     expect(support).toBeTruthy();
     for (const t of SUPPORT_DENY) expect(deny, t).toContain(t);
+  });
+
+  it("the deny list is exactly that list: nothing was dropped and nothing else added", () => {
+    expect([...deny].sort()).toEqual([...SUPPORT_DENY].sort());
   });
 
   it("keeps her pre-existing look-up, billing, order, founding, retention and ticket tools", () => {
@@ -53,13 +78,20 @@ describe("openclaw-edge.json: Caroline hands off verification and merging", () =
   });
 
   it("any registered support-tools tool whose name reads as verification or merging is denied to her", () => {
-    const src = readFileSync(resolve(here, "../src/index.ts"), "utf8");
-    const names = [...src.matchAll(/name:\s*"([a-z_]+)"/g)].map((m) => m[1]);
-    expect(names.length).toBeGreaterThan(10);
-    for (const n of names.filter((x) => /verif|claim_|_claim|consolidat|dedupe|merge|proof|remove_credit/.test(x))) {
+    expect(REGISTERED.length).toBeGreaterThan(10);
+    for (const n of REGISTERED.filter((x) => /verif|claim_|_claim|consolidat|dedupe|merge|proof|remove_credit/.test(x))) {
       if (OWN_ROW_READS.includes(n)) continue;
       expect(deny, n).toContain(n);
     }
+  });
+
+  it("nothing is registered as proof_on_file while that name is off her deny list", () => {
+    // Registering a tool under it is exactly the event that must not pass unreviewed: the name is
+    // denied only when it appeared on this list, and it is off the list because nothing carried it.
+    expect(deny).not.toContain("proof_on_file");
+    expect(REGISTERED, "proof_on_file is registered: review it, then re-add the deny entry").not.toContain(
+      "proof_on_file",
+    );
   });
 
   it("the two own-row reads are allowed, and they are reads: none of them is a write tool", () => {

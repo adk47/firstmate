@@ -18,7 +18,7 @@ import {
 } from "../src/injection-watch.js";
 import { SAFETY_LEDGER_PATH, emailSha256 } from "../src/safety-ledger.js";
 import { classifyText, classifierBlocksOutbound, SAFETY_CLASSIFIER_URL } from "../src/safety-classifier.js";
-import { ANSWER_BANK, BANK_VERSION, BLOCKED_REPLY_FALLBACK, HANDOFF_LINE } from "../src/answer-bank.js";
+import { ANSWER_BANK, BANK_VERSION, BLOCKED_REPLY_FALLBACK, HANDOFF_LINE, HONEST_FALLBACK } from "../src/answer-bank.js";
 import { MERGE_PARAGRAPH, HANDOFF_LINE as MERGE_HANDOFF } from "../src/merge-reply-guard.js";
 import { IntercomAssignmentConflictError } from "../src/outbound.js";
 
@@ -271,8 +271,8 @@ describe("guardOutbound", () => {
   it("passes a clean reply untouched and writes nothing", async () => {
     const client = fakeClient();
     const { rows, d } = deps();
-    const o = await guardOutbound({ client, account, conversationId: "c", reply: HANDOFF_LINE, customerText: "hi", tag: "t", deps: d });
-    expect(o).toMatchObject({ blocked: false, body: HANDOFF_LINE });
+    const o = await guardOutbound({ client, account, conversationId: "c", reply: HONEST_FALLBACK, customerText: "hi", tag: "t", deps: d });
+    expect(o).toMatchObject({ blocked: false, body: HONEST_FALLBACK });
     expect(rows).toEqual([]);
     expect(client.assignConversation).not.toHaveBeenCalled();
   });
@@ -294,6 +294,50 @@ describe("guardOutbound", () => {
     expect(pages[0]).toMatch(/blocked by the output guard/);
     expect(pages[0]).toMatch(/STAYS with Caroline/);
     expect(pages[0]).not.toMatch(/please answer it/);
+  });
+  // caroline-read-state-tools-r1: "a person is coming" is only true when the conversation was
+  // assigned to a staffed queue in the same step. Caroline's reply doors assign nobody (#1889), so
+  // through guardOutbound the sentence is always refused, and no caller can assert otherwise.
+  it("refuses 'a teammate will follow up' and the approved hand-off line: this door assigns nobody", async () => {
+    for (const reply of [
+      "Thanks for sending that. A teammate will follow up with you.",
+      "Thanks for sending that. We will have someone follow up with you.",
+      "Thanks for sending that. A teammate has been assigned to your case.",
+      "Thanks for sending that. A teammate was assigned to your case.",
+      "Thanks for sending that. A specialist is assigned to your request.",
+      "Thanks for sending that. Your case will be handled by a specialist.",
+      HANDOFF_LINE,
+    ]) {
+      const client = fakeClient();
+      const { rows, d } = deps();
+      const o = await guardOutbound({ client, account, conversationId: "c-p", reply, customerText: "any update?", tag: "t", deps: d });
+      expect(o.blocked).toBe(true);
+      expect(o.body).toBe(BLOCKED_REPLY_FALLBACK);
+      expect(o.result.flags.map((f) => f.rule)).toEqual(["person_without_assignment"]);
+      expect(client.assignConversation).not.toHaveBeenCalled();
+      expect(rows[0]).toMatchObject({ kind: "output_guard", enforced: true, assignment: "ai_queue" });
+    }
+  });
+  it("a caller cannot buy the hand-off line with a fact: there is no assignment fact to assert", async () => {
+    const client = fakeClient();
+    const { d } = deps();
+    const o = await guardOutbound({
+      client, account, conversationId: "c-p2", reply: HANDOFF_LINE, customerText: "hi", tag: "t", deps: d,
+      facts: { openRequest: true, assignedThisStep: true } as unknown as { openRequest?: boolean },
+    });
+    expect(o.blocked).toBe(true);
+    expect(o.body).toBe(BLOCKED_REPLY_FALLBACK);
+    expect(o.result.flags.map((f) => f.rule)).toEqual(["person_without_assignment"]);
+  });
+  it("with a retry available the refusal tells Caroline why, and that she cannot hand off", async () => {
+    const client = fakeClient();
+    const { d } = deps();
+    const o = await guardOutbound({
+      client, account, conversationId: "c-p3", reply: "Someone from our team will reach out to you by email.", customerText: "hi", tag: "t", deps: d,
+      retryAvailable: true, attempt: 1,
+    });
+    expect(o.blocked).toBe(true);
+    expect(o.feedback).toMatch(/nobody was assigned/);
   });
   it("the fallback promises no person, no outcome and no time", () => {
     expect(BLOCKED_REPLY_FALLBACK).not.toBe(HANDOFF_LINE);
@@ -465,7 +509,7 @@ describe("classifier health is recorded on CLEAN traffic too (QA on #1628)", () 
     const { rows, d } = deps({ now: () => now, classify: async () => ({ label: "unavailable" as const, score: null }) });
     const health = new ClassifierHealth();
     await watchInbound({ client, account, conversationId: "c", contactId: "u", text: "How do I claim my profile?", tag: "t", deps: d, health });
-    await guardOutbound({ client, account, conversationId: "c", reply: HANDOFF_LINE, customerText: "", tag: "t", deps: d, health });
+    await guardOutbound({ client, account, conversationId: "c", reply: HONEST_FALLBACK, customerText: "", tag: "t", deps: d, health });
     // Each unavailable call is persisted AT ONCE: nothing waits for a later call, an idle window or the process.
     expect(rows).toEqual([
       expect.objectContaining({ kind: "classifier_unavailable", direction: "inbound" }),

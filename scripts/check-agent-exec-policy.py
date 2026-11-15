@@ -103,7 +103,7 @@ RC_CLEAN, RC_VIOLATION, RC_UNREADABLE, RC_EXPIRING = 0, 1, 2, 4
 #              hydra grants it to every main agent via tools.alsoAllow ["lobster"].
 #   nodes / computer - command and control on paired nodes (paired nodes exist: node_exec calls seen 2026-10).
 #   terminal - reads/writes operator-opened terminals.
-# Edge requires only exec: Caroline's exact 15-name list belongs to scripts/lib/assert-support-deny.sh (captain
+# Edge requires only exec: Caroline's exact 12-name list belongs to scripts/lib/assert-support-deny.sh (captain
 # 2026-10-28) and edge loads no lobster plugin. Hardening her beyond exec is the captain's call, not this script's.
 REQUIRED_DENY = {
     "openclaw-main.json": ("exec", "process", "lobster", "nodes", "computer", "terminal"),

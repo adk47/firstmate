@@ -35,13 +35,18 @@ import sqlite3
 import sys
 import tempfile
 import types
+import time
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "scripts"))
 
-from caroline_monitor import alerts, calibrate, cli, collect, fixloop, metrics, rules  # noqa: E402
+from caroline_monitor import (alerts, calibrate, cli, collect, commitments, fixloop, metrics, rules,  # noqa: E402
+                              safety_records)
 from caroline_monitor.store import Store  # noqa: E402
+sys.path.insert(0, os.path.join(REPO, "scripts", "lib"))
+import injection_watch  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402,F401
 
 DAY, HOUR = 86400, 3600
 CAROLINE, JAN, BOT = "5763097", "5465657", "4359478"
@@ -150,10 +155,27 @@ class ApprovedCopy(unittest.TestCase):
         t = thread(parts=[part("comment", "admin", CAROLINE, NOW - 9 * DAY, text)])
         return codes(t)
 
-    def test_the_hand_off_lines_are_person_promises(self):
-        for name in ("HANDOFF_LINE", "HONEST_FALLBACK"):
+    def test_the_hand_off_line_is_a_person_promise(self):
+        self.assertIn(rules.EV_PROMISE, self.reply(bank_const("HANDOFF_LINE")))
+
+    def test_the_honesty_lines_are_owed_follow_ups_and_not_person_promises(self):
+        # firstmate inbox 010 (2026-11-14): "keep counting it as a commitment ... make the guard and
+        # the monitor agree on it (both treat it as an owed follow-up, not a person promise)".
+        for name in ("HONEST_FALLBACK", "HONEST_FALLBACK_UNRECORDED"):
             with self.subTest(line=name):
-                self.assertIn(rules.EV_PROMISE, self.reply(bank_const(name)))
+                got = self.reply(bank_const(name))
+                self.assertIn(rules.EV_QUEUE, got)
+                self.assertNotIn(rules.EV_PROMISE, got)
+                facts = rules.thread_facts(thread(parts=[
+                    part("comment", "customer", "contact_1", NOW - 9 * DAY, "Where is my request?"),
+                    part("comment", "admin", CAROLINE, NOW - 9 * DAY, bank_const(name)),
+                ]))
+                opened = commitments.derive(facts["events"], now=NOW - 8 * DAY)
+                self.assertEqual([c["promise"] for c in opened], ["queue"], opened)
+
+    def test_the_old_honesty_line_is_still_a_person_promise(self):
+        # Already-answered threads carry it; rewriting history would under-count them.
+        self.assertIn(rules.EV_PROMISE, self.reply("I'll make sure this gets to the team."))
 
     def test_the_decline_line_is_a_refusal_and_not_a_hand_off(self):
         got = self.reply(bank_text("declined"))
@@ -181,6 +203,116 @@ class ApprovedCopy(unittest.TestCase):
         self.assertNotIn(rules.EV_DATE, got)
         self.assertIn(rules.EV_REFUSAL, got)
         self.assertIn(rules.EV_DATE, self.reply("You'll hear back within 3 business days."))
+
+
+class SafetyRecords(unittest.TestCase):
+    """The pre-send owed-follow-up record `outbound.ts` writes before it claims a case was recorded."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.ledger = os.path.join(self.dir, "ledger.jsonl")
+
+    def record(self, conv, at):
+        injection_watch.append({"kind": "owed_followup", "source": "intercom", "ref": conv,
+                                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at)),
+                                "bank_version": "2026-11-14.1"}, ledger=self.ledger)
+
+    def test_a_record_the_thread_owes_a_follow_up_for_is_backed(self):
+        self.record("1", NOW - 2 * HOUR)
+        got = safety_records.summarize([fact("1", NOW - DAY, [(0, "c"), (HOUR, "a"), (DAY - HOUR, "q")])],
+                                       ledger=self.ledger, now=NOW)
+        self.assertEqual((got["owed_followup_24h"], got["owed_followup_unbacked"], got["owed_followup_error"]),
+                         (1, 0, None))
+
+    def test_a_record_with_no_commitment_on_the_thread_is_unbacked(self):
+        self.record("2", NOW - 2 * HOUR)
+        got = safety_records.summarize([fact("2", NOW - DAY, [(0, "c"), (HOUR, "a")])],
+                                       ledger=self.ledger, now=NOW)
+        self.assertEqual((got["owed_followup_24h"], got["owed_followup_unbacked"]), (1, 1))
+
+    def test_a_commitment_opened_before_the_record_does_not_back_it(self):
+        self.record("3", NOW - 2 * HOUR)
+        got = safety_records.summarize([fact("3", NOW - DAY, [(0, "c"), (DAY - 3 * HOUR, "q")])],
+                                       ledger=self.ledger, now=NOW)
+        self.assertEqual(got["owed_followup_unbacked"], 1)
+
+    def record_ms(self, conv, at):
+        """Exactly what the plugin writes: `new Date().toISOString()`, milliseconds included."""
+        stamp = datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        injection_watch.append({"kind": "owed_followup", "source": "intercom", "ref": conv,
+                                "ts": stamp, "bank_version": "2026-11-14.2"}, ledger=self.ledger)
+        return stamp
+
+    def not_sent(self, conv, record_ts):
+        """Exactly what the plugin writes when the POST after the record failed."""
+        injection_watch.append({"kind": "owed_followup_not_sent", "source": "intercom", "ref": conv,
+                                "record_ts": record_ts,
+                                "ts": record_ts,
+                                "bank_version": "2026-11-14.2"}, ledger=self.ledger)
+
+    def test_a_record_the_send_never_delivered_is_not_counted(self):
+        at = NOW - 2 * HOUR
+        stamp = self.record_ms("11", at)
+        self.not_sent("11", stamp)
+        got = safety_records.summarize([fact("11", NOW - DAY, [(0, "c"), (HOUR, "a")])],
+                                       ledger=self.ledger, now=NOW)
+        self.assertEqual((got["owed_followup_24h"], got["owed_followup_unbacked"],
+                          got["owed_followup_unmeasured"]), (0, 0, 0))
+
+    def test_a_second_record_in_the_same_conversation_is_still_counted(self):
+        at = NOW - 2 * HOUR
+        self.not_sent("12", self.record_ms("12", at))
+        self.record_ms("12", at + 60)
+        got = safety_records.summarize([fact("12", NOW - DAY, [(0, "c"), (HOUR, "a")])],
+                                       ledger=self.ledger, now=NOW)
+        self.assertEqual((got["owed_followup_24h"], got["owed_followup_unbacked"]), (1, 1))
+
+    def test_the_send_that_follows_the_record_in_the_same_second_backs_it(self):
+        # The record is written immediately before the POST, and the monitor truncates thread
+        # event times to whole seconds: the commitment lands in the same second, never before it.
+        self.record_ms("5", NOW - 2 * HOUR + 0.9)
+        got = safety_records.summarize([fact("5", NOW - DAY, [(0, "c"), (NOW - 2 * HOUR, "q")])],
+                                       ledger=self.ledger, now=NOW)
+        self.assertEqual((got["owed_followup_24h"], got["owed_followup_unbacked"]), (1, 0))
+
+    def test_a_record_whose_thread_was_not_read_is_unmeasured(self):
+        self.record("6", NOW - 2 * HOUR)
+        got = safety_records.summarize([fact("7", NOW - DAY, [(0, "c")])],
+                                       ledger=self.ledger, now=NOW)
+        self.assertEqual((got["owed_followup_24h"], got["owed_followup_unbacked"],
+                          got["owed_followup_unmeasured"]), (1, 0, 1))
+
+    def test_a_record_is_never_both_unmeasured_and_unbacked(self):
+        self.record("8", NOW - 2 * HOUR)      # thread not read
+        self.record("9", NOW - 2 * HOUR)      # thread read, no commitment
+        got = safety_records.summarize([fact("9", NOW - DAY, [(0, "c")])], ledger=self.ledger, now=NOW)
+        self.assertEqual((got["owed_followup_unbacked"], got["owed_followup_unmeasured"]), (1, 1))
+
+    def test_with_no_thread_read_nothing_is_called_unbacked(self):
+        self.record("10", NOW - 2 * HOUR)
+        got = safety_records.summarize([], ledger=self.ledger, now=NOW)
+        self.assertIsNone(got["owed_followup_unbacked"])
+        self.assertEqual(got["owed_followup_unmeasured"], 1)
+
+    def test_an_unreadable_ledger_is_unknown_never_zero(self):
+        got = safety_records.summarize([fact("1", NOW - DAY, [(0, "q")])], ledger=self.dir, now=NOW)
+        self.assertIsNone(got["owed_followup_24h"])
+        self.assertIsNone(got["owed_followup_unbacked"])
+        self.assertTrue(got["owed_followup_error"])
+
+    def test_the_ledger_digest_counts_the_records(self):
+        self.record("1", NOW - HOUR)
+        self.record("1", NOW - 2 * HOUR)
+        got = injection_watch.digest(self.ledger, hours=24, now=datetime.now(timezone.utc))
+        self.assertEqual(got["owed_followup"]["records"], 2)
+
+    def test_the_ledger_digest_leaves_out_a_record_the_send_never_delivered(self):
+        stamp = self.record_ms("13", NOW - HOUR)
+        self.not_sent("13", stamp)
+        got = injection_watch.digest(self.ledger, hours=24, now=datetime.now(timezone.utc))
+        self.assertEqual(got["owed_followup"]["records"], 0)
+        self.assertEqual(got["owed_followup"]["conversations"], [])
+        self.assertEqual(got["owed_followup"]["not_sent"], 1)
 
 
 class Events(unittest.TestCase):
@@ -889,6 +1021,70 @@ class Baseline(unittest.TestCase):
             self.assertNotEqual(rc, 0)
             with open(out) as f:
                 self.assertEqual(f.read(), "previous baseline\n")
+    def test_a_separate_inbox_read_is_built_and_stamped_as_of_its_own_cut_off(self):
+        register = fixloop.load_register(None)
+        now = 1_800_000_000
+        threads = [thread("1"), thread("2", created=now - 2 * DAY)]
+        meta = {"start": now - 40 * DAY, "end": now, "listed": 2, "total_count": 2, "errors": 0}
+        inbox_now = now + 3 * DAY
+        inbox_meta = {"start": inbox_now - 37 * DAY, "end": inbox_now, "listed": 2, "total_count": 2,
+                      "errors": 0, "backlog": True}
+        inbox_threads = [thread("1", created=inbox_now - 20 * DAY), thread("3", created=inbox_now - DAY)]
+        plain = cli.build_baseline(threads, meta, register, now)
+        read = cli.build_baseline(threads, meta, register, now, inbox_read=(inbox_meta, inbox_threads))
+        self.assertEqual(read["inbox"]["written_at"], inbox_now)
+        self.assertEqual(read["inbox"]["scope"]["as_of"], inbox_now)
+        self.assertEqual(read["inbox_read_at"], inbox_now)
+        self.assertEqual(read["inbox_read_at_utc"], cli.utc(inbox_now))
+        self.assertEqual(read["inbox"]["open"], 2)
+        self.assertEqual(read["inbox_source"]["read"], len(inbox_threads))
+        self.assertEqual(read["taken_at"], now)
+        self.assertEqual(read["matured_weeks"], plain["matured_weeks"])
+        self.assertEqual(read["last30_as_of_now"], plain["last30_as_of_now"])
+
+    def test_without_a_separate_read_the_inbox_block_is_as_of_the_baseline_time(self):
+        register = fixloop.load_register(None)
+        now = 1_800_000_000
+        threads = [thread("1")]
+        meta = {"start": now - 40 * DAY, "end": now, "listed": 1, "total_count": 1, "errors": 0}
+        read = cli.build_baseline(threads, meta, register, now)
+        self.assertEqual(read["inbox_read_at"], now)
+        self.assertEqual(read["inbox_read_at_utc"], read["taken_at_utc"])
+        self.assertEqual(read["inbox"]["written_at"], now)
+
+    def test_an_inbox_read_that_is_not_the_whole_inbox_is_refused_before_anything_is_written(self):
+        now = 1_800_000_000
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = os.path.join(tmp, "corpus.jsonl")
+            inbox = os.path.join(tmp, "inbox.jsonl")
+            out = os.path.join(tmp, "baseline.json")
+            with open(corpus, "w") as f:
+                f.write(json.dumps({"_meta": {"start": now - 40 * DAY, "end": now, "listed": 1,
+                                                "total_count": 1, "errors": 0}}) + "\n")
+                f.write(json.dumps(thread("1")) + "\n")
+            with open(inbox, "w") as f:
+                f.write(json.dumps({"_meta": {"start": now - 40 * DAY, "end": now, "listed": 1,
+                                                "total_count": 1, "errors": 0}}) + "\n")
+                f.write(json.dumps(thread("1")) + "\n")
+            with open(out, "w") as f:
+                f.write("previous baseline\n")
+            args = types.SimpleNamespace(register=None, corpus=corpus, now=now, out=out, inbox_corpus=inbox)
+            with open(os.devnull, "w") as sink:
+                stderr, sys.stderr = sys.stderr, sink
+                try:
+                    rc = cli.cmd_baseline(args)
+                finally:
+                    sys.stderr = stderr
+            self.assertNotEqual(rc, 0)
+            with open(out) as f:
+                self.assertEqual(f.read(), "previous baseline\n")
+
+    def test_the_record_on_file_stamps_the_inbox_block_with_its_own_read(self):
+        with open(os.path.join(REPO, "data", "caroline-monitor", "baseline.json")) as f:
+            record = json.load(f)
+        self.assertEqual(record["inbox"]["written_at"], record["inbox_read_at"])
+        self.assertEqual(record["inbox"]["scope"]["as_of"], record["inbox_read_at"])
+        self.assertEqual(record["inbox_source"]["read"], record["inbox_source"]["listed"])
 
 
 if __name__ == "__main__":

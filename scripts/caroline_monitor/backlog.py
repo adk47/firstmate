@@ -20,8 +20,9 @@ import json
 import os
 import tempfile
 import time
+from datetime import datetime, timezone
 
-from . import commitments, rules
+from . import commitments, rules, safety_records
 
 HOUR = 3600
 DAY = 86400
@@ -30,7 +31,9 @@ SCHEMA = "support-backlog.v1"
 INBOX_FIELDS = ("open", "waiting_on_us", "waiting_on_us_robot_mail", "waiting_on_customer",
                 "oldest_waiting_on_us_h", "promised_a_person_24h", "handed_to_human_24h", "human_replied_24h",
                 "commitments_open", "commitments_overdue", "promises_kept_24h", "promises_broken_24h",
-                "messages_queued", "messages_held", "messages_held_by_reason")
+                "messages_queued", "messages_held", "messages_held_by_reason",
+                "owed_followup_24h", "owed_followup_unbacked", "owed_followup_unmeasured",
+                "owed_followup_error")
 _MESSAGES = (rules.EV_CUSTOMER, rules.EV_CAROLINE, rules.EV_HUMAN_REPLY)
 WAIT_BANDS = (("under_2d", 2), ("2d_to_7d", 7), ("7d_to_30d", 30), ("30d_to_90d", 90), ("over_90d", None))
 
@@ -113,6 +116,7 @@ def build(facts, register, now, scope, week=None, outbox=None):
                 "commitments_open_unbacked", "commitments_closed_24h", "oldest_overdue_h"):
         doc[key] = ledger[key]
     doc["commitments_by_kind"] = by_kind(ledger, register)
+    doc.update(safety_records.summarize(facts, now=datetime.fromtimestamp(now, timezone.utc)))
     if outbox is not None:
         doc.update(outbox)
     return doc
@@ -171,6 +175,9 @@ def render(doc):
         f"  last 24h: told a person is coming       {n('promised_a_person_24h')}",
         f"  last 24h: handed to a person            {n('handed_to_human_24h')}",
         f"  last 24h: a person replied              {n('human_replied_24h')}",
+        f"  last 24h: owed follow-ups recorded      {n('owed_followup_24h')}"
+        f"   (no commitment on the thread: {n('owed_followup_unbacked')};"
+        f" thread not read: {n('owed_followup_unmeasured')})",
         "",
         "PROMISES (a promise closes only when a message is sent on its own thread)",
         f"  open                                    {n('commitments_open')}"

@@ -97,7 +97,7 @@
         "posture": "denied",
         "since": "2026-10-28",
         "ruling": "captain 2026-10-28 12:1xZ / 12:3xZ (#408): Caroline holds no shell and no verification/merge tool",
-        "note": "The exact 15-name deny list is owned by scripts/lib/assert-support-deny.sh; this registry only requires exec. Edge loads no lobster plugin."
+        "note": "The exact 12-name deny list is owned by scripts/lib/assert-support-deny.sh; this registry only requires exec. Edge loads no lobster plugin."
       }
     }
   }

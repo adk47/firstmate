@@ -19,6 +19,15 @@ import {
 } from "../src/outbound.js";
 import type { IntercomClient, IntercomConversation } from "../src/types.js";
 import { PersonalAssignmentRefused, assertAssignmentTarget } from "../src/assignment-policy.js";
+import { BANK_VERSION, HONEST_FALLBACK, HONEST_FALLBACK_UNRECORDED } from "../src/answer-bank.js";
+
+function recordingWriter(rows: Record<string, unknown>[], order?: string[]) {
+  return async (row: Record<string, unknown>) => {
+    order?.push("record");
+    rows.push(row);
+    return null;
+  };
+}
 
 describe("MockIntercomClient", () => {
   it("records replyToConversation calls", async () => {
@@ -333,14 +342,261 @@ describe("SanitizingIntercomClient", () => {
     delete (globalThis as unknown as Record<string, unknown>)[SIGNAL_KEY];
     const inner = new MockIntercomClient();
     const logged: string[] = [];
-    const client = new SanitizingIntercomClient(inner, { error: (msg) => logged.push(msg) });
+    const rows: Record<string, unknown>[] = [];
+    const client = new SanitizingIntercomClient(inner, { error: (msg) => logged.push(msg) }, recordingWriter(rows));
     await client.replyToConversation({
       conversationId: "conv_hc1",
       adminId: "admin_1",
       body: "I've flagged this for our team.",
     });
-    expect(inner.calls.replyToConversation[0].body).toBe("I'll make sure this gets to the team.");
+    expect(inner.calls.replyToConversation[0].body).toBe(HONEST_FALLBACK);
+    expect(rows.map((r) => r.kind)).toEqual(["owed_followup"]);
     expect(logged.some((m) => m.includes("[intercom:false-handoff-claim]") && m.includes("conv=conv_hc1") && m.includes("count=1"))).toBe(true);
+  });
+
+  it("records the owed follow-up BEFORE posting the line that claims it", async () => {
+    delete (globalThis as unknown as Record<string, unknown>)["__musoSupportTicketSignal"];
+    const inner = new MockIntercomClient();
+    const innerReply = inner.replyToConversation.bind(inner);
+    const order: string[] = [];
+    inner.replyToConversation = async (params) => {
+      order.push("post");
+      return innerReply(params);
+    };
+    const rows: Record<string, unknown>[] = [];
+    const client = new SanitizingIntercomClient(inner, { error: () => {} }, recordingWriter(rows, order));
+    await client.replyToConversation({
+      conversationId: "conv_rec1",
+      adminId: "admin_1",
+      body: "I've flagged this for our team.",
+    });
+    expect(inner.calls.replyToConversation[0].body).toBe(HONEST_FALLBACK);
+    expect(order).toEqual(["record", "post"]);
+    expect(rows.map((r) => r.kind)).toEqual(["owed_followup"]);
+    expect(rows[0]).toMatchObject({
+      kind: "owed_followup",
+      source: "intercom",
+      ref: "conv_rec1",
+      bank_version: BANK_VERSION,
+    });
+  });
+
+  it("sends the no-record wording, and still delivers, when the record write fails", async () => {
+    delete (globalThis as unknown as Record<string, unknown>)["__musoSupportTicketSignal"];
+    const inner = new MockIntercomClient();
+    const logged: string[] = [];
+    const client = new SanitizingIntercomClient(
+      inner,
+      { error: (msg) => logged.push(msg) },
+      async () => "ledger unwritable",
+    );
+    await client.replyToConversation({
+      conversationId: "conv_rec2",
+      adminId: "admin_1",
+      body: "I've flagged this for our team.",
+    });
+    const posted = inner.calls.replyToConversation[0].body;
+    expect(posted).toBe(HONEST_FALLBACK_UNRECORDED);
+    expect(posted).not.toContain("recorded");
+    expect(logged.some((m) => m.includes("[intercom:ALERT]") && m.includes("conv=conv_rec2") && m.includes("ledger unwritable"))).toBe(true);
+  });
+
+  it("sends the no-record wording when the record writer throws", async () => {
+    delete (globalThis as unknown as Record<string, unknown>)["__musoSupportTicketSignal"];
+    const inner = new MockIntercomClient();
+    const logged: string[] = [];
+    const client = new SanitizingIntercomClient(
+      inner,
+      { error: (msg) => logged.push(msg) },
+      async () => { throw new Error("EACCES /var/lib/hydra"); },
+    );
+    await client.replyToConversation({
+      conversationId: "conv_rec3",
+      adminId: "admin_1",
+      body: "I've flagged this for our team.",
+    });
+    expect(inner.calls.replyToConversation[0].body).toBe(HONEST_FALLBACK_UNRECORDED);
+    expect(inner.calls.replyToConversation[0].body).not.toContain("recorded");
+    expect(logged.some((m) => m.includes("[intercom:ALERT]") && m.includes("conv=conv_rec3"))).toBe(true);
+  });
+
+  it("cancels the record with a not-sent row when the post itself fails", async () => {
+    delete (globalThis as unknown as Record<string, unknown>)["__musoSupportTicketSignal"];
+    const inner = new MockIntercomClient();
+    inner.replyToConversation = async () => {
+      throw new Error("intercom 502");
+    };
+    const rows: Record<string, unknown>[] = [];
+    const client = new SanitizingIntercomClient(inner, { error: () => {} }, recordingWriter(rows));
+    await expect(client.replyToConversation({
+      conversationId: "conv_ns1",
+      adminId: "admin_1",
+      body: "I've flagged this for our team.",
+    })).rejects.toThrow("intercom 502");
+    expect(rows.map((r) => r.kind)).toEqual(["owed_followup", "owed_followup_not_sent"]);
+    expect(rows[1]).toMatchObject({
+      kind: "owed_followup_not_sent",
+      source: "intercom",
+      ref: "conv_ns1",
+      record_ts: rows[0].ts,
+      bank_version: BANK_VERSION,
+    });
+  });
+
+  it("keeps the post's own error when the not-sent marker cannot be written", async () => {
+    delete (globalThis as unknown as Record<string, unknown>)["__musoSupportTicketSignal"];
+    const inner = new MockIntercomClient();
+    inner.replyToConversation = async () => {
+      throw new Error("intercom 502");
+    };
+    const logged: string[] = [];
+    const rows: Record<string, unknown>[] = [];
+    let writes = 0;
+    const client = new SanitizingIntercomClient(
+      inner,
+      { error: (msg) => logged.push(msg) },
+      async (row) => {
+        rows.push(row);
+        writes += 1;
+        return writes === 1 ? null : "ledger unwritable";
+      },
+    );
+    await expect(client.replyToConversation({
+      conversationId: "conv_ns2",
+      adminId: "admin_1",
+      body: "I've flagged this for our team.",
+    })).rejects.toThrow("intercom 502");
+    expect(logged.some((m) => m.includes("[intercom:owed-followup-not-sent-unmarked]")
+      && m.includes("conv=conv_ns2") && m.includes("ledger unwritable"))).toBe(true);
+  });
+
+  it("records the owed follow-up for the escalation's person-free farewell, ticket reference kept", async () => {
+    delete (globalThis as unknown as Record<string, unknown>)["__musoSupportTicketSignal"];
+    const inner = new MockIntercomClient();
+    const innerReply = inner.replyToConversation.bind(inner);
+    const rows: Record<string, unknown>[] = [];
+    const order: string[] = [];
+    inner.replyToConversation = async (params) => {
+      order.push("post");
+      return innerReply(params);
+    };
+    const client = new SanitizingIntercomClient(inner, { error: () => {} }, recordingWriter(rows, order));
+    // Exactly the body escalation-action.ts's farewell posts (buildFarewell), asserted verbatim
+    // in tests/escalation-action.test.ts.
+    await client.replyToConversation({
+      conversationId: "conv_far1",
+      adminId: "admin_1",
+      body: `${HONEST_FALLBACK} Reference: T1.`,
+    });
+    expect(inner.calls.replyToConversation[0].body).toBe(`${HONEST_FALLBACK} Reference: T1.`);
+    expect(order).toEqual(["record", "post"]);
+    expect(rows.map((r) => r.ref)).toEqual(["conv_far1"]);
+  });
+
+  it("the escalation farewell keeps its ticket reference when the record write fails", async () => {
+    delete (globalThis as unknown as Record<string, unknown>)["__musoSupportTicketSignal"];
+    const inner = new MockIntercomClient();
+    const logged: string[] = [];
+    const client = new SanitizingIntercomClient(
+      inner,
+      { error: (msg) => logged.push(msg) },
+      async () => "ledger unwritable",
+    );
+    await client.replyToConversation({
+      conversationId: "conv_far2",
+      adminId: "admin_1",
+      body: `${HONEST_FALLBACK} Reference: T1.`,
+    });
+    expect(inner.calls.replyToConversation[0].body).toBe(`${HONEST_FALLBACK_UNRECORDED} Reference: T1.`);
+    expect(logged.some((m) => m.includes("[intercom:ALERT]") && m.includes("conv=conv_far2"))).toBe(true);
+  });
+
+  // SOUL.md teaches the sentence WITHOUT the full stop and the word after it varies, so the
+  // record must fire for whichever spelling the send path left in place: a recorded claim the
+  // record misses is a reply telling the customer it was recorded with nothing recorded.
+  describe("the pre-send record matches the approved sentence in every spelling the send path leaves", () => {
+    const SPOKEN = HONEST_FALLBACK.replace(/\.$/, "");
+    const CASES: [string, string][] = [
+      ["with the full stop", HONEST_FALLBACK],
+      ["period-less at the end of the body", SPOKEN],
+      ["period-less mid-sentence", `${SPOKEN}, and I'll keep watching.`],
+    ];
+    for (const [name, body] of CASES) {
+      it(`records exactly one row before the send, ${name}`, async () => {
+        delete (globalThis as unknown as Record<string, unknown>)["__musoSupportTicketSignal"];
+        const inner = new MockIntercomClient();
+        const innerReply = inner.replyToConversation.bind(inner);
+        const order: string[] = [];
+        inner.replyToConversation = async (params) => { order.push("post"); return innerReply(params); };
+        const rows: Record<string, unknown>[] = [];
+        const client = new SanitizingIntercomClient(inner, { error: () => {} }, recordingWriter(rows, order));
+        await client.replyToConversation({ conversationId: "conv_sp1", adminId: "admin_1", body });
+        expect(order).toEqual(["record", "post"]);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ kind: "owed_followup", ref: "conv_sp1", bank_version: BANK_VERSION });
+        // nothing is rewritten when the record was written
+        expect(inner.calls.replyToConversation[0].body).toBe(body);
+      });
+
+      it(`sends no "recorded" claim when the write fails, ${name}`, async () => {
+        delete (globalThis as unknown as Record<string, unknown>)["__musoSupportTicketSignal"];
+        const inner = new MockIntercomClient();
+        const logged: string[] = [];
+        const client = new SanitizingIntercomClient(
+          inner,
+          { error: (msg) => logged.push(msg) },
+          async () => "ledger unwritable",
+        );
+        await client.replyToConversation({ conversationId: "conv_sp2", adminId: "admin_1", body });
+        const posted = inner.calls.replyToConversation[0].body;
+        expect(posted).not.toContain("recorded");
+        expect(posted).toContain("I will update you here as soon as there is news");
+        expect(posted).not.toContain("..");
+        if (name === "period-less mid-sentence") expect(posted).toContain(", and I'll keep watching.");
+        expect(logged.some((m) => m.includes("[intercom:ALERT]") && m.includes("conv=conv_sp2"))).toBe(true);
+      });
+    }
+
+    it("rewrites every copy of the line when the write fails", async () => {
+      delete (globalThis as unknown as Record<string, unknown>)['__musoSupportTicketSignal'];
+      const inner = new MockIntercomClient();
+      const rows: Record<string, unknown>[] = [];
+      const client = new SanitizingIntercomClient(
+        inner,
+        { error: () => {} },
+        async (row) => {
+          rows.push(row);
+          return "ledger unwritable";
+        },
+      );
+      const body = `${HONEST_FALLBACK} I asked the team about the second request too. ${HONEST_FALLBACK}`;
+      await client.replyToConversation({ conversationId: "conv_sp3", adminId: "admin_1", body });
+      const posted = inner.calls.replyToConversation[0].body;
+      expect(rows).toHaveLength(1);
+      expect(posted.toLowerCase()).not.toContain("i have recorded this");
+      expect(posted.match(/I will update you here as soon as there is news/g)).toHaveLength(2);
+      expect(posted).not.toContain("..");
+      expect(posted).toContain("I asked the team about the second request too.");
+    });
+  });
+
+  it("writes no owed-follow-up row for a note, or for a reply without the line", async () => {
+    const rows: Record<string, unknown>[] = [];
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner, { error: () => {} }, recordingWriter(rows));
+    await client.replyToConversation({
+      conversationId: "conv_rec4",
+      adminId: "admin_1",
+      messageType: "note",
+      body: HONEST_FALLBACK,
+    });
+    await client.replyToConversation({
+      conversationId: "conv_rec5",
+      adminId: "admin_1",
+      body: "Thanks, I have your request.",
+    });
+    expect(rows).toHaveLength(0);
+    expect(inner.calls.replyToConversation[0].body).toBe(HONEST_FALLBACK);
   });
 
   it("passes the same handoff claim through when a ticket WAS filed this conversation", async () => {
@@ -372,13 +628,15 @@ describe("SanitizingIntercomClient", () => {
     delete (globalThis as unknown as Record<string, unknown>)[IDS_KEY];
     const inner = new MockIntercomClient();
     const logged: string[] = [];
-    const client = new SanitizingIntercomClient(inner, { error: (msg) => logged.push(msg) });
+    const rows: Record<string, unknown>[] = [];
+    const client = new SanitizingIntercomClient(inner, { error: (msg) => logged.push(msg) }, recordingWriter(rows));
     await client.replyToConversation({
       conversationId: "conv_ref1",
       adminId: "admin_1",
       body: "Your reference number is 869f7v9v2.",
     });
-    expect(inner.calls.replyToConversation[0].body).toBe("I'll make sure this gets to the team.");
+    expect(inner.calls.replyToConversation[0].body).toBe(HONEST_FALLBACK);
+    expect(rows.map((r) => r.kind)).toEqual(["owed_followup"]);
     expect(logged.some((m) => m.includes("[intercom:false-handoff-claim]") && m.includes("conv=conv_ref1"))).toBe(true);
   });
 
@@ -988,7 +1246,7 @@ describe("SanitizingIntercomClient help-centre link gate", () => {
   const manifest = { articles: { "1111111": { slug: "claim", title: "Claim", url: GOOD } } };
   const send = async (body: string, loader: () => any, errors: string[] = []) => {
     const inner = new MockIntercomClient();
-    const client = new SanitizingIntercomClient(inner, { error: (m) => errors.push(m) }, loader);
+    const client = new SanitizingIntercomClient(inner, { error: (m) => errors.push(m) }, async () => null, loader);
     await client.replyToConversation({ conversationId: "c1", adminId: "a1", body });
     return inner.calls.replyToConversation[0].body;
   };
@@ -1008,7 +1266,8 @@ describe("SanitizingIntercomClient help-centre link gate", () => {
   ])("posts nothing when the gate leaves an empty reply: %s", async (_n, body, loader) => {
     const inner = new MockIntercomClient();
     const errors: string[] = [];
-    const client = new SanitizingIntercomClient(inner, { error: (m: string) => { errors.push(m); } }, loader as any);
+    const client = new SanitizingIntercomClient(inner, { error: (m: string) => { errors.push(m); } },
+                                                async () => null, loader as any);
     const res = await client.replyToConversation({ conversationId: "c1", adminId: "a1", body });
     expect(inner.calls.replyToConversation).toHaveLength(0);
     expect(res.messageId).toBe("");

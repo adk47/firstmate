@@ -78,13 +78,9 @@ describe("stripUnbackedHandoff", () => {
     }
   });
 
-  it("no approved answer-bank line loses a sentence, except the hand-off line itself", () => {
+  it("no approved answer-bank line loses a sentence", () => {
     for (const e of ANSWER_BANK) {
       const r = stripUnbackedHandoff(e.text);
-      if (e.id === "handoff_line") {
-        expect(r.onlyPromise).toBe(true);
-        continue;
-      }
       expect(r.removed, e.id).toEqual([]);
       expect(r.body, e.id).toBe(e.text);
     }

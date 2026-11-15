@@ -99,7 +99,7 @@ run_check() {
 }
 
 @test "a refusing action that names a customer line is refused" {
-  mutate 'd["actions"]["requester-linked-refusal"]["line"] = "handoff_line"'
+  mutate 'd["actions"]["requester-linked-refusal"]["line"] = "status_chase"'
   run_check
   [ "$status" -ne 0 ]
   echo "$output" | grep -qi 'refusal sends no customer copy'

@@ -128,23 +128,25 @@ describe("merge-reply guard on the 2026-10-30 transcripts (firstmate 017)", () =
     expect(out.paragraphSent).toBe(false);
   });
 
-  it("a non-merge reply that was ONLY a judgement becomes the hand-off line, never an empty (unsent) body", () => {
+  it("a reply that was ONLY a judgement is emptied, and a merge reply keeps just the paragraph", () => {
     const state = {};
     const p = prepareMergeReply(state, "Help with my credits", "Those profiles should not be merged.", "t");
     expect(p.result.actions).toEqual(["dropped_judgement"]);
-    expect(p.body).toBe(HANDOFF_LINE);
-    expect(p.body.trim().length).toBeGreaterThan(0); // channel.ts posts it instead of skipping
-    // and inside a merge thread the fallback is the paragraph + hand-off
+    expect(p.body).toBe("");
+    // inside a merge thread the approved paragraph is the whole reply
     const m = prepareMergeReply({}, "merge my two profiles", "These shouldn't be merged.", "t");
-    expect(m.body).toBe(`${MERGE_PARAGRAPH}\n\n${HANDOFF_LINE}`);
+    expect(m.body).toBe(MERGE_PARAGRAPH);
   });
 
-  it("no reply is ever emptied by the guard (any intent, any judgement-only reply)", () => {
+  it("the guard never writes a customer line of its own: an emptied reply stays empty for the caller", () => {
     for (const customer of ["hi", "merge my profiles", "refund please"]) {
       for (const reply of ["Those profiles should not be merged.", "I can merge them. They have been merged."]) {
-        expect(applyMergeReplyGuard({ customerText: customer, reply, paragraphAlreadySent: true }).body.trim()).not.toBe("");
-        expect(applyMergeReplyGuard({ customerText: customer, reply, paragraphAlreadySent: false }).body.trim()).not.toBe("");
+        for (const paragraphAlreadySent of [true, false]) {
+          const body = applyMergeReplyGuard({ customerText: customer, reply, paragraphAlreadySent }).body;
+          expect(body).not.toMatch(/teammate|specialist|a person|human/i);
+        }
       }
+      expect(applyMergeReplyGuard({ customerText: customer, reply: "Those profiles should not be merged.", paragraphAlreadySent: true }).body).toBe("");
     }
   });
 
@@ -296,8 +298,9 @@ describe("merge-reply guard on the 2026-10-30 transcripts (firstmate 017)", () =
       expect(out.body).toBe(`Thank you. ${HANDOFF_LINE}`);
       expect(out.actions).toEqual(["replaced_doc_thanks"]);
       expect(out.body).not.toContain(KEY); // no merge intent, no §2.4
-      // a reply that was ONLY the thank-you text still delivers the hand-off
-      expect(applyMergeReplyGuard({ customerText: customer, reply: docThanks, paragraphAlreadySent: false }).body).toBe(HANDOFF_LINE);
+      // A reply that was ONLY the thank-you text is emptied, and the caller posts the AI-queue
+      // line (channel.ts): this guard writes no customer sentence of its own any more.
+      expect(applyMergeReplyGuard({ customerText: customer, reply: docThanks, paragraphAlreadySent: false }).body).toBe("");
     }
     // a real document link (not a profile) keeps it
     const doc = applyMergeReplyGuard({ customerText: "here is the split sheet https://drive.google.com/x", reply: `Thank you. ${docThanks}`, paragraphAlreadySent: false });
@@ -316,7 +319,7 @@ describe("merge-reply guard on the 2026-10-30 transcripts (firstmate 017)", () =
     const keep = "Is this your main profile: https://muso.ai/profile/abc? E.g. the one with more credits. I'm pulling in a teammate to take this from here.";
     expect(applyMergeReplyGuard({ customerText: "?", reply: keep, mergeIntentEarlier: true, paragraphAlreadySent: true }).body).toBe(keep);
     // a URL at the very end of a forbidden sentence
-    expect(applyMergeReplyGuard({ customerText: "hi", reply: "We merged https://muso.ai/profile/a.", paragraphAlreadySent: true }).body).toBe(HANDOFF_LINE);
+    expect(applyMergeReplyGuard({ customerText: "hi", reply: "We merged https://muso.ai/profile/a.", paragraphAlreadySent: true }).body).toBe("");
   });
 
   it("containsMergeParagraph: exact, the gate's /w form, HTML and curly apostrophes count; altered or partial do not (firstmate 028)", () => {
@@ -336,10 +339,11 @@ describe("merge-reply guard on the 2026-10-30 transcripts (firstmate 017)", () =
     expect(out.actions).toEqual([]);
   });
 
-  it("(d) a reply made only of merge-family sentences still delivers the hand-off (never empty)", () => {
-    expect(applyMergeReplyGuard({ customerText: "hello", reply: "The merge went through. We combined them.", paragraphAlreadySent: true }).body).toBe(HANDOFF_LINE);
+  it("(d) a reply made only of merge-family sentences carries the paragraph, never a person line", () => {
+    // Nobody is assigned, so an emptied reply is the caller's AI-queue fallback, not a hand-off line.
+    expect(applyMergeReplyGuard({ customerText: "hello", reply: "The merge went through. We combined them.", paragraphAlreadySent: true }).body).toBe("");
     expect(applyMergeReplyGuard({ customerText: "merge my two profiles", reply: "The merge went through.", paragraphAlreadySent: false }).body)
-      .toBe(`${MERGE_PARAGRAPH}\n\n${HANDOFF_LINE}`);
+      .toBe(MERGE_PARAGRAPH);
   });
 
   it("credit/track merges with an incidental account or profile word are not profile merges (QA on #1530)", () => {

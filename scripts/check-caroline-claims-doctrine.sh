@@ -137,14 +137,12 @@ HANDOFF_LINE="I'm pulling in a teammate to take this from here."
 for f in "$CV" "$CI" "$CAP"; do
   forbid "$f" "the retired closing line is not taught (unbacked promise of a person)" "$HANDOFF_LINE"
 done
-# AGENTS.md names the sentence exactly once, as the SYSTEM's words on a real escalation (it is the
-# answer-bank anchor for `handoff_line`: escalation-action.ts and merge-reply-guard.ts still send it).
-require "$AGENTS" "the closing line is the system's, never Caroline's" "They are the system's and only the system's: you never write that sentence."
-n_line="$(grep -oF "pulling in a teammate" "$AGENTS" | wc -l | tr -d " ")"
-if [ "$n_line" != "1" ]; then
-  echo "FAIL: ${AGENTS#"$ROOT"/}: the system's closing line appears $n_line times (expected once, as the system's words)" >&2
-  fail=1
-fi
+# Captain 2026-11-14 (firstmate inbox 012): no path tells a customer a person is coming. The
+# escalation team has no members, so the escalation's own farewell is the honesty line, and the
+# retired closing line is not taught anywhere a human reads it. Where a file still said "the handoff
+# line", it means the honesty line below.
+forbid "$AGENTS" "the retired closing line is not taught" "$HANDOFF_LINE"
+require "$AGENTS" "the escalation's words are the honesty line" "I have recorded this and will update you here as soon as there is news."
 forbid "$AGENTS" "no instruction to say the retired closing line" "say the handoff line verbatim"
 forbid "$CV" "no instruction to say the retired closing line" "Last, always, the handoff line"
 require "$AGENTS" "never a closing sentence that promises a person" "Never end a reply with a sentence that says a person is coming"

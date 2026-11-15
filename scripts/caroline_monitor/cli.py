@@ -594,30 +594,56 @@ def cmd_remeasure(args):
     return 0
 
 
-def build_baseline(threads, meta, register, now):
+def _source(meta, read):
+    return {"window_start": meta.get("start"), "window_end": meta.get("end"),
+            "listed": meta.get("listed"), "intercom_total_count": meta.get("total_count"),
+            "read": read, "gone": meta.get("gone"), "errors": meta.get("errors")}
+
+
+def _inbox_block(threads, meta, register, now):
+    """The support-backlog.json content for ONE read: every field of the block is as of `now`."""
     cfg = register.get("monitor") or {}
     facts = facts_of(threads, cfg)
     reading = take_reading(facts, register, now, int(meta.get("start") or 0))
-    last30 = reading["last30"]
     scope = {"whole_inbox": bool(meta.get("backlog")) and not meta.get("errors"), "as_of": now,
              "created_since": int(meta.get("start") or 0), "listed": meta.get("listed"),
              "intercom_total_count": meta.get("total_count"), "read_errors": meta.get("errors")}
     week = reading["weeks"][0] if reading["weeks_covered"][0] else None
+    return backlog.build(facts, register, now, scope, week)
+
+
+def build_baseline(threads, meta, register, now, inbox_read=None):
+    """`inbox_read` is an optional (meta, threads) pair from a SEPARATE read of the inbox. The open
+    and waiting counts of the inbox block describe the moment the inbox was read, which cannot be
+    replayed: when the headline is rebuilt for an earlier `now`, the block is built whole from that
+    one read, as of that read's own cut-off (`_meta.end`), and the moment is recorded in
+    `inbox_read_at`. Without it the block is built from the same corpus at `now`."""
+    cfg = register.get("monitor") or {}
+    facts = facts_of(threads, cfg)
+    reading = take_reading(facts, register, now, int(meta.get("start") or 0))
+    last30 = reading["last30"]
     matured = [w for w, ok in zip(reading["weeks"], reading["weeks_covered"]) if ok]
+    if inbox_read is None:
+        inbox_meta, inbox_threads, inbox_now = meta, threads, now
+    else:
+        inbox_meta, inbox_threads = inbox_read
+        inbox_now = int(inbox_meta["end"])
     return {
         "_doc": "The monitor's recorded starting point. Written by `caroline-monitor.py baseline` from a full "
                 "read of the window; never edited by hand. Counts only: no thread text and no thread ids. "
-                "`inbox` is the support-backlog.json content at the same moment (null fields when the read "
-                "did not cover every open conversation).",
-        "inbox": backlog.build(facts, register, now, scope, week),
+                "`inbox` is the support-backlog.json content of ONE read of the inbox, every field as of "
+                "`inbox_read_at` (null fields when the read did not cover every open conversation); "
+                "`inbox_source` is that read. Everything else is as of `taken_at`, from `source`.",
+        "inbox": _inbox_block(inbox_threads, inbox_meta, register, inbox_now),
+        "inbox_read_at": inbox_now,
+        "inbox_read_at_utc": utc(inbox_now),
+        "inbox_source": _source(inbox_meta, len(inbox_threads)),
         "taken_at": now,
         "taken_at_utc": utc(now),
         "rules_version": rules.RULES_VERSION,
         "reader_version": reading["reader_version"],
         "covered_from": int(meta.get("start") or 0),
-        "source": {"window_start": meta.get("start"), "window_end": meta.get("end"),
-                   "listed": meta.get("listed"), "intercom_total_count": meta.get("total_count"),
-                   "read": len(threads), "gone": meta.get("gone"), "errors": meta.get("errors")},
+        "source": _source(meta, len(threads)),
         "matured_weeks": matured,
         "last30_as_of_now": last30,
         "shape_threads": {sid: row["threads"] for sid, row in last30["shapes"].items()},
@@ -641,7 +667,18 @@ def cmd_baseline(args):
               f"({utc(now - need * HOUR)}), and the corpus must start before that. No file was written.",
               file=sys.stderr)
         return 2
-    baseline = build_baseline(threads, meta, register, now)
+    inbox_read = None
+    if getattr(args, "inbox_corpus", None):
+        inbox_meta, inbox_threads = read_corpus(args.inbox_corpus)
+        check_coverage(inbox_meta.get("listed", len(inbox_threads)), inbox_meta.get("total_count"),
+                       inbox_meta.get("errors", 0), cfg)
+        if not inbox_meta.get("end") or not inbox_meta.get("backlog"):
+            print(f"refusing to write {args.out}: {args.inbox_corpus} is not a whole-inbox read with a recorded "
+                  "cut-off (collect with --backlog), so the inbox block would have no single read time. "
+                  "No file was written.", file=sys.stderr)
+            return 2
+        inbox_read = (inbox_meta, inbox_threads)
+    baseline = build_baseline(threads, meta, register, now, inbox_read)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(baseline, f, indent=1, sort_keys=True)
@@ -753,6 +790,9 @@ def build_parser():
     b = sub.add_parser("baseline", help="write the baseline from a corpus")
     b.add_argument("--corpus", required=True)
     b.add_argument("--now", type=int)
+    b.add_argument("--inbox-corpus", default=None,
+                   help="a separate whole-inbox read (collect --backlog): the inbox block is built from it alone, "
+                        "as of its own cut-off, and that moment is recorded as inbox_read_at")
     b.add_argument("--out", default=BASELINE_PATH)
     d = common(sub.add_parser("drill", help="send one labelled test page"))
     d.add_argument("--dry-run", action="store_true")

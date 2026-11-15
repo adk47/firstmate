@@ -29,8 +29,15 @@ assigned to a person.
 | 19 to 26 Oct | 428 | 661 (65%) |
 | 12 to 19 Oct | 263 | 450 (58%) |
 
-Read on 2026-11-11 23:50Z from all 9,386 conversations Intercom listed (0 read errors). It is
-rising, so the monitor pages on its first run.
+Read on 2026-11-14 13:35Z-13:45Z, read-only, from all 9,930 conversations Intercom listed
+(Intercom's own count 9,929; 0 read errors, 0 gone). This is a fresh re-read: the 2026-11-11
+corpus and its hand labels were scratch and were deleted after scoring, as `calibrate.py`
+requires. The baseline is stamped as of 2026-11-11 23:50Z (weeks 1,078 / 818 / 428 / 263, and
+2,770 in 30 days), and its "inbox right now" block is a separate read of its own: node-8,
+read-only, started 2026-11-14 16:13:26Z and finished by 16:24Z, 9,883 conversations listed and
+read (Intercom's own count 9,883), 0 read errors, 0 gone, window from 2026-10-08 16:13Z. Every
+field of that block is as of 2026-11-14 16:13:26Z, which the file records as `inbox_read_at`
+(and `inbox.written_at`). The headline is rising, so the monitor pages on its first run.
 
 Each conversation is read as it stood 48 hours after it opened. Without that, the newest week
 would always be read younger than the week it is compared with, and would always look better.
@@ -43,8 +50,8 @@ nearly the same 30 days. The difference has two known causes:
   Queue lines are counted separately.
 - Hand labels showed the first version of the rules missed about one promise in five among
   conversations counted as *not* handed off (11 of 50). The wording rules were widened and
-  re-labelled (now 4 of 50). The first version reproduced the report's 2,678 exactly; the
-  widened one counts more.
+  re-labelled (now 5 of 50 on the 2026-11-14 labels). The first version reproduced the report's
+  2,678 exactly; the widened one counts more.
 
 ## What is measured
 
@@ -72,7 +79,7 @@ Caroline fixes in flight push assignment in opposite directions (one assigns whe
 the other makes human assignment an exception). They are recorded every tick and page through
 the two numbers built from them: hand-offs with nobody assigned, and assigned with no human reply.
 
-"Resolved" cannot mean "closed in Intercom": 9,080 conversations are open and almost none is
+"Resolved" cannot mean "closed in Intercom": 9,661 conversations are open and almost none is
 ever closed.
 
 The monitor also pages when it cannot measure: once two ticks in a row could not read Intercom,
@@ -99,22 +106,45 @@ send it elsewhere with `monitor.slack.health_channel` or `CAROLINE_MONITOR_HEALT
 
 The rules are regular expressions in one file, `scripts/caroline_monitor/rules.py`. They were
 checked by hand labels, recorded in `data/caroline-monitor/calibration.json` (counts only).
-One AI rater labelled them, blind to what the rules said. There was no second rater.
+One AI rater labelled them, blind to what the rules said. There was no second rater. These labels
+are a second blind pass by one AI rater on 2026-11-14, not the first pass re-scored.
 
-- **Did she really promise a person?** 50 of 50 counted hand-offs were real promises. 4 of 50
-  conversations counted as not handed off held a promise the rules missed. So the headline
-  undercounts by about 2% (2,757 counted against an estimated 2,811 on the labelled read).
-- **Which shape?** 287 labels. Weighted accuracy 67%. It varies a lot by shape:
+The rule change itself moves no number: on the same re-read corpus, rules `2026-11-11.2` and
+`2026-11-14.1` give byte-identical labelling sheets and keys (shapes and outcomes).
+
+- **Did she really promise a person?** 47 of 50 counted hand-offs were real promises. 5 of 50
+  conversations counted as not handed off held a promise the rules missed (the first pass: 50 of
+  50 and 4 of 50). The labelled read estimates a true headline of 2,659 against 2,757 counted, so
+  on this pass the headline reads about 4% high, where the first pass read it about 2% low
+  (2,811). Both passes are 50 labels per arm by one rater and the intervals overlap (precision
+  0.84 to 0.98; miss rate 0.04 to 0.21). The disagreements were of two kinds: "I've flagged ..."
+  lines that name no person or team (the rules count them as a promise, the rater did not), and
+  the queue line "we review in the order requests arrive and will email you" (the rules count it
+  as a queue line by design, the rater answered that the team will follow up).
+- **Which shape?** 287 labels. Weighted accuracy 67% (first pass 0.6688). It varies a lot by
+  shape:
 
 | Shape | Right | Labels |
 |---|---|---|
-| proof_sent (the largest) | 83% | 30 |
-| artist_link, robot_mail, refund_dispute, human_request | 100% | 8 to 15 each |
-| merge_split, proof_what_needed, profile_edit, account_access | 88% | 8 each |
-| request_status | 40% | 15 |
-| claim_start_problem, track_fix_takedown, legal_notice | 25% | 8 each |
-| product_question, other | 20% | 15 each |
-| app_bug, declined_why | 0% | 8 and 6 |
+| artist_link, human_request, profile_edit, robot_mail | 100% | 8 to 15 each |
+| account_access, proof_what_needed, refund_dispute | 88% | 8 each |
+| proof_sent (the largest) | 80% | 30 |
+| cancel_subscription, credit_add_howto, merge_split, plaque_order, thanks_empty | 75% | 8 each |
+| request_status | 73% | 15 |
+| api_support | 67% | 3 |
+| declined_why | 67% | 6 |
+| credit_wrong | 62% | 8 |
+| claim_code_added, request_withdraw_correct, stats_wrong | 50% | 8 each |
+| partnership | 40% | 5 |
+| billing_question | 38% | 8 |
+| claim_conflict, claim_start_problem, gdpr_erasure, legal_notice, track_fix_takedown | 25% | 8 each |
+| other, product_question | 20% | 15 each |
+| app_bug | 0% | 8 |
+
+Two shapes moved a long way between the two single-rater passes with no rule change behind it:
+request_status 40% to 73% and declined_why 0% to 67%. That is rater variance, and it moves both
+across the "right less than half the time" line that decides whether a shape's re-measure verdict
+is `unmeasured`.
 
 The `shapes` command prints this next to every shape. A shape the rules get right less than half
 the time cannot prove its own fix: its re-measure verdict is `unmeasured` until the rule is
@@ -122,6 +152,15 @@ tightened and re-labelled.
 
 Changing a rule means bumping `RULES_VERSION`, re-labelling, and re-recording the baseline. CI
 fails while the labels on file are for older rules.
+
+**The records on file are for `2026-11-14.1`.** They were re-recorded on node-8 (ovh-node-8),
+read-only (`POST /conversations/search` + `GET /conversations/{id}`), with the same commands that
+produced the first records: `collect.py --days 37 --until 1794450000 --backlog`, then
+`caroline-monitor.py baseline --now 1794441000`, `calibrate sample --now 1794419539
+--outcome-seed 20261112` (shape seed 20261111) and `calibrate score`. The inbox block came from
+its own read, `collect.py --days 37 --until 1794672806 --backlog`, passed as
+`caroline-monitor.py baseline --now 1794441000 --inbox-corpus <that read>`: the block is then
+built whole from that one read, as of its own cut-off, and `inbox_read_at` records it.
 
 ## The fix loop
 
@@ -199,9 +238,11 @@ register must carry all four:
 | Promise a date | the date-promise count above |
 
 They are enforced by the output guard (`plugins/intercom/src/caroline-output-guard.ts`), not by
-this monitor. Today a guard hit replaces her reply with the hand-off line and assigns a person:
-168 conversations last week, all assigned, none answered by a person within 48 hours. So the
-guard's hits are not in the headline; they are most of the "assigned, no human reply" rise.
+this monitor. A guard hit replaces her reply with the AI-queue fallback line (`ai_queue_fallback`,
+which promises no person) and assigns nobody, so the conversation stays with Caroline
+(`assignment-policy.ts`). Back when the guard's hits were hand-offs they were all assigned and
+none answered by a person within 48 hours (168 conversations in one week, measured to 2026-11-11),
+so the guard's hits are not in the headline; they are most of the "assigned, no human reply" rise.
 
 ## The promise ledger
 
@@ -222,6 +263,28 @@ and an owner.
   a new message.
 - **The due time is ours.** 24 hours, never told to the customer. The ledger makes no date
   promise.
+- **The honesty lines are an owed follow-up, not a person promise.** `HONEST_FALLBACK`
+  ("I have recorded this and will update you here as soon as there is news.") reaches customers from
+  the unstaffed escalation farewell (`escalation-action.ts`) and from `sanitize-handoff-claim.ts`'s
+  rewrite of a completed-action claim; `HONEST_FALLBACK_UNRECORDED` ("I will update you here as soon as
+  there is news.") replaces it when `outbound.ts` could not write the owed-follow-up record. Both open a
+  commitment (`rules.QUEUE_LINE`, `RULES_VERSION` 2026-11-14.1) and neither is `EV_PROMISE`, so the row
+  is never `promise: "person"`. The OLD line ("I'll make sure this gets to the team.") stays in
+  `rules.PERSON_PROMISE`: threads that were already answered carry it, and a `person` row read from
+  those is accurate.
+- **The pre-send record is read back.** `outbound.ts` writes one `owed_followup` row per sent fallback
+  (kind `owed_followup`, `ref` = conversation id, `bank_version`) into the shared safety ledger before
+  the sentence claiming it is posted. `scripts/caroline_monitor/safety_records.py` counts those rows
+  (last 24h) and the ones with no monitor commitment row on that conversation at or after the record
+  time (compared at whole-second granularity: the plugin writes milliseconds, the monitor truncates
+  thread event times to seconds, and the record's own send lands in the same second); an unreadable
+  ledger is `unknown`, never 0. A record whose conversation is not among the threads read is counted
+  apart as unmeasured, never as unbacked: the window is by `created_at`, so an older thread that gets
+  the line today is not in the facts. Present in the backlog file as `owed_followup_24h` /
+  `owed_followup_unbacked` / `owed_followup_unmeasured`. A reply whose post then fails leaves an
+  `owed_followup_not_sent` marker for that record, and a record carrying that marker is not counted at
+  all: the customer never heard the sentence. The reverse direction (a commitment row with
+  no pre-send record) is not built.
 
 Kinds, in the captain's order (2026-11-11):
 
@@ -303,20 +366,20 @@ user id.
 Written by every good tick to `/var/lib/hydra/support-backlog.json`. Counted on every open
 conversation of any age plus everything touched in the last 26 hours, not on the weekly cohort.
 
-| Field | Meaning | 2026-11-11 23:50Z |
+| Field | Meaning | 2026-11-14 16:13Z (baseline inbox read) |
 |---|---|---|
-| `open` | open conversations | 9,080 |
-| `waiting_on_us` | open, the customer spoke last, more than 24h ago (robots excluded) | 1,594 |
-| `waiting_on_us_by_wait` | the same, by how long | under 2d 32, 2 to 7d 19, 7 to 30d 18, 30 to 90d 134, over 90d 1,391 |
-| `oldest_waiting_on_us_h` | the longest wait, in hours | 30,794 |
-| `waiting_on_customer` | open, we spoke last | 7,345 |
-| `promised_a_person_24h` | conversations where she said a person is coming, last 24h | 269 |
-| `handed_to_human_24h` | conversations assigned to a person, last 24h | 63 |
+| `open` | open conversations | 9,661 |
+| `waiting_on_us` | open, the customer spoke last, more than 24h ago (robots excluded) | 1,554 |
+| `waiting_on_us_by_wait` | the same, by how long | under 2d 11, 2 to 7d 18, 7 to 30d 4, 30 to 90d 127, over 90d 1,394 |
+| `oldest_waiting_on_us_h` | the longest wait, in hours | 30,858 |
+| `waiting_on_customer` | open, we spoke last | 8,041 |
+| `promised_a_person_24h` | conversations where she said a person is coming, last 24h | 35 |
+| `handed_to_human_24h` | conversations assigned to a person, last 24h | 0 |
 | `human_replied_24h` | conversations a person replied in, last 24h | 0 |
-| `commitments_open` | promises not yet closed by a sent message | 3,704 |
-| `commitments_overdue` | open promises past their due time with nothing sent | 3,494 |
-| `promises_kept_24h` | times we came back inside the due time, last 24h | 49 |
-| `promises_broken_24h` | due times that passed with nothing sent, last 24h | 380 |
+| `commitments_open` | promises not yet closed by a sent message | 4,065 |
+| `commitments_overdue` | open promises past their due time with nothing sent | 3,914 |
+| `promises_kept_24h` | times we came back inside the due time, last 24h | 1 |
+| `promises_broken_24h` | due times that passed with nothing sent, last 24h | 183 |
 | `messages_queued` | due cycles whose status line is sendable and waiting for the driver | 0 |
 | `messages_held` | due cycles held by a switch, with the count per reason in `messages_held_by_reason` | 0 |
 | `written_at` | when the tick that wrote it ran | |
@@ -332,8 +395,7 @@ Rules of the file:
 
 Two things a reader of the file should know:
 
-- `waiting_on_us` will not reach 0 soon. 1,391 of the 1,594 have waited over 90 days; 770 of
-  them opened in April 2026. A check that fires on `waiting_on_us > 0` or
+- `waiting_on_us` will not reach 0 soon. 1,394 of the 1,554 have waited over 90 days. A check that fires on `waiting_on_us > 0` or
   `oldest_waiting_on_us_h > 24` fires forever. Watch `waiting_on_us_by_wait.under_2d` and
   `2d_to_7d` for what is going wrong now.
 - The tick also pages when `commitments_overdue` or `waiting_on_us` rises on the reading from a

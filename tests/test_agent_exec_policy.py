@@ -121,9 +121,10 @@ class RepoState(unittest.TestCase):
     def test_live_parity_against_identical_copies_is_clean(self):
         rc, errors, notes = chk.run(today=TODAY, live=True, live_paths={p: str(ROOT / p) for p in chk.LIVE_CONFIG})
         self.assertEqual((rc, errors), (0, []))
-        # 13 = exec + the 12 verification/merge tools. It was 15 until ai-support-quality-v1 let the two
-        # own-row reads (credit_verification_check, profile_claim_status) off the list.
-        self.assertTrue(any("support: live deny == repo deny (13)" in n for n in notes))
+        # 12 = exec + the 11 verification/merge tools. It was 15 until ai-support-quality-v1 let the two
+        # own-row reads (credit_verification_check, profile_claim_status) off the list, and 13 until
+        # caroline-read-state-tools-r1 dropped `proof_on_file` (no tool was registered under it).
+        self.assertTrue(any("support: live deny == repo deny (12)" in n for n in notes))
 
 
 class Mutations(unittest.TestCase):
@@ -564,7 +565,7 @@ class Mutations(unittest.TestCase):
             p.write_text(json.dumps(c))
             rc, errors, _ = self.run_check(live=True, live_paths={k: str(live / k) for k in chk.LIVE_CONFIG})
             self.assertEqual(rc, 1)
-            self.assertTrue(any("support: live tools.deny (12) != repo (13)" in e and "dedupe_check" in e
+            self.assertTrue(any("support: live tools.deny (11) != repo (12)" in e and "dedupe_check" in e
                                 for e in errors), errors)
         finally:
             shutil.rmtree(live)

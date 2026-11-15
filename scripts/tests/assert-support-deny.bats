@@ -46,7 +46,7 @@ run_step1() {  # run the extracted block as deploy.sh would, for the given --tar
   ' _ "$1" "$ROOT" "$TEST_TMPDIR/step1-edge.sh"
 }
 
-@test "the repo openclaw-edge.json carries the full 15-entry support deny" {
+@test "the repo openclaw-edge.json carries the full 12-entry support deny" {
   run bash "$LIB" "$HYDRA_REPO/openclaw-edge.json"
   [ "$status" -eq 0 ]
 }
@@ -74,10 +74,10 @@ run_step1() {  # run the extracted block as deploy.sh would, for the given --tar
 }
 
 @test "deploy.sh --target all: an incomplete deny list stops Step 1 too" {
-  drop proof_on_file
+  drop merge_intake
   run run_step1 all
   [ "$status" -ne 0 ]
-  [[ "$output" == *"proof_on_file"* ]]
+  [[ "$output" == *"merge_intake"* ]]
 }
 
 @test "deploy.sh --target edge: the complete list passes Step 1" {

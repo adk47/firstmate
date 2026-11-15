@@ -823,6 +823,16 @@ def digest(ledger: Path = LEDGER_PATH, *, hours: int = 24, now: datetime | None 
     inj = [r for r in day if r.get("kind") == "inbound_injection"]
     blocks = [r for r in day if r.get("kind") == "output_guard"]
     notes = [r for r in day if r.get("kind") == "output_note"]
+    # The pre-send owed-follow-up records outbound.ts writes before a sentence that says the case was
+    # recorded (answer-bank.ts HONEST_FALLBACK). One per send; counted here so an unreadable ledger
+    # reads as `None` above, never as zero.
+    owed = [r for r in day if r.get("kind") == "owed_followup"]
+    # A record whose POST failed is cancelled by its own row (inbox 015): the customer never heard
+    # the sentence, so neither the record nor the conversation is counted here.
+    cancelled = {(r.get("source"), str(r.get("ref")), r.get("record_ts"))
+                 for r in day if r.get("kind") == "owed_followup_not_sent"}
+    owed = [r for r in owed
+            if (r.get("source"), str(r.get("ref")), r.get("ts")) not in cancelled]
     # Every classifier call is counted in `classifier_health` window rows (clean traffic included), so an
     # outage that recovered before the daily probe still shows here.
     # Unavailable calls are persisted one row per call (survives idle periods and restarts); the 15-min
@@ -846,6 +856,9 @@ def digest(ledger: Path = LEDGER_PATH, *, hours: int = 24, now: datetime | None 
         "classifier_calls": clf_calls,
         "classifier_unavailable": clf_unavailable,
         "classifier_health_windows": len(health),
+        "owed_followup": {"records": len(owed),
+                          "not_sent": len(cancelled),
+                          "conversations": sorted({str(r.get("ref")) for r in owed})[:50]},
         "watch_candidates": watch_candidates(week),
     }
 

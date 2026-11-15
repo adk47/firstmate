@@ -49,6 +49,12 @@ const RULE_REASON: Array<[prefix: string, reason: string]> = [
       "Do not send the status line. Use the approved how-it-works paragraph for their topic, or ask which credit or claim they mean.",
   ],
   [
+    "person_without_assignment",
+    "it said a person is coming (a teammate, a specialist, someone from the team, or the team getting in touch), and nobody was assigned: you cannot hand a conversation to anyone. " +
+      "Remove that sentence. Answer the customer's question from the approved wording and what your tools return. " +
+      "If you cannot tell what they need, ask them with the approved clarifying line.",
+  ],
+  [
     "person_promise_unbacked",
     "it only said a person is coming, and no person was assigned: you cannot hand a conversation to anyone. " +
       "Answer the customer's question from the approved wording and what your tools return. " +

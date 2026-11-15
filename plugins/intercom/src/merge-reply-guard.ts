@@ -29,6 +29,9 @@ export const MERGE_PARAGRAPH =
   "onto the main profile. Profiles claimed by someone else, and company or label profiles, are " +
   "handled differently: I'll pass those on.";
 
+// Detection and paragraph anchor only (captain 2026-11-14: nobody is assigned, so this sentence
+// is never sent by anything): a model reply may still carry it, `unbacked-handoff.ts` removes it at
+// send, and the paragraph is inserted before it when it is the closing sentence.
 export const HANDOFF_LINE = "I'm pulling in a teammate to take this from here.";
 // The model writes the apostrophe straight or curly (U+2019); both are the hand-off line.
 const HANDOFF_RE = /I['’]m pulling in a teammate to take this from here\./;
@@ -311,11 +314,10 @@ export function applyMergeReplyGuard(input: MergeGuardInput): MergeGuardResult {
   }
   const hasParagraph = body.includes(MERGE_PARAGRAPH);
   if (!mergeIntent) {
-    // A reply that was ONLY a judgement must not turn into silence (QA on #1530): channel.ts
-    // posts nothing for an empty body, so the customer would get neither an answer nor a
-    // hand-off. Fall back to the approved hand-off line.
-    if ((j.dropped.length > 0 || docThanksStripped) && !body.trim()) body = HANDOFF_LINE;
-    return { body, mergeIntent, actions, droppedJudgements: j.dropped, paragraphSent: hasParagraph, mergeIntentThisTurn };
+    // A reply that was ONLY a judgement must not turn into silence (QA on #1530). This module
+    // writes no customer line of its own any more: the caller posts the AI-queue fallback line
+    // for an emptied body (channel.ts).
+    return { body: body.trim() ? body : "", mergeIntent, actions, droppedJudgements: j.dropped, paragraphSent: hasParagraph, mergeIntentThisTurn };
   }
 
 
@@ -337,12 +339,8 @@ export function applyMergeReplyGuard(input: MergeGuardInput): MergeGuardResult {
     actions.push("inserted_paragraph");
     paragraphSent = true;
   }
-  // A merge reply emptied by the judgement filter still ends with the hand-off line.
-  if (j.dropped.length > 0 && !j.body.trim() && body.trim() && !HANDOFF_RE.test(body)) {
-    body = `${body}\n\n${HANDOFF_LINE}`;
-  }
   if (!body.trim()) {
-    body = input.paragraphAlreadySent ? HANDOFF_LINE : `${MERGE_PARAGRAPH}\n\n${HANDOFF_LINE}`;
+    body = input.paragraphAlreadySent ? "" : MERGE_PARAGRAPH;
     paragraphSent = paragraphSent || !input.paragraphAlreadySent;
   }
   return { body, mergeIntent, actions, droppedJudgements: j.dropped, paragraphSent, mergeIntentThisTurn };

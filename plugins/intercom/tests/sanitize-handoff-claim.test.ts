@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { sanitizeHandoffClaim } from "../src/sanitize-handoff-claim.js";
 import { musoProfileUrl } from "../src/ticket-format.js";
+import { HONEST_FALLBACK } from "../src/answer-bank.js";
 
-const FALLBACK = "I'll make sure this gets to the team.";
+const FALLBACK = HONEST_FALLBACK;
 
 describe("sanitizeHandoffClaim", () => {
   it("rewrites first-person completed-action claims to the honest fallback when no ticket was filed", () => {

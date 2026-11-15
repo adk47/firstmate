@@ -839,8 +839,11 @@ guard (`guard-feedback.ts`); only a second refusal posts the `ai_queue_fallback`
 stays with her. The status line needs an `open_request` fact MEASURED in the same turn by one of her two
 own-row reads (`credit_verification_check`, `profile_claim_status`: fail closed without a signed-in
 contact; `profile_credits_status` stays denied because a typed id selects any profile). Unmeasured is not
-false. A model-written promise of a person is removed at send (`unbacked-handoff.ts`); only the system's
-escalation writes that line. Resolution rate and still-waiting are read daily by
+false. A model-written promise of a person is removed at send (`unbacked-handoff.ts`), merge threads
+included, and any phrasing that strip misses is refused by the guard rule `person_without_assignment`,
+which is UNCONDITIONAL: no fact can back the sentence, because nobody can be assigned (the escalation
+team has no members) and neither reply door nor the Ops bridge can assign. The escalation therefore
+says what it recorded and then moves the conversation to the escalation queue, never that a person is coming. Resolution rate and still-waiting are read daily by
 `scripts/support-resolution-daily.py` (`docs/support/resolution-daily.md`): a bulk sender's holding copy
 must be added to its rules or it reads as resolutions (2026-11-12: 13.9% read as 24.9% with nothing
 deployed). Approved lines live ONCE in
@@ -1019,7 +1022,7 @@ ONE place that says what Caroline did: `scripts/caroline_monitor/rules.py` holds
   rewritten only from a new read of the thread, so only a message sent on that conversation closes it.
 - **It sends nothing.** The sender is `scripts/request_comms/` (still off: `enabled: false`), which asks the
   ledger which thread carries the promise. Turning those lines on is a captain decision on the exact copy.
-- `waiting_on_us` is 1,594 with 1,391 older than 90 days, so never alarm on `> 0`; use `waiting_on_us_by_wait`.
+- `waiting_on_us` is 1,554 with 1,394 older than 90 days, so never alarm on `> 0`; use `waiting_on_us_by_wait`.
 
 ## The Ops bot's staff asks are routed, not answered by an agent turn
 

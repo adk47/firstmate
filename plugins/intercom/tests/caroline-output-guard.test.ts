@@ -7,6 +7,7 @@ import {
   maskApproved,
   normalizeReply,
   OUTPUT_GUARD_MODE,
+  saysPersonIsComing,
 } from "../src/caroline-output-guard.js";
 import { AI_QUEUE_FALLBACK, ANSWER_BANK, BLOCKED_REPLY_FALLBACK, HANDOFF_LINE, bankEntry } from "../src/answer-bank.js";
 
@@ -40,9 +41,13 @@ describe("approved bank lines always pass", () => {
       // a fact-conditioned line is approved only with its fact known-true at send
       const facts = e.requiresFact ? { openRequest: true } : undefined;
       expect(rules(text, { facts })).toEqual([]);
-      expect(rules(`${text}\n\n${HANDOFF_LINE}`, { facts })).toEqual([]);
+      expect(rules(`${text}\n\n${HANDOFF_LINE}`, { facts })).toEqual(["person_without_assignment"]);
     });
   }
+  it("no approved line says a person is coming", () => {
+    const needing = ANSWER_BANK.filter((e) => saysPersonIsComing(e.text.replace("{date}", "1 November 2026")) !== null).map((e) => e.id);
+    expect(needing).toEqual([]);
+  });
   it("with a greeting spliced in, curly apostrophes and markdown", () => {
     const doc = bankEntry("document_thanks")!.text.replace("Thank you.", "Thank you, Vanessa.").replace(/'/g, "\u2019");
     expect(rules(doc)).toEqual([]);
@@ -188,7 +193,8 @@ describe("normalisation", () => {
   it("mask leaves unapproved text in place", () => {
     const m = maskApproved(normalizeReply(`${HANDOFF_LINE} Approved!`));
     expect(m).toContain("Approved!");
-    expect(m).not.toContain("pulling in a teammate");
+    // The retired closing line is no longer an approved line, so masking leaves it to the rules.
+    expect(m).toContain("pulling in a teammate");
   });
 });
 
@@ -212,6 +218,93 @@ describe("the bank itself carries no barred phrase (Fable r5 on #1628)", () => {
       expect(hits.filter((r) => !(APPROVED_EXCEPTIONS[e.id] ?? []).includes(r))).toEqual([]);
     });
   }
+});
+
+describe("a person is coming: refused on every path, with no fact that can back it", () => {
+  const REFUSED = [
+    "A teammate will follow up with you.",
+    "a teammate will follow up",
+    "Someone from our team will reach out to you by email.",
+    "One of our specialists is going to review this and get back to you.",
+    "The support team will follow up with you.",
+    "Our team will get back to you by email.",
+    "I'm pulling in a teammate to take this from here.",
+    "I\u2019m pulling in a teammate to take this from here.",
+    "I'll connect you with a specialist.",
+    "I'll put you through to our support team.",
+    "I've handed this to a specialist.",
+    "I have escalated it to a human.",
+    "You'll hear from a team member here.",
+    "A human agent will take over this conversation now.",
+    "A teammate takes it from here.",
+    "I'm escalating this to our support team.",
+    "I've escalated this to our support team.",
+    "I'm handing this to the team.",
+    "I've handed this to our team.",
+    "I'll pass this to our support team.",
+    "I'm sending this over to our support team.",
+    "I'm transferring this to the billing team.",
+    "Your merge request is with our verification team. They will get back to you here.",
+    "They'll reach out once it is checked.",
+    "Someone will contact you about this.",
+    "Somebody is going to follow up with you.",
+    "They will follow up by email.",
+    "We will have someone follow up with you.",
+    "I'll get a teammate to take this over.",
+    "A teammate has been assigned to your case.",
+    "A teammate was assigned to your case.",
+    "A specialist is assigned to your request.",
+    "Someone was handed your request.",
+    "Your case will be handled by a specialist.",
+  ];
+  for (const reply of REFUSED) {
+    it(`refuses ${JSON.stringify(reply)}`, () => {
+      expect(rules(reply)).toContain("person_without_assignment");
+      expect(rules(reply, { facts: {} })).toContain("person_without_assignment");
+      expect(rules(reply, { facts: { openRequest: true } })).toContain("person_without_assignment");
+    });
+  }
+  it("the rule is in the promise family, blocks, and no fact relaxes it", () => {
+    const r = guardCarolineReply({ reply: HANDOFF_LINE });
+    expect(r.verdict).toBe("block");
+    expect(r.flags).toEqual([expect.objectContaining({ family: "promise", rule: "person_without_assignment" })]);
+    expect(guardCarolineReply({ reply: HANDOFF_LINE, facts: { openRequest: true } })).toMatchObject({ verdict: "block" });
+  });
+  it("an open request does not stand in for the assignment the sentence needs", () => {
+    const status = bankEntry("status_chase")!.text;
+    expect(rules(`${status}\n\n${HANDOFF_LINE}`, { facts: { openRequest: true } })).toEqual(["person_without_assignment"]);
+    expect(rules(status, { facts: { openRequest: false } })).toEqual(["fact_false:status_chase"]);
+  });
+  const ALLOWED = [
+    // states a fact about the customer's own request, promises nobody
+    "You have 3 credit requests waiting for review. The oldest was requested on 2 October 2026.",
+    // an offer is not a promise
+    "Would you like me to bring in a teammate?",
+    // a refusal is not a promise
+    "I can't promise a teammate will reply today.",
+    // the approved intent line names no person and no reply
+    "I have recorded this and will update you here as soon as there is news.",
+    "I will update you here as soon as there is news.",
+    // the approved status line: 'the team ... will ask here' is conditional copy, already approved
+    bankEntry("status_chase")!.text,
+    // process wording about the team: it names no individual and no reply to the customer
+    "The support team will look into it.",
+    "The team reviews requests in the order they arrive.",
+    // a pronoun doing process work, not reaching the customer
+    "Our verification team reviews it. They will review your documents.",
+    "Would you like me to check whether they will accept that document?",
+    // process wording in the passive: a team reviewing the documents promises no reply
+    "Your documents will be reviewed by our verification team.",
+  ];
+  for (const reply of ALLOWED) {
+    it(`does not fire on ${JSON.stringify(reply.slice(0, 60))}`, () => {
+      expect(rules(reply, { facts: { openRequest: true } })).not.toContain("person_without_assignment");
+      expect(saysPersonIsComing(reply)).toBeNull();
+    });
+  }
+  it("saysPersonIsComing is the same matcher the rule uses", () => {
+    for (const reply of REFUSED) expect(saysPersonIsComing(reply), reply).not.toBeNull();
+  });
 });
 
 describe("fact-conditioned lines (Fable r5: status_chase only on the open-request fact)", () => {

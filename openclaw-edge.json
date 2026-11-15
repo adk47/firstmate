@@ -306,8 +306,7 @@
             "document_intake",
             "merge_request_intake",
             "credit_trust_handoff",
-            "merge_intake",
-            "proof_on_file"
+            "merge_intake"
           ]
         }
       }

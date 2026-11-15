@@ -29,7 +29,7 @@ from ops_intake import resolutions as res_mod  # noqa: E402
 from ops_intake import summarize as summarize_mod  # noqa: E402
 
 BANK_IDS = ["credit_how", "claim_how", "removal_how", "merge_how", "declined", "status_chase",
-            "hidden_stays", "handoff_line", "gdpr_ack_v2", "timing_other"]
+            "hidden_stays", "honest_fallback", "gdpr_ack_v2", "timing_other"]
 
 
 def conversation(*, external_id="prof-1", email="fan@example.com", customer="where is my request?",

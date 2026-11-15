@@ -107,6 +107,14 @@ class OutcomeTests(unittest.TestCase):
         self.assertEqual(self.one([cust(T), caro(T + 5, "Un compa\u00f1ero se encargar\u00e1 del seguimiento.")]),
                          "person_promised_unassigned")
 
+    def test_the_honesty_lines_are_a_held_follow_up_and_never_a_resolution(self):
+        # The approved copy (answer-bank.ts HONEST_FALLBACK / _UNRECORDED, firstmate inbox 010/011).
+        for body in ("I have recorded this and will update you here as soon as there is news.",
+                     "I will update you here as soon as there is news."):
+            with self.subTest(body=body):
+                # parked on "we owe you a word", which is not an answer and not a person promise
+                self.assertEqual(self.one([cust(T), caro(T + 5, body)]), "queue_line")
+
     def test_a_person_replying_after_a_promise_does_not_turn_it_into_caroline_resolving_it(self):
         # A person answered after her promise: not hers, and the customer is no longer waiting.
         self.assertEqual(self.one([cust(T), caro(T + 5, HANDOFF), assign(T + 6), human(T + 60)]),

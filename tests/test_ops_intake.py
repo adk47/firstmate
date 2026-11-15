@@ -723,16 +723,21 @@ class Router(Base):
         self.assertTrue(pages, "the pager was never called for a hand-off")
         self.assertIn("215476444480749", pages[0])
 
-    def test_a_read_only_requester_still_pages_the_handoff(self):
-        """QA #1842: the `may_write` refusal branch also rebuilt the Answer without `page`.
+    def test_a_read_only_requester_is_refused_the_write_and_the_answer_survives(self):
+        """QA #1842: the `may_write` branch must not swallow the answer with the write.
 
-        A read-only or unknown requester asking for a resolution gets a hand-off page from the
-        answerer. The refusal is about the WRITE, not about the hand-off, so dropping the page
-        there means the case reaches nobody.
+        The intent is injected and an open request is measured, so the mapping proposes the W1
+        status line this requester may not send. The answer still reaches the requester, saying
+        the write was refused.
         """
         conv = _intercom_conversation("I submitted my proof, any update?")
         lens = redteam.StubLens({"band": "clean", "requester_linked": False})
         pages = []
+        readers = _stub_readers()
+        readers.requests = lambda _aid, _q: [{"profile_id": "prof-1", "status": "pending"}]
+        guardobj = guard.Guard(
+            judge=lambda prompt, schema: {"text": "where_is_my_request",
+                                          "data": {"intent": "where_is_my_request"}})
         with unittest.mock.patch.object(output_guard, "line",
                                         lambda line_id, **k: f"<{line_id}>"), \
                 unittest.mock.patch.object(output_guard, "check",
@@ -743,10 +748,45 @@ class Router(Base):
                 self.envelope("give me summary and resolution intercom 215476444480749",
                               user="U0NOTSTAFF1"),
                 backends=answer_mod.Backends(intercom_conversation=lambda c: conv, lens=lens,
+                                             readers=readers, pager=pages.append),
+                guardobj=guardobj)
+        self.assertEqual(out.state, "refused")
+        self.assertIn("refused for this requester", out.reply or "")
+
+    def test_a_refused_write_keeps_the_handoff_page(self):
+        """QA #1842: the refusal is about the WRITE, never about the hand-off.
+
+        `page=ans.page` in the `may_write` branch exists so a read-only or unknown requester's
+        hand-off still reaches a human. The answerer here proposes a W1 reply AND a page (the
+        shape the guard-blocked reply path produces); the write must be refused and the page must
+        survive, naming the conversation.
+        """
+        conv = _intercom_conversation("I submitted my proof, any update?")
+        lens = redteam.StubLens({"band": "clean", "requester_linked": False})
+        pages = []
+
+        def answerer(**_kwargs):
+            return answer_mod.Answer(
+                state="answered",
+                verdict="suggested: status-chase -> status-line",
+                evidence="card",
+                write=answer_mod.WriteRequest(
+                    action="intercom_customer_reply", target="215476444480749",
+                    params={"conversation_id": "215476444480749", "body": "<status_chase>"},
+                    inverse_action="annotate_intercom_reply", inverse_params={}),
+                page="ops-intake: status-line on conversation 215476444480749 handed off "
+                     "to human queue - a human must pick it up")
+
+        with unittest.mock.patch.object(router_mod, "_answer_for", answerer):
+            out = self._route(
+                self.envelope("give me summary and resolution intercom 215476444480749",
+                              user="U0NOTSTAFF1"),
+                backends=answer_mod.Backends(intercom_conversation=lambda c: conv, lens=lens,
                                              readers=_stub_readers(), pager=pages.append))
         self.assertEqual(out.state, "refused")
-        self.assertTrue(out.page, "the hand-off page was lost in the may_write refusal branch")
-        self.assertTrue(pages, "the pager was never called for a read-only requester's hand-off")
+        self.assertIn("refused for this requester", out.reply or "")
+        self.assertTrue(pages, "the hand-off page was lost in the may_write branch")
+        self.assertIn("215476444480749", pages[0])
 
     def test_w2_in_the_message_refuses_the_whole_ask(self):
         pages = []

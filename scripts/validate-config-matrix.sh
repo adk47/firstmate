@@ -302,12 +302,13 @@ for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
   #        have it. The cost is real and unpriced elsewhere: operations is a
   #        codex agent and stays permanently restricted, losing skill_search,
   #        memories, image_generation and browser_use too.
-  #      - openclaw-edge.json:support:<the 12 verification/merge tools> -- captain 2026-10-28 12:1xZ /
+  #      - openclaw-edge.json:support:<the 11 verification/merge tools> -- captain 2026-10-28 12:1xZ /
   #        12:3xZ: Caroline holds no verification or merge capability. Two reads left this list on
   #        2026-11-12 (ai-support-quality-v1): credit_verification_check and profile_claim_status fail
   #        closed on the signed-in contact and return that customer's own rows only, and they are the
   #        only writer of the open_request fact the output guard needs. A stale row for either fails
-  #        this check, so re-denying them means restoring their rows here too. These are plugin
+  #        this check, so re-denying them means restoring their rows here too. `proof_on_file` left on
+  #        2026-11-14 because support-tools registers no tool under that name. These are plugin
   #        tools (support-tools), not codex-native ones, and `support` already runs the restricted
   #        harness because of `exec` above, so they add no further native-surface cost. They are listed
   #        here so a deploy keeps the live deny list (scripts/lib/assert-support-deny.sh).
@@ -336,7 +337,7 @@ for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
   #        qa still runs the restricted harness, so it still has no native web_search / skill_search / memories /
   #        MCP; the PR body enumerates what replaces each of those. Revert = restore `exec` to qa's deny list and
   #        delete the REGRANT_ALLOWLIST claim.
-  HARNESS_DENY_EXCEPTIONS='["openclaw-main.json:scout:exec","openclaw-main.json:qa:process","openclaw-main.json:qa:lobster","openclaw-main.json:qa:nodes","openclaw-main.json:qa:computer","openclaw-main.json:qa:terminal","openclaw-main.json:finance:exec","openclaw-main.json:finance:process","openclaw-main.json:finance:lobster","openclaw-main.json:finance:nodes","openclaw-main.json:finance:computer","openclaw-main.json:finance:terminal","openclaw-main.json:scout:process","openclaw-main.json:scout:lobster","openclaw-main.json:scout:nodes","openclaw-main.json:scout:computer","openclaw-main.json:scout:terminal","openclaw-edge.json:support:exec","openclaw-main.json:operations:web_search","openclaw-edge.json:support:credits_verify","openclaw-edge.json:support:profiles_claim_self","openclaw-edge.json:support:profiles_consolidate","openclaw-edge.json:support:profile_credits_status","openclaw-edge.json:support:dedupe_check","openclaw-edge.json:support:remove_credits","openclaw-edge.json:support:credit_status_lookup","openclaw-edge.json:support:document_intake","openclaw-edge.json:support:merge_request_intake","openclaw-edge.json:support:credit_trust_handoff","openclaw-edge.json:support:merge_intake","openclaw-edge.json:support:proof_on_file"]'
+  HARNESS_DENY_EXCEPTIONS='["openclaw-main.json:scout:exec","openclaw-main.json:qa:process","openclaw-main.json:qa:lobster","openclaw-main.json:qa:nodes","openclaw-main.json:qa:computer","openclaw-main.json:qa:terminal","openclaw-main.json:finance:exec","openclaw-main.json:finance:process","openclaw-main.json:finance:lobster","openclaw-main.json:finance:nodes","openclaw-main.json:finance:computer","openclaw-main.json:finance:terminal","openclaw-main.json:scout:process","openclaw-main.json:scout:lobster","openclaw-main.json:scout:nodes","openclaw-main.json:scout:computer","openclaw-main.json:scout:terminal","openclaw-edge.json:support:exec","openclaw-main.json:operations:web_search","openclaw-edge.json:support:credits_verify","openclaw-edge.json:support:profiles_claim_self","openclaw-edge.json:support:profiles_consolidate","openclaw-edge.json:support:profile_credits_status","openclaw-edge.json:support:dedupe_check","openclaw-edge.json:support:remove_credits","openclaw-edge.json:support:credit_status_lookup","openclaw-edge.json:support:document_intake","openclaw-edge.json:support:merge_request_intake","openclaw-edge.json:support:credit_trust_handoff","openclaw-edge.json:support:merge_intake"]'
 
   #    REACH OF THIS GATE, stated honestly: openclaw classifies over
   #    explicitPolicies = [globalPolicy, globalProviderPolicy, agentPolicy,

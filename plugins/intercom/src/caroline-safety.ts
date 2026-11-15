@@ -251,7 +251,7 @@ export interface OutboundGuardParams {
   customerText: string;
   customerNames?: string[];
   customerEmails?: string[];
-  /** Code-sourced facts at send (see GuardInput.facts). */
+  /** Code-sourced facts at send (see GuardInput.facts). openRequest only: see guardOutbound. */
   facts?: { openRequest?: boolean };
   /** Per-deploy canary token (see GuardInput.canary). Resolved by the caller, never read from env here. */
   canary?: string;
@@ -295,7 +295,11 @@ export async function guardOutbound(p: OutboundGuardParams): Promise<OutboundGua
     customerText: p.customerText,
     customerNames: p.customerNames,
     customerEmails: p.customerEmails,
-    facts: p.facts,
+    // ONLY openRequest crosses this boundary. There is no assignment fact to forward: a reply that
+    // comes through here was written by Caroline, she cannot assign a conversation
+    // (assignment-policy.ts), and the escalation team has no members, so "a person is coming" is
+    // refused on both reply doors whatever a caller passes (rule person_without_assignment).
+    facts: { openRequest: p.facts?.openRequest },
     canary: p.canary,
   });
   // Classifier second: only when the rules passed, and it can only ADD a block.

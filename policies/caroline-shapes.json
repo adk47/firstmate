@@ -22,7 +22,7 @@
     "`fix` on an open row is the missing piece named by the caroline-intent-mining-m1 report (30-day read of",
     "all 4,051 threads, 2026-11-11). It says what kind of fix this is, not how to build it."
   ],
-  "rules_version": "2026-11-11.2",
+  "rules_version": "2026-11-14.1",
   "monitor": {
     "cadence": "every 2 hours (caroline-monitor.timer on node-8)",
     "window_days": 37,

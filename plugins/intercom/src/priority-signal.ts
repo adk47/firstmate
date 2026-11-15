@@ -17,8 +17,8 @@
  *   - NO_REPLY *suppresses* the post. PRIORITY *keeps* the (stripped) post and
  *     *adds* the classify-and-tag side-effect. The token may co-exist with real
  *     reply text.
- *   - The handoff escalation pulls Caroline OUT (reassigns to a human, posts a
- *     "pulling in a teammate" farewell). The priority signal leaves her IN — it
+ *   - The escalation pulls Caroline OUT (says what it recorded, then moves the
+ *     conversation to the escalation queue). The priority signal leaves her IN — it
  *     is purely an internal classification; she keeps helping the customer.
  *
  * Optional payload: `[[PRIORITY: <reason>]]` carries Caroline's read of the

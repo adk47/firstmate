@@ -144,6 +144,9 @@ QUEUE_LINE = _rx(
     # honest, and they are not answers: under rules .1 they read as 38 resolutions in one hour.
     r"|\bit will be read\b|\bwe will write to you here\b|\bqueued for review\b|\bit is with the team\b"
     r"|\bwe will tell you what we (find|need)\b|\bwe are checking it\b|\bte escribiremos (aqu[ií]|por aqu[ií])\b"
+    # The approved honesty lines (answer-bank.ts, firstmate inbox 010/011 2026-11-14): an owed
+    # follow-up, naming no person. A holding message, so never a resolution.
+    r"|\bi have recorded this and will update you here\b|\bi will update you here as soon as there is news\b"
 )
 # A REFUSAL with a way back. Not a hand-off, and not resolved either.
 REFUSAL_LINE = _rx(

@@ -34,7 +34,7 @@ from ops_intake import output_guard  # noqa: E402
 from ops_intake import resolutions as res_mod  # noqa: E402
 
 BANK_IDS = ["credit_how", "claim_how", "removal_how", "merge_how", "declined", "status_chase",
-            "hidden_stays", "handoff_line", "gdpr_ack_v2", "timing_other"]
+            "hidden_stays", "honest_fallback", "gdpr_ack_v2", "timing_other"]
 
 POLICY = res_mod.Policy.load(ROOT / "policies" / "ops-resolutions.json", bank_ids=BANK_IDS)
 
@@ -165,13 +165,20 @@ class AnswererTest(unittest.TestCase):
         self.assertIn("store missing on", ans.verdict)
         self.assertIn("erasure.sqlite", ans.verdict)
 
-    def test_an_unmapped_ask_is_unknown_and_still_sends_the_handoff_line(self):
-        """A hand-off that names an approved line SENDS it: silence leaves the customer in the dark."""
+    def test_an_unmapped_ask_is_a_page_only_handoff_that_names_the_conversation(self):
+        """Captain 2026-11-14 (firstmate inbox 012): no customer line from the `unknown` action.
+
+        This surface cannot reassign a conversation and no approved line promises nobody, so the
+        answerer proposes NO write and the page - which names the conversation id - is the whole
+        hand-off. A stand-in guard that passes everything pins the routing itself: even then there
+        is no line to send.
+        """
         ans = self._run(intent="other")
         self.assertEqual(ans.state, "answered")
-        self.assertIsNotNone(ans.write)
-        self.assertEqual(ans.write.params["line_id"], "handoff_line")
+        self.assertIsNone(ans.write)
         self.assertIn("rule=fallthrough", ans.notes)
+        self.assertTrue(ans.page)
+        self.assertIn("conv-1", ans.page)
 
     def test_a_requester_linked_account_gets_no_customer_reply_and_pages(self):
         """QA #1842: the refusal must not become a customer write.
@@ -210,11 +217,11 @@ class AnswererTest(unittest.TestCase):
                         readers_obj=readers(requests=OPEN_REQUEST, popular=True),
                         text='rename to "New Name"')
         self.assertIn("rule=rename-popular-profile-is-W2", ans.notes)
-        # The hand-off line still goes out (the customer is not left in the dark), but the write
-        # is the approved hand-off reply, never a rename.
-        self.assertIsNotNone(ans.write)
-        self.assertEqual(ans.write.action, "intercom_customer_reply")
-        self.assertEqual(ans.write.params["line_id"], "handoff_line")
+        # No write is proposed and the page names the conversation: nothing here carries the rename
+        # out and no customer line is invented for it.
+        self.assertIsNone(ans.write)
+        self.assertTrue(ans.page)
+        self.assertIn("conv-1", ans.page)
 
     # -- the guard is the gate, and it fails closed ----------------------------------------
 
@@ -231,6 +238,22 @@ class AnswererTest(unittest.TestCase):
         self.assertEqual(ans.state, "refused")
         self.assertIsNone(ans.write)
         self.assertIn("promise/outcome", ans.page or "")
+
+    def test_a_blocked_reply_page_names_the_conversation(self):
+        """A blocked-reply page is never anonymous: no write, and the page carries the conv id.
+
+        The real guard refuses "a person is coming" unconditionally (guard g1-2026-11-14.2), and a
+        blocked proposal is page-only on this surface.
+        """
+        def _no_assignment(text, **_k):
+            return _Outcome(blocked=True, body=text,
+                            flags=[{"family": "promise", "rule": "person_without_assignment"}])
+
+        ans = self._run(intent="where_is_my_request", readers_obj=readers(requests=OPEN_REQUEST),
+                        guard_check=_no_assignment)
+        self.assertIsNone(ans.write)
+        self.assertTrue(ans.page)
+        self.assertIn("conv-1", ans.page)
 
     def test_a_refused_bank_line_sends_nothing(self):
         def _refuse(line_id, **_k):
@@ -337,14 +360,16 @@ class AnswererTest(unittest.TestCase):
         self.assertIn("not the account's profile", ans.page or "")
 
     def test_a_rename_measures_popularity_on_the_target_profile(self):
+        """Popularity is measured on the TARGET profile: the W2 hand-off proposes no write."""
         backends = answer_mod.Backends(profile_name=lambda pid: "Old Name")
         ans = self._run(intent="rename_profile",
                         readers_obj=readers(requests=OPEN_REQUEST, popular=False,
                                             profile_popular=True),
                         backends=backends, text='rename to "New Name"')
         self.assertIn("rule=rename-popular-profile-is-W2", ans.notes)
-        self.assertIsNotNone(ans.write)
-        self.assertEqual(ans.write.action, "intercom_customer_reply")
+        self.assertIsNone(ans.write)
+        self.assertTrue(ans.page)
+        self.assertIn("conv-1", ans.page)
 
     def test_a_rename_without_a_requester_supplied_name_is_refused_not_guessed(self):
         backends = answer_mod.Backends(profile_name=lambda pid: "Old Name")

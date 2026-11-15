@@ -3,19 +3,23 @@
  *
  * Caroline's honesty rule (workspaces/support/SOUL.md) forbids claiming a follow-up was
  * created unless she actually called create_ticket AND received a success THIS
- * conversation; when she hasn't, the sanctioned wording is a statement of intent —
- * "I'll make sure this gets to the team." That rule was prose-only, and a real
+ * conversation; when she hasn't, the sanctioned wording is a statement of intent that
+ * also records the follow-up: "I have recorded this and will update you here as soon as
+ * there is news." That rule was prose-only, and a real
  * conversation shipped "added these ... and raised it with the team" with no ticket
  * behind it (no ClickUp task, no audit-log hit). This sanitizer is the deterministic
  * enforcement layer: when no ticket was confirmed for the conversation, it rewrites a
- * completed-action handoff claim down to the honest fallback (and drops a co-occurring
- * invented SLA), so a confabulated reassurance can never reach the customer.
+ * completed-action handoff claim down to the honest fallback (answer-bank.ts HONEST_FALLBACK,
+ * whose "I have recorded this" outbound.ts makes true before the send), so a
+ * confabulated reassurance can never reach the customer.
  *
  * Composes AFTER sanitize-email / sanitize-tool-leak / sanitize-typography in
  * outbound.ts and mirrors their { body, redactions } shape. It deliberately matches only
  * COMPLETED-action claims (the actual lie); pure future promises ("I'll flag this…") and
  * the sanctioned fallback itself are left untouched.
  */
+
+import { HONEST_FALLBACK } from "./answer-bank.js";
 
 export interface HandoffClaimSanitizeResult {
   body: string;
@@ -24,9 +28,10 @@ export interface HandoffClaimSanitizeResult {
 
 const MAX_BODY_LENGTH = 16_000;
 
-// The exact, verbatim honest fallback from SOUL.md. A statement of INTENT, not a
-// completed-action claim, so by construction it must never match the families below.
-const FALLBACK = "I'll make sure this gets to the team.";
+// The exact, verbatim honest fallback from SOUL.md (answer-bank.ts, one source). It states an
+// intent and a completed action on OUR OWN record ("I have recorded this"), which outbound.ts makes
+// true before the send; by construction it must never match the families below.
+const FALLBACK = HONEST_FALLBACK;
 
 // Family A — first-person COMPLETED action verb + a human-handoff target. Catches the
 // real lie: "I've flagged this for our team", "I raised it with the team", "I've sent

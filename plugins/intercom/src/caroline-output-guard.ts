@@ -3,10 +3,13 @@
  * security-arch-fable-s1, copy review pr-review-fable-r5).
  *
  * The last code-owned gate before any Caroline reply is posted to a customer. It decides; the
- * prompt does not. A reply is BLOCKED (replaced by the approved hand-off line, the conversation
- * reassigned to the human inbox, tagged and flagged) when it:
+ * prompt does not. A reply is BLOCKED (replaced by BLOCKED_REPLY_FALLBACK, the AI-queue line that
+ * promises no person; the conversation stays with Caroline per assignment-policy.ts; tagged and
+ * flagged) when it:
  *
- *   (a) PROMISES an outcome, a date or timeframe, an approval, a refund or a deletion;
+ *   (a) PROMISES an outcome, a date or timeframe, an approval, a refund or a deletion, or says a
+ *       PERSON is coming when the conversation was not assigned to a staffed queue in the same
+ *       step (rule `person_without_assignment`, see PERSON_COMING_RULES);
  *   (b) REVEALS internal process ("secret sauce"): scores, thresholds, signals, the fraud lens,
  *       which sources we check, reviewer / staff names, model or vendor names, internal tools,
  *       or another person's data (a phone number, street address or email the customer did not
@@ -32,12 +35,13 @@
  */
 
 import { createHash } from "node:crypto";
-import { ANSWER_BANK, BANK_VERSION, BLOCKED_REPLY_FALLBACK } from "./answer-bank.js";
+import { ANSWER_BANK, BANK_VERSION, BLOCKED_REPLY_FALLBACK, HANDOFF_LINE } from "./answer-bank.js";
 
-export const OUTPUT_GUARD_VERSION = "g1-2026-11-04.1";
+export const OUTPUT_GUARD_VERSION = "g1-2026-11-14.3";
 
 /**
- * "enforce": a blocked reply is replaced and the conversation handed to a human.
+ * "enforce": a blocked reply is replaced by BLOCKED_REPLY_FALLBACK. It assigns nobody, so the
+ * conversation stays with Caroline (assignment-policy.ts); only an escalation assigns.
  * "shadow": the verdict is logged and flagged, the reply is posted unchanged.
  * A constant, not config: flipping it is a reviewed PR.
  */
@@ -261,6 +265,88 @@ const PROMISE_RULES: Rule[] = [
 ];
 
 // ---------------------------------------------------------------------------------------------
+// (a2) a person is coming
+//
+// Captain (caroline-read-state-tools-r1; tightened 2026-11-14): the hand-off line went out in 81% of
+// threads and a person was assigned in 15%. A sentence that says a person will follow up, reach out,
+// reply or take over is a promise about staff, and NOBODY can be assigned that would make it true:
+// the escalation team has no members (assignment-policy.ts), and Caroline cannot assign a
+// conversation at all. So the rule is UNCONDITIONAL — there is no fact that lets it pass, and an
+// "assigned in this step" fact nothing can truthfully set was a dead bypass (captain 2026-11-14).
+//
+// The approved hand-off line itself is covered (it is the sentence the numbers are about), so it is
+// matched on the text BEFORE approved lines are masked. Deliberately NOT covered:
+//   - an OFFER ("would you like me to bring in a teammate?") and a refusal ("I can't promise a
+//     teammate will reply");
+//   - process wording about the team as a whole ("our verification team reviews it", "the team
+//     will review your documents"): that is how the queue works, not a person taking this thread.
+//     The TEAM only counts when it is said to CONTACT the customer or to be handed the customer;
+//   - a PRONOUN after a team is mentioned only counts for the four contact acts ("they will get
+//     back to you", "they'll reach out", "someone will contact you", "somebody is going to
+//     follow up"): "they will review your documents" is process wording, not a person coming;
+//   - "I'll pass it on" / "I have recorded this and will update you here as soon as there is
+//     news" (the honest fallback, answer-bank.ts): intent, no person, no reply.
+//
+// Causative ("we will have someone follow up") and passive ("a teammate has been assigned",
+// "a specialist is assigned to your request", "your case will be handled by a specialist") forms
+// say the same thing as the active ones, so they are matched too: a customer reads all three as a
+// person taking the thread.
+
+const INDIVIDUAL = String.raw`(?:(?:an?|another|one\s+of\s+(?:our|the|my)|our|my|the)\s+(?:[\w-]+\s+){0,2}?(?:teammates?|team\s+members?|colleagues?|specialists?|agents?|person|human|representative|member\s+of\s+(?:the|our)\s+team)|some(?:one|body)(?:\s+(?:from|on|in|at)\s+(?:the|our)\s+(?:[\w-]+\s+){0,2}?team)?|a\s+real\s+person)`;
+const TEAM = String.raw`(?:(?:the|our)\s+(?:[\w-]+\s+){0,2}?team)`;
+// Reaching the customer: the acts that mean "you will hear from them".
+const CONTACT_ACT = String.raw`(?:follow\s+up|reach\s+out|get\s+back\s+to\s+you|be\s+in\s+touch|get\s+in\s+touch|contact\s+you|reply|respond|email\s+you|message\s+you|write\s+to\s+you|call\s+you)`;
+// Taking the thread: only a promise when an individual is said to do it.
+const OWN_ACT = String.raw`(?:take\s+(?:this|it|that|over)|pick\s+(?:this|it|that)\s+up|look\s+(?:into|at)|review|help\s+you|assist\s+you|handle|sort\s+(?:this|it|that)\s+out)`;
+const WILL = String.raw`(?:will|'ll|is\s+going\s+to|are\s+going\s+to|is\s+about\s+to|should|shall)\s+(?:[\w']+\s+){0,3}?`;
+// The pronoun that follows a mention of the team in the same reply.
+const PRONOUN = String.raw`(?:they)`;
+// The four acts that mean "you will hear from them"; narrower than CONTACT_ACT on purpose.
+const CONTACT_PROMISE_ACT = String.raw`(?:get\s+back(?:\s+to\s+you)?|reach\s+out|contact\s+(?:you)?|follow\s+up)`;
+
+const PERSON_COMING_RULES: RegExp[] = [
+  // "a teammate will follow up", "someone from our team is going to look into it"
+  new RegExp(String.raw`\b${INDIVIDUAL}\s+${WILL}(?:${CONTACT_ACT}|${OWN_ACT})\b`, "i"),
+  // "the team will follow up with you", "our support team is going to reach out"
+  new RegExp(String.raw`\b${TEAM}\s+${WILL}${CONTACT_ACT}\b`, "i"),
+  // "a teammate takes it from here", "a teammate is taking this over"
+  new RegExp(String.raw`\b${INDIVIDUAL}\s+(?:takes?|is\s+taking|are\s+taking|picks?|is\s+picking|has\s+picked)\s+(?:this|it|that|over)\b`, "i"),
+  // "I'm pulling in a teammate", "I've handed this to a specialist", "I have escalated it to a human"
+  new RegExp(
+    String.raw`\b(?:I|we)(?:'m|\s+am|'re|\s+are|'ll|\s+will|'ve|\s+have)?\s+(?:(?:now|just|already|going\s+to)\s+)*(?:pull(?:ing|ed)?\s+in|loop(?:ing|ed)?\s+in|bring(?:ing)?\s+in|brought\s+in|get(?:ting)?\s+you|(?:hand(?:ing|ed)?|pass(?:ing|ed)?|transferr?(?:ing|ed)?|escalat(?:ing|ed?)|assign(?:ing|ed)?|forward(?:ing|ed)?|rout(?:ing|ed?)|send(?:ing)?|sent)\s+(?:you|this|it|that|your\s+[\w-]+)\s+(?:(?:over|on|along|off|up)\s+)?to)\s+(?:${INDIVIDUAL}|${TEAM})`,
+    "i",
+  ),
+  // "I'll connect you with a specialist", "putting you through to our support team"
+  new RegExp(
+    String.raw`\b(?:connect(?:ing|ed)?\s+you\s+(?:with|to)|put(?:ting)?\s+you\s+(?:through\s+to|in\s+touch\s+with)|(?:hand(?:ing|ed)?|transferr?(?:ing|ed)?)\s+you\s+(?:over\s+)?to)\s+(?:${INDIVIDUAL}|${TEAM})`,
+    "i",
+  ),
+  // "you'll hear from a teammate", "expect a reply from one of our specialists"
+  new RegExp(String.raw`\b(?:hear(?:\s+back)?|a\s+(?:reply|response|message|email|call))\s+from\s+${INDIVIDUAL}`, "i"),
+  // "They will get back to you here", "they'll reach out once it is checked"
+  new RegExp(String.raw`\b${PRONOUN}\s*${WILL}${CONTACT_PROMISE_ACT}\b`, "i"),
+  // "We will have someone follow up with you", "I'll get a teammate to take this over"
+  new RegExp(
+    String.raw`\b(?:I|we)(?:'ll|\s+will|\s+can|\s+(?:am|are)\s+going\s+to)?\s+(?:have|get|ask)\s+${INDIVIDUAL}\s+(?:to\s+)?(?:${CONTACT_ACT}|${OWN_ACT})\b`,
+    "i",
+  ),
+  // "A teammate has been assigned to your case", "someone was handed your request",
+  // "a specialist is assigned to your request" (simple past/present state, no "been")
+  new RegExp(
+    String.raw`\b${INDIVIDUAL}\s+(?:(?:has|have|had)\s+been\s+|(?:is|are|was|were)\s+(?:now\s+|already\s+)?)(?:assigned|handed|passed|transferred|routed|escalated|given)\b`,
+    "i",
+  ),
+  // "Your case will be handled by a specialist", "this was taken care of by our support team"
+  new RegExp(
+    String.raw`\byour\s+(?:[\w'-]+\s+){0,2}?(?:case|request|ticket|thread|conversation|issue|claim)\s+(?:will\s+be|is\s+(?:now\s+)?being|has\s+been|was)\s+(?:handled|taken\s+care\s+of|looked\s+(?:into|at)|escalated|passed\s+(?:on|over))\s+by\s+${INDIVIDUAL}`,
+    "i",
+  ),
+];
+const HANDOFF_LINE_RE = bankPattern(HANDOFF_LINE);
+/** The rule name, exported for the ledger vocabulary and the feedback table. */
+export const PERSON_WITHOUT_ASSIGNMENT_RULE = "person_without_assignment";
+
+// ---------------------------------------------------------------------------------------------
 // (b) secret sauce
 
 const TOOL_NAMES = [
@@ -445,6 +531,31 @@ function promiseExempt(text: string, index: number, match: string, rule: string)
   return false;
 }
 
+function personComing(normalized: string, remainder: string): string | null {
+  HANDOFF_LINE_RE.lastIndex = 0;
+  const line = HANDOFF_LINE_RE.exec(normalized);
+  if (line) return line[0];
+  for (const re of PERSON_COMING_RULES) {
+    const all = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
+    for (const m of remainder.matchAll(all)) {
+      // "I can't promise a teammate will reply" is a refusal, not a promise.
+      if (promiseExempt(remainder, m.index ?? 0, m[0], PERSON_WITHOUT_ASSIGNMENT_RULE)) continue;
+      return m[0];
+    }
+  }
+  return null;
+}
+
+/**
+ * The sentence in `reply` that says a person is coming, or null. The SAME matcher the
+ * `person_without_assignment` rule uses, exported so the red-team corpus check can tell which
+ * approved replies depend on an assignment (tests/redteam.test.ts) without a second pattern set.
+ */
+export function saysPersonIsComing(reply: string): string | null {
+  const normalized = normalizeReply(reply);
+  return personComing(normalized, maskApproved(normalized));
+}
+
 function excerpt(s: string): string {
   const t = s.replace(/\s+/g, " ").trim();
   return t.length > 80 ? `${t.slice(0, 77)}...` : t;
@@ -495,6 +606,13 @@ export function evaluateReply(input: GuardInput): GuardFlag[] {
       add(r.family, r.rule, m[0]);
       break;
     }
+  }
+
+  // A person is coming: refused unconditionally, because nothing can assign the conversation that
+  // would make it true (no fact can back it; see the section header).
+  {
+    const m = personComing(normalized, remainder);
+    if (m) add("promise", PERSON_WITHOUT_ASSIGNMENT_RULE, m);
   }
 
   // altered approved line: the lead of a bank entry survives masking, so the exact text did not

@@ -52,7 +52,8 @@ bank = json.loads(sys.argv[2].strip().splitlines()[-1])
 lines = {e["id"]: e["text"] for e in bank["entries"]}
 body = blocked["body"]
 assert body == lines["ai_queue_fallback"], body
-assert body != lines["handoff_line"], body
+# The retired hand-off line is not a bank line any more: nothing on this surface sends it.
+assert "handoff_line" not in lines, sorted(lines)
 assert "teammate" not in body.lower(), body
 print("fallback-is-the-bank-line")
 ' "$blocked" "$output"
@@ -138,10 +139,33 @@ J
 }
 
 @test "the Python guard bridge PASSES an approved bank line" {
-  run bash -c "cd '$HYDRA_REPO' && python3 scripts/ops_intake/output_guard.py --check \"I'm pulling in a teammate to take this from here.\""
+  run bash -c "cd '$HYDRA_REPO' && python3 scripts/ops_intake/output_guard.py --check \"I want to get this right for you. Could you tell me a little more about what you need help with?\""
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"verdict": "pass"'
   echo "$output" | grep -q '"bank_version"'
+}
+
+@test "the Ops surface cannot say a person is coming: it assigns nobody, so the real guard refuses the hand-off line" {
+  # caroline-read-state-tools-r1: "a teammate takes it from here" is true only when the
+  # conversation was assigned to a staffed queue in the same step. Nothing on this surface can
+  # assign an Intercom conversation (router._production_writers() is empty), so the approved
+  # hand-off line is refused here like any other unbacked promise of a person.
+  run bash -c "cd '$HYDRA_REPO' && python3 scripts/ops_intake/output_guard.py --check \"I'm pulling in a teammate to take this from here.\""
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"verdict": "block"'
+  echo "$output" | grep -q '"rule": "person_without_assignment"'
+  run bash -c "cd '$HYDRA_REPO' && python3 scripts/ops_intake/output_guard.py --check 'A teammate will follow up with you.'"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"rule": "person_without_assignment"'
+}
+
+@test "a caller cannot assert an assignment through the bridge" {
+  # There is no assignment fact: nobody can be assigned (the escalation team has no members), so
+  # a stdin field claiming one must change nothing.
+  run bash -c "echo '{\"reply\":\"I am pulling in a teammate to take this from here.\",\"assignedThisStep\":true,\"facts\":{\"assignedThisStep\":true}}' | node --experimental-strip-types --no-warnings --import '$HOOKS' '$BRIDGE'"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"verdict":"block"'
+  echo "$output" | grep -q '"rule":"person_without_assignment"'
 }
 
 @test "the Ops reply path refuses a body that leaks internal surfaces" {

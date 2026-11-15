@@ -1168,6 +1168,19 @@ describe("sendTextReply (a gate-dropped or blocked reply on the sendText path st
     expect(pages).toHaveLength(1);
     expect(r.messageId).not.toBe("");
   });
+  // caroline-read-state-tools-r1: this door assigns nobody either, so "a person is coming" never
+  // leaves through it, the approved hand-off line included.
+  it.each([
+    "I'm pulling in a teammate to take this from here.",
+    "A teammate will follow up with you.",
+    "Someone from our support team is going to reach out to you by email.",
+  ])("a body that says a person is coming via sendText is replaced by the AI-queue fallback: %s", async (body) => {
+    const client = new MockIntercomClient();
+    await sendTextReply({ client, account, conversationId: "conv_9", body, safetyDeps: quiet });
+    expect(client.calls.replyToConversation).toHaveLength(1);
+    expect((client.calls.replyToConversation[0] as { body: string }).body).toBe(BLOCKED_REPLY_FALLBACK);
+    expect(client.calls.assignConversation).toEqual([]);
+  });
   it("a phone number on this path fails closed (no customer turn to echo)", async () => {
     const client = new MockIntercomClient();
     await sendTextReply({ client, account, conversationId: "conv_9", body: "Call them on +44 7700 900123.", safetyDeps: quiet });

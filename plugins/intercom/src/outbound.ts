@@ -9,6 +9,13 @@ import { sanitizeHandoffClaim } from "./sanitize-handoff-claim.js";
 import { sanitizeInternalReference } from "./sanitize-internal-reference.js";
 import { wasTicketFiledRecently, getFiledTicketIds } from "./ticket-success-signal.js";
 import { assertAssignmentTarget } from "./assignment-policy.js";
+import { appendSafetyLedger } from "./safety-ledger.js";
+import { BANK_VERSION, HONEST_FALLBACK, HONEST_FALLBACK_UNRECORDED } from "./answer-bank.js";
+
+// The approved sentence, without the full stop the bank text carries and the doctrine teaches
+// without (SOUL.md), matched in whatever case and punctuation the send path left it in.
+const RECORDED_CLAIM_SOURCE = `(${HONEST_FALLBACK.replace(/\.$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})(\\.?)`;
+const RECORDED_CLAIM_RE = new RegExp(RECORDED_CLAIM_SOURCE, "i");
 
 // --- Outbound reply retry (design §7 Rate Limiting) ---
 // "Intercom returns 429 with Retry-After. Retry with capped exponential
@@ -564,6 +571,12 @@ export class RealIntercomClient implements IntercomClient {
  * subset of the OpenClaw `ctx.log` shape, and of `console`, so both work.
  */
 export type SanitizerLogger = { error?: (msg: string) => void };
+/**
+ * Writes the owed-follow-up record that makes HONEST_FALLBACK's "I have recorded this" true.
+ * Returns null on success, the error text on failure (never throws). Injectable so tests never
+ * touch /var/lib/hydra; production uses the shared safety ledger.
+ */
+export type OwedFollowUpWriter = (row: Record<string, unknown>) => Promise<string | null>;
 
 /**
  * Wraps an IntercomClient and replaces any outbound email address that is not
@@ -584,6 +597,7 @@ export class SanitizingIntercomClient implements IntercomClient {
   constructor(
     private readonly inner: IntercomClient,
     private readonly log?: SanitizerLogger,
+    private readonly writeOwedFollowUp: OwedFollowUpWriter = appendSafetyLedger,
     private readonly helpManifestLoader: () => HelpManifest | null = loadHelpManifest,
   ) {}
 
@@ -659,7 +673,7 @@ export class SanitizingIntercomClient implements IntercomClient {
     // "I've flagged this for our team" is only honest if create_ticket actually
     // succeeded for this conversation; the cross-plugin signal (set by support-tools on
     // a successful file) tells us. When it did not, rewrite the claim down to the
-    // sanctioned "I'll make sure this gets to the team." fallback. Runs after the other
+    // sanctioned honesty fallback (answer-bank.ts HONEST_FALLBACK). Runs after the other
     // text passes; a lost/absent signal errs toward the honest fallback.
     const ticketConfirmed = wasTicketFiledRecently(params.conversationId);
     // MUS-1516: which ids this conversation actually filed, so the guard can
@@ -691,6 +705,35 @@ export class SanitizingIntercomClient implements IntercomClient {
         try { console.error(msg); } catch { /* noop */ }
       }
     }
+    // "I have recorded this" is a completed-action claim about OUR OWN record, so the record is
+    // written FIRST and the sentence is only sent once the write succeeded (firstmate inbox 011,
+    // 2026-11-14). A write that failed or threw replaces that sentence with the approved
+    // no-record wording and still delivers the reply: a failed record must never drop it.
+    let outBody = refPass.body;
+    let owedRecordTs: string | null = null;
+    if (params.messageType !== "note" && RECORDED_CLAIM_RE.test(outBody)) {
+      const ts = new Date().toISOString();
+      const recordError = await this.writeOwedFollowUp({
+        kind: "owed_followup",
+        source: "intercom",
+        ref: params.conversationId,
+        ts,
+        bank_version: BANK_VERSION,
+      }).catch((err: unknown) => String(err));
+      if (recordError) {
+        outBody = outBody.replace(new RegExp(RECORDED_CLAIM_SOURCE, "gi"),
+          (_m, _line: string, dot: string) =>
+            dot ? HONEST_FALLBACK_UNRECORDED : HONEST_FALLBACK_UNRECORDED.replace(/\.$/, ""));
+        const msg = `[intercom:ALERT] [intercom:owed-followup-not-recorded] conv=${params.conversationId} error=${recordError}`;
+        try {
+          this.log?.error?.(msg);
+        } catch {
+          try { console.error(msg); } catch { /* noop */ }
+        }
+      } else {
+        owedRecordTs = ts;
+      }
+    }
     // The channel's empty-reply guard runs before this wrapper, so a reply that was
     // only a citation the gate removed would otherwise post `body: ""`. Post nothing, and
     // alert: no other mechanism pages a dropped reply (the wrapper returns messageId "").
@@ -703,7 +746,37 @@ export class SanitizingIntercomClient implements IntercomClient {
       }
       return { messageId: "", dropped: true };
     }
-    return this.inner.replyToConversation({ ...params, body: refPass.body });
+    // The record was written before the post; a post that never lands leaves a promise the
+    // customer never heard, so it is cancelled by its own append-only row (inbox 015).
+    let result: { messageId: string; dropped?: true };
+    try {
+      result = await this.inner.replyToConversation({ ...params, body: outBody });
+    } catch (err) {
+      if (owedRecordTs) await this.markOwedFollowUpNotSent(params.conversationId, owedRecordTs);
+      throw err;
+    }
+    if (owedRecordTs && result?.dropped) {
+      await this.markOwedFollowUpNotSent(params.conversationId, owedRecordTs);
+    }
+    return result;
+  }
+
+  private async markOwedFollowUpNotSent(conversationId: string, recordTs: string): Promise<void> {
+    const markerError = await this.writeOwedFollowUp({
+      kind: "owed_followup_not_sent",
+      source: "intercom",
+      ref: conversationId,
+      record_ts: recordTs,
+      ts: new Date().toISOString(),
+      bank_version: BANK_VERSION,
+    }).catch((err: unknown) => String(err));
+    if (!markerError) return;
+    const msg = `[intercom:ALERT] [intercom:owed-followup-not-sent-unmarked] conv=${conversationId} error=${markerError}`;
+    try {
+      this.log?.error?.(msg);
+    } catch {
+      try { console.error(msg); } catch { /* noop */ }
+    }
   }
 
   /**

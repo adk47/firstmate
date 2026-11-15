@@ -1,11 +1,12 @@
 {
- "_doc": "The monitor's recorded starting point. Written by `caroline-monitor.py baseline` from a full read of the window; never edited by hand. Counts only: no thread text and no thread ids. `inbox` is the support-backlog.json content at the same moment (null fields when the read did not cover every open conversation).",
+ "_doc": "The monitor's recorded starting point. Written by `caroline-monitor.py baseline` from a full read of the window; never edited by hand. Counts only: no thread text and no thread ids. `inbox` is the support-backlog.json content of ONE read of the inbox, every field as of `inbox_read_at` (null fields when the read did not cover every open conversation); `inbox_source` is that read. Everything else is as of `taken_at`, from `source`.",
+ "covered_from": 1791253200,
  "inbox": {
   "commitments_by_kind": [
    {
     "kind": "credit_verification",
-    "open": 1907,
-    "overdue": 1794,
+    "open": 2184,
+    "overdue": 2080,
     "owner": "job:request-comms",
     "priority": 1
    },
@@ -18,90 +19,108 @@
    },
    {
     "kind": "refund",
-    "open": 48,
-    "overdue": 47,
+    "open": 51,
+    "overdue": 49,
     "owner": null,
     "priority": 3
    },
    {
     "kind": "request_status",
-    "open": 246,
-    "overdue": 230,
+    "open": 264,
+    "overdue": 257,
     "owner": "job:request-comms",
     "priority": 3
    },
    {
     "kind": "claim",
-    "open": 147,
-    "overdue": 141,
+    "open": 151,
+    "overdue": 148,
     "owner": "job:request-comms",
     "priority": 4
    },
    {
     "kind": "erasure",
-    "open": 54,
-    "overdue": 52,
+    "open": 47,
+    "overdue": 47,
     "owner": "job:request-comms",
     "priority": 4
    },
    {
     "kind": "merge",
-    "open": 118,
-    "overdue": 113,
+    "open": 117,
+    "overdue": 114,
     "owner": null,
     "priority": 4
    },
    {
     "kind": "unbacked",
-    "open": 1152,
-    "overdue": 1086,
+    "open": 1219,
+    "overdue": 1188,
     "owner": null,
     "priority": null
    }
   ],
-  "commitments_closed_24h": 518,
-  "commitments_open": 3704,
-  "commitments_open_unbacked": 1350,
-  "commitments_overdue": 3494,
-  "handed_to_human_24h": 63,
-  "handoff_no_assignment_last_matured_week": 1078,
+  "commitments_closed_24h": 13,
+  "commitments_open": 4065,
+  "commitments_open_unbacked": 1419,
+  "commitments_overdue": 3914,
+  "handed_to_human_24h": 0,
+  "handoff_no_assignment_last_matured_week": 1184,
   "human_replied_24h": 0,
   "last_matured_week": {
-   "from": 1793663400,
-   "threads": 1436,
-   "to": 1794268200
+   "from": 1793895206,
+   "threads": 1631,
+   "to": 1794500006
   },
-  "oldest_overdue_h": 4535,
-  "oldest_waiting_on_us_h": 30794,
-  "open": 9080,
+  "messages_held": null,
+  "messages_held_by_reason": null,
+  "messages_queued": null,
+  "oldest_overdue_h": 4599,
+  "oldest_waiting_on_us_h": 30858,
+  "open": 9661,
   "open_no_message": 16,
-  "promised_a_person_24h": 269,
-  "promises_broken_24h": 380,
-  "promises_kept_24h": 49,
-  "rules": "2026-11-11.2+0ac91017",
+  "owed_followup_24h": 0,
+  "owed_followup_error": null,
+  "owed_followup_unbacked": 0,
+  "owed_followup_unmeasured": 0,
+  "promised_a_person_24h": 35,
+  "promises_broken_24h": 183,
+  "promises_kept_24h": 1,
+  "rules": "2026-11-14.1+0ac91017",
   "schema": "support-backlog.v1",
   "scope": {
-   "as_of": 1794441000,
-   "created_since": 1791253200,
-   "intercom_total_count": 9386,
-   "listed": 9386,
+   "as_of": 1794672806,
+   "created_since": 1791476006,
+   "intercom_total_count": 9883,
+   "listed": 9883,
    "read_errors": 0,
    "whole_inbox": true
   },
-  "waiting_on_customer": 7345,
-  "waiting_on_us": 1594,
+  "waiting_on_customer": 8041,
+  "waiting_on_us": 1554,
   "waiting_on_us_by_wait": {
-   "2d_to_7d": 19,
-   "30d_to_90d": 134,
-   "7d_to_30d": 18,
-   "over_90d": 1391,
-   "under_2d": 32
+   "2d_to_7d": 18,
+   "30d_to_90d": 127,
+   "7d_to_30d": 4,
+   "over_90d": 1394,
+   "under_2d": 11
   },
   "waiting_on_us_hours": 24,
-  "waiting_on_us_robot_mail": 52,
-  "waiting_on_us_under_limit": 73,
-  "written_at": 1794441000,
-  "written_at_utc": "2026-11-11T23:50:00Z"
+  "waiting_on_us_robot_mail": 27,
+  "waiting_on_us_under_limit": 23,
+  "written_at": 1794672806,
+  "written_at_utc": "2026-11-14T16:13:26Z"
+ },
+ "inbox_read_at": 1794672806,
+ "inbox_read_at_utc": "2026-11-14 16:13Z",
+ "inbox_source": {
+  "errors": 0,
+  "gone": 0,
+  "intercom_total_count": 9883,
+  "listed": 9883,
+  "read": 9883,
+  "window_end": 1794672806,
+  "window_start": 1791476006
  },
  "last30_as_of_now": {
   "extra": {
@@ -359,12 +378,12 @@
     "date_promise": 60,
     "guard_blocked": 15,
     "handoff_assigned": 27,
-    "handoff_no_assignment": 83,
+    "handoff_no_assignment": 82,
     "never_answered": 1,
     "no_customer_message": 0,
     "queue_line": 1,
     "refused": 0,
-    "threads": 129
+    "threads": 128
    },
    "other": {
     "answered": 71,
@@ -415,12 +434,12 @@
     "date_promise": 82,
     "guard_blocked": 42,
     "handoff_assigned": 63,
-    "handoff_no_assignment": 153,
+    "handoff_no_assignment": 152,
     "never_answered": 4,
     "no_customer_message": 0,
     "queue_line": 5,
     "refused": 0,
-    "threads": 290
+    "threads": 289
    },
    "profile_edit": {
     "answered": 6,
@@ -455,14 +474,14 @@
     "answered_awaiting": 0,
     "assigned_silent": 0,
     "date_promise": 7,
-    "guard_blocked": 10,
-    "handoff_assigned": 12,
+    "guard_blocked": 11,
+    "handoff_assigned": 13,
     "handoff_no_assignment": 38,
     "never_answered": 0,
     "no_customer_message": 0,
     "queue_line": 0,
     "refused": 0,
-    "threads": 61
+    "threads": 62
    },
    "refund_dispute": {
     "answered": 6,
@@ -483,14 +502,14 @@
     "answered_awaiting": 0,
     "assigned_silent": 0,
     "date_promise": 60,
-    "guard_blocked": 64,
-    "handoff_assigned": 76,
-    "handoff_no_assignment": 136,
+    "guard_blocked": 63,
+    "handoff_assigned": 75,
+    "handoff_no_assignment": 138,
     "never_answered": 1,
     "no_customer_message": 0,
     "queue_line": 8,
     "refused": 4,
-    "threads": 237
+    "threads": 238
    },
    "request_withdraw_correct": {
     "answered": 1,
@@ -830,12 +849,12 @@
      "date_promise": 0,
      "guard_blocked": 5,
      "handoff_assigned": 6,
-     "handoff_no_assignment": 21,
+     "handoff_no_assignment": 20,
      "never_answered": 0,
      "no_customer_message": 0,
      "queue_line": 0,
      "refused": 0,
-     "threads": 31
+     "threads": 30
     },
     "other": {
      "answered": 14,
@@ -886,12 +905,12 @@
      "date_promise": 1,
      "guard_blocked": 22,
      "handoff_assigned": 25,
-     "handoff_no_assignment": 41,
+     "handoff_no_assignment": 40,
      "never_answered": 2,
      "no_customer_message": 0,
      "queue_line": 0,
      "refused": 0,
-     "threads": 78
+     "threads": 77
     },
     "profile_edit": {
      "answered": 0,
@@ -926,14 +945,14 @@
      "answered_awaiting": 0,
      "assigned_silent": 0,
      "date_promise": 0,
-     "guard_blocked": 6,
-     "handoff_assigned": 7,
+     "guard_blocked": 7,
+     "handoff_assigned": 8,
      "handoff_no_assignment": 15,
      "never_answered": 0,
      "no_customer_message": 0,
      "queue_line": 0,
      "refused": 0,
-     "threads": 27
+     "threads": 28
     },
     "refund_dispute": {
      "answered": 3,
@@ -954,14 +973,14 @@
      "answered_awaiting": 0,
      "assigned_silent": 0,
      "date_promise": 5,
-     "guard_blocked": 33,
-     "handoff_assigned": 36,
-     "handoff_no_assignment": 37,
+     "guard_blocked": 32,
+     "handoff_assigned": 35,
+     "handoff_no_assignment": 39,
      "never_answered": 1,
      "no_customer_message": 0,
      "queue_line": 0,
      "refused": 0,
-     "threads": 76
+     "threads": 77
     },
     "request_withdraw_correct": {
      "answered": 0,
@@ -2329,8 +2348,8 @@
    }
   }
  ],
- "reader_version": "2026-11-11.2+0ac91017",
- "rules_version": "2026-11-11.2",
+ "reader_version": "2026-11-14.1+0ac91017",
+ "rules_version": "2026-11-14.1",
  "shape_threads": {
   "account_access": 21,
   "api_support": 3,
@@ -2347,16 +2366,16 @@
   "gdpr_erasure": 70,
   "human_request": 10,
   "legal_notice": 27,
-  "merge_split": 129,
+  "merge_split": 128,
   "other": 259,
   "partnership": 5,
   "plaque_order": 37,
-  "product_question": 290,
+  "product_question": 289,
   "profile_edit": 30,
   "proof_sent": 2026,
-  "proof_what_needed": 61,
+  "proof_what_needed": 62,
   "refund_dispute": 41,
-  "request_status": 237,
+  "request_status": 238,
   "request_withdraw_correct": 32,
   "robot_mail": 147,
   "stats_wrong": 19,
@@ -2366,9 +2385,9 @@
  "source": {
   "errors": 0,
   "gone": 0,
-  "intercom_total_count": 9386,
-  "listed": 9386,
-  "read": 9386,
+  "intercom_total_count": 9929,
+  "listed": 9930,
+  "read": 9930,
   "window_end": 1794450000,
   "window_start": 1791253200
  },

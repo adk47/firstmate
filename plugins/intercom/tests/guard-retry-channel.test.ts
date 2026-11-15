@@ -36,6 +36,7 @@ vi.mock("openclaw/plugin-sdk/state-paths", () => ({ resolveStateDir: () => null 
 
 const { intercomPlugin, accountSessions } = await import("../src/channel.js");
 const { bankEntry, BLOCKED_REPLY_FALLBACK } = await import("../src/answer-bank.js");
+const mergeGuard = await import("../src/merge-reply-guard.js");
 const { RESTRICTED_NOTE, PROOF_REVIEW_NOTE } = await import("../src/restricted-accounts.js");
 const { DEFAULT_FALLBACK_ACK } = await import("../src/types.js");
 
@@ -267,5 +268,50 @@ describe("a promise of a person nobody keeps is not sent (end to end)", () => {
     expect(dispatched).toHaveLength(2);
     expect(sent()).toEqual([BLOCKED_REPLY_FALLBACK]);
     expect(sent()[0]).not.toMatch(/teammate/i);
+  });
+});
+
+// caroline-read-state-tools-r1: the output guard's own rule (`promise/person_without_assignment`).
+// A reply that says a person is coming is sent only when the conversation was assigned to a staffed
+// queue in the same step. Caroline's reply path assigns nobody, so here the sentence never leaves,
+// however it is phrased and whichever code wrote it.
+describe("a person is coming only with an assignment in the same step (end to end)", () => {
+  const { MERGE_PARAGRAPH } = mergeGuard;
+
+  it.each([
+    "Thanks for sending that. Someone from our support team is going to reach out to you by email.",
+    "A human agent will take over this conversation now.",
+    "I'll put you through to our support team.",
+  ])("a phrasing the sentence strip does not know is refused by the guard, explained, and the retry is sent: %s", async (promise) => {
+    script = [{ text: promise }, { text: THANKS }];
+    await deliver(message("user_p1", "here is my proof, see attached", `p1-${promise.length}`, `conv_p1_${promise.length}`));
+    expect(dispatched).toHaveLength(2);
+    expect(dispatched[1].rawBody).toContain("promise/person_without_assignment");
+    expect(sent()).toEqual([THANKS]);
+    expect(toSomeoneElse()).toHaveLength(0);
+  });
+
+  it("refused twice: the customer gets the fallback line, which names nobody, and nobody is assigned", async () => {
+    script = [{ text: "A human agent will take over this conversation now." }];
+    await deliver(message("user_p2", "any update on my request?", "p2", "conv_p2"));
+    expect(dispatched).toHaveLength(2);
+    expect(sent()).toEqual([BLOCKED_REPLY_FALLBACK]);
+    expect(toSomeoneElse()).toHaveLength(0);
+  });
+
+  it("a measured open request states the fact with no hand-off: the status line alone is what is sent", async () => {
+    script = [{ text: `${STATUS_LINE}\n\nI'm pulling in a teammate to take this from here.`, onRun: () => setFact("conv_p3", true) }];
+    await deliver(message("user_p3", "where is my request?", "p3", "conv_p3"));
+    expect(dispatched).toHaveLength(1);
+    expect(sent()).toEqual([STATUS_LINE]);
+    expect(toSomeoneElse()).toHaveLength(0);
+  });
+
+  it("a merge thread keeps its approved paragraph and loses the closing 'a teammate' line, with no retry spent", async () => {
+    script = [{ text: "Happy to help with that.\n\nI'm pulling in a teammate to take this from here." }];
+    await deliver(message("user_p4", "I have two profiles on Muso, can you merge them into one?", "p4", "conv_p4"));
+    expect(dispatched).toHaveLength(1);
+    expect(sent()).toEqual([`Happy to help with that.\n\n${MERGE_PARAGRAPH}`]);
+    expect(toSomeoneElse()).toHaveLength(0);
   });
 });

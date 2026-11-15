@@ -358,11 +358,13 @@ def _reply_request(card: Any, conversation_id: str, line_id: str) -> _Proposal:
         return _Proposal(reason=f"answer-bank line {line_id!r} refused: {exc}")
     except output_guard.GuardUnavailable as exc:
         return _Proposal(reason=f"output guard unavailable, so nothing may be sent: {exc}",
-                         page="ops-intake: output guard unavailable on a summarize/resolve reply")
+                         page=("ops-intake: output guard unavailable on a summarize/resolve "
+                               f"reply for conversation {conversation_id}"))
     if outcome.blocked:
         flags = ",".join(f"{f.get('family')}/{f.get('rule')}" for f in outcome.flags) or "no rule"
         return _Proposal(reason=f"output guard blocked the reply ({flags})",
-                         page=f"ops-intake: output guard blocked a reply ({flags})")
+                         page=(f"ops-intake: output guard blocked a reply ({flags}) "
+                               f"on conversation {conversation_id}"))
     return _Proposal(write=WriteRequest(
         action="intercom_customer_reply",
         target=conversation_id,
@@ -442,11 +444,14 @@ def _propose_write(card: Any, *, conversation_id: str, new_name: str | None,
     action = card.suggestion.action
     line_id = card.suggestion.line_id or action.line
 
-    # A hand-off that names an approved line still SENDS that line. "We handed it off" with
-    # nothing in the thread is the failure the census found: the customer is left in the dark.
-    # The page that makes the hand-off real is attached by the caller from `action.page`.
-    if action.key == "unknown" and line_id:
-        return _reply_request(card, conversation_id, line_id)
+    # The `unknown` action is page-only (captain 2026-11-14): this surface cannot reassign a
+    # conversation, the hand-off line is refused here by the output guard, and the honesty line would
+    # be an unbacked "I have recorded this" because this writer does not write the owed-followup
+    # record, so no customer line is proposed and the caller attaches the page, which names the
+    # conversation id.
+    if action.key == "unknown":
+        return _Proposal(reason=("no rule matched: the conversation needs a human, and no customer "
+                                 "line is posted from this surface"))
 
     if not action.executes_here or action.tier != "W1":
         return _Proposal(reason=(f"{card.suggestion.rule_key or 'unmapped'} maps to {action.key} "

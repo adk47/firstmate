@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { HONEST_FALLBACK } from "../src/answer-bank.js";
 import {
   executeEscalation,
   buildEscalationDetails,
@@ -52,6 +53,9 @@ const assessment: RiskAssessment = {
   confidence: "high",
 };
 
+// The read-back applyHandOff needs to call a hand-off done: the escalation team holds it, no admin.
+const HELD_BY_TEAM = async () => ({ admin_assignee_id: null, team_assignee_id: 7111842 } as any);
+
 describe("executeEscalation", () => {
   it("sets dedupe gate BEFORE any I/O", async () => {
     const state = makeState();
@@ -65,7 +69,7 @@ describe("executeEscalation", () => {
       client: {
         replyToConversation: async () => { order.push("reply"); return { messageId: "m1" }; },
         assignConversation: async () => { order.push("assign"); },
-        getConversation: async () => ({} as any),
+        getConversation: HELD_BY_TEAM,
       },
       saveState: async () => { order.push("save"); },
       createTicket: async () => { order.push("ticket"); return { ok: true, ticketId: "T1", sla: "5-10 business days" }; },
@@ -77,10 +81,14 @@ describe("executeEscalation", () => {
     expect(state.handoffMode).toBe("human_takeover");
     expect(order[0]).toBe("save");           // gate persisted first
     expect(order[1]).toBe("ticket");         // ticket second
-    expect(order.indexOf("reply")).toBe(2);  // farewell after ticket
+    // The escalation says what it recorded, then moves the conversation to the queue: the
+    // assignment is the last write on the thread.
+    expect(order.indexOf("reply")).toBe(2);
+    expect(order.indexOf("assign")).toBeGreaterThan(order.indexOf("reply"));
+    expect(order.indexOf("slack")).toBeGreaterThan(order.indexOf("assign"));
   });
 
-  it("uses the SLA-bearing farewell when ticket succeeds", async () => {
+  it("uses the recorded-follow-up farewell when the ticket succeeds", async () => {
     const state = makeState();
     let farewellBody = "";
     await executeEscalation({
@@ -92,7 +100,7 @@ describe("executeEscalation", () => {
       client: {
         replyToConversation: async (p) => { farewellBody = p.body; return { messageId: "m1" }; },
         assignConversation: async () => {},
-        getConversation: async () => ({} as any),
+        getConversation: HELD_BY_TEAM,
       },
       saveState: async () => {},
       createTicket: async () => ({ ok: true, ticketId: "T1", sla: "5-10 business days" }),
@@ -101,13 +109,13 @@ describe("executeEscalation", () => {
     });
     // The ticket's internal SLA never reaches the customer (caroline-instructions-1029 §2.9).
     expect(farewellBody).not.toContain("5-10 business days");
-    expect(farewellBody).not.toMatch(/business day|shortly|soon/i);
-    expect(farewellBody).toContain("T1");
-    expect(farewellBody).toContain("in this conversation and by email");
+    expect(farewellBody).not.toMatch(/business day|shortly/i);
+    expect(farewellBody).not.toMatch(/teammate|specialist|a person|human/i);
+    expect(farewellBody).toBe(`${HONEST_FALLBACK} Reference: T1.`);
     expect(farewellBody).not.toMatch(ANY_EMAIL);
   });
 
-  it("uses the degraded farewell when ticket fails", async () => {
+  it("uses the reference-free farewell when the ticket fails", async () => {
     const state = makeState();
     let farewellBody = "";
     await executeEscalation({
@@ -119,7 +127,7 @@ describe("executeEscalation", () => {
       client: {
         replyToConversation: async (p) => { farewellBody = p.body; return { messageId: "m1" }; },
         assignConversation: async () => {},
-        getConversation: async () => ({} as any),
+        getConversation: HELD_BY_TEAM,
       },
       saveState: async () => {},
       createTicket: async () => ({ ok: false, error: "ClickUp 503" }),
@@ -127,8 +135,8 @@ describe("executeEscalation", () => {
       log: { info: () => {}, warn: () => {}, error: () => {} },
     });
     expect(farewellBody).not.toContain("Reference");
-    expect(farewellBody).toContain("in this conversation and by email");
-    expect(farewellBody).not.toMatch(/shortly|soon|business day/i);
+    expect(farewellBody).toBe(HONEST_FALLBACK);
+    expect(farewellBody).not.toMatch(/business day|shortly/i);
     expect(farewellBody).not.toMatch(ANY_EMAIL);
   });
 
@@ -145,17 +153,90 @@ describe("executeEscalation", () => {
       client: {
         replyToConversation: async (p) => { farewellBody = p.body; return { messageId: "m1" }; },
         assignConversation: async () => {},
-        getConversation: async () => ({} as any),
+        getConversation: HELD_BY_TEAM,
       },
       saveState: async () => {},
       createTicket: async () => ({ ok: false, error: "ClickUp 503" }),
       postSlack: async () => {},
       log: { info: () => {}, warn: () => {}, error: () => {} },
     });
-    expect(farewellBody).toContain("in this conversation and by email");
-    expect(farewellBody).not.toMatch(/shortly|soon|business day/i);
+    expect(farewellBody).toBe(HONEST_FALLBACK);
+    expect(farewellBody).not.toMatch(/business day|shortly/i);
     expect(farewellBody).not.toContain("operations@muso.ai");
     expect(farewellBody).not.toMatch(ANY_EMAIL);
+  });
+
+  // Captain 2026-11-14 (firstmate inbox 012): the escalation team has no members, so no path
+  // tells a customer a person is coming. The farewell is the honesty line for EVERY applyHandOff
+  // outcome, and the action no longer reads the conversation back after posting it.
+  describe("the farewell never names a person, whatever the assignment did", () => {
+    const run = async (over: {
+      getConversation?: () => Promise<unknown>;
+      assignConversation?: () => Promise<void>;
+      acct?: IntercomAccountConfig;
+      ticketOk?: boolean;
+      a?: RiskAssessment;
+    }) => {
+      const out = { body: "", warn: [] as string[], error: [] as string[], order: [] as string[] };
+      await executeEscalation({
+        state: makeState(),
+        conversationId: "conv1",
+        assessment: over.a ?? assessment,
+        currentMessage: "i want a refund please",
+        account: over.acct ?? account,
+        client: {
+          replyToConversation: async (p: { body: string }) => { out.order.push("reply"); out.body = p.body; return { messageId: "m1" }; },
+          assignConversation: async () => { out.order.push("assign"); await (over.assignConversation ?? (async () => {}))(); },
+          getConversation: over.getConversation ?? HELD_BY_TEAM,
+        } as never,
+        saveState: async () => {},
+        createTicket: async () => (over.ticketOk === false ? { ok: false, error: "ClickUp 503" } : { ok: true, ticketId: "T1", sla: "x" }),
+        postSlack: async () => { out.order.push("slack"); },
+        log: { info: () => {}, warn: (m: string) => out.warn.push(m), error: (m: string) => out.error.push(m) },
+      });
+      return out;
+    };
+    const NO_PERSON = /teammate|team member|colleague|specialist|someone|a person|human|hear from/i;
+
+    const OUTCOMES: [string, Parameters<typeof run>[0]][] = [
+      ["the escalation team holds it", {}],
+      ["the assignment request fails", { assignConversation: async () => { throw new Error("intercom 500"); } }],
+      ["the read-back is unreadable", { getConversation: async () => ({}) }],
+      ["the read-back throws", { getConversation: async () => { throw new Error("intercom 502"); } }],
+      ["a person, not the team, holds it", { getConversation: async () => ({ admin_assignee_id: 5465657, team_assignee_id: 7111842 }) }],
+      ["the bot still holds it", { getConversation: async () => ({ admin_assignee_id: "bot", team_assignee_id: null }) }],
+      ["a different team holds it", { getConversation: async () => ({ admin_assignee_id: null, team_assignee_id: 999 }) }],
+      [
+        "no escalation team is configured",
+        { acct: { ...account, escalationTeamId: "" } as IntercomAccountConfig, getConversation: async () => ({ admin_assignee_id: null, team_assignee_id: null }) },
+      ],
+    ];
+    for (const [name, over] of OUTCOMES) {
+      it(`says what was recorded when ${name}`, async () => {
+        const o = await run(over);
+        expect(o.body).toBe(`${HONEST_FALLBACK} Reference: T1.`);
+        expect(o.body).not.toMatch(NO_PERSON);
+        // the customer still gets a reply, and ops still gets the Slack line
+        expect(o.order).toContain("reply");
+        expect(o.order).toContain("slack");
+      });
+    }
+
+    it("keeps the keyword prefix and drops the reference when no ticket exists", async () => {
+      const o = await run({
+        getConversation: async () => ({}),
+        ticketOk: false,
+        a: { ...assessment, source: "user_request", reason: "user_requested_human" },
+      });
+      expect(o.body).toBe(`Got it — ${HONEST_FALLBACK}`);
+    });
+
+    it("does not read the conversation back after posting the farewell", async () => {
+      let reads = 0;
+      await run({ getConversation: async () => { reads += 1; return {}; } });
+      // applyHandOff's own read-back measures the assignment; nothing reads after the farewell.
+      expect(reads).toBe(1);
+    });
   });
 
   it("prepends 'Got it — ' for magic-keyword path", async () => {

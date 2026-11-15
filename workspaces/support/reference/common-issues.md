@@ -69,7 +69,8 @@ There is **no self-service merge UI** in app.muso.ai yet. Do NOT direct customer
    `details.duplicate_profile_urls[]` and `details.handoff: "merge"` (`unmerge-request` when another
    artist's tracks were mixed in).
 3. Reply: if they asked how merging works, the approved merge paragraph in `faq.md` ("Can I merge
-   duplicate profiles?"), then the handoff line. Never say which of their
+   duplicate profiles?"), then the honesty line ("I have recorded this and will update you here as
+   soon as there is news."). Never say which of their
    profiles are claimed, never "I can merge them", never a date, never that a merge is done.
 
 **Notes:**

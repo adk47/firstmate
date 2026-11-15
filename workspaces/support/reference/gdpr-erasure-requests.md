@@ -86,7 +86,8 @@ Row #1 / Row #10 – not this flow.
    never what data we hold, never the playbook letter. The written confirmation comes from
    the process, not from you; never say a page was deleted or hidden.
 4. **"My profile was hidden, will it come back?"**: "No, once a page is hidden it stays
-   hidden; our written confirmation covers what was done." Then the handoff line.
+   hidden; our written confirmation covers what was done." Then the honesty line: "I have recorded
+   this and will update you here as soon as there is news."
 
 ## Escalation triggers – flag these loudly
 

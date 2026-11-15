@@ -173,7 +173,7 @@ PY
 
 @test "CAN FAIL: dropping the never-promise-a-person rule is caught" {
   CV_MD="$FAKE/workspaces/support/skills/verification-handoff/SKILL.md"
-  sed -i.bak 's/Never end a reply with/You may end a reply with/' "$CV_MD"
+  sed -i.bak 's/a sentence that says a person is coming/a sentence that says a person may come/' "$CV_MD"
   run_gate
   [ "$status" -eq 1 ]
   [[ "$output" == *"never a closing sentence that promises a person"* ]]
@@ -203,20 +203,20 @@ PY
   [[ "$output" == *"the one read: own rows only"* ]]
 }
 
-@test "CAN FAIL: the system's closing line taught to Caroline a second time in AGENTS is caught" {
+@test "CAN FAIL: AGENTS no longer carrying the honesty line as the escalation's words is caught" {
   AG_MD="$FAKE/workspaces/support/AGENTS.md"
-  printf '\nEnd with: I am pulling in a teammate to take this from here.\n' >> "$AG_MD"
+  sed -i.bak 's/I have recorded this and will update you here as soon as there is news/something else entirely/' "$AG_MD"
   run_gate
   [ "$status" -eq 1 ]
-  [[ "$output" == *"appears 2 times"* ]]
+  [[ "$output" == *"the escalation's words are the honesty line"* ]]
 }
 
-@test "CAN FAIL: AGENTS no longer saying the closing line is the system's alone is caught" {
+@test "CAN FAIL: the retired closing line taught again in AGENTS is caught" {
   AG_MD="$FAKE/workspaces/support/AGENTS.md"
-  sed -i.bak "s/you never write that sentence/you may write that sentence/" "$AG_MD"
+  printf '\nEnd with: %s\n' "I'm pulling in a teammate to take this from here." >> "$AG_MD"
   run_gate
   [ "$status" -eq 1 ]
-  [[ "$output" == *"the closing line is the system's, never Caroline's"* ]]
+  [[ "$output" == *"the retired closing line is not taught"* ]]
 }
 
 @test "CAN FAIL: the any-profile diagnosis handed to Caroline as part of the one read is caught" {

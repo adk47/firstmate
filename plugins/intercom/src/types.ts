@@ -314,7 +314,8 @@ export interface IntercomAccountConfig {
   //                This is the measurement window: the false-positive rate on real traffic is
   //                computed from those rows before anything starts refusing to post.
   //   "enforce" — a non-benign outbound label at >= OUTBOUND_BLOCK_SCORE adds a block
-  //                (safety-classifier.ts), which turns the reply into the approved hand-off line.
+  //                (safety-classifier.ts), which turns the reply into BLOCKED_REPLY_FALLBACK (the
+  //                AI-queue line: no person, no time); nobody is assigned by a block.
   // Default (absent) = "enforce", the historical behaviour of this lane, so a host that never sets
   // the key behaves exactly as it does today. Inbound is detection-only in BOTH modes
   // (watchInbound never changes what is dispatched), so the stage only gates the outbound half.

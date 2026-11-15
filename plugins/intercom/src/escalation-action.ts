@@ -6,6 +6,7 @@ import type {
 } from "./types.js";
 import { isAssignmentConflict } from "./outbound.js";
 import { applyHandOff } from "./assignment-policy.js";
+import { HONEST_FALLBACK } from "./answer-bank.js";
 import { intercomDeeplink, getTierForAction, TIER_SLAS } from "./ticket-format.js";
 
 export interface TicketResult {
@@ -54,16 +55,16 @@ export interface ExecuteEscalationDeps {
   log: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
 }
 
+/**
+ * The escalation farewell. No path names a person (captain 2026-11-14: the escalation team has no
+ * members, so "a teammate is taking this" was never true): the approved honesty line, plus the
+ * ticket reference when a ticket exists. `outbound.ts` writes the owed-follow-up record that makes
+ * "I have recorded this" true before this is posted.
+ */
 function buildFarewell(assessment: RiskAssessment, ticket: TicketResult): string {
-  const isMagic = assessment.source === "user_request";
-  const prefix = isMagic ? "Got it — " : "";
-  // No timeframe on any customer reply (Fable caroline-instructions-1029 §2.9/§3): the tier
-  // SLA stays on the ticket and in the Slack line, never in the farewell, and no "shortly".
-  const tail = " You'll hear from us in this conversation and by email.";
-  if (ticket.ok && ticket.ticketId) {
-    return `${prefix}I'm pulling in a teammate to take this from here.${tail} Reference: ${ticket.ticketId}.`;
-  }
-  return `${prefix}I'm pulling in a teammate to take this from here.${tail}`;
+  const prefix = assessment.source === "user_request" ? "Got it — " : "";
+  if (ticket.ok && ticket.ticketId) return `${prefix}${HONEST_FALLBACK} Reference: ${ticket.ticketId}.`;
+  return `${prefix}${HONEST_FALLBACK}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +363,7 @@ export async function executeEscalation(deps: ExecuteEscalationDeps): Promise<vo
     }
   }
 
-  // Step 3 — post farewell.
+  // Step 3 — post farewell. The approved honesty line + the ticket reference; never a person.
   let farewellOk = false;
   const body = buildFarewell(assessment, ticket);
   try {

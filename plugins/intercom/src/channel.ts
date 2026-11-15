@@ -1809,12 +1809,17 @@ export const intercomPlugin = createChatChannelPlugin({
               };
               logMergePrep(mergePrep);
               guard.body = mergePrep.body;
+              // An emptied merge reply gets the AI-queue fallback line: this module writes no
+              // customer sentence of its own, and posting nothing is not an option. An empty reply
+              // the merge guard never touched (control tokens only) still posts nothing, below.
+              if (!guard.body.trim() && mergePrep.result.actions.length > 0) guard.body = BLOCKED_REPLY_FALLBACK;
               // A promise of a person in a model-written reply is never backed (unbacked-handoff.ts):
               // remove the sentence and keep the answer. When the promise was the WHOLE reply there is
-              // nothing to keep, so she gets the reason and one retry instead. Merge threads keep
-              // their own closing line (merge-reply-guard.ts).
-              const dropUnbackedHandoff = async (body: string, mp: typeof mergePrep, attempt: 1 | 2): Promise<{ body: string; onlyPromise: boolean }> => {
-                if (mp.result.mergeIntent) return { body, onlyPromise: false };
+              // nothing to keep, so she gets the reason and one retry instead. Merge threads are no
+              // exception: nobody is assigned on a merge ask either, and merge-reply-guard.ts no
+              // longer keeps or appends that sentence, so what the customer gets is the approved
+              // merge paragraph.
+              const dropUnbackedHandoff = async (body: string, attempt: 1 | 2): Promise<{ body: string; onlyPromise: boolean }> => {
                 const uh = stripUnbackedHandoff(body);
                 if (uh.removed.length === 0) return { body, onlyPromise: false };
                 log?.warn?.(
@@ -1858,7 +1863,7 @@ export const intercomPlugin = createChatChannelPlugin({
                   deps: { page: safetyPage },
                 });
               let guardFeedback: string | null = null;
-              const first = await dropUnbackedHandoff(guard.body, mergePrep, 1);
+              const first = await dropUnbackedHandoff(guard.body, 1);
               guard.body = first.body;
               if (first.onlyPromise) {
                 guardFeedback =
@@ -1918,7 +1923,7 @@ export const intercomPlugin = createChatChannelPlugin({
                 } else {
                   const retryMerge = prepareMergeReply(state, bodyForDispatch, retryText, new Date().toISOString());
                   logMergePrep(retryMerge);
-                  const second = await dropUnbackedHandoff(retryMerge.body, retryMerge, 2);
+                  const second = await dropUnbackedHandoff(retryMerge.body, 2);
                   if (!second.onlyPromise && second.body.trim().length > 0) {
                     const og2 = await runOutputGuard(second.body, 2);
                     guard.body = og2.body;

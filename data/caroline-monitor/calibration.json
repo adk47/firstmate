@@ -39,16 +39,17 @@
      0.3244
     ],
     "correct": 0,
-    "estimate_plus_minus": 51,
-    "estimated_true_threads": 57,
+    "estimate_plus_minus": 60,
+    "estimated_true_threads": 69,
     "labelled": 8,
     "mistaken_for": {
      "account_access": 1,
      "billing_question": 1,
+     "credit_wrong": 1,
      "product_question": 1,
      "request_status": 1,
      "stats_wrong": 1,
-     "track_fix_takedown": 3
+     "track_fix_takedown": 2
     },
     "population": 23,
     "precision": 0.0
@@ -73,14 +74,14 @@
     ],
     "correct": 3,
     "estimate_plus_minus": 32,
-    "estimated_true_threads": 36,
+    "estimated_true_threads": 39,
     "labelled": 8,
     "mistaken_for": {
+     "app_bug": 1,
      "cancel_subscription": 1,
-     "product_question": 1,
-     "proof_what_needed": 1,
-     "request_status": 1,
-     "robot_mail": 1
+     "claim_start_problem": 1,
+     "partnership": 1,
+     "proof_what_needed": 1
     },
     "population": 48,
     "precision": 0.375
@@ -91,11 +92,11 @@
      0.9285
     ],
     "correct": 6,
-    "estimate_plus_minus": 23,
-    "estimated_true_threads": 54,
+    "estimate_plus_minus": 25,
+    "estimated_true_threads": 60,
     "labelled": 8,
     "mistaken_for": {
-     "app_bug": 1,
+     "credit_add_howto": 1,
      "refund_dispute": 1
     },
     "population": 53,
@@ -111,29 +112,29 @@
     "estimated_true_threads": 24,
     "labelled": 8,
     "mistaken_for": {
-     "claim_start_problem": 3,
-     "merge_split": 1
+     "credit_wrong": 1,
+     "merge_split": 1,
+     "proof_sent": 2
     },
-    "population": 48,
+    "population": 47,
     "precision": 0.5
    },
    "claim_conflict": {
     "ci95": [
-     0.0224,
-     0.4709
+     0.0715,
+     0.5907
     ],
-    "correct": 1,
-    "estimate_plus_minus": 5,
-    "estimated_true_threads": 3,
+    "correct": 2,
+    "estimate_plus_minus": 7,
+    "estimated_true_threads": 7,
     "labelled": 8,
     "mistaken_for": {
-     "claim_start_problem": 1,
      "credit_wrong": 1,
      "merge_split": 4,
-     "proof_what_needed": 1
+     "request_status": 1
     },
     "population": 27,
-    "precision": 0.125
+    "precision": 0.25
    },
    "claim_start_problem": {
     "ci95": [
@@ -141,85 +142,82 @@
      0.5907
     ],
     "correct": 2,
-    "estimate_plus_minus": 63,
-    "estimated_true_threads": 99,
+    "estimate_plus_minus": 36,
+    "estimated_true_threads": 36,
     "labelled": 8,
     "mistaken_for": {
      "account_access": 1,
-     "merge_split": 4,
-     "profile_edit": 1
+     "credit_add_howto": 1,
+     "merge_split": 4
     },
-    "population": 118,
+    "population": 119,
     "precision": 0.25
    },
    "credit_add_howto": {
+    "ci95": [
+     0.4093,
+     0.9285
+    ],
+    "correct": 6,
+    "estimate_plus_minus": 68,
+    "estimated_true_threads": 130,
+    "labelled": 8,
+    "mistaken_for": {
+     "app_bug": 1,
+     "proof_what_needed": 1
+    },
+    "population": 56,
+    "precision": 0.75
+   },
+   "credit_wrong": {
     "ci95": [
      0.3057,
      0.8632
     ],
     "correct": 5,
     "estimate_plus_minus": 62,
-    "estimated_true_threads": 102,
-    "labelled": 8,
-    "mistaken_for": {
-     "app_bug": 1,
-     "proof_what_needed": 1,
-     "request_status": 1
-    },
-    "population": 56,
-    "precision": 0.625
-   },
-   "credit_wrong": {
-    "ci95": [
-     0.2152,
-     0.7848
-    ],
-    "correct": 4,
-    "estimate_plus_minus": 49,
-    "estimated_true_threads": 89,
+    "estimated_true_threads": 147,
     "labelled": 8,
     "mistaken_for": {
      "gdpr_erasure": 2,
-     "merge_split": 2
+     "merge_split": 1
     },
     "population": 73,
-    "precision": 0.5
+    "precision": 0.625
    },
    "declined_why": {
     "ci95": [
-     0.0,
-     0.3903
+     0.3,
+     0.9032
     ],
-    "correct": 0,
-    "estimate_plus_minus": 0,
-    "estimated_true_threads": 0,
+    "correct": 4,
+    "estimate_plus_minus": 32,
+    "estimated_true_threads": 21,
     "labelled": 6,
     "mistaken_for": {
      "profile_edit": 1,
-     "proof_what_needed": 1,
-     "request_status": 3,
-     "request_withdraw_correct": 1
+     "request_status": 1
     },
     "population": 6,
-    "precision": 0.0
+    "precision": 0.6667
    },
    "gdpr_erasure": {
     "ci95": [
-     0.1368,
-     0.6943
+     0.0715,
+     0.5907
     ],
-    "correct": 3,
-    "estimate_plus_minus": 32,
-    "estimated_true_threads": 53,
+    "correct": 2,
+    "estimate_plus_minus": 30,
+    "estimated_true_threads": 44,
     "labelled": 8,
     "mistaken_for": {
      "cancel_subscription": 1,
-     "credit_wrong": 2,
+     "credit_wrong": 3,
      "merge_split": 1,
-     "profile_edit": 1
+     "product_question": 1
     },
-    "population": 69,
-    "precision": 0.375
+    "population": 70,
+    "precision": 0.25
    },
    "human_request": {
     "ci95": [
@@ -256,18 +254,19 @@
    },
    "merge_split": {
     "ci95": [
-     0.5291,
-     0.9776
+     0.4093,
+     0.9285
     ],
-    "correct": 7,
-    "estimate_plus_minus": 82,
-    "estimated_true_threads": 295,
+    "correct": 6,
+    "estimate_plus_minus": 77,
+    "estimated_true_threads": 235,
     "labelled": 8,
     "mistaken_for": {
-     "profile_edit": 1
+     "profile_edit": 1,
+     "request_status": 1
     },
-    "population": 129,
-    "precision": 0.875
+    "population": 128,
+    "precision": 0.75
    },
    "other": {
     "ci95": [
@@ -275,21 +274,21 @@
      0.4519
     ],
     "correct": 3,
-    "estimate_plus_minus": 59,
-    "estimated_true_threads": 71,
+    "estimate_plus_minus": 141,
+    "estimated_true_threads": 137,
     "labelled": 15,
     "mistaken_for": {
      "app_bug": 1,
-     "claim_start_problem": 1,
      "credit_add_howto": 1,
+     "credit_wrong": 1,
+     "declined_why": 1,
      "product_question": 1,
      "proof_sent": 1,
      "request_status": 2,
-     "stats_wrong": 2,
-     "thanks_empty": 1,
-     "track_fix_takedown": 2
+     "stats_wrong": 3,
+     "thanks_empty": 1
     },
-    "population": 261,
+    "population": 259,
     "precision": 0.2
    },
    "partnership": {
@@ -298,32 +297,32 @@
      0.7693
     ],
     "correct": 2,
-    "estimate_plus_minus": 0,
-    "estimated_true_threads": 2,
+    "estimate_plus_minus": 10,
+    "estimated_true_threads": 8,
     "labelled": 5,
     "mistaken_for": {
-     "merge_split": 1,
-     "robot_mail": 2
+     "credit_wrong": 1,
+     "product_question": 1,
+     "robot_mail": 1
     },
     "population": 5,
     "precision": 0.4
    },
    "plaque_order": {
     "ci95": [
-     0.3057,
-     0.8632
+     0.4093,
+     0.9285
     ],
-    "correct": 5,
-    "estimate_plus_minus": 11,
-    "estimated_true_threads": 22,
+    "correct": 6,
+    "estimate_plus_minus": 10,
+    "estimated_true_threads": 27,
     "labelled": 8,
     "mistaken_for": {
-     "app_bug": 1,
      "product_question": 1,
      "proof_sent": 1
     },
     "population": 36,
-    "precision": 0.625
+    "precision": 0.75
    },
    "product_question": {
     "ci95": [
@@ -331,53 +330,51 @@
      0.4519
     ],
     "correct": 3,
-    "estimate_plus_minus": 67,
-    "estimated_true_threads": 95,
+    "estimate_plus_minus": 68,
+    "estimated_true_threads": 99,
     "labelled": 15,
     "mistaken_for": {
-     "app_bug": 1,
+     "app_bug": 2,
      "credit_add_howto": 2,
      "credit_wrong": 1,
      "merge_split": 2,
-     "profile_edit": 1,
      "proof_sent": 3,
-     "stats_wrong": 1,
-     "track_fix_takedown": 1
+     "proof_what_needed": 1,
+     "stats_wrong": 1
     },
-    "population": 291,
+    "population": 290,
     "precision": 0.2
    },
    "profile_edit": {
     "ci95": [
-     0.5291,
-     0.9776
+     0.6756,
+     1.0
     ],
-    "correct": 7,
-    "estimate_plus_minus": 55,
-    "estimated_true_threads": 86,
+    "correct": 8,
+    "estimate_plus_minus": 28,
+    "estimated_true_threads": 47,
     "labelled": 8,
-    "mistaken_for": {
-     "track_fix_takedown": 1
-    },
+    "mistaken_for": {},
     "population": 30,
-    "precision": 0.875
+    "precision": 1.0
    },
    "proof_sent": {
     "ci95": [
-     0.6644,
-     0.9266
+     0.6269,
+     0.905
     ],
-    "correct": 25,
-    "estimate_plus_minus": 275,
-    "estimated_true_threads": 1772,
+    "correct": 24,
+    "estimate_plus_minus": 293,
+    "estimated_true_threads": 1703,
     "labelled": 30,
     "mistaken_for": {
+     "other": 1,
      "proof_what_needed": 1,
-     "request_status": 3,
-     "request_withdraw_correct": 1
+     "request_status": 2,
+     "request_withdraw_correct": 2
     },
-    "population": 2003,
-    "precision": 0.8333
+    "population": 2005,
+    "precision": 0.8
    },
    "proof_what_needed": {
     "ci95": [
@@ -385,48 +382,47 @@
      0.9776
     ],
     "correct": 7,
-    "estimate_plus_minus": 135,
-    "estimated_true_threads": 168,
+    "estimate_plus_minus": 137,
+    "estimated_true_threads": 169,
     "labelled": 8,
     "mistaken_for": {
-     "merge_split": 1
+     "credit_wrong": 1
     },
-    "population": 61,
+    "population": 62,
     "precision": 0.875
    },
    "refund_dispute": {
     "ci95": [
-     0.6756,
-     1.0
+     0.5291,
+     0.9776
     ],
-    "correct": 8,
-    "estimate_plus_minus": 12,
-    "estimated_true_threads": 54,
+    "correct": 7,
+    "estimate_plus_minus": 15,
+    "estimated_true_threads": 48,
     "labelled": 8,
-    "mistaken_for": {},
+    "mistaken_for": {
+     "cancel_subscription": 1
+    },
     "population": 44,
-    "precision": 1.0
+    "precision": 0.875
    },
    "request_status": {
     "ci95": [
-     0.1982,
-     0.6425
+     0.4805,
+     0.891
     ],
-    "correct": 6,
-    "estimate_plus_minus": 226,
-    "estimated_true_threads": 355,
+    "correct": 11,
+    "estimate_plus_minus": 192,
+    "estimated_true_threads": 374,
     "labelled": 15,
     "mistaken_for": {
      "billing_question": 1,
-     "claim_start_problem": 2,
      "human_request": 1,
-     "merge_split": 1,
      "other": 1,
-     "proof_sent": 1,
-     "proof_what_needed": 2
+     "proof_what_needed": 1
     },
-    "population": 231,
-    "precision": 0.4
+    "population": 232,
+    "precision": 0.7333
    },
    "request_withdraw_correct": {
     "ci95": [
@@ -434,15 +430,16 @@
      0.7848
     ],
     "correct": 4,
-    "estimate_plus_minus": 128,
-    "estimated_true_threads": 84,
+    "estimate_plus_minus": 178,
+    "estimated_true_threads": 150,
     "labelled": 8,
     "mistaken_for": {
      "credit_wrong": 1,
-     "merge_split": 2,
-     "proof_sent": 1
+     "merge_split": 1,
+     "proof_sent": 1,
+     "request_status": 1
     },
-    "population": 33,
+    "population": 32,
     "precision": 0.5
    },
    "robot_mail": {
@@ -451,8 +448,8 @@
      1.0
     ],
     "correct": 15,
-    "estimate_plus_minus": 12,
-    "estimated_true_threads": 149,
+    "estimate_plus_minus": 6,
+    "estimated_true_threads": 142,
     "labelled": 15,
     "mistaken_for": {},
     "population": 134,
@@ -464,12 +461,12 @@
      0.7848
     ],
     "correct": 4,
-    "estimate_plus_minus": 57,
-    "estimated_true_threads": 67,
+    "estimate_plus_minus": 62,
+    "estimated_true_threads": 84,
     "labelled": 8,
     "mistaken_for": {
      "api_support": 2,
-     "app_bug": 1,
+     "billing_question": 1,
      "robot_mail": 1
     },
     "population": 19,
@@ -481,7 +478,7 @@
      0.9285
     ],
     "correct": 6,
-    "estimate_plus_minus": 33,
+    "estimate_plus_minus": 32,
     "estimated_true_threads": 35,
     "labelled": 8,
     "mistaken_for": {
@@ -497,49 +494,48 @@
      0.5907
     ],
     "correct": 2,
-    "estimate_plus_minus": 58,
-    "estimated_true_threads": 77,
+    "estimate_plus_minus": 13,
+    "estimated_true_threads": 16,
     "labelled": 8,
     "mistaken_for": {
      "credit_add_howto": 2,
-     "credit_wrong": 1,
+     "credit_wrong": 2,
      "gdpr_erasure": 1,
-     "merge_split": 1,
      "request_status": 1
     },
     "population": 43,
     "precision": 0.25
    }
   },
-  "weighted_accuracy": 0.6688
+  "weighted_accuracy": 0.672
  },
- "labelled_at_utc": "2026-11-11",
+ "labelled_at_utc": "2026-11-14",
  "outcome_reader": {
   "counted_headline": 2757,
-  "estimated_true_headline": 2811,
+  "estimated_true_headline": 2659,
   "headline": {
    "ci95": [
-    0.9286,
-    1.0
+    0.8378,
+    0.9794
    ],
    "labelled": 50,
    "population": 2757,
-   "precision": 1.0,
-   "really_a_promise": 50
+   "precision": 0.94,
+   "really_a_promise": 47
   },
   "no_handoff": {
    "ci95": [
-    0.0315,
-    0.1884
+    0.0435,
+    0.2136
    ],
    "labelled": 50,
-   "miss_rate": 0.08,
-   "missed_promises": 4,
-   "population": 673
+   "miss_rate": 0.1,
+   "missed_promises": 5,
+   "population": 679
   }
  },
  "rater": "one AI rater (Claude), blind to the rules' output; no second rater",
- "rules_version": "2026-11-11.2",
+ "rules_version": "2026-11-14.1",
  "seed": {
   "outcomes": 20261112,
   "shapes": 20261111

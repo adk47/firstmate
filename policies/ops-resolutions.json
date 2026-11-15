@@ -116,8 +116,8 @@
       "tier": "handoff",
       "executes_here": false,
       "handoff": "human queue",
-      "line": "handoff_line",
-      "describe": "no rule matched: post the approved hand-off line and page a human with the conversation id. The conversation is NOT reassigned from this surface - no reassignment writer is wired (router._production_writers() is empty by captain decision), so the page is what stops the case going unattended",
+      "line": "",
+      "describe": "no rule matched: page a human, and the page names the conversation id. No customer line is proposed from this surface: it cannot reassign a conversation (no reassignment writer is wired; router._production_writers() is empty by captain decision), the approved hand-off line is refused here by the output guard (promise/person_without_assignment) because it says a person is coming, and the approved honesty line (I have recorded this and will update you here as soon as there is news.) cannot be sent either: this reply path (scripts/intercom-ops-write.sh reply) does not write the owed_followup record that outbound.ts writes before that sentence, so posting it here would be an unbacked claim. The page is what stops the case going unattended",
       "page": true
     },
     "requester-linked-refusal": {
@@ -423,7 +423,7 @@
     },
     {
       "key": "fallthrough",
-      "why": "every other intent, or an unmeasured fact pattern: the approved hand-off line, then a human",
+      "why": "every other intent, or an unmeasured fact pattern: a human, by page (the hand-off line is guard-refused on a surface that cannot assign)",
       "intents": [
         "*"
       ],

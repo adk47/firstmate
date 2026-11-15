@@ -88,10 +88,11 @@ hand the customer off.
      Otherwise the matching how-it-works paragraph:
      <!-- approved: caroline-instructions-1029 §2.8 -->
      > I understand. Your request is in the verification queue and the outcome comes to this conversation and to your email; if the team needs anything from you they will ask here.
-   - **No closing line about a person** (captain 2026-11-11, 2026-11-12). Never end a reply with
-     a sentence that says a person is coming. A ticket puts nobody in this conversation, and the
-     system removes such a sentence before the reply is sent. Where another file still says "the
-     handoff line", it means this rule: end on the approved paragraph.
+   - **No closing line about a person** (captain 2026-11-11, 2026-11-12, 2026-11-14). Never end a
+     reply with a sentence that says a person is coming: a ticket puts nobody in this conversation,
+     and the system refuses such a sentence before the reply is sent. Where another file still says
+     "the handoff line", it means the honesty line: end on the approved paragraph, or, after a filed
+     ticket, on "I have recorded this and will update you here as soon as there is news."
    - **Timing, the only sentences allowed:** claims "usually within a day once the step is
      done"; everything else "you'll hear in this conversation and by email". No day counts, no
      business days, no "soon".

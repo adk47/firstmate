@@ -78,7 +78,7 @@ Actions and tiers:
 | `erasure-store-missing` | handoff | no | the register could not be read: a staff line names the host and path; the customer is not asked again |
 | `data-issue` | handoff | no | ClickUp categorization (j-k1) |
 | `fraud-lens-ticket` | handoff | no | a fraud report becomes a lens ticket, **never a bulk status write** |
-| `unknown` | handoff | no | the approved hand-off line, then a page naming the conversation |
+| `unknown` | handoff | no | a page naming the conversation, and **no customer line**: this surface cannot assign the conversation and no approved line promises nobody, so nothing is proposed and the page is the whole hand-off |
 | `requester-linked-refusal` | handoff | no | **no customer copy at all** + a page: the target account is the requester's own, so every write would be self-approval |
 
 **Every action that does not execute here pages.** Nothing on this surface can reassign an Intercom
@@ -86,8 +86,12 @@ conversation — `router._production_writers()` is empty by captain decision, so
 exists. A hand-off that posts a line and pages nobody leaves the case with the bot while the customer
 has been told someone will follow up, which is the exact failure the census found. `page` is therefore
 required on every non-executing action, and `refuse` (which forbids customer copy) is the one flag that
-overrides it. `scripts/check-ops-resolutions.sh` fails the build if a handoff action does neither, or if
-a refusing action names an answer-bank line.
+overrides it. The same failure is refused in code too, unconditionally: a reply that says a person is
+coming never passes the output guard (`promise/person_without_assignment`; the rule, its version and its
+coverage are owned by `docs/support/caroline-safety-layer.md`), because nobody can be assigned (the
+escalation team has no members). A page raised when the guard blocks or cannot
+run names the conversation id, so no blocked-reply page is anonymous. `scripts/check-ops-resolutions.sh`
+fails the build if a handoff action does neither, or if a refusing action names an answer-bank line.
 
 The `2026-10-23` "Mixed by Big Boy" case ("they are a fraudster, reject everything") maps to
 `fraud-lens-ticket`; a rename/merge whose target is popular (`pop ≥ 60` or `≥ 50` credits) is W2

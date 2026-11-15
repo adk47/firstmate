@@ -55,6 +55,10 @@ try {
 
 if (typeof input.reply !== "string") fail("input.reply is required (string)");
 
+// ONLY openRequest crosses this bridge. There is no assignment fact and no caller can supply one:
+// a caller-asserted assignment was exactly the unbacked "a person is coming" the guard's
+// person_without_assignment rule refuses, and since captain 2026-11-14 that rule is unconditional
+// (the escalation team has no members).
 const facts = typeof input.openRequest === "boolean" ? { openRequest: input.openRequest } : undefined;
 
 let result;

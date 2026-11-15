@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # assert-support-deny.sh <openclaw-edge.json>: the edge `support` agent (Caroline) must deny exec + the
-# 12 verification/merge tools: every write and intake tool, and the profile_credits_status
+# 11 verification/merge tools: every write and intake tool, and the profile_credits_status
 # diagnosis (captain 2026-10-28 12:1xZ / 12:3xZ). Every deploy that targets edge
 # syncs this file over /root/.openclaw-edge/openclaw.json, so a missing entry re-opens that tool to a
 # customer-facing agent. Called by deploy.sh Step 1 for EVERY deploy that targets edge (including
@@ -14,7 +14,11 @@ import json, sys
 NEED = ["exec", "credits_verify", "profiles_claim_self", "profiles_consolidate",
         "profile_credits_status", "dedupe_check", "remove_credits",
         "credit_status_lookup", "document_intake", "merge_request_intake", "credit_trust_handoff",
-        "merge_intake", "proof_on_file"]
+        "merge_intake"]
+# `proof_on_file` is NOT in NEED since 2026-11-14: support-tools registers no tool under that name
+# (it is a field of credit_verification_check's result), so denying the name changed nothing
+# Caroline could do. Registering a tool under it later fails
+# plugins/support-tools/tests/edge-support-deny.test.ts until its deny entry is reviewed.
 # Not in NEED since ai-support-quality-v1 (2026-11-12): the two READS that fail closed on the
 # conversation's signed-in contact and return that customer's OWN rows only
 # (credit_verification_check, profile_claim_status). They write nothing and are the source of the

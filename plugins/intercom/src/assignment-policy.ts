@@ -312,8 +312,8 @@ export async function applyHandOff(p: {
  * responses by caroline"; no humans in the loop, a hand-off is a defect):
  *   - `user_requested_human`: asking for a person does not produce one. Measured on the edge
  *     journal 2026-11-12 12:54Z..11-13 14:00Z, the first day escalations went to the queue: 5 of
- *     the 9 were this reason, and the queue's team has no members, so each customer was told "I'm
- *     pulling in a teammate" and then got silence on every later message.
+ *     the 9 were this reason, and the queue's team has no members, so each customer was promised a
+ *     teammate who never came and then got silence on every later message.
  *   - `turn_count_cap` (2 of the 9): a long conversation is a reason to answer better, and after
  *     the hand-off nobody answered at all.
  *

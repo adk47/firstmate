@@ -19,7 +19,13 @@
  *     reason and one retry (guard-feedback.ts).
  *   - Honest statements ABOUT a person ("I couldn't confirm a teammate had taken this on") stay:
  *     the patterns need a promise shape, not just the word.
- *   - Merge threads are left to merge-reply-guard.ts, which owns their closing line.
+ *   - Merge threads are NOT an exception (caroline-read-state-tools-r1, 2026-11-14): nobody is
+ *     assigned on a merge ask either, so a closing line in a merge reply is removed here and the
+ *     approved merge paragraph is what is sent.
+ *
+ * This is the gentle half. The output guard's `promise/person_without_assignment` rule
+ * (caroline-output-guard.ts) is the strict half: any phrasing this strip does not know is refused
+ * there, on every reply door, unconditionally (captain 2026-11-14: nobody can be assigned).
  */
 
 const PROMISE_RES: RegExp[] = [

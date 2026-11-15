@@ -22,7 +22,7 @@ import html
 import re
 from collections import namedtuple
 
-RULES_VERSION = "2026-11-11.2"
+RULES_VERSION = "2026-11-14.1"
 
 # ----------------------------------------------------------------------------------------------
 # Who is who. Ids are Intercom admin ids; the policy file can override them (k1 introduces an AI
@@ -526,6 +526,10 @@ QUEUE_LINE = _rx(
     r"goes to the verification team|in the verification queue|review in the order requests arrive"
     r"|will email you when yours has been reviewed|we'll message you here as soon as|we are continuing to review"
     r"|we will follow up here once|we'll be in touch|we'll update you|the outcome comes to this conversation"
+    # the approved honesty lines (answer-bank.ts, firstmate inbox 010/011 2026-11-14): an owed
+    # follow-up we must keep, naming no person. The old "gets to the team" line stays in
+    # PERSON_PROMISE because already-answered threads carry it.
+    r"|i have recorded this and will update you here|i will update you here as soon as there is news"
 )
 # A DATE PROMISE: one of the four things Caroline must never do. "within N business days",
 # "by Friday", "usually within a day". Counted on its own; it pages.
