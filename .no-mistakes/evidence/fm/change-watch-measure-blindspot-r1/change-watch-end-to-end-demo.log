@@ -1,0 +1,40 @@
+==================================================================
+ 1. A Deployment labelled app.kubernetes.io/name=<name> is measured
+    with its own selector (not the assumed app=<name>)
+==================================================================
+$ fm-change-watch.sh register sel <PR URL>
+change-watch: registered sel-7 for https://github.com/Muso-AI/demo-service/pull/7 (1 target(s)); beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)
+
+targets recorded:
+muso-prod	demo
+
+$ fm-change-watch.sh sample sel-7 300     # +5m, new image rolled out
+
+kubectl calls actually issued by the watch:
+  /home/aaron/.kube/muso-ovh-tunnel.yaml	--request-timeout=4s -n muso-prod get deployment demo -o jsonpath={range $k,$v := .spec.selector.matchLabels}{$k}={$v}{"\n"}{end}
+  /home/aaron/.kube/muso-ovh-tunnel.yaml	--request-timeout=4s -n muso-prod get pods -l app.kubernetes.io/name=demo -o json
+  /home/aaron/.kube/muso-ovh-tunnel.yaml	--request-timeout=4s -n muso-prod get deployment demo -o jsonpath={range $k,$v := .spec.selector.matchLabels}{$k}={$v}{"\n"}{end}
+  /home/aaron/.kube/muso-ovh-tunnel.yaml	--request-timeout=4s -n muso-prod get pods -l app.kubernetes.io/name=demo -o json
+  /home/aaron/.kube/muso-ovh-tunnel.yaml	--request-timeout=4s -n muso-prod get deployment demo -o jsonpath={range $k,$v := .spec.selector.matchLabels}{$k}={$v}{"\n"}{end}
+  /home/aaron/.kube/muso-ovh-tunnel.yaml	--request-timeout=4s -n muso-prod get pods -l app.kubernetes.io/name=demo -o json
+
+measurement written to samples.log:
+  metric=http_5xx_per_min@muso-prod/demo value=2.0000 status=0.1667
+
+==================================================================
+ 2. A monorepo PR touching only scripts/ concludes clean, not an
+    unproven rollout of services it never touched
+==================================================================
+$ fm-change-watch.sh register ms-91 <PR URL>
+change-watch: registered ms-91-91 for https://github.com/Muso-AI/muso-messaging/pull/91 (1 target(s); the change deploys nothing: no Deployment path is touched by the diff); beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)
+
+cluster targets recorded: (none - the watch did not threaten the notification services)
+
+==================================================================
+ 3. A genuine rollout failure is still reported as a regression
+==================================================================
+$ fm-change-watch.sh verdict fd-8    # after the failing rollout
+change-watch regressed at +5m on http_5xx_per_min (40.0000 vs baseline 0.1667)
+
+operator notification sent:
+  fd change-watch https://github.com/Muso-AI/demo-service/pull/8 regressed at +5m on http_5xx_per_min (target muso-prod/demo, measured 40.0000, baseline 0.1667); investigate before the next sample
