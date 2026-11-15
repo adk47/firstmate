@@ -1,0 +1,20 @@
+# pod=chi-ticker-prod-prod-0-0-0 ns=data-processing run_at_utc=2026-11-13T05:25:34Z clickhouse-client --readonly 1
+   ┌─host───────────────────────┬─view───────────────────────────┬─status────┬───last_success_time─┬───next_refresh_time─┬─has_exception─┐
+1. │ chi-ticker-prod-prod-0-0-0 │ mv_dim_refresh                 │ Scheduled │ 2026-11-13 04:00:00 │ 2026-11-13 08:00:00 │             0 │
+2. │ chi-ticker-prod-prod-0-0-0 │ mv_entity_set_snapshot_refresh │ Running   │ 2026-11-13 04:25:00 │ 2026-11-13 05:25:00 │             0 │
+3. │ chi-ticker-prod-prod-0-0-0 │ mv_nowcast_baseline_sweep      │ Scheduled │ 2026-11-13 05:25:30 │ 2026-11-13 05:26:00 │             0 │
+4. │ chi-ticker-prod-prod-0-0-0 │ mv_nowcast_diurnal_refresh     │ Scheduled │ 2026-11-13 00:40:00 │ 2026-11-13 06:40:00 │             0 │
+5. │ chi-ticker-prod-prod-0-0-0 │ mv_nowcast_refresh             │ Scheduled │ 2026-11-13 05:00:00 │ 2026-11-13 06:00:00 │             0 │
+   └────────────────────────────┴────────────────────────────────┴───────────┴─────────────────────┴─────────────────────┴───────────────┘
+   ┌─host───────────────────────┬─name─────────────────────┬─engine───────────────────────┬─total_rows─┐
+1. │ chi-ticker-prod-prod-0-0-0 │ dim_paid_entities        │ ReplicatedReplacingMergeTree │  112301983 │
+2. │ chi-ticker-prod-prod-0-0-0 │ entity_set_snapshots     │ ReplicatedReplacingMergeTree │      55350 │
+3. │ chi-ticker-prod-prod-0-0-0 │ nowcast_baseline_staging │ MergeTree                    │   15572536 │
+4. │ chi-ticker-prod-prod-0-0-0 │ nowcast_rate             │ ReplicatedReplacingMergeTree │  239655087 │
+5. │ chi-ticker-prod-prod-0-0-0 │ processed_profile_daily  │ ReplicatedReplacingMergeTree │    2953600 │
+6. │ chi-ticker-prod-prod-0-0-0 │ processed_source_daily   │ ReplicatedReplacingMergeTree │   20400455 │
+7. │ chi-ticker-prod-prod-0-0-0 │ profile_box_stats        │ ReplicatedReplacingMergeTree │      19678 │
+   └────────────────────────────┴──────────────────────────┴──────────────────────────────┴────────────┘
+   ┌─backups_on_record─┬─────────────────────newest─┐
+1. │               337 │ 2026-11-13 04:14:56.980689 │
+   └───────────────────┴────────────────────────────┘

@@ -1,0 +1,76 @@
+# host=10.0.0.17 db=stats run_at_utc=2026-11-13T00:18:11Z session=default_transaction_read_only=on
+        datname        |      usename       |                  app                  | client_addr |  n  | active | idle_in_txn 
+-----------------------+--------------------+---------------------------------------+-------------+-----+--------+-------------
+ stats                 | muso-stats-pg      | (blank)                               | 127.0.0.1   | 136 |      3 |         129
+ analytics             | muso-analytics     | (blank)                               | 127.0.0.1   | 116 |      3 |          24
+ stats                 | muso-stats-pg      | industry-worker-v2                    | 127.0.0.1   |  65 |      5 |          60
+ stats                 | muso-stats-pg      | industry-proc-catalog-v2              | 127.0.0.1   |  13 |      0 |          13
+ muso-core-dev         | muso-dev           | (blank)                               | 10.0.0.4    |  11 |      0 |           0
+ airflow               | airflow            | (blank)                               | 127.0.0.1   |  10 |      0 |           0
+ core                  | muso-app           | (blank)                               | 127.0.0.1   |  10 |      2 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 127.0.0.1   |   9 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 127.0.0.1   |   8 |      0 |           0
+ authentik             | authentik          | (blank)                               | 10.0.0.20   |   7 |      0 |           0
+ authentik             | authentik          | (blank)                               | 10.0.0.2    |   6 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.5    |   6 |      0 |           0
+ feed                  | muso-stats-feed    | (blank)                               | 127.0.0.1   |   6 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.5    |   6 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.4    |   5 |      0 |           0
+ muso-feed-dev         | muso-dev           | (blank)                               | 10.0.0.8    |   5 |      0 |           0
+ stats                 | postgres           | psql                                  |             |   4 |      4 |           0
+ stats                 | v4poc_rw           | v4-ticker-api-prod                    | 10.0.0.41   |   4 |      0 |           0
+ industry_calculations | muso-ic-pg         | (blank)                               | 10.0.0.4    |   4 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.4    |   3 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.43   |   2 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.43   |   2 |      0 |           0
+ stats                 | v4poc_rw           | v4-ticker-api-poc                     | 10.0.0.41   |   2 |      0 |           0
+ stats                 | v4poc_rw           | v4-ticker-api-poc-baseline            | 10.0.0.41   |   2 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.36   |   2 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.40   |   2 |      0 |           0
+ industry_calculations | muso-ic-pg         | (blank)                               | 10.0.0.1    |   2 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.36   |   2 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.39   |   2 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.34   |   2 |      0 |           0
+ industry_calculations | muso-ic-pg         | (blank)                               | 10.0.0.3    |   2 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.44   |   2 |      0 |           0
+ industry_calculations | muso-ic-pg         | (blank)                               | 10.0.0.5    |   2 |      0 |           0
+ industry_calculations | muso-ic-pg         | (blank)                               | 127.0.0.1   |   2 |      0 |           0
+ kong                  | kong               | kong                                  | 10.0.0.1    |   2 |      0 |           0
+ kong                  | kong               | kong                                  | 10.0.0.2    |   2 |      0 |           0
+ kong                  | kong               | kong                                  | 10.0.0.3    |   2 |      0 |           0
+ iceberg_catalog       | iceberg_catalog_rw | PostgreSQL JDBC Driver                | 10.0.0.20   |   2 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.35   |   2 |      0 |           0
+ iceberg_catalog       | iceberg_catalog_rw | PostgreSQL JDBC Driver                | 10.0.0.29   |   2 |      0 |           0
+ stats                 | v4poc_rw           | v4-ticker-api-prod-processed-snapshot | 10.0.0.41   |   1 |      1 |           0
+ analytics             | postgres           | psql                                  |             |   1 |      1 |           0
+ authentik             | authentik          | (blank)                               | 10.0.0.4    |   1 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.33   |   1 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.37   |   1 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.38   |   1 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.39   |   1 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.41   |   1 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.45   |   1 |      0 |           0
+ catalog               | muso-stats-pg      | (blank)                               | 10.0.0.51   |   1 |      0 |           0
+ hive_metastore        | hive               | (blank)                               | 127.0.0.1   |   1 |      0 |           0
+ iceberg_catalog       | iceberg_catalog_rw | PostgreSQL JDBC Driver                | 10.0.0.67   |   1 |      0 |           0
+ iceberg_catalog       | iceberg_catalog_rw | v4-pod-extract-catalog                | 10.0.0.68   |   1 |      0 |           0
+ industry_calculations | muso-ic-pg         | (blank)                               | 10.0.0.2    |   1 |      0 |           0
+ muso-catalog-dev      | muso-dev           | (blank)                               | 10.0.0.8    |   1 |      0 |           0
+ muso-messaging-dev    | muso-dev           | preferences                           | 10.0.0.8    |   1 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.33   |   1 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.34   |   1 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.35   |   1 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.37   |   1 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.38   |   1 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.40   |   1 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.41   |   1 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.44   |   1 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.45   |   1 |      0 |           0
+ olap                  | muso-olap-pg       | (blank)                               | 10.0.0.51   |   1 |      0 |           0
+ postgres              | postgres_exporter  | (blank)                               |             |   1 |      0 |           0
+ stats                 | v4poc_rw           | v4-ticker-api-poc-box-refresh         | 10.0.0.41   |   1 |      0 |           0
+ stats                 | v4poc_rw           | v4-ticker-api-poc-processed-snapshot  | 10.0.0.41   |   1 |      1 |           0
+ stats                 | v4poc_rw           | v4-ticker-api-prod                    | 10.0.0.40   |   1 |      0 |           0
+ stats                 | v4poc_rw           | v4-ticker-api-prod-box-refresh        | 10.0.0.41   |   1 |      0 |           0
+(71 rows)
+

@@ -1,0 +1,48 @@
+# host=10.0.0.19 db=stats run_at_utc=2026-11-13T00:19:10Z session=default_transaction_read_only=on
+        datname        |      rolname      |   kind   | stmts |   calls    |     rows     | exec_h |  blks_read   |    blks_hit    |   wal   | wal_bytes |   oldest   
+-----------------------+-------------------+----------+-------+------------+--------------+--------+--------------+----------------+---------+-----------+------------
+ stats                 | muso-stats-pg     | read     |  1046 | 3837985586 | 450840597894 |  19857 | 742320815880 | 15179762869559 | 0 bytes |         0 | 2026-06-22
+ core                  | muso-app          | read     |  2064 |  759260314 |   1838066914 |    214 |   5386873355 |   189309499728 | 0 bytes |         0 | 2026-06-22
+ catalog               | muso-stats-pg     | read     |   445 | 1781973992 |   2209092511 |    126 |   2506337664 |    45183524679 | 0 bytes |         0 | 2026-06-22
+ olap                  | muso-stats-pg     | read     |   341 |  110368464 |    710501038 |     91 |   2654165617 |     8344540812 | 0 bytes |         0 | 2026-06-22
+ feed                  | muso-stats-feed   | read     |    61 |  217416987 |    173844692 |     65 |   1142147192 |   499329815869 | 0 bytes |         0 | 2026-06-22
+ core                  | core_paid_ro      | read     |     9 |   13636994 |      2203589 |     18 |         1012 |    14376587091 | 0 bytes |         0 | 2026-11-03
+ analytics             | muso-analytics    | read     |   380 |     221059 |   1494277655 |     12 |    771295822 |     2412854659 | 0 bytes |         0 | 2026-08-05
+ postgres              | postgres_exporter | read     |    18 |   17775250 |    339293662 |     11 |       299721 |      161378521 | 0 bytes |         0 | 2026-06-21
+ industry_calculations | muso-ic-pg        | read     |    51 |   49762289 |    250019717 |     10 |    162123907 |      574423113 | 0 bytes |         0 | 2026-06-22
+ stats                 | muso-stats-pg     | txn_util |    37 | 8858406097 |            0 |      6 |            0 |       55835411 | 0 bytes |         0 | 2026-06-22
+ stats                 | postgres          | read     |    11 |      11643 |     39203663 |      2 |    147790845 |      555856771 | 0 bytes |         0 | 2026-08-06
+ catalog               | muso-stats-pg     | txn_util |    10 | 3166569979 |            0 |      1 |            0 |            147 | 0 bytes |         0 | 2026-06-22
+ stats                 | beta_ro           | read     |    28 |     282176 |       172095 |      1 |     48636935 |     1157243366 | 0 bytes |         0 | 2026-10-18
+ catalog               | postgres          | read     |    59 |       2817 |     43538024 |      1 |     53495260 |      294974423 | 0 bytes |         0 | 2026-08-06
+ core                  | muso-app          | txn_util |    59 |   39330169 |            0 |      0 |        10456 |        4018073 | 0 bytes |         0 | 2026-06-22
+ olap                  | muso-stats-pg     | txn_util |    17 |  248353527 |            0 |      0 |           22 |         151417 | 0 bytes |         0 | 2026-06-22
+ olap                  | beta_ro           | read     |    54 |     413747 |       293767 |      0 |       749371 |      204427180 | 0 bytes |         0 | 2026-10-15
+ industry_calculations | beta_ro           | read     |    18 |     867055 |      3803381 |      0 |      1207985 |        9951646 | 0 bytes |         0 | 2026-10-18
+ feed                  | muso-stats-feed   | txn_util |    11 |  214412477 |            0 |      0 |            0 |             54 | 0 bytes |         0 | 2026-06-22
+ industry_calculations | muso-ic-pg        | txn_util |     4 |     872492 |            0 |      0 |        73040 |        6027252 | 0 bytes |         0 | 2026-07-31
+ core                  | core_paid_ro      | txn_util |    11 |   54385386 |            0 |      0 |            1 |         201470 | 0 bytes |         0 | 2026-10-23
+ core                  | postgres          | read     |    22 |       1461 |         2554 |      0 |       119338 |       21596639 | 0 bytes |         0 | 2026-10-06
+ core                  | core_paid_ro      | other    |     1 |         46 |      3311924 |      0 |       952318 |        9035553 | 0 bytes |         0 | 2026-10-23
+ postgres              | postgres          | read     |    14 |     116170 |       115090 |      0 |            0 |          68442 | 0 bytes |         0 | 2026-08-04
+ catalog               | beta_ro           | read     |    24 |      33792 |        57470 |      0 |       107107 |        1155349 | 0 bytes |         0 | 2026-10-15
+ industry_calculations | muso-stats-pg     | read     |     9 |      32541 |       228161 |      0 |       109292 |        2382210 | 0 bytes |         0 | 2026-08-05
+ analytics             | muso-analytics    | txn_util |    10 |     632916 |            0 |      0 |         9719 |         187073 | 0 bytes |         0 | 2026-08-05
+ feed                  | muso-stats-pg     | read     |     9 |      32999 |       136090 |      0 |        35761 |        1213147 | 0 bytes |         0 | 2026-08-05
+ stats                 | beta_ro           | txn_util |     6 |     563497 |            0 |      0 |            0 |           4997 | 0 bytes |         0 | 2026-10-15
+ olap                  | postgres          | read     |     3 |        209 |       107096 |      0 |        40139 |        1575651 | 0 bytes |         0 | 2026-10-18
+ airflow               | postgres          | read     |     5 |        570 |          500 |      0 |         8779 |          20931 | 0 bytes |         0 | 2026-10-26
+ olap                  | beta_ro           | txn_util |     2 |     827886 |            0 |      0 |            0 |              0 | 0 bytes |         0 | 2026-10-15
+ industry_calculations | beta_ro           | txn_util |     2 |       1580 |            0 |      0 |          523 |          10537 | 0 bytes |         0 | 2026-10-18
+ feed                  | muso-stats-pg     | txn_util |     5 |      38778 |            0 |      0 |            4 |             32 | 0 bytes |         0 | 2026-08-05
+ industry_calculations | muso-stats-pg     | txn_util |     5 |      22310 |            0 |      0 |            4 |            158 | 0 bytes |         0 | 2026-08-05
+ stats                 | postgres          | txn_util |    10 |      37493 |            0 |      0 |            0 |            399 | 0 bytes |         0 | 2026-08-06
+ catalog               | beta_ro           | txn_util |     2 |      63760 |            0 |      0 |            0 |              0 | 0 bytes |         0 | 2026-10-15
+ olap                  | muso-olap-pg      | read     |     1 |         55 |         2864 |      0 |          329 |          22326 | 0 bytes |         0 | 2026-10-17
+ core                  | postgres          | txn_util |    11 |       3623 |            0 |      0 |            5 |            670 | 0 bytes |         0 | 2026-09-28
+ olap                  | postgres          | txn_util |     8 |      14088 |            0 |      0 |            0 |              0 | 0 bytes |         0 | 2026-09-28
+ catalog               | postgres          | txn_util |    16 |       3961 |            0 |      0 |            0 |              0 | 0 bytes |         0 | 2026-08-06
+ postgres              | postgres          | txn_util |     1 |        852 |            0 |      0 |            0 |              0 | 0 bytes |         0 | 2026-10-06
+ stats                 | muso-analytics    | txn_util |     2 |         18 |            0 |      0 |            0 |              0 | 0 bytes |         0 | 2026-11-12
+(43 rows)
+

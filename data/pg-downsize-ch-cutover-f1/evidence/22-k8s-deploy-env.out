@@ -1,0 +1,71 @@
+# source=kubectl (read-only get) on node-1 ns=muso-prod run_at_utc=2026-11-13T00:28:24Z
+## deployments: replicas + PG/CH/V4/shadow/yield env (names and non-secret literal values only)
+### credits-next replicas=18 ready=18
+TICKER_API_URL=http://ticker-api-prod.data-processing.svc.cluster.local:8080
+TICKER_JWT_HMAC_SECRET=<from:ticker-jwt-hmac/token_hmac_secret_key>
+### industry-api replicas=3 ready=3
+CUBE_SUMMARY_WINDOW_DELTA=false
+SHADOW_MIRROR_ENABLED=false
+SHADOW_MIRROR_ENDPOINTS=stats_main_windowed,stats_dates_windowed
+SHADOW_MIRROR_SAMPLE_RATE=0.05
+SHADOW_CH_HOST=clickhouse-ticker-prod.data-processing.svc.cluster.local
+SHADOW_CH_USER=ticker_ro
+SHADOW_CH_PASSWORD=<from:clickhouse-ticker-ro/ticker_ro_password>
+SHADOW_CH_DATABASE=ticker_prod
+SHADOW_CH_VIEW_MAP={"cube_analytics_stats_windowed_view":"cube_windowed_stats_locf_view"}
+SHADOW_CH_QUERY_TIMEOUT_S=30
+PG_CORE_BACKEND_READER_CONNECT_STRING=<from:core-paid-ro/PG_CORE_READER_CONNECT_STRING>
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections-reader/PG_ANALYTICS_STATS_CONNECT_STRING>
+PG_CATALOG_READER_CONNECT_STRING=<from:industry-pg-connections-reader/PG_CATALOG_CONNECT_STRING>
+### industry-api-shadow-canary replicas=0 ready=0
+CUBE_SUMMARY_WINDOW_DELTA=false
+SHADOW_MIRROR_ENABLED=true
+SHADOW_TRACEMALLOC=1
+SHADOW_MIRROR_ENDPOINTS=stats_main_windowed,stats_dates_windowed
+SHADOW_MIRROR_SAMPLE_RATE=0.05
+SHADOW_CH_HOST=clickhouse-ticker-prod.data-processing.svc.cluster.local
+SHADOW_CH_USER=ticker_ro
+SHADOW_CH_PASSWORD=<from:clickhouse-ticker-ro/ticker_ro_password>
+SHADOW_CH_DATABASE=ticker_prod
+SHADOW_CH_VIEW_MAP={"cube_analytics_stats_windowed_view":"cube_windowed_stats_locf_view"}
+SHADOW_CH_QUERY_TIMEOUT_S=30
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections-reader/PG_ANALYTICS_STATS_CONNECT_STRING>
+PG_CATALOG_READER_CONNECT_STRING=<from:industry-pg-connections-reader/PG_CATALOG_CONNECT_STRING>
+### industry-proc-catalog-medium-v2 replicas=0 ready=0
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections/PG_ANALYTICS_STATS_READER_CONNECT_STRING_IW>
+### industry-proc-catalog-v2 replicas=40 ready=40
+FASTLANE_OWNS_STATS=true
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections/PG_ANALYTICS_STATS_READER_CONNECT_STRING_IW>
+### industry-proc-catalog-v2-backlog replicas=0 ready=0
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections/PG_ANALYTICS_STATS_READER_CONNECT_STRING_IW>
+### industry-proc-fastlane-admin replicas=4 ready=4
+PG_CORE_BACKEND_READER_CONNECT_STRING=<from:core-paid-ro/PG_CORE_READER_CONNECT_STRING>
+FASTLANE_OWNS_STATS=true
+### industry-proc-fastlane-mega replicas=10 ready=10
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections-reader/PG_ANALYTICS_STATS_READER_CONNECT_STRING>
+FASTLANE_CUBE_READ_SECONDARY=false
+PG_CORE_BACKEND_READER_CONNECT_STRING=<from:core-paid-ro/PG_CORE_READER_CONNECT_STRING>
+FASTLANE_OWNS_STATS=true
+### industry-proc-fastlane-priority replicas=150 ready=150
+PG_CORE_BACKEND_READER_CONNECT_STRING=<from:core-paid-ro/PG_CORE_READER_CONNECT_STRING>
+FASTLANE_OWNS_STATS=true
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections-reader/PG_ANALYTICS_STATS_READER_CONNECT_STRING>
+### industry-proc-fastlane-v2 replicas=400 ready=400
+FASTLANE_CUBE_READ_SECONDARY=false
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections-bouncer/PG_ANALYTICS_STATS_CONNECT_STRING>
+PG_CORE_BACKEND_READER_CONNECT_STRING=<from:core-paid-ro/PG_CORE_READER_CONNECT_STRING>
+FASTLANE_OWNS_STATS=true
+### industry-proc-fastlane-v2-reader-canary replicas=0 ready=0
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections-reader/PG_ANALYTICS_STATS_READER_CONNECT_STRING_FL>
+PG_CORE_BACKEND_READER_CONNECT_STRING=<from:core-paid-ro/PG_CORE_READER_CONNECT_STRING>
+FASTLANE_OWNS_STATS=true
+### industry-proc-raw-fresh replicas=1 ready=1
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections/PG_ANALYTICS_STATS_READER_CONNECT_STRING_IW>
+### industry-proc-raw-v2 replicas=17 ready=17
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections/PG_ANALYTICS_STATS_READER_CONNECT_STRING_IW>
+### industry-worker-medium-v2 replicas=50 ready=50
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections/PG_ANALYTICS_STATS_READER_CONNECT_STRING_IW>
+### industry-worker-v2 replicas=80 ready=80
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections/PG_ANALYTICS_STATS_READER_CONNECT_STRING_IW>
+### industry-worker-v2-backlog replicas=20 ready=20
+PG_ANALYTICS_STATS_READER_CONNECT_STRING=<from:industry-pg-connections/PG_ANALYTICS_STATS_READER_CONNECT_STRING_IW>

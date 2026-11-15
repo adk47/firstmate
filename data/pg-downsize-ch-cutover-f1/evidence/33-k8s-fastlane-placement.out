@@ -1,0 +1,30 @@
+# run_at_utc=2026-11-13T02:26:17Z source=kubectl get (read-only) on node-1, ns muso-prod
+industry-proc-fastlane-v2	400	{"limits":{"cpu":"1","memory":"3Gi"},"requests":{"cpu":"25m","ephemeral-storage":"1Gi","memory":"1Gi"}}	{}	{"preferredDuringSchedulingIgnoredDuringExecution":[{"preference":{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":["node-49-pdp","node-50-pdp"]}]},"weight":90}],"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"role","op	[{"effect":"PreferNoSchedule","key":"dedicated","value":"app-serving"},{"effect":"PreferNoSchedule","key":"dedicated","value":"data-processing"},{"effect":"NoSchedule","key":"dedicated","value":"data-
+industry-proc-fastlane-priority	150	{"limits":{"cpu":"1","memory":"4Gi"},"requests":{"cpu":"25m","memory":"256Mi"}}	{}	{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"role","operator":"In","values":["app-serving"]}]}]}}	[{"effect":"PreferNoSchedule","key":"dedicated","value":"app-serving"},{"effect":"PreferNoSchedule","key":"dedicated","value":"data-processing"},{"effect":"NoSchedule","key":"dedicated","value":"data-
+industry-proc-fastlane-mega	10	{"limits":{"cpu":"2","memory":"28Gi"},"requests":{"cpu":"250m","memory":"28Gi"}}	{}	{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"role","operator":"In","values":["app-serving"]}]}]}}	[{"effect":"PreferNoSchedule","key":"dedicated","value":"app-serving"},{"effect":"PreferNoSchedule","key":"dedicated","value":"data-processing"},{"effect":"NoSchedule","key":"dedicated","value":"data-
+industry-proc-raw-v2	28	{"limits":{"cpu":"1","memory":"3Gi"},"requests":{"cpu":"50m","memory":"256Mi"}}	{}	{"preferredDuringSchedulingIgnoredDuringExecution":[{"preference":{"matchExpressions":[{"key":"node.muso.ai/idp-primary","operator":"In","values":["true"]}]},"weight":100},{"preference":{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":["node-49-pdp","node-50-pdp"]}]},"we	[{"effect":"PreferNoSchedule","key":"dedicated","value":"app-serving"},{"effect":"PreferNoSchedule","key":"dedicated","value":"data-processing"},{"effect":"NoSchedule","key":"dedicated","value":"data-
+--- scaledobjects
+industry-proc-fastlane-admin-scaler	industry-proc-fastlane-admin	4	47	-
+industry-proc-fastlane-v2-scaler	industry-proc-fastlane-v2	230	280	400
+industry-proc-raw-fresh-scaler	industry-proc-raw-fresh	1	4	-
+industry-proc-raw-medium-v2-scaler	industry-proc-raw-medium-v2	0	285	10
+industry-proc-raw-v2-scaler	industry-proc-raw-v2	0	570	-
+--- node allocatable/requests
+Allocated resources:
+  (Total limits may be over 100 percent, i.e., overcommitted.)
+  Resource           Requests        Limits
+  --------           --------        ------
+  cpu                110870m (29%)   257500m (67%)
+  memory             460818Mi (60%)  894472Mi (118%)
+  ephemeral-storage  190Gi (1%)      0 (0%)
+  hugepages-1Gi      0 (0%)          0 (0%)
+  hugepages-2Mi      0 (0%)          0 (0%)
+Allocated resources:
+  (Total limits may be over 100 percent, i.e., overcommitted.)
+  Resource           Requests        Limits
+  --------           --------        ------
+  cpu                111920m (29%)   262500m (69%)
+  memory             464146Mi (61%)  905736Mi (119%)
+  ephemeral-storage  190Gi (1%)      0 (0%)
+  hugepages-1Gi      0 (0%)          0 (0%)
+  hugepages-2Mi      0 (0%)          0 (0%)

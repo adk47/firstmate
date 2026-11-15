@@ -1,0 +1,63 @@
+# source=clickhouse-client --readonly 1 in pod chi-product-analytics-product-0-0-0 (ns data-processing) run_at_utc=2026-11-13T00:25:17Z query=21-ch-tables.sql
+    ┌─database───────┬─name───────────────────────────────────────────┬─engine─────────────────────────────────┬─total_rows─┬─size───────┬─metadata_modification_time─┐
+ 1. │ messaging      │ email_events                                   │ ReplicatedReplacingMergeTree           │   19312834 │ 734.66 MiB │        2026-10-19 13:31:44 │
+ 2. │ openpanel      │ events_replicated                              │ ReplicatedMergeTree                    │    7353342 │ 835.21 MiB │        2026-10-08 16:53:14 │
+ 3. │ openpanel      │ .inner_id.fc64daf7-e7d2-42f7-9ed8-2d7b09f844b7 │ ReplicatedAggregatingMergeTree         │   15076253 │ 760.45 MiB │        2026-10-08 16:53:03 │
+ 4. │ openpanel      │ event_property_values_mv_replicated            │ MaterializedView                       │   15076253 │ 760.45 MiB │        2026-10-08 16:53:03 │
+ 5. │ openpanel      │ sessions_replicated                            │ ReplicatedVersionedCollapsingMergeTree │    1324131 │ 357.41 MiB │        2026-10-08 16:53:14 │
+ 6. │ openpanel      │ profiles_replicated                            │ ReplicatedReplacingMergeTree           │    1294298 │ 175.70 MiB │        2026-10-08 16:53:25 │
+ 7. │ openpanel      │ .inner_id.94eff854-b77a-4c5f-8592-2afe983b562e │ ReplicatedAggregatingMergeTree         │    2717457 │ 22.75 MiB  │        2026-10-08 16:53:23 │
+ 8. │ openpanel      │ profile_event_property_summary_mv_replicated   │ MaterializedView                       │    2717457 │ 22.75 MiB  │        2026-10-08 16:53:23 │
+ 9. │ openpanel      │ .inner_id.c5bfbff2-f8d6-4081-b7c5-851dbe8364be │ ReplicatedAggregatingMergeTree         │    1443911 │ 10.16 MiB  │        2026-10-08 16:53:02 │
+10. │ openpanel      │ distinct_event_names_mv_replicated             │ MaterializedView                       │    1443911 │ 10.16 MiB  │        2026-10-08 16:53:02 │
+11. │ openpanel      │ .inner_id.e1b58a23-9073-4ebf-afad-1b0fb4426787 │ ReplicatedAggregatingMergeTree         │     374959 │ 7.69 MiB   │        2026-10-08 16:53:01 │
+12. │ openpanel      │ cohort_events_mv_replicated                    │ MaterializedView                       │     374959 │ 7.69 MiB   │        2026-10-08 16:53:01 │
+13. │ openpanel      │ .inner_id.d465b375-5fc4-4421-8477-7f14f7507a98 │ ReplicatedAggregatingMergeTree         │     373697 │ 5.65 MiB   │        2026-10-08 16:53:22 │
+14. │ openpanel      │ profile_event_summary_mv_replicated            │ MaterializedView                       │     373697 │ 5.65 MiB   │        2026-10-08 16:53:22 │
+15. │ openpanel      │ .inner_id.0d3d7cee-97cd-4f8e-a600-ae5a30114c5d │ ReplicatedAggregatingMergeTree         │        658 │ 4.00 MiB   │        2026-10-08 16:52:59 │
+16. │ openpanel      │ dau_mv_replicated                              │ MaterializedView                       │        658 │ 4.00 MiB   │        2026-10-08 16:52:59 │
+17. │ openpanel      │ cohort_events_mv                               │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:01 │
+18. │ openpanel      │ cohort_members                                 │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:20 │
+19. │ openpanel      │ cohort_members_replicated                      │ ReplicatedReplacingMergeTree           │          0 │ 0.00 B     │        2026-10-08 16:53:20 │
+20. │ openpanel      │ cohort_metadata                                │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:22 │
+21. │ openpanel      │ cohort_metadata_replicated                     │ ReplicatedReplacingMergeTree           │          0 │ 0.00 B     │        2026-10-08 16:53:21 │
+22. │ openpanel      │ dau_mv                                         │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:00 │
+23. │ openpanel      │ distinct_event_names_mv                        │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:02 │
+24. │ openpanel      │ event_property_values_mv                       │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:03 │
+25. │ openpanel      │ events                                         │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:14 │
+26. │ openpanel      │ events_20251123                                │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:07 │
+27. │ openpanel      │ events_20251123_replicated                     │ ReplicatedMergeTree                    │          0 │ 0.00 B     │        2026-10-08 16:53:06 │
+28. │ openpanel      │ events_bots                                    │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:52:56 │
+29. │ openpanel      │ events_bots_replicated                         │ ReplicatedMergeTree                    │          0 │ 0.00 B     │        2026-10-08 16:52:56 │
+30. │ openpanel      │ events_imports                                 │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:04 │
+31. │ openpanel      │ events_imports_replicated                      │ ReplicatedMergeTree                    │          0 │ 0.00 B     │        2026-10-08 16:53:06 │
+32. │ openpanel      │ groups                                         │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:16 │
+33. │ openpanel      │ groups_replicated                              │ ReplicatedReplacingMergeTree           │          0 │ 0.00 B     │        2026-10-08 16:53:16 │
+34. │ openpanel      │ gsc_daily                                      │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:18 │
+35. │ openpanel      │ gsc_daily_replicated                           │ ReplicatedReplacingMergeTree           │          0 │ 0.00 B     │        2026-10-08 16:53:17 │
+36. │ openpanel      │ gsc_pages_daily                                │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:19 │
+37. │ openpanel      │ gsc_pages_daily_replicated                     │ ReplicatedReplacingMergeTree           │          0 │ 0.00 B     │        2026-10-08 16:53:18 │
+38. │ openpanel      │ gsc_queries_daily                              │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:19 │
+39. │ openpanel      │ gsc_queries_daily_replicated                   │ ReplicatedReplacingMergeTree           │          0 │ 0.00 B     │        2026-10-08 16:53:19 │
+40. │ openpanel      │ profile_aliases                                │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:52:58 │
+41. │ openpanel      │ profile_aliases_replicated                     │ ReplicatedMergeTree                    │          0 │ 0.00 B     │        2026-10-08 16:52:57 │
+42. │ openpanel      │ profile_event_property_summary_mv              │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:24 │
+43. │ openpanel      │ profile_event_summary_mv                       │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:23 │
+44. │ openpanel      │ profiles                                       │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:26 │
+45. │ openpanel      │ profiles_20260504                              │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:15 │
+46. │ openpanel      │ profiles_20260504_replicated                   │ ReplicatedReplacingMergeTree           │          0 │ 0.00 B     │        2026-10-08 16:53:15 │
+47. │ openpanel      │ self_hosting                                   │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:52:53 │
+48. │ openpanel      │ self_hosting_replicated                        │ ReplicatedMergeTree                    │          0 │ 0.00 B     │        2026-10-08 16:52:53 │
+49. │ openpanel      │ session_replay_chunks                          │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:13 │
+50. │ openpanel      │ session_replay_chunks_replicated               │ ReplicatedMergeTree                    │          0 │ 0.00 B     │        2026-10-08 16:53:14 │
+51. │ openpanel      │ sessions                                       │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:15 │
+52. │ openpanel      │ sessions_20251123                              │ Distributed                            │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-08 16:53:03 │
+53. │ openpanel      │ sessions_20251123_replicated                   │ ReplicatedVersionedCollapsingMergeTree │          0 │ 0.00 B     │        2026-10-08 16:53:03 │
+54. │ product_events │ amplitude_events                               │ ReplicatedMergeTree                    │  168931503 │ 28.29 GiB  │        2026-10-09 15:51:41 │
+55. │ product_events │ router_events                                  │ ReplicatedReplacingMergeTree           │    6135181 │ 1.25 GiB   │        2026-10-09 15:51:41 │
+56. │ product_events │ user_property_state                            │ ReplicatedReplacingMergeTree           │   14417282 │ 99.20 MiB  │        2026-10-09 15:51:42 │
+57. │ product_events │ deletions                                      │ ReplicatedReplacingMergeTree           │      74801 │ 4.92 MiB   │        2026-10-09 15:51:43 │
+58. │ product_events │ load_ledger                                    │ ReplicatedReplacingMergeTree           │       1597 │ 139.08 KiB │        2026-10-09 15:51:42 │
+59. │ product_events │ cutover                                        │ ReplicatedReplacingMergeTree           │          1 │ 579.00 B   │        2026-10-09 15:51:44 │
+60. │ product_events │ events                                         │ View                                   │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-09 15:51:44 │
+    └─database───────┴─name───────────────────────────────────────────┴─engine─────────────────────────────────┴─total_rows─┴─size───────┴─metadata_modification_time─┘

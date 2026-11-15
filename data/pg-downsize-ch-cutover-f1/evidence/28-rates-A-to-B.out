@@ -1,0 +1,91 @@
+# derived from 12-snapshot-rate-*-{A,B}.csv and 13-snapshot-pgss-*-{A,B}.csv (same SQL both runs)
+
+## n17 pg_stat_database delta  A=2026-11-13T00:19:30Z B=2026-11-13T02:05:29Z window=6359s (1.77h)
+  wal_bytes_window=608609368184  => 91.3 MiB/s => 7.52 TiB/day
+  db                           tup_returned       %      blks_read       %          ins          upd          del  commits/s
+  stats                          7277022890   58.9%     1051538546   57.9%     27233185     40305716     23893269       7553
+  core                           2663164822   21.6%      508668677   28.0%       173703        13053        35909        741
+  olap                            744983998    6.0%      132501818    7.3%     46837842     39887577     13402076        538
+  analytics                      1253775093   10.2%       94805955    5.2%        76497     22993388          391      14402
+  catalog                          65794367    0.5%       22173836    1.2%      4796442      1781300      4780508        140
+  feed                             66484373    0.5%        5981034    0.3%         9073            0          506        109
+  industry_calculations            45530419    0.4%        1283446    0.1%      8826455        16260      7667564         54
+  airflow                         214742204    1.7%         504131    0.0%         7498       114422         5630        218
+  authentik                        15923941    0.1%         117896    0.0%         3298         2187         2554         29
+  hive_metastore                    1250786    0.0%          13722    0.0%            0            0            0          6
+  kong                              1167870    0.0%           2393    0.0%            0            0           14         10
+  TOTAL                         12351269549             1817647645  (7850.9 GiB read from disk/h)
+  pg_stat_statements: 4858 entries at B, 3365 not present at A with same stats_since (0 evicted+re-entered before A, dropped)
+  db                       role                      calls           rows    exec_h      blks_read      wal_GiB
+  stats                    muso-stats-pg          71884653      350511284      27.1      763230247        197.9
+  olap                     muso-olap-pg            4007189      123713555       4.1       42109684         14.0
+  analytics                muso-analytics        148077090       46649616       4.1       48259506         38.4
+  stats                    v4poc_rw                  36208         153254       2.6       92191961          0.4
+  catalog                  muso-stats-pg            598759       18585241       0.3        1568699          1.0
+  industry_calculations    muso-ic-pg              2764010       16546842       0.1        1253136          3.2
+  core                     muso-app                 760015         137176       0.1         333122          0.1
+  airflow                  airflow                 3516657        4510645       0.1         127363          0.1
+  feed                     muso-stats-feed          629461         384173       0.1        5953497          0.0
+  postgres                 postgres_exporter         10208         201332       0.0            436          0.0
+  authentik                authentik                 48710          23456       0.0         102151          0.0
+  muso-core-dev            muso-dev                  51894          16888       0.0           2410          0.0
+  muso-catalog-dev         muso-dev                  25361            101       0.0           6444          0.0
+  hive_metastore           hive                      57052         163377       0.0           5068          0.0
+  top statements in window by exec time:
+   stats      muso-stats-pg     -1553054039769019196 calls=34195      rows=85309462      exec_h=6.6     blks_read=114073518    wal_GiB=0.0
+   stats      muso-stats-pg      1094077187582001326 calls=14174      rows=1347368       exec_h=2.3     blks_read=237791586    wal_GiB=1.7
+   stats      muso-stats-pg     -3793548785045396670 calls=713392     rows=6974099       exec_h=2.2     blks_read=46787087     wal_GiB=87.2
+   stats      muso-stats-pg       569286942632052879 calls=17297      rows=48070414      exec_h=2.0     blks_read=57731726     wal_GiB=2.7
+   stats      muso-stats-pg     -8850958813059235032 calls=17155      rows=8979670       exec_h=1.9     blks_read=32199634     wal_GiB=0.0
+   stats      v4poc_rw           3762482857210364637 calls=107        rows=16804         exec_h=1.7     blks_read=46291162     wal_GiB=0.0
+   stats      muso-stats-pg      2214863175886206164 calls=12775      rows=4180874       exec_h=1.7     blks_read=17283992     wal_GiB=0.0
+   olap       muso-olap-pg       4711670716640376464 calls=6420       rows=61773537      exec_h=1.3     blks_read=0            wal_GiB=0.0
+   stats      muso-stats-pg       104068935604112716 calls=2860652    rows=2860652       exec_h=1.0     blks_read=22489017     wal_GiB=2.4
+   stats      muso-stats-pg     -2037529466112218811 calls=37740      rows=11417250      exec_h=0.9     blks_read=1769494      wal_GiB=0.0
+   stats      v4poc_rw          -7330739156377739483 calls=1338       rows=125589        exec_h=0.9     blks_read=43179012     wal_GiB=0.0
+   olap       muso-olap-pg       3315142407059383314 calls=53933      rows=39530928      exec_h=0.8     blks_read=0            wal_GiB=0.0
+   stats      muso-stats-pg     -5173349918025204224 calls=6233       rows=1806755       exec_h=0.8     blks_read=12521008     wal_GiB=1.7
+   stats      muso-stats-pg     -3206784974791733282 calls=650076     rows=2030383       exec_h=0.8     blks_read=14685937     wal_GiB=27.7
+
+## n19 pg_stat_database delta  A=2026-11-13T00:19:30Z B=2026-11-13T02:05:29Z window=6359s (1.77h)
+  wal_bytes_window=608670099192  => 91.3 MiB/s => 7.52 TiB/day
+  db                           tup_returned       %      blks_read       %          ins          upd          del  commits/s
+  stats                          4525212991   33.1%     1250162831   84.3%            0            0            0       1490
+  core                           7615431272   55.6%      164933704   11.1%            0            0            0        774
+  analytics                      1240551798    9.1%       48941376    3.3%            0            0            0          9
+  catalog                         163747043    1.2%        8680129    0.6%            0            0            0        174
+  feed                             89058498    0.7%        6973775    0.5%            0            0            0          5
+  olap                             47882487    0.3%        3625187    0.2%            0            0            0         25
+  industry_calculations             6457809    0.0%          74824    0.0%            0            0            0         13
+  TOTAL                         13688919619             1483403048  (6406.9 GiB read from disk/h)
+  pg_stat_statements: 4734 entries at B, 33 not present at A with same stats_since (0 evicted+re-entered before A, dropped)
+  db                       role                      calls           rows    exec_h      blks_read      wal_GiB
+  stats                    muso-stats-pg          13306860      263210781      43.5     1228137970          0.0
+  core                     muso-app                1020325        4464768       0.7      113184888          0.0
+  core                     core_paid_ro             704601          23735       0.2              0          0.0
+  olap                     muso-stats-pg            167231         424562       0.1        2771913          0.0
+  analytics                muso-analytics             1460        5188630       0.1        4941437          0.0
+  catalog                  muso-stats-pg           3089152        1286927       0.1        1412183          0.0
+  feed                     muso-stats-feed            7741          46089       0.0        3684140          0.0
+  postgres                 postgres_exporter          9328         181203       0.0           1361          0.0
+  industry_calculations    muso-ic-pg                17241         150084       0.0          64387          0.0
+  olap                     beta_ro                    5166           1722       0.0              1          0.0
+  stats                    postgres                      6           3642       0.0              0          0.0
+  postgres                 postgres                    159            159       0.0              0          0.0
+  industry_calculations    muso-stats-pg                42             81       0.0             85          0.0
+  feed                     muso-stats-pg                72            120       0.0             22          0.0
+  top statements in window by exec time:
+   stats      muso-stats-pg      2214863175886206164 calls=4663       rows=7902272       exec_h=15.3    blks_read=388311038    wal_GiB=0.0
+   stats      muso-stats-pg     -2037529466112218811 calls=16193      rows=28113678      exec_h=10.5    blks_read=72797592     wal_GiB=0.0
+   stats      muso-stats-pg     -1553054039769019196 calls=30211      rows=142570858     exec_h=7.0     blks_read=267456311    wal_GiB=0.0
+   stats      muso-stats-pg      -709929211709219153 calls=2699       rows=3556708       exec_h=4.5     blks_read=178597397    wal_GiB=0.0
+   stats      muso-stats-pg     -8850958813059235032 calls=13811      rows=12662432      exec_h=1.7     blks_read=66587317     wal_GiB=0.0
+   stats      muso-stats-pg     -5173349918025204224 calls=1560       rows=2032516       exec_h=0.8     blks_read=23459903     wal_GiB=0.0
+   stats      muso-stats-pg     -1554494242981308297 calls=204        rows=13394252      exec_h=0.6     blks_read=28829113     wal_GiB=0.0
+   stats      muso-stats-pg     -3551118359116872780 calls=3056       rows=3056          exec_h=0.5     blks_read=28687432     wal_GiB=0.0
+   stats      muso-stats-pg       569286942632052879 calls=869        rows=8661180       exec_h=0.3     blks_read=17509252     wal_GiB=0.0
+   stats      muso-stats-pg     -8675192230945017254 calls=2583       rows=2616          exec_h=0.3     blks_read=6732992      wal_GiB=0.0
+   stats      muso-stats-pg      4631285744814978667 calls=2588       rows=2588          exec_h=0.3     blks_read=6772368      wal_GiB=0.0
+   stats      muso-stats-pg     -3785425734406749421 calls=136        rows=32285         exec_h=0.2     blks_read=57229936     wal_GiB=0.0
+   core       core_paid_ro       4374677147112744231 calls=132608     rows=23655         exec_h=0.2     blks_read=0            wal_GiB=0.0
+   core       muso-app          -9124507421979129157 calls=3          rows=3             exec_h=0.1     blks_read=11502732     wal_GiB=0.0

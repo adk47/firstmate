@@ -1,0 +1,76 @@
+# run_at_utc=2026-11-13T05:25:36Z source=kubectl get (read-only) on node-1
+## ticker-api-prod CH_URL now
+CH_URL=http://clickhouse-ticker-prod.data-processing.svc:8123
+CH_ANCHOR_FLOOR=shadow
+## CHI stop flags
+analytics-prod stop=yes status=Completed
+product-analytics stop=(unset) status=Completed
+ticker-poc stop=(unset) status=Completed
+ticker-prod stop=(unset) status=Completed
+ticker-tier stop=no status=Completed
+## PVCs of ticker-prod and ticker-tier: name storageclass size status volume-node
+ch-data-chi-ticker-prod-prod-0-0-0 sc=local-nvme size=500Gi phase=Bound pv=ticker-prod-ch-node49-s3b
+ch-data-chi-ticker-prod-prod-0-1-0 sc=local-nvme size=500Gi phase=Bound pv=ticker-prod-ch-node29-s5b
+ch-data-chi-ticker-prod-prod-1-0-0 sc=local-nvme size=500Gi phase=Bound pv=ticker-prod-ch-node50-s4b
+ch-data-chi-ticker-prod-prod-1-1-0 sc=local-nvme size=500Gi phase=Bound pv=ticker-prod-ch-node49-s1a
+ch-data-chi-ticker-prod-prod-2-0-0 sc=local-nvme size=500Gi phase=Bound pv=ticker-prod-ch-node29-s2b
+ch-data-chi-ticker-prod-prod-2-1-0 sc=local-nvme size=500Gi phase=Bound pv=ticker-prod-ch-node49-s6b
+ch-data-chi-ticker-prod-prod-3-0-0 sc=local-nvme size=500Gi phase=Bound pv=ticker-prod-ch-node50-s5a
+ch-data-chi-ticker-prod-prod-3-1-0 sc=local-nvme size=500Gi phase=Bound pv=ticker-prod-ch-node29-s6a
+ch-data-chi-ticker-prod-prod-4-0-0 sc=local-nvme size=500Gi phase=Bound pv=ticker-prod-ch-node49-s4a
+ch-data-chi-ticker-prod-prod-4-1-0 sc=local-nvme size=500Gi phase=Bound pv=ticker-prod-ch-node50-s2a
+ch-data-chi-ticker-prod-prod-5-0-0 sc=local-nvme size=500Gi phase=Bound pv=ticker-prod-ch-node50-s1b
+ch-data-chi-ticker-prod-prod-5-1-0 sc=local-nvme size=500Gi phase=Bound pv=ticker-prod-ch-node29-s3a
+ch-data-tier-chi-ticker-tier-prod-0-0-0 sc=local-nvme size=1000Gi phase=Bound pv=ticker-tier-47-s2r0
+ch-data-tier-chi-ticker-tier-prod-0-1-0 sc=local-nvme size=1000Gi phase=Bound pv=ticker-tier-52-s3r1
+ch-data-tier-chi-ticker-tier-prod-1-0-0 sc=local-nvme size=1000Gi phase=Bound pv=ticker-tier-46-s1r0
+ch-data-tier-chi-ticker-tier-prod-1-1-0 sc=local-nvme size=1000Gi phase=Bound pv=ticker-tier-53-s1r1
+ch-data-tier-chi-ticker-tier-prod-2-0-0 sc=local-nvme size=1000Gi phase=Bound pv=ticker-tier-46-s2r0
+ch-data-tier-chi-ticker-tier-prod-2-1-0 sc=local-nvme size=1000Gi phase=Bound pv=ticker-tier-54-s5r1
+ch-data-tier-chi-ticker-tier-prod-3-0-0 sc=local-nvme size=1000Gi phase=Bound pv=ticker-tier-48-s5r0
+ch-data-tier-chi-ticker-tier-prod-3-1-0 sc=local-nvme size=1000Gi phase=Bound pv=ticker-tier-47-s3r1
+ch-data-tier-chi-ticker-tier-prod-4-0-0 sc=local-nvme size=1000Gi phase=Bound pv=ticker-tier-48-s3r0
+ch-data-tier-chi-ticker-tier-prod-4-1-0 sc=local-nvme size=1000Gi phase=Bound pv=ticker-tier-53-s4r1
+ch-data-tier-chi-ticker-tier-prod-5-0-0 sc=local-nvme size=1000Gi phase=Bound pv=ticker-tier-52-s5r0
+ch-data-tier-chi-ticker-tier-prod-5-1-0 sc=local-nvme size=1000Gi phase=Bound pv=ticker-tier-54-s2r1
+valkey-data-valkey-ticker-prod-ha-0 sc=longhorn size=2Gi phase=Bound pv=pvc-801abdd6-8305-4615-814d-666c5d96c9cc
+valkey-data-valkey-ticker-prod-ha-1 sc=longhorn size=2Gi phase=Bound pv=pvc-ca6b70c4-717b-4f2c-8019-62e800e13021
+valkey-data-valkey-ticker-prod-ha-2 sc=longhorn size=2Gi phase=Bound pv=pvc-55179d48-7aa3-449a-8f49-8788ce2378dd
+## storage classes
+local-nvme                    kubernetes.io/no-provisioner   Retain
+local-path                    rancher.io/local-path          Delete
+longhorn                      driver.longhorn.io             Delete
+longhorn-chat-ha              driver.longhorn.io             Retain
+longhorn-drummer              driver.longhorn.io             Delete
+longhorn-drummer-new          driver.longhorn.io             Retain
+longhorn-event-router-spool   driver.longhorn.io             Retain
+longhorn-ha                   driver.longhorn.io             Retain
+longhorn-node1                driver.longhorn.io             Delete
+longhorn-node2                driver.longhorn.io             Delete
+longhorn-node4                driver.longhorn.io             Delete
+longhorn-node5                driver.longhorn.io             Delete
+longhorn-postgres             driver.longhorn.io             Retain
+longhorn-producer             driver.longhorn.io             Delete
+longhorn-producer-new         driver.longhorn.io             Delete
+longhorn-single               driver.longhorn.io             Delete
+longhorn-static               driver.longhorn.io             Delete
+longhorn-vault-ha             driver.longhorn.io             Retain
+## cronjobs/deploys whose name mentions backup or clickhouse (all ns)
+data-processing   analytics-prod-ch-backup-full            30 3 * * *                     <none>             True    0     <none>   42d
+data-processing   analytics-prod-ch-backup-incr            15 0-2,5-23 * * *              <none>             True    0     <none>   42d
+data-processing   product-analytics-ch-backup              45 3 * * *                     <none>             False   0     100m     37d
+data-processing   ticker-ch-restore-drill                  5 15 * * 5                     <none>             True    0     <none>   9d
+data-processing   ticker-cold-export                       23 * * * *                     <none>             False   1     2m37s    153d
+data-processing   ticker-poc-ch-backup                     41 3 * * *                     <none>             False   0     104m     154d
+data-processing   ticker-prod-ch-backup                    51 3 * * *                     <none>             False   1     94m      152d
+databases-dev     mongodb-dev-backup                       0 6 * * *                      <none>             False   0     23h      201d
+databases         etcd-backup-offsite                      0 4 * * *                      <none>             False   0     85m      238d
+databases         mongodb-backup                           0 3 * * *                      <none>             False   1     145m     238d
+longhorn-system   daily-backup-critical                    27 5 * * *                     <none>             False   0     23h      101d
+longhorn-system   hydra-daily-backup                       35 4 * * *                     <none>             False   0     50m      9d
+messaging         novu-mongo-backup                        17 * * * *                     <none>             False   0     8m37s    37d
+monitoring        longhorn-backup-sentinel                 41 * * * *                     <none>             False   0     44m      101d
+muso-chat         tuwunel-db-backup                        0 */6 * * *                    <none>             False   0     5h25m    73d
+muso-prod         muso-auth-db-backup                      23 3 * * *                     <none>             False   0     122m     129d
+queuing           redpanda-v2-daily-backup                 23 4 * * *                     <none>             False   0     62m      168d
+sftp              sftpgo-data-s3-backup                    15 2 * * *                     UTC                False   0     3h10m    204d

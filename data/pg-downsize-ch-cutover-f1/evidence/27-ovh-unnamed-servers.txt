@@ -1,0 +1,8 @@
+# run_at_utc=2026-11-13T02:17Z  read-only
+# Method: OVH GET /dedicated/server/{name} -> ip; compared with `hostname; ip -4 -o addr show scope global`
+# run on 10.0.0.66 / .69 / .70 via node-1. Public addresses compared in memory, not stored.
+ns1023467.ip-15-204-222.us -> node-66-mongo (10.0.0.66)   not a k3s member
+ns1024669.ip-15-204-250.us -> node-70-ch    (10.0.0.70)   k3s label node.muso.ai/analytics-ch=r1 ovh-rack=V113C13 joined 2026-10-17T14:43:50Z
+ns1024670.ip-15-204-250.us -> node-69-ch    (10.0.0.69)   k3s label node.muso.ai/analytics-ch=r0 ovh-rack=V113C13 joined 2026-10-14T16:34:05Z
+# Both analytics-ch boxes sit in ONE rack (V113C13); the CHI's rack anti-affinity is "preferred", so it would still schedule.
+# Both renew 2026-11-14 (15:56Z and 16:16Z), see 26-ovh-options-price.json.

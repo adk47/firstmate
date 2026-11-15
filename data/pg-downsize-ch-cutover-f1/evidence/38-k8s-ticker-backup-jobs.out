@@ -1,0 +1,22 @@
+# run_at_utc=2026-11-13T05:26:16Z source=kubectl get (read-only) on node-1; secret values are not read (env from secretKeyRef shown as <from:...>)
+## cronjob ticker-prod-ch-backup
+schedule=51 3 * * * suspend=false lastSchedule=2026-11-13T03:51:00Z lastSuccessful=2026-11-12T06:28:43Z created=2026-06-13T19:27:36Z
+container=backup image=altinity/clickhouse-server:25.8.16.10002.altinitystable
+  env CH_PASSWORD=<from:clickhouse-prod-credentials>
+  env POD_NAMESPACE=<from:ref>
+  env JOB_NAME=<from:ref>
+  command=bash -c set -uo pipefail
+JOB_START_EPOCH=$(date -u +%s)
+JOB_START_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+D=$(date -u +%Y%m%d)
+# Unique per-RUN dir under the date: a
+  args=
+## cronjob ticker-ch-restore-drill
+schedule=5 15 * * 5 suspend=true lastSchedule=never lastSuccessful=never created=2026-11-03T22:17:57Z
+container=drill image=altinity/clickhouse-server:25.8.16.10002.altinitystable
+  env CH_PASSWORD=<from:clickhouse-prod-credentials>
+  env POD_NAMESPACE=<from:ref>
+  command=bash /scripts/drill.sh
+  args=
+## last 5 jobs of ticker-prod-ch-backup
+ticker-prod-ch-backup-29909031                      Running     0/1   95m     95m

@@ -1,0 +1,52 @@
+# source=kubectl (node-1, read-only get) run_at_utc=2026-11-13T00:25:06Z
+## pods/sts/pvc matching analytics-prod or keeper-analytics (any phase)
+pod/chi-product-analytics-product-0-0-0                               1/1     Running     0              9h      10.240.75.248    node-67-pdp         <none>           <none>
+pod/chi-product-analytics-product-0-1-0                               1/1     Running     1 (3d3h ago)   7d10h   10.240.76.165    node-68-pdp         <none>           <none>
+pod/chk-keeper-product-analytics-product-0-0-0                        1/1     Running     0              37d     10.240.201.247   node-41-aw          <none>           <none>
+pod/chk-keeper-product-analytics-product-0-1-0                        1/1     Running     0              37d     10.240.147.64    node-51-aw          <none>           <none>
+pod/chk-keeper-product-analytics-product-0-2-0                        1/1     Running     0              37d     10.240.39.238    node-44-aw          <none>           <none>
+statefulset.apps/chi-analytics-prod-analytics-0-0           0/0     26d    clickhouse          altinity/clickhouse-server:25.8.16.10002.altinitystable
+statefulset.apps/chi-analytics-prod-analytics-0-1           0/0     26d    clickhouse          altinity/clickhouse-server:25.8.16.10002.altinitystable
+statefulset.apps/chi-product-analytics-product-0-0          1/1     37d    clickhouse          altinity/clickhouse-server:25.8.16.10002.altinitystable
+statefulset.apps/chi-product-analytics-product-0-1          1/1     37d    clickhouse          altinity/clickhouse-server:25.8.16.10002.altinitystable
+statefulset.apps/chk-keeper-analytics-analytics-0-0         0/0     41d    clickhouse-keeper   altinity/clickhouse-keeper:25.8.16.10002.altinitystable
+statefulset.apps/chk-keeper-analytics-analytics-0-1         0/0     41d    clickhouse-keeper   altinity/clickhouse-keeper:25.8.16.10002.altinitystable
+statefulset.apps/chk-keeper-analytics-analytics-0-2         0/0     41d    clickhouse-keeper   altinity/clickhouse-keeper:25.8.16.10002.altinitystable
+statefulset.apps/chk-keeper-product-analytics-product-0-0   1/1     37d    clickhouse-keeper   altinity/clickhouse-keeper:25.8.16.10002.altinitystable
+statefulset.apps/chk-keeper-product-analytics-product-0-1   1/1     37d    clickhouse-keeper   altinity/clickhouse-keeper:25.8.16.10002.altinitystable
+statefulset.apps/chk-keeper-product-analytics-product-0-2   1/1     37d    clickhouse-keeper   altinity/clickhouse-keeper:25.8.16.10002.altinitystable
+persistentvolumeclaim/keeper-product-analytics-data-chk-keeper-product-analytics-product-0-0-0   Bound    pvc-d9f0b541-3bef-437d-89e5-81b96c8b759d   5Gi        RWO            longhorn       <unset>                 37d    Filesystem
+persistentvolumeclaim/keeper-product-analytics-data-chk-keeper-product-analytics-product-0-1-0   Bound    pvc-ed3e5199-3510-41c7-af6e-b7b665b8c844   5Gi        RWO            longhorn       <unset>                 37d    Filesystem
+persistentvolumeclaim/keeper-product-analytics-data-chk-keeper-product-analytics-product-0-2-0   Bound    pvc-790f71a8-80c9-47ee-b9c4-f52011be823c   5Gi        RWO            longhorn       <unset>                 37d    Filesystem
+persistentvolumeclaim/product-analytics-data-chi-product-analytics-product-0-0-0                 Bound    pvc-a3ccadea-477c-4a68-9c21-32844e4b21f9   100Gi      RWO            longhorn       <unset>                 37d    Filesystem
+persistentvolumeclaim/product-analytics-data-chi-product-analytics-product-0-1-0                 Bound    pvc-554b1c3d-a654-48e8-9634-c51e5b30486e   100Gi      RWO            longhorn       <unset>                 37d    Filesystem
+
+## chi analytics-prod spec summary
+yes|stop
+Completed|status
+["chi-analytics-prod-analytics-0-0-0","chi-analytics-prod-analytics-0-1-0"]|pods
+["chi-analytics-prod-analytics-0-0.data-processing.svc.cluster.local","chi-analytics-prod-analytics-0-1.data-processing.svc.cluster.local"]|fqdns
+|hosts
+|completed
+|error
+|nodeSelector
+{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"node.muso.ai/analytics-ch","operator":"In","values":["r0","r1"]},{"key":"node.muso.ai/ovh-rack","operator":"Exists"}]}]}},"podAntiAffinity":{"preferredDuringSchedulingIgnoredDuringExecution":[{"podAffinityTerm":{"labelSelector":{"matchLabels":{"clickhouse.altinity.com/chi":"analytics-prod"}},"topologyKey":"node.muso.ai/ovh-rack"},"weight":100}],"requiredDuringSchedulingIgnoredDuringExecution":[{"labelSelector":{"matchLabels":{"clickhouse.altinity.com/chi":"analytics-prod"}},"topologyKey":"kubernetes.io/hostname"}]}}|affinity
+{"replicasCount":2,"shardsCount":1}|layout
+
+## nodes 69/70 pods
+data-processing chk-keeper-prod-prod-0-0-0 Running
+kube-system cilium-envoy-k4khl Running
+kube-system cilium-h5fb7 Running
+kube-system tcp-mss-clamp-6ztt2 Running
+monitoring kube-prometheus-prometheus-node-exporter-cvhmc Running
+monitoring node-problem-detector-nvhz6 Running
+monitoring promtail-wxdmk Running
+velero node-agent-ttx87 Running
+data-processing chk-keeper-prod-prod-0-2-0 Running
+kube-system cilium-d6hxx Running
+kube-system cilium-envoy-hgtks Running
+kube-system tcp-mss-clamp-mfjsq Running
+monitoring kube-prometheus-prometheus-node-exporter-fjs48 Running
+monitoring node-problem-detector-4cqst Running
+monitoring promtail-km44f Running
+velero node-agent-4skgh Running

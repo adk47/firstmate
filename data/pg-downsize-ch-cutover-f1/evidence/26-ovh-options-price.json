@@ -1,0 +1,869 @@
+{
+ "run_at_utc": "2026-11-13T02:15:59Z",
+ "note": "prices pre-tax USD/month; OVH US adds sales tax on the invoice",
+ "servers": [
+  {
+   "service": "ns1001980.ip-51-81-67.us",
+   "node": "node-57-AW-IW",
+   "range": "SYS-4 | AMD Epyc 7371",
+   "rack": "V118A06",
+   "base": 129,
+   "nextBilling": "2026-12-01T11:32:50Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "256GB DDR4 ECC 2400MHz",
+     "price": 53
+    }
+   ],
+   "options_total": 53,
+   "monthly_pre_tax": 182
+  },
+  {
+   "service": "ns1005773.ip-135-148-34.us",
+   "node": "node-58-AW-IW",
+   "range": "SYS-4 | AMD Epyc 7371",
+   "rack": "V111B04",
+   "base": 129,
+   "nextBilling": "2026-12-01T11:32:49Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "256GB DDR4 ECC 2400MHz",
+     "price": 53
+    }
+   ],
+   "options_total": 53,
+   "monthly_pre_tax": 182
+  },
+  {
+   "service": "ns1006599.ip-135-148-54.us",
+   "node": "node-59-AW-IW",
+   "range": "SYS-4 | AMD Epyc 7371",
+   "rack": "V111B17",
+   "base": 129,
+   "nextBilling": "2026-12-01T11:42:19Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "256GB DDR4 ECC 2400MHz",
+     "price": 53
+    }
+   ],
+   "options_total": 53,
+   "monthly_pre_tax": 182
+  },
+  {
+   "service": "ns1009089.ip-135-148-122.us",
+   "node": "node-60-AW-IW",
+   "range": "SYS-4 | AMD Epyc 7371",
+   "rack": "V119A01",
+   "base": 129,
+   "nextBilling": "2026-12-01T11:40:19Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "256GB DDR4 ECC 2400MHz",
+     "price": 53
+    }
+   ],
+   "options_total": 53,
+   "monthly_pre_tax": 182
+  },
+  {
+   "service": "ns1011031.ip-135-148-169.us",
+   "node": "node-04-app-serving",
+   "range": "RISE-5 | AMD Epyc 7413",
+   "rack": "V119B02",
+   "base": 199,
+   "nextBilling": "2026-12-01T22:28:10Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 199
+  },
+  {
+   "service": "ns1011038.ip-135-148-169.us",
+   "node": "node-01-control-plane-vpn",
+   "range": "RISE-5 | AMD Epyc 7413",
+   "rack": "V119B02",
+   "base": 199,
+   "nextBilling": "2026-12-02T02:14:40Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 199
+  },
+  {
+   "service": "ns1012079.ip-15-204-140.us",
+   "node": "node-47-Red-Panda-1",
+   "range": "Advance-1 Gen 2 | Intel Xeon-E 2386G",
+   "rack": "V119B18",
+   "base": 98,
+   "nextBilling": "2026-12-01T23:22:44Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 130
+    },
+    {
+     "name": "128GB DDR4 ECC 2933MHz",
+     "price": 61
+    }
+   ],
+   "options_total": 191,
+   "monthly_pre_tax": 289
+  },
+  {
+   "service": "ns1012218.ip-15-204-140.us",
+   "node": "node-54-Red-Panda-6",
+   "range": "Advance-1 Gen 2 | Intel Xeon-E 2386G",
+   "rack": "V119C05",
+   "base": 98,
+   "nextBilling": "2026-12-01T14:05:27Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "128GB DDR4 ECC 2933MHz",
+     "price": 61
+    },
+    {
+     "name": "2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 130
+    }
+   ],
+   "options_total": 191,
+   "monthly_pre_tax": 289
+  },
+  {
+   "service": "ns1014310.ip-15-204-160.us",
+   "node": "node-02-control-plane",
+   "range": "RISE-5 | AMD Epyc 7413",
+   "rack": "V119C27",
+   "base": 199,
+   "nextBilling": "2026-12-02T02:15:14Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 199
+  },
+  {
+   "service": "ns1014433.ip-15-204-160.us",
+   "node": "node-03-control-plane",
+   "range": "RISE-5 | AMD Epyc 7413",
+   "rack": "V119D04",
+   "base": 199,
+   "nextBilling": "2026-12-02T02:20:41Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 199
+  },
+  {
+   "service": "ns1014451.ip-15-204-160.us",
+   "node": "node-05-data-read",
+   "range": "RISE-5 | AMD Epyc 7413",
+   "rack": "V119D04",
+   "base": 199,
+   "nextBilling": "2026-12-01T17:02:07Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 199
+  },
+  {
+   "service": "ns1016279.ip-15-204-182.us",
+   "node": "node-67-pdp",
+   "range": "RISE-4 | AMD Epyc 7313",
+   "rack": "V119E09",
+   "base": 200,
+   "nextBilling": "2026-12-01T11:50:43Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "1024GB DDR4 ECC 2933MHz",
+     "price": 420
+    },
+    {
+     "name": "2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 110
+    }
+   ],
+   "options_total": 530,
+   "monthly_pre_tax": 730
+  },
+  {
+   "service": "ns1016280.ip-15-204-182.us",
+   "node": "node-68-pdp",
+   "range": "RISE-4 | AMD Epyc 7313",
+   "rack": "V119E09",
+   "base": 200,
+   "nextBilling": "2026-12-01T17:23:17Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "1024GB DDR4 ECC 2933MHz",
+     "price": 420
+    },
+    {
+     "name": "2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 110
+    }
+   ],
+   "options_total": 530,
+   "monthly_pre_tax": 730
+  },
+  {
+   "service": "ns1021277.ip-15-204-220.us",
+   "node": "node-48-Red-Panda-2",
+   "range": "Advance-1 Gen 2 | Intel Xeon-E 2386G",
+   "rack": "V119G05",
+   "base": 98,
+   "nextBilling": "2026-12-01T23:26:16Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "128GB DDR4 ECC 2933MHz",
+     "price": 61
+    },
+    {
+     "name": "2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 130
+    }
+   ],
+   "options_total": 191,
+   "monthly_pre_tax": 289
+  },
+  {
+   "service": "ns1021278.ip-15-204-220.us",
+   "node": "node-46-Red-Panda-3",
+   "range": "Advance-1 Gen 2 | Intel Xeon-E 2386G",
+   "rack": "V119G05",
+   "base": 98,
+   "nextBilling": "2026-12-01T23:29:25Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 130
+    },
+    {
+     "name": "128GB DDR4 ECC 2933MHz",
+     "price": 61
+    }
+   ],
+   "options_total": 191,
+   "monthly_pre_tax": 289
+  },
+  {
+   "service": "ns1021281.ip-15-204-220.us",
+   "node": "node-52-Red-Panda-4",
+   "range": "Advance-1 Gen 2 | Intel Xeon-E 2386G",
+   "rack": "V119G05",
+   "base": 98,
+   "nextBilling": "2026-12-02T03:40:59Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 130
+    },
+    {
+     "name": "128GB DDR4 ECC 2933MHz",
+     "price": 61
+    }
+   ],
+   "options_total": 191,
+   "monthly_pre_tax": 289
+  },
+  {
+   "service": "ns1021344.ip-15-204-220.us",
+   "node": "node-53-Red-Panda-5",
+   "range": "Advance-1 Gen 2 | Intel Xeon-E 2386G",
+   "rack": "V119G06",
+   "base": 98,
+   "nextBilling": "2026-12-02T03:40:29Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "128GB DDR4 ECC 2933MHz",
+     "price": 61
+    },
+    {
+     "name": "2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 130
+    }
+   ],
+   "options_total": 191,
+   "monthly_pre_tax": 289
+  },
+  {
+   "service": "ns1022009.ip-40-160-72.us",
+   "node": "node-17-PG-primary-writer",
+   "range": "Scale-a4",
+   "rack": "V113D08",
+   "base": 829,
+   "nextBilling": "2026-12-01T22:03:16Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "512GB DDR5 ECC 4800MHz",
+     "price": 624
+    },
+    {
+     "name": "2x SSD NVMe 7.68TB Enterprise Class Soft RAID",
+     "price": 315
+    }
+   ],
+   "options_total": 939,
+   "monthly_pre_tax": 1768
+  },
+  {
+   "service": "ns1023467.ip-15-204-222.us",
+   "node": "ns1023467.ip-15-204-222.us",
+   "range": "RISE-4 | AMD Epyc 7313",
+   "rack": "V119G24",
+   "base": 200,
+   "nextBilling": "2026-12-01T13:54:44Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "512GB DDR4 ECC 3200MHz",
+     "price": 196
+    },
+    {
+     "name": "2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 110
+    }
+   ],
+   "options_total": 306,
+   "monthly_pre_tax": 506,
+   "k3s_node_by_ip": "no k3s node has this address"
+  },
+  {
+   "service": "ns1024669.ip-15-204-250.us",
+   "node": "ns1024669.ip-15-204-250.us",
+   "range": "RISE-4 | AMD Epyc 7313",
+   "rack": "V113C13",
+   "base": 200,
+   "nextBilling": "2026-11-14T16:16:49Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 110
+    },
+    {
+     "name": "2Gbps unmetered and guaranteed private bandwidth",
+     "price": 23
+    },
+    {
+     "name": "128GB DDR4 ECC 3200MHz",
+     "price": 28
+    }
+   ],
+   "options_total": 161,
+   "monthly_pre_tax": 361,
+   "k3s_node_by_ip": "no k3s node has this address"
+  },
+  {
+   "service": "ns1024670.ip-15-204-250.us",
+   "node": "ns1024670.ip-15-204-250.us",
+   "range": "RISE-4 | AMD Epyc 7313",
+   "rack": "V113C13",
+   "base": 200,
+   "nextBilling": "2026-11-14T15:56:05Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "128GB DDR4 ECC 3200MHz",
+     "price": 28
+    },
+    {
+     "name": "2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 110
+    },
+    {
+     "name": "2Gbps unmetered and guaranteed private bandwidth",
+     "price": 23
+    }
+   ],
+   "options_total": 161,
+   "monthly_pre_tax": 361,
+   "k3s_node_by_ip": "no k3s node has this address"
+  },
+  {
+   "service": "ns1028041.ip-40-160-29.us",
+   "node": "node-61-Red-Panda-1",
+   "range": "ADVANCE-3 | AMD EPYC 4464P",
+   "rack": "VIN0120B05B",
+   "base": 255,
+   "nextBilling": "2026-12-01T11:35:20Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "128GB DDR5 On-Die ECC 3600MHz",
+     "price": 118
+    },
+    {
+     "name": "2x SSD NVMe 960GB Datacenter Class Soft RAID + 2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 285
+    }
+   ],
+   "options_total": 403,
+   "monthly_pre_tax": 658
+  },
+  {
+   "service": "ns1028042.ip-40-160-30.us",
+   "node": "node-62-Red-Panda-2",
+   "range": "ADVANCE-3 | AMD EPYC 4464P",
+   "rack": "VIN0120B05B",
+   "base": 255,
+   "nextBilling": "2026-12-01T11:40:49Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "2x SSD NVMe 960GB Datacenter Class Soft RAID + 2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 285
+    },
+    {
+     "name": "128GB DDR5 On-Die ECC 3600MHz",
+     "price": 118
+    }
+   ],
+   "options_total": 403,
+   "monthly_pre_tax": 658
+  },
+  {
+   "service": "ns1028047.ip-40-160-30.us",
+   "node": "node-64-Red-Panda-4",
+   "range": "ADVANCE-3 | AMD EPYC 4464P",
+   "rack": "VIN0120B05B",
+   "base": 255,
+   "nextBilling": "2026-12-01T11:47:18Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "128GB DDR5 On-Die ECC 3600MHz",
+     "price": 118
+    },
+    {
+     "name": "2x SSD NVMe 960GB Datacenter Class Soft RAID + 2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 285
+    }
+   ],
+   "options_total": 403,
+   "monthly_pre_tax": 658
+  },
+  {
+   "service": "ns1028051.ip-40-160-30.us",
+   "node": "node-65-Red-Panda-5",
+   "range": "ADVANCE-3 | AMD EPYC 4464P",
+   "rack": "VIN0120B05B",
+   "base": 255,
+   "nextBilling": "2026-12-01T11:48:19Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "2x SSD NVMe 960GB Datacenter Class Soft RAID + 2x SSD NVMe 3.84TB Datacenter Class Soft RAID",
+     "price": 285
+    },
+    {
+     "name": "128GB DDR5 On-Die ECC 3600MHz",
+     "price": 118
+    }
+   ],
+   "options_total": 403,
+   "monthly_pre_tax": 658
+  },
+  {
+   "service": "ns1029600.ip-40-160-70.us",
+   "node": "node-29-PDP",
+   "range": "Scale-a6",
+   "rack": "VIN0121C01B",
+   "base": 1033,
+   "nextBilling": "2026-12-02T03:37:08Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "2x SSD NVMe 7.68TB Enterprise Class Soft RAID",
+     "price": 315
+    },
+    {
+     "name": "1TB DDR5 ECC 4800MHz",
+     "price": 1416
+    }
+   ],
+   "options_total": 1731,
+   "monthly_pre_tax": 2764
+  },
+  {
+   "service": "ns1029913.ip-40-160-23.us",
+   "node": "node-13-mongo-secondary",
+   "range": "ADVANCE-5 | AMD EPYC 8224P",
+   "rack": "VIN0120C03C",
+   "base": 504,
+   "nextBilling": "2026-12-02T02:56:05Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "192GB DDR5 ECC 4800MHz",
+     "price": 129
+    },
+    {
+     "name": "2x SSD NVMe 960GB Datacenter Class Soft RAID + 2x SSD NVMe 7.68TB Datacenter Class Soft RAID",
+     "price": 315
+    }
+   ],
+   "options_total": 444,
+   "monthly_pre_tax": 948
+  },
+  {
+   "service": "ns1030663.ip-40-160-32.us",
+   "node": "node-08-hydra",
+   "range": "ADVANCE-3 | AMD EPYC 4464P",
+   "rack": "VIN0120D02C",
+   "base": 255,
+   "nextBilling": "2026-12-01T20:11:05Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 255
+  },
+  {
+   "service": "ns1032224.ip-40-160-66.us",
+   "node": "node-19-pg-replica-and-builder",
+   "range": "HGR-HCI-i2",
+   "rack": "VIN0121C03C",
+   "base": 1677,
+   "nextBilling": "2026-12-02T02:46:37Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "512GB DDR5 ECC 4800MHz",
+     "price": 341
+    }
+   ],
+   "options_total": 341,
+   "monthly_pre_tax": 2018
+  },
+  {
+   "service": "ns1032420.ip-40-160-67.us",
+   "node": "node-28-mongo-secondary",
+   "range": "HGR-HCI-i2",
+   "rack": "VIN0121C03C",
+   "base": 1677,
+   "nextBilling": "2026-12-01T23:22:32Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 1677
+  },
+  {
+   "service": "ns1033966.ip-40-160-67.us",
+   "node": "node-20-AW-IW",
+   "range": "ADVANCE-5 | AMD EPYC 8224P",
+   "rack": "VIN0120E05B",
+   "base": 504,
+   "nextBilling": "2026-12-02T03:10:30Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 504
+  },
+  {
+   "service": "ns1034650.ip-40-160-27.us",
+   "node": "node-49-PDP",
+   "range": "SCALE-a8 | AMD EPYC 9965",
+   "rack": "VIN0121F03A",
+   "base": 1530,
+   "nextBilling": "2026-12-01T14:38:15Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "768GB DDR5 ECC 4800MHz",
+     "price": 1157
+    },
+    {
+     "name": "6x SSD NVMe 1.92TB Enterprise Class PCIe 5.0 Soft RAID",
+     "price": 302
+    }
+   ],
+   "options_total": 1459,
+   "monthly_pre_tax": 2989
+  },
+  {
+   "service": "ns1034652.ip-40-160-29.us",
+   "node": "node-50-PDP",
+   "range": "SCALE-a8 | AMD EPYC 9965",
+   "rack": "VIN0121F03A",
+   "base": 1530,
+   "nextBilling": "2026-12-01T05:56:31Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "6x SSD NVMe 1.92TB Enterprise Class PCIe 5.0 Soft RAID",
+     "price": 302
+    },
+    {
+     "name": "768GB DDR5 ECC 4800MHz",
+     "price": 1157
+    }
+   ],
+   "options_total": 1459,
+   "monthly_pre_tax": 2989
+  },
+  {
+   "service": "ns105102.ip-147-135-68.us",
+   "node": "node-44-AW",
+   "range": "BV-2",
+   "rack": "V117A01",
+   "base": 120,
+   "nextBilling": "2026-12-02T00:23:29Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns105108.ip-147-135-68.us",
+   "node": "node-42-AW",
+   "range": "BV-2",
+   "rack": "V117A01",
+   "base": 120,
+   "nextBilling": "2026-12-01T18:36:39Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns105111.ip-147-135-68.us",
+   "node": "node-45-AW",
+   "range": "BV-2",
+   "rack": "V117A01",
+   "base": 120,
+   "nextBilling": "2026-12-02T00:24:29Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns105146.ip-147-135-68.us",
+   "node": "node-34-AW",
+   "range": "BV-2",
+   "rack": "V117A02",
+   "base": 120,
+   "nextBilling": "2026-12-01T17:27:33Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns105162.ip-147-135-68.us",
+   "node": "node-40-AW",
+   "range": "BV-2",
+   "rack": "V117A02",
+   "base": 120,
+   "nextBilling": "2026-12-01T18:27:35Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns105167.ip-147-135-68.us",
+   "node": "node-43-AW",
+   "range": "BV-2",
+   "rack": "V117A02",
+   "base": 120,
+   "nextBilling": "2026-12-01T18:36:39Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns105222.ip-147-135-68.us",
+   "node": "node-35-AW",
+   "range": "BV-2",
+   "rack": "V117A03",
+   "base": 120,
+   "nextBilling": "2026-12-01T17:28:33Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns105229.ip-147-135-68.us",
+   "node": "node-33-AW",
+   "range": "BV-2",
+   "rack": "V117A03",
+   "base": 120,
+   "nextBilling": "2026-12-01T16:23:00Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns105233.ip-147-135-68.us",
+   "node": "node-36-AW",
+   "range": "BV-2",
+   "rack": "V117A03",
+   "base": 120,
+   "nextBilling": "2026-12-01T17:28:33Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns105240.ip-147-135-68.us",
+   "node": "node-37-AW",
+   "range": "BV-2",
+   "rack": "V117A03",
+   "base": 120,
+   "nextBilling": "2026-12-01T17:34:33Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns105262.ip-147-135-68.us",
+   "node": "node-38-AW-IW",
+   "range": "BV-2",
+   "rack": "V117A03",
+   "base": 120,
+   "nextBilling": "2026-12-01T17:29:23Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns105277.ip-147-135-68.us",
+   "node": "node-39-AW",
+   "range": "BV-2",
+   "rack": "V117A02",
+   "base": 120,
+   "nextBilling": "2026-12-01T17:33:33Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns105279.ip-147-135-68.us",
+   "node": "node-41-AW-IW",
+   "range": "BV-2",
+   "rack": "V117A02",
+   "base": 120,
+   "nextBilling": "2026-12-01T18:28:35Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns105443.ip-147-135-68.us",
+   "node": "node-51-AW-IW",
+   "range": "BV-2",
+   "rack": "V117A05",
+   "base": 120,
+   "nextBilling": "2026-12-01T21:42:33Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [],
+   "options_total": 0,
+   "monthly_pre_tax": 120
+  },
+  {
+   "service": "ns106907.ip-51-81-106.us",
+   "node": "node-56-mongot",
+   "range": "SYS-3 | Intel Xeon-E 2288G",
+   "rack": "V115B04",
+   "base": 60,
+   "nextBilling": "2026-12-02T03:22:29Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "128GB DDR4 ECC 2666MHz",
+     "price": 40
+    }
+   ],
+   "options_total": 40,
+   "monthly_pre_tax": 100
+  },
+  {
+   "service": "ns107496.ip-51-81-107.us",
+   "node": "node-55-mongot",
+   "range": "SYS-3 | Intel Xeon-E 2288G",
+   "rack": "V115B07",
+   "base": 60,
+   "nextBilling": "2026-12-02T03:22:29Z",
+   "deleteAtExpiration": false,
+   "terminationDate": null,
+   "options": [
+    {
+     "name": "128GB DDR4 ECC 2666MHz",
+     "price": 40
+    }
+   ],
+   "options_total": 40,
+   "monthly_pre_tax": 100
+  }
+ ]
+}

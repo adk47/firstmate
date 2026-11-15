@@ -1,0 +1,212 @@
+# source=kubectl (read-only get) on node-1 run_at_utc=2026-11-13T00:28:42Z
+## services ns=data-processing matching clickhouse|ticker (name, type, selector)
+analytics-keeper-metrics	ClusterIP	clickhouse-keeper.altinity.com/chk=keeper-analytics
+chk-keeper-analytics-analytics-0-0	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-analytics,clickhouse-keeper.altinity.com/cluster=analytics,clickhouse-keeper.altinity.com/namespace=data-processing,clickhouse-keeper
+chk-keeper-analytics-analytics-0-1	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-analytics,clickhouse-keeper.altinity.com/cluster=analytics,clickhouse-keeper.altinity.com/namespace=data-processing,clickhouse-keeper
+chk-keeper-analytics-analytics-0-2	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-analytics,clickhouse-keeper.altinity.com/cluster=analytics,clickhouse-keeper.altinity.com/namespace=data-processing,clickhouse-keeper
+chk-keeper-poc-poc-0-0	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-poc,clickhouse-keeper.altinity.com/cluster=poc,clickhouse-keeper.altinity.com/namespace=data-processing,clickhouse-keeper.altinity.com/replica=0,
+chk-keeper-poc-poc-0-1	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-poc,clickhouse-keeper.altinity.com/cluster=poc,clickhouse-keeper.altinity.com/namespace=data-processing,clickhouse-keeper.altinity.com/replica=1,
+chk-keeper-poc-poc-0-2	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-poc,clickhouse-keeper.altinity.com/cluster=poc,clickhouse-keeper.altinity.com/namespace=data-processing,clickhouse-keeper.altinity.com/replica=2,
+chk-keeper-prod-prod-0-0	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-prod,clickhouse-keeper.altinity.com/cluster=prod,clickhouse-keeper.altinity.com/namespace=data-processing,clickhouse-keeper.altinity.com/replic
+chk-keeper-prod-prod-0-1	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-prod,clickhouse-keeper.altinity.com/cluster=prod,clickhouse-keeper.altinity.com/namespace=data-processing,clickhouse-keeper.altinity.com/replic
+chk-keeper-prod-prod-0-2	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-prod,clickhouse-keeper.altinity.com/cluster=prod,clickhouse-keeper.altinity.com/namespace=data-processing,clickhouse-keeper.altinity.com/replic
+chk-keeper-product-analytics-product-0-0	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-product-analytics,clickhouse-keeper.altinity.com/cluster=product,clickhouse-keeper.altinity.com/namespace=data-processing,click
+chk-keeper-product-analytics-product-0-1	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-product-analytics,clickhouse-keeper.altinity.com/cluster=product,clickhouse-keeper.altinity.com/namespace=data-processing,click
+chk-keeper-product-analytics-product-0-2	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-product-analytics,clickhouse-keeper.altinity.com/cluster=product,clickhouse-keeper.altinity.com/namespace=data-processing,click
+clickhouse-operator-altinity-clickhouse-operator-metrics	ClusterIP	app.kubernetes.io/instance=clickhouse-operator,app.kubernetes.io/name=altinity-clickhouse-operator
+clickhouse-product-analytics	ClusterIP	clickhouse.altinity.com/app=chop,clickhouse.altinity.com/chi=product-analytics,clickhouse.altinity.com/namespace=data-processing,clickhouse.altinity.com/ready=yes
+clickhouse-ticker-poc	ClusterIP	clickhouse.altinity.com/app=chop,clickhouse.altinity.com/chi=ticker-poc,clickhouse.altinity.com/namespace=data-processing,clickhouse.altinity.com/ready=yes
+clickhouse-ticker-prod	ClusterIP	clickhouse.altinity.com/app=chop,clickhouse.altinity.com/chi=ticker-prod,clickhouse.altinity.com/namespace=data-processing,clickhouse.altinity.com/ready=yes
+clickhouse-ticker-tier	ClusterIP	clickhouse.altinity.com/app=chop,clickhouse.altinity.com/chi=ticker-tier,clickhouse.altinity.com/namespace=data-processing,clickhouse.altinity.com/ready=yes
+keeper-keeper-poc	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-poc,clickhouse-keeper.altinity.com/namespace=data-processing,clickhouse-keeper.altinity.com/ready=yes
+keeper-keeper-prod	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-prod,clickhouse-keeper.altinity.com/namespace=data-processing,clickhouse-keeper.altinity.com/ready=yes
+keeper-keeper-product-analytics	ClusterIP	clickhouse-keeper.altinity.com/app=chop,clickhouse-keeper.altinity.com/chk=keeper-product-analytics,clickhouse-keeper.altinity.com/namespace=data-processing,clickhouse-keeper.altinity.com/ready=yes
+product-analytics-keeper-metrics	ClusterIP	clickhouse-keeper.altinity.com/chk=keeper-product-analytics
+ticker-api-prod	ClusterIP	app=ticker-api-prod
+ticker-demo-poc	ClusterIP	app=ticker-demo-poc
+ticker-keeper-prod-metrics	ClusterIP	clickhouse-keeper.altinity.com/chk=keeper-prod
+ticker-poc-api	ClusterIP	app=ticker-poc-api
+ticker-poc-ch-metrics	ClusterIP	clickhouse.altinity.com/chi=ticker-poc
+ticker-prod-ch-metrics	ClusterIP	clickhouse.altinity.com/chi=ticker-prod
+ticker-tier-ch-metrics	ClusterIP	clickhouse.altinity.com/chi=ticker-tier
+valkey-ticker-dev-ha	ClusterIP	app.kubernetes.io/component=node,app.kubernetes.io/instance=valkey-ticker-dev-ha,app.kubernetes.io/name=valkey
+valkey-ticker-dev-ha-headless	ClusterIP	app.kubernetes.io/component=node,app.kubernetes.io/instance=valkey-ticker-dev-ha,app.kubernetes.io/name=valkey
+valkey-ticker-prod-ha	ClusterIP	app.kubernetes.io/component=node,app.kubernetes.io/instance=valkey-ticker-prod-ha,app.kubernetes.io/name=valkey
+valkey-ticker-prod-ha-headless	ClusterIP	app.kubernetes.io/component=node,app.kubernetes.io/instance=valkey-ticker-prod-ha,app.kubernetes.io/name=valkey
+## endpoints for clickhouse-ticker-prod / clickhouse-ticker-tier (pod -> node)
+-- clickhouse-ticker-prod
+chi-ticker-prod-prod-2-1-0	node-49-pdp
+chi-ticker-prod-prod-4-0-0	node-49-pdp
+chi-ticker-prod-prod-0-0-0	node-49-pdp
+chi-ticker-prod-prod-1-1-0	node-49-pdp
+chi-ticker-prod-prod-3-0-0	node-50-pdp
+chi-ticker-prod-prod-4-1-0	node-50-pdp
+chi-ticker-prod-prod-1-0-0	node-50-pdp
+chi-ticker-prod-prod-5-0-0	node-50-pdp
+chi-ticker-prod-prod-0-1-0	ovh-node-29
+chi-ticker-prod-prod-3-1-0	ovh-node-29
+chi-ticker-prod-prod-2-0-0	ovh-node-29
+chi-ticker-prod-prod-5-1-0	ovh-node-29
+-- clickhouse-ticker-tier
+chi-ticker-tier-prod-4-0-0	node-48-red-panda
+chi-ticker-tier-prod-3-0-0	node-48-red-panda
+chi-ticker-tier-prod-0-1-0	node-52-red-panda
+chi-ticker-tier-prod-5-0-0	node-52-red-panda
+chi-ticker-tier-prod-2-0-0	node-46-red-panda
+chi-ticker-tier-prod-1-0-0	node-46-red-panda
+chi-ticker-tier-prod-1-1-0	node-53-red-panda
+chi-ticker-tier-prod-4-1-0	node-53-red-panda
+chi-ticker-tier-prod-5-1-0	node-54-red-panda
+chi-ticker-tier-prod-2-1-0	node-54-red-panda
+chi-ticker-tier-prod-0-0-0	node-47-red-panda
+chi-ticker-tier-prod-3-1-0	node-47-red-panda
+## ticker-api deployments: replicas + CH/PG/CUBE env
+### ticker-api-prod replicas=2 ready=2
+CH_URL=http://clickhouse-ticker-prod.data-processing.svc:8123
+CH_DB=ticker_prod
+CH_RO_USER=ticker_ro
+CH_RO_PASSWORD=<secret/config ref>
+CH_ADMIN_USER=admin
+CH_ADMIN_PASSWORD=<secret/config ref>
+PG_HOST=10.0.0.17
+PG_PORT=5432
+PG_DB=stats
+PG_SCHEMA=v4_poc
+PG_RW_USER=<secret/config ref>
+PG_RW_PASSWORD=<secret/config ref>
+CUBE_ANCHOR_FAIL_TTL_MS=21600000
+CH_ANCHOR_FLOOR=shadow
+### ticker-demo-poc replicas=1 ready=1
+### ticker-poc-api replicas=2 ready=2
+CH_URL=http://clickhouse-ticker-poc.data-processing.svc:8123
+CH_DB=ticker_poc
+CH_RO_USER=ticker_ro
+CH_RO_PASSWORD=<secret/config ref>
+CH_ADMIN_USER=admin
+CH_ADMIN_PASSWORD=<secret/config ref>
+PG_HOST=10.0.0.17
+PG_PORT=5432
+PG_DB=stats
+PG_SCHEMA=v4_poc
+PG_RW_USER=<secret/config ref>
+PG_RW_PASSWORD=<secret/config ref>
+CUBE_ANCHOR_TABLE=<secret/config ref>
+## pods on node-49-pdp / node-50-pdp / ovh-node-29 by namespace + owner-kind + name-prefix
+-- node-49-pdp
+    190 muso-prod	ReplicaSet	industry-proc-fastlane-v2
+      8 muso-prod	ReplicaSet	industry-proc-raw-v2
+      2 longhorn-system	DaemonSet	engine-image-ei
+      1 muso-prod	ReplicaSet	industry-proc-raw-fresh
+      1 monitoring	DaemonSet	promtail
+      1 monitoring	DaemonSet	prometheus-node-exporter
+      1 monitoring	DaemonSet	node-problem-detector
+      1 longhorn-system	InstanceManager	instance-manager-1582989c9b7d3b825d544af4b76cc180
+      1 longhorn-system	DaemonSet	longhorn-manager
+      1 longhorn-system	DaemonSet	longhorn-csi-plugin
+      1 kube-system	DaemonSet	tcp-mss-clamp
+      1 kube-system	DaemonSet	cilium-envoy
+      1 kube-system	DaemonSet	cilium-agent
+      1 data-processing	StatefulSet	chi-ticker-prod-prod-4-0-0
+      1 data-processing	StatefulSet	chi-ticker-prod-prod-2-1-0
+      1 data-processing	StatefulSet	chi-ticker-prod-prod-1-1-0
+      1 data-processing	StatefulSet	chi-ticker-prod-prod-0-0-0
+-- node-50-pdp
+    190 muso-prod	ReplicaSet	industry-proc-fastlane-v2
+      9 muso-prod	ReplicaSet	industry-proc-raw-v2
+      2 longhorn-system	DaemonSet	engine-image-ei
+      1 monitoring	DaemonSet	promtail
+      1 monitoring	DaemonSet	prometheus-node-exporter
+      1 monitoring	DaemonSet	node-problem-detector
+      1 longhorn-system	ReplicaSet	csi-snapshotter
+      1 longhorn-system	ReplicaSet	csi-resizer
+      1 longhorn-system	ReplicaSet	csi-provisioner
+      1 longhorn-system	ReplicaSet	csi-attacher
+      1 longhorn-system	InstanceManager	instance-manager-0d5082f4ad0545db12211153c1512220
+      1 longhorn-system	DaemonSet	longhorn-manager
+      1 longhorn-system	DaemonSet	longhorn-csi-plugin
+      1 kube-system	DaemonSet	tcp-mss-clamp
+      1 kube-system	DaemonSet	cilium-envoy
+      1 kube-system	DaemonSet	cilium-agent
+      1 data-processing	StatefulSet	chi-ticker-prod-prod-5-0-0
+      1 data-processing	StatefulSet	chi-ticker-prod-prod-4-1-0
+      1 data-processing	StatefulSet	chi-ticker-prod-prod-3-0-0
+      1 data-processing	StatefulSet	chi-ticker-prod-prod-1-0-0
+      1 data-processing	ReplicaSet	hive-metastore
+-- ovh-node-29
+     24 data-processing	Pod	executor
+      2 longhorn-system	DaemonSet	engine-image-ei
+      2 data-processing	SparkApplication	driver
+      2 data-processing	ReplicaSet	airflow-scheduler
+      1 velero	DaemonSet	velero
+      1 monitoring	DaemonSet	promtail
+      1 monitoring	DaemonSet	prometheus-node-exporter
+      1 monitoring	DaemonSet	node-problem-detector
+      1 longhorn-system	InstanceManager	instance-manager-a32d16e7803f2e88b86392344d4c5012
+      1 longhorn-system	DaemonSet	longhorn-manager
+      1 longhorn-system	DaemonSet	longhorn-csi-plugin
+      1 kube-system	DaemonSet	tcp-mss-clamp
+      1 kube-system	DaemonSet	cilium-envoy
+      1 kube-system	DaemonSet	cilium-agent
+      1 data-processing	StatefulSet	chk-keeper-prod-prod-0-1-0
+      1 data-processing	StatefulSet	chi-ticker-prod-prod-5-1-0
+      1 data-processing	StatefulSet	chi-ticker-prod-prod-3-1-0
+      1 data-processing	StatefulSet	chi-ticker-prod-prod-2-0-0
+      1 data-processing	StatefulSet	chi-ticker-prod-prod-0-1-0
+      1 data-processing	ReplicaSet	hive-metastore
+      1 data-processing	ReplicaSet	airflow-webserver
+      1 data-processing	ReplicaSet	airflow-triggerer
+      1 data-processing	DaemonSet	spark-scratch-janitor
+-- node-67-pdp
+      3 data-processing	SparkApplication	driver
+      3 data-processing	Pod	executor
+      2 longhorn-system	DaemonSet	engine-image-ei
+      1 velero	DaemonSet	velero
+      1 monitoring	DaemonSet	promtail
+      1 monitoring	DaemonSet	prometheus-node-exporter
+      1 monitoring	DaemonSet	node-problem-detector
+      1 longhorn-system	InstanceManager	instance-manager-8fb93b36bb31a164c1d2c93dc0d40c0c
+      1 longhorn-system	DaemonSet	longhorn-manager
+      1 longhorn-system	DaemonSet	longhorn-csi-plugin
+      1 kube-system	DaemonSet	tcp-mss-clamp
+      1 kube-system	DaemonSet	cilium-envoy
+      1 kube-system	DaemonSet	cilium-agent
+      1 data-processing	none	v4-ptc-native-extract-catalog-track-delta
+      1 data-processing	none	v4-olap-cubes-submit-industry-stat-profile
+      1 data-processing	none	run-import-industry-realtime-import-industry-table-ind
+      1 data-processing	StatefulSet	chi-product-analytics-product-0-0-0
+      1 data-processing	DaemonSet	spark-scratch-janitor
+-- node-68-pdp
+      5 data-processing	ReplicaSet	trino
+      2 longhorn-system	DaemonSet	engine-image-ei
+      1 velero	DaemonSet	velero
+      1 monitoring	DaemonSet	promtail
+      1 monitoring	DaemonSet	prometheus-node-exporter
+      1 monitoring	DaemonSet	node-problem-detector
+      1 longhorn-system	InstanceManager	instance-manager-8ab945586a3126c6623538379e12bbda
+      1 longhorn-system	DaemonSet	longhorn-manager
+      1 longhorn-system	DaemonSet	longhorn-csi-plugin
+      1 kube-system	DaemonSet	tcp-mss-clamp
+      1 kube-system	DaemonSet	cilium-envoy
+      1 kube-system	DaemonSet	cilium-agent
+      1 data-processing	none	v4-olap-cubes-submit-list-track-dates
+      1 data-processing	none	v4-olap-cubes-submit-list-profile-dates
+      1 data-processing	none	v4-milestone-fresh-sentinel-fresh-tick
+      1 data-processing	StatefulSet	chi-product-analytics-product-0-1-0
+      1 data-processing	Job	job-v4-pod-extract-catalog-track-delta
+      1 data-processing	DaemonSet	spark-scratch-janitor
+-- ovh-node-19
+      2 longhorn-system	DaemonSet	engine-image-ei
+      1 velero	DaemonSet	velero
+      1 vault	StatefulSet	vault
+      1 queuing	ReplicaSet	elasticmq
+      1 muso-system	ReplicaSet	zot-registry
+      1 monitoring	DaemonSet	promtail
+      1 monitoring	DaemonSet	prometheus-node-exporter
+      1 monitoring	DaemonSet	node-problem-detector
+      1 longhorn-system	InstanceManager	instance-manager-d5d0274069e5db27e6487287626df513
+      1 longhorn-system	InstanceManager	instance-manager-d20b26fb7a1a1c1bdc0650a99a246862
+      1 longhorn-system	DaemonSet	longhorn-manager
+      1 longhorn-system	DaemonSet	longhorn-csi-plugin
+      1 kube-system	DaemonSet	tcp-mss-clamp
+      1 kube-system	DaemonSet	cilium-envoy
+      1 kube-system	DaemonSet	cilium-agent

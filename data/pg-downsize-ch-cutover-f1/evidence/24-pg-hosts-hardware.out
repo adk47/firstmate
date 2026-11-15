@@ -1,0 +1,98 @@
+# host=10.0.0.17 source=ssh read-only (nproc, lscpu, free, df, lsblk, mdstat, uptime) run_at_utc=2026-11-13T00:29:09Z
+node-17-pg-primary-writer
+ 00:29:10 up 146 days, 19:02,  2 users,  load average: 82.14, 68.91, 46.15
+96
+Model name:                              AMD EPYC 9454 48-Core Processor
+Thread(s) per core:                      2
+Core(s) per socket:                      48
+Socket(s):                               1
+               total        used        free      shared  buff/cache   available
+Mem:             503         203          13           0         315         300
+Filesystem      Size  Used Avail Use% Mounted on
+efivarfs        256K   27K  225K  11% /sys/firmware/efi/efivars
+/dev/md3        878G   27G  806G   4% /
+/dev/md2        988M  223M  698M  25% /boot
+/dev/nvme0n1p1  511M  5.2M  506M   2% /boot/efi
+/dev/md4         14T   12T  2.7T  81% /data
+md4 : active raid0 nvme3n1[1] nvme2n1[0]
+      15002667008 blocks super 1.2 512k chunks
+md2 : active raid1 nvme1n1p2[1] nvme0n1p2[0]
+      1046528 blocks super 1.2 [2/2] [UU]
+md3 : active raid1 nvme0n1p3[0] nvme1n1p3[1]
+      935460864 blocks super 1.2 [2/2] [UU]
+NAME      SIZE ROTA MODEL
+nvme0n1 894.3G    0 SAMSUNG MZQL2960HCJR-00A07
+nvme1n1 894.3G    0 SAMSUNG MZQL2960HCJR-00A07
+nvme2n1     7T    0 SAMSUNG MZQL27T6HBLA-00A07
+nvme3n1     7T    0 SAMSUNG MZQL27T6HBLA-00A07
+MemAvailable:   314568028 kB
+Cached:         321301588 kB
+HugePages_Total:   70000
+HugePages_Free:     2887
+Hugepagesize:       2048 kB
+some avg10=24.13 avg60=37.50 avg300=29.11 total=2757948136677
+full avg10=23.15 avg60=31.77 avg300=24.42 total=2175614305452
+Device            r/s     rkB/s   rrqm/s  %rrqm r_await rareq-sz     w/s     wkB/s   wrqm/s  %wrqm w_await wareq-sz     d/s     dkB/s   drqm/s  %drqm d_await dareq-sz    
+md2              0.00      0.00     0.00   0.00    0.00     0.00    0.00      0.00     0.00   0.00    0.00     0.00    0.00      0.00     0.00   0.00    0.00     0.00    
+md3              0.00      0.00     0.00   0.00    0.00     0.00  147.00   1515.20     0.00   0.00    0.50    10.31    0.00      0.00     0.00   0.00    0.00     0.00    
+md4           112918.80 1797468.80     0.00   0.00    0.32    15.92 158236.40 1688853.60     0.00   0.00    0.50    10.67    0.00      0.00     0.00   0.00    0.00     0.
+nvme0n1          0.00      0.00     0.00   0.00    0.00     0.00  144.40   1522.00     5.00   3.35    0.07    10.54    0.00      0.00     0.00   0.00    0.00     0.00    
+nvme1n1          0.00      0.00     0.00   0.00    0.00     0.00  144.40   1522.00     5.00   3.35    0.07    10.54    0.00      0.00     0.00   0.00    0.00     0.00    
+nvme2n1       56342.20 898985.60     0.00   0.00    0.32    15.96 78885.40 844072.00   244.20   0.31    0.53    10.70    0.00      0.00     0.00   0.00    0.00     0.00  
+nvme3n1       56578.20 898500.80     0.00   0.00    0.31    15.88 78865.40 844748.00   237.80   0.30    0.46    10.71    0.00      0.00     0.00   0.00    0.00     0.00  
+
+# host=10.0.0.19 source=ssh read-only (nproc, lscpu, free, df, lsblk, mdstat, uptime) run_at_utc=2026-11-13T00:29:15Z
+node-19-pg-replica-and-builder
+ 00:29:17 up 207 days, 17:33,  1 user,  load average: 37.81, 41.70, 41.88
+64
+Model name:                              INTEL(R) XEON(R) GOLD 6526Y
+Thread(s) per core:                      2
+Core(s) per socket:                      16
+Socket(s):                               2
+               total        used        free      shared  buff/cache   available
+Mem:             503         232           1         130         404         271
+Filesystem      Size  Used Avail Use% Mounted on
+efivarfs        512K  281K  227K  56% /sys/firmware/efi/efivars
+/dev/md3        878G  326G  507G  40% /
+/dev/md2        988M  223M  699M  25% /boot
+/dev/nvme0n1p1  511M  5.2M  506M   2% /boot/efi
+/dev/md4         21T   12T  9.5T  55% /data
+md4 : active raid0 nvme7n1[5] nvme6n1[4] nvme5n1[3] nvme4n1[2] nvme3n1[1] nvme1n1[0]
+      22503634944 blocks super 1.2 512k chunks
+md3 : active raid1 nvme2n1p3[1] nvme0n1p3[0]
+      935460864 blocks super 1.2 [2/2] [UU]
+md2 : active raid1 nvme0n1p2[0] nvme2n1p2[1]
+      1046528 blocks super 1.2 [2/2] [UU]
+NAME      SIZE ROTA MODEL
+sda        10G    1 VIRTUAL-DISK
+sdb       100G    1 VIRTUAL-DISK
+sdc        50G    1 VIRTUAL-DISK
+sr0      1024M    1 Virtual CDROM0
+nvme0n1 894.3G    0 MTFDKCC960TGP-1BK1DABYY
+nvme2n1 894.3G    0 MTFDKCC960TGP-1BK1DABYY
+nvme4n1   3.5T    0 SOLIDIGM SSDPF2KX038T1O
+nvme5n1   3.5T    0 SOLIDIGM SSDPF2KX038T1O
+nvme1n1   3.5T    0 SOLIDIGM SSDPF2KX038T1O
+nvme6n1   3.5T    0 SOLIDIGM SSDPF2KX038T1O
+nvme3n1   3.5T    0 SOLIDIGM SSDPF2KX038T1O
+nvme7n1   3.5T    0 SOLIDIGM SSDPF2KX038T1O
+MemAvailable:   284275956 kB
+Cached:         413481440 kB
+HugePages_Total:       0
+HugePages_Free:        0
+Hugepagesize:       2048 kB
+some avg10=25.80 avg60=20.85 avg300=20.85 total=1056829357856
+full avg10=25.41 avg60=20.40 avg300=20.23 total=1024568777246
+Device            r/s     rkB/s   rrqm/s  %rrqm r_await rareq-sz     w/s     wkB/s   wrqm/s  %wrqm w_await wareq-sz     d/s     dkB/s   drqm/s  %drqm d_await dareq-sz    
+md2              0.00      0.00     0.00   0.00    0.00     0.00    0.00      0.00     0.00   0.00    0.00     0.00    0.00      0.00     0.00   0.00    0.00     0.00    
+md3              8.20     72.00     0.00   0.00    0.15     8.78  879.80   8538.40     0.00   0.00    0.15     9.70    0.00      0.00     0.00   0.00    0.00     0.00    
+md4           212667.80 2528016.80     0.00   0.00    0.10    11.89 86293.20 801004.80     0.00   0.00    0.06     9.28    0.00      0.00     0.00   0.00    0.00     0.00
+nvme0n1          7.00     45.60     0.00   0.00    0.11     6.51  885.40   8558.00     0.00   0.00    0.08     9.67    0.00      0.00     0.00   0.00    0.00     0.00    
+nvme1n1       35462.20 422048.00     0.00   0.00    0.10    11.90 14352.00 133476.00     0.00   0.00    0.06     9.30    0.00      0.00     0.00   0.00    0.00     0.00  
+nvme2n1          1.20     26.40     0.00   0.00    0.00    22.00  885.40   8558.00     0.00   0.00    0.07     9.67    0.00      0.00     0.00   0.00    0.00     0.00    
+nvme3n1       35296.00 419670.40     0.00   0.00    0.09    11.89 14348.80 133080.00     0.00   0.00    0.06     9.27    0.00      0.00     0.00   0.00    0.00     0.00  
+nvme4n1       35464.00 421133.60     0.00   0.00    0.09    11.87 14467.40 133908.80     0.00   0.00    0.06     9.26    0.00      0.00     0.00   0.00    0.00     0.00  
+nvme5n1       35251.00 419782.40     0.00   0.00    0.09    11.91 14420.80 134032.80     0.00   0.00    0.06     9.29    0.00      0.00     0.00   0.00    0.00     0.00  
+nvme6n1       35620.40 423411.20     0.00   0.00    0.10    11.89 14316.40 132741.60     0.00   0.00    0.06     9.27    0.00      0.00     0.00   0.00    0.00     0.00  
+nvme7n1       35571.00 421829.60     0.00   0.00    0.10    11.86 14380.40 133704.80     0.00   0.00    0.06     9.30    0.00      0.00     0.00   0.00    0.00     0.00  
+

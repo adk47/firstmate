@@ -1,0 +1,7 @@
+2026-11-13T00:20:00Z  n17 pgbouncer :6432 admin console (SHOW CLIENTS / SHOW POOLS / SHOW STATS_TOTALS)
+command: sudo -n -u postgres psql -X -h /var/run/postgresql -p 6432 -U postgres pgbouncer --csv -c 'SHOW CLIENTS'
+result:  psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.6432" failed: fe_sendauth: no password supplied
+The console asks for the postgres password. This lane was not given one and did not go looking for one
+(/etc/pgbouncer/userlist.txt and Vault were not read). Consequence: sessions that arrive through pgbouncer with a
+blank application_name cannot be tied to a client pod IP from this source. They are mapped by query text against the
+service repos instead (evidence 16), and by pg_stat_activity.query_id where the client sets application_name (evidence 15).

@@ -1,0 +1,16 @@
+# pod=chi-ticker-tier-prod-0-0-0 ns=data-processing run_at_utc=2026-11-13T05:25:35Z clickhouse-client --readonly 1
+   ┌─host───────────────────────┬─view─────────────────────┬─status────┬───last_success_time─┬───next_refresh_time─┬─has_exception─┐
+1. │ chi-ticker-tier-prod-0-0-0 │ mv_dim_refresh_local     │ Scheduled │ 2026-11-13 04:17:51 │ 2026-11-13 08:44:52 │             0 │
+2. │ chi-ticker-tier-prod-0-0-0 │ mv_nowcast_refresh_local │ Scheduled │ 2026-11-13 05:00:00 │ 2026-11-13 06:00:00 │             0 │
+   └────────────────────────────┴──────────────────────────┴───────────┴─────────────────────┴─────────────────────┴───────────────┘
+   ┌─host───────────────────────┬─name────────────────────┬─engine───────────────────────┬─total_rows─┐
+1. │ chi-ticker-tier-prod-0-0-0 │ dim_paid_entities       │ ReplacingMergeTree           │  190997311 │
+2. │ chi-ticker-tier-prod-0-0-0 │ entity_set_snapshots    │ ReplicatedReplacingMergeTree │      55350 │
+3. │ chi-ticker-tier-prod-0-0-0 │ nowcast_rate            │ ReplacingMergeTree           │  156712017 │
+4. │ chi-ticker-tier-prod-0-0-0 │ processed_profile_daily │ ReplicatedReplacingMergeTree │    2953600 │
+5. │ chi-ticker-tier-prod-0-0-0 │ processed_source_daily  │ ReplicatedReplacingMergeTree │   20400455 │
+6. │ chi-ticker-tier-prod-0-0-0 │ profile_box_stats       │ ReplicatedReplacingMergeTree │      19678 │
+   └────────────────────────────┴─────────────────────────┴──────────────────────────────┴────────────┘
+   ┌─backups_on_record─┬─────────────────────newest─┐
+1. │                 0 │ 1970-01-01 00:00:00.000000 │
+   └───────────────────┴────────────────────────────┘

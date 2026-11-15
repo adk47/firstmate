@@ -1,0 +1,1819 @@
+{
+ "run_at_utc": "2026-11-13T02:05:45Z",
+ "count": 49,
+ "servers": [
+  {
+   "service": "ns1001980.ip-51-81-67.us",
+   "reverse": "ns1001980.ip-51-81-67.us",
+   "range": "SYS-4 | AMD Epyc 7371",
+   "rack": "V118A06",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-57-AW-IW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-07-11",
+   "engagedUpTo": null,
+   "renew": {
+    "deleteAtExpiration": false,
+    "forced": false,
+    "manualPayment": false,
+    "automatic": true,
+    "period": 1
+   },
+   "serviceId": 10440426,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$129.00 USD",
+    "value": 129
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T11:32:50Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-07-11T11:21:30Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24sys042-us",
+   "invoiceName": "SYS-4 | AMD Epyc 7371"
+  },
+  {
+   "service": "ns1005773.ip-135-148-34.us",
+   "reverse": "ns1005773.ip-135-148-34.us",
+   "range": "SYS-4 | AMD Epyc 7371",
+   "rack": "V111B04",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-58-AW-IW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-07-11",
+   "engagedUpTo": null,
+   "renew": {
+    "forced": false,
+    "deleteAtExpiration": false,
+    "automatic": true,
+    "period": 1,
+    "manualPayment": false
+   },
+   "serviceId": 10440427,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$129.00 USD",
+    "value": 129
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T11:32:49Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-07-11T11:21:29Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24sys042-us",
+   "invoiceName": "SYS-4 | AMD Epyc 7371"
+  },
+  {
+   "service": "ns1006599.ip-135-148-54.us",
+   "reverse": "ns1006599.ip-135-148-54.us",
+   "range": "SYS-4 | AMD Epyc 7371",
+   "rack": "V111B17",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-59-AW-IW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-07-11",
+   "engagedUpTo": null,
+   "renew": {
+    "manualPayment": false,
+    "forced": false,
+    "deleteAtExpiration": false,
+    "automatic": true,
+    "period": 1
+   },
+   "serviceId": 10440328,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$129.00 USD",
+    "value": 129
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T11:42:19Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-07-11T11:21:30Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24sys042-us",
+   "invoiceName": "SYS-4 | AMD Epyc 7371"
+  },
+  {
+   "service": "ns1009089.ip-135-148-122.us",
+   "reverse": "ns1009089.ip-135-148-122.us",
+   "range": "SYS-4 | AMD Epyc 7371",
+   "rack": "V119A01",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-60-AW-IW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-07-11",
+   "engagedUpTo": null,
+   "renew": {
+    "forced": false,
+    "deleteAtExpiration": false,
+    "automatic": true,
+    "manualPayment": false,
+    "period": 1
+   },
+   "serviceId": 10440441,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$129.00 USD",
+    "value": 129
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T11:40:19Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-07-11T11:21:30Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24sys042-us",
+   "invoiceName": "SYS-4 | AMD Epyc 7371"
+  },
+  {
+   "service": "ns1011031.ip-135-148-169.us",
+   "reverse": "ns1011031.ip-135-148-169.us",
+   "range": "RISE-5 | AMD Epyc 7413",
+   "rack": "V119B02",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-04-app-serving",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-03-12",
+   "engagedUpTo": null,
+   "renew": {
+    "forced": false,
+    "period": 1,
+    "manualPayment": false,
+    "automatic": true,
+    "deleteAtExpiration": false
+   },
+   "serviceId": 10062557,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$199.00 USD",
+    "value": 199
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T22:28:10Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-03-12T22:17:21Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24rise052-v1-us",
+   "invoiceName": "RISE-5 | AMD Epyc 7413"
+  },
+  {
+   "service": "ns1011038.ip-135-148-169.us",
+   "reverse": "ns1011038.ip-135-148-169.us",
+   "range": "RISE-5 | AMD Epyc 7413",
+   "rack": "V119B02",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-01-control-plane-vpn",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-03-08",
+   "engagedUpTo": null,
+   "renew": {
+    "deleteAtExpiration": false,
+    "automatic": true,
+    "forced": false,
+    "period": 1,
+    "manualPayment": false
+   },
+   "serviceId": 10069273,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$199.00 USD",
+    "value": 199
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-02T02:14:40Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-03-09T02:02:52Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24rise052-v1-us",
+   "invoiceName": "RISE-5 | AMD Epyc 7413"
+  },
+  {
+   "service": "ns1012079.ip-15-204-140.us",
+   "reverse": "ns1012079.ip-15-204-140.us",
+   "range": "Advance-1 Gen 2 | Intel Xeon-E 2386G",
+   "rack": "V119B18",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-47-Red-Panda-1",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-27",
+   "engagedUpTo": null,
+   "renew": {
+    "automatic": true,
+    "forced": false,
+    "deleteAtExpiration": false,
+    "period": 1,
+    "manualPayment": false
+   },
+   "serviceId": 10394210,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$98.00 USD",
+    "value": 98
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T23:22:44Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-27T23:09:57Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "21adv01-v1-us",
+   "invoiceName": "Advance-1 Gen 2 | Intel Xeon-E 2386G"
+  },
+  {
+   "service": "ns1012218.ip-15-204-140.us",
+   "reverse": "ns1012218.ip-15-204-140.us",
+   "range": "Advance-1 Gen 2 | Intel Xeon-E 2386G",
+   "rack": "V119C05",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-54-Red-Panda-6",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-06-02",
+   "engagedUpTo": null,
+   "renew": {
+    "forced": false,
+    "manualPayment": false,
+    "automatic": true,
+    "period": 1,
+    "deleteAtExpiration": false
+   },
+   "serviceId": 10389834,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$98.00 USD",
+    "value": 98
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T14:05:27Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-06-02T03:29:32Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "21adv01-v1-us",
+   "invoiceName": "Advance-1 Gen 2 | Intel Xeon-E 2386G"
+  },
+  {
+   "service": "ns1014310.ip-15-204-160.us",
+   "reverse": "ns1014310.ip-15-204-160.us",
+   "range": "RISE-5 | AMD Epyc 7413",
+   "rack": "V119C27",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-02-control-plane",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-03-08",
+   "engagedUpTo": null,
+   "renew": {
+    "deleteAtExpiration": false,
+    "forced": false,
+    "automatic": true,
+    "manualPayment": false,
+    "period": 1
+   },
+   "serviceId": 10069278,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$199.00 USD",
+    "value": 199
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-02T02:15:14Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-03-09T02:02:56Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24rise052-v1-us",
+   "invoiceName": "RISE-5 | AMD Epyc 7413"
+  },
+  {
+   "service": "ns1014433.ip-15-204-160.us",
+   "reverse": "ns1014433.ip-15-204-160.us",
+   "range": "RISE-5 | AMD Epyc 7413",
+   "rack": "V119D04",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-03-control-plane",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-03-08",
+   "engagedUpTo": null,
+   "renew": {
+    "automatic": true,
+    "period": 1,
+    "forced": false,
+    "deleteAtExpiration": false,
+    "manualPayment": false
+   },
+   "serviceId": 10069291,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$199.00 USD",
+    "value": 199
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-02T02:20:41Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-03-09T02:02:56Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24rise052-v1-us",
+   "invoiceName": "RISE-5 | AMD Epyc 7413"
+  },
+  {
+   "service": "ns1014451.ip-15-204-160.us",
+   "reverse": "ns1014451.ip-15-204-160.us",
+   "range": "RISE-5 | AMD Epyc 7413",
+   "rack": "V119D04",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-05-data-read",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-03-13",
+   "engagedUpTo": null,
+   "renew": {
+    "automatic": true,
+    "deleteAtExpiration": false,
+    "forced": false,
+    "period": 1,
+    "manualPayment": false
+   },
+   "serviceId": 10061838,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$199.00 USD",
+    "value": 199
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T17:02:07Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-03-13T16:52:06Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24rise052-v1-us",
+   "invoiceName": "RISE-5 | AMD Epyc 7413"
+  },
+  {
+   "service": "ns1016279.ip-15-204-182.us",
+   "reverse": "ns1016279.ip-15-204-182.us",
+   "range": "RISE-4 | AMD Epyc 7313",
+   "rack": "V119E09",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-67-pdp",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-09-29",
+   "engagedUpTo": null,
+   "renew": {
+    "period": 1,
+    "forced": false,
+    "manualPayment": false,
+    "automatic": true,
+    "deleteAtExpiration": false
+   },
+   "serviceId": 10332992,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$200.00 USD",
+    "value": 200
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T11:50:43Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-09-29T11:36:38Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24rise04-v2-us",
+   "invoiceName": "RISE-4 | AMD Epyc 7313"
+  },
+  {
+   "service": "ns1016280.ip-15-204-182.us",
+   "reverse": "ns1016280.ip-15-204-182.us",
+   "range": "RISE-4 | AMD Epyc 7313",
+   "rack": "V119E09",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-68-pdp",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-09-29",
+   "engagedUpTo": null,
+   "renew": {
+    "period": 1,
+    "manualPayment": false,
+    "automatic": true,
+    "forced": false,
+    "deleteAtExpiration": false
+   },
+   "serviceId": 10333904,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$200.00 USD",
+    "value": 200
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T17:23:17Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-09-29T11:36:38Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24rise04-v2-us",
+   "invoiceName": "RISE-4 | AMD Epyc 7313"
+  },
+  {
+   "service": "ns1021277.ip-15-204-220.us",
+   "reverse": "ns1021277.ip-15-204-220.us",
+   "range": "Advance-1 Gen 2 | Intel Xeon-E 2386G",
+   "rack": "V119G05",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-48-Red-Panda-2",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-27",
+   "engagedUpTo": null,
+   "renew": {
+    "period": 1,
+    "manualPayment": false,
+    "forced": false,
+    "deleteAtExpiration": false,
+    "automatic": true
+   },
+   "serviceId": 10394228,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$98.00 USD",
+    "value": 98
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T23:26:16Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-27T23:16:00Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "21adv01-v1-us",
+   "invoiceName": "Advance-1 Gen 2 | Intel Xeon-E 2386G"
+  },
+  {
+   "service": "ns1021278.ip-15-204-220.us",
+   "reverse": "ns1021278.ip-15-204-220.us",
+   "range": "Advance-1 Gen 2 | Intel Xeon-E 2386G",
+   "rack": "V119G05",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-46-Red-Panda-3",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-27",
+   "engagedUpTo": null,
+   "renew": {
+    "manualPayment": false,
+    "forced": false,
+    "deleteAtExpiration": false,
+    "period": 1,
+    "automatic": true
+   },
+   "serviceId": 10394230,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$98.00 USD",
+    "value": 98
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T23:29:25Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-27T23:16:35Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "21adv01-v1-us",
+   "invoiceName": "Advance-1 Gen 2 | Intel Xeon-E 2386G"
+  },
+  {
+   "service": "ns1021281.ip-15-204-220.us",
+   "reverse": "ns1021281.ip-15-204-220.us",
+   "range": "Advance-1 Gen 2 | Intel Xeon-E 2386G",
+   "rack": "V119G05",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-52-Red-Panda-4",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-06-01",
+   "engagedUpTo": null,
+   "renew": {
+    "period": 1,
+    "manualPayment": false,
+    "automatic": true,
+    "forced": false,
+    "deleteAtExpiration": false
+   },
+   "serviceId": 10389694,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$98.00 USD",
+    "value": 98
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-02T03:40:59Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-06-02T03:29:32Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "21adv01-v1-us",
+   "invoiceName": "Advance-1 Gen 2 | Intel Xeon-E 2386G"
+  },
+  {
+   "service": "ns1021344.ip-15-204-220.us",
+   "reverse": "ns1021344.ip-15-204-220.us",
+   "range": "Advance-1 Gen 2 | Intel Xeon-E 2386G",
+   "rack": "V119G06",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-53-Red-Panda-5",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-06-01",
+   "engagedUpTo": null,
+   "renew": {
+    "forced": false,
+    "automatic": true,
+    "deleteAtExpiration": false,
+    "manualPayment": false,
+    "period": 1
+   },
+   "serviceId": 10389574,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$98.00 USD",
+    "value": 98
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-02T03:40:29Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-06-02T03:29:32Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "21adv01-v1-us",
+   "invoiceName": "Advance-1 Gen 2 | Intel Xeon-E 2386G"
+  },
+  {
+   "service": "ns1022009.ip-40-160-72.us",
+   "reverse": "ns1022009.ip-40-160-72.us",
+   "range": "Scale-a4",
+   "rack": "V113D08",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-17-PG-primary-writer",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-06-18",
+   "engagedUpTo": null,
+   "renew": {
+    "period": 1,
+    "automatic": true,
+    "manualPayment": false,
+    "deleteAtExpiration": false,
+    "forced": false
+   },
+   "serviceId": 10404967,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$829.00 USD",
+    "value": 829
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T22:03:16Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-06-17T15:18:45Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "23scaleamd04-v2-us",
+   "invoiceName": "Scale-a4"
+  },
+  {
+   "service": "ns1023467.ip-15-204-222.us",
+   "reverse": "ns1023467.ip-15-204-222.us",
+   "range": "RISE-4 | AMD Epyc 7313",
+   "rack": "V119G24",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "ns1023467.ip-15-204-222.us",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-09-28",
+   "engagedUpTo": null,
+   "renew": {
+    "manualPayment": false,
+    "period": 1,
+    "automatic": true,
+    "forced": false,
+    "deleteAtExpiration": false
+   },
+   "serviceId": 10334937,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$200.00 USD",
+    "value": 200
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T13:54:44Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-09-28T13:42:07Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24rise04-v2-us",
+   "invoiceName": "RISE-4 | AMD Epyc 7313"
+  },
+  {
+   "service": "ns1024669.ip-15-204-250.us",
+   "reverse": "ns1024669.ip-15-204-250.us",
+   "range": "RISE-4 | AMD Epyc 7313",
+   "rack": "V113C13",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "ns1024669.ip-15-204-250.us",
+   "expiration": "2026-11-14",
+   "status": "ok",
+   "creation": "2026-10-14",
+   "engagedUpTo": null,
+   "renew": {
+    "period": 1,
+    "automatic": true,
+    "deleteAtExpiration": false,
+    "forced": false,
+    "manualPayment": false
+   },
+   "serviceId": 10630125,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$200.00 USD",
+    "value": 200
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-11-14T16:16:49Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-10-14T16:04:44Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24rise04-v2-us",
+   "invoiceName": "RISE-4 | AMD Epyc 7313"
+  },
+  {
+   "service": "ns1024670.ip-15-204-250.us",
+   "reverse": "ns1024670.ip-15-204-250.us",
+   "range": "RISE-4 | AMD Epyc 7313",
+   "rack": "V113C13",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "ns1024670.ip-15-204-250.us",
+   "expiration": "2026-11-14",
+   "status": "ok",
+   "creation": "2026-10-14",
+   "engagedUpTo": null,
+   "renew": {
+    "deleteAtExpiration": false,
+    "forced": false,
+    "automatic": true,
+    "manualPayment": false,
+    "period": 1
+   },
+   "serviceId": 10630107,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$200.00 USD",
+    "value": 200
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-11-14T15:56:05Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-10-14T15:45:00Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24rise04-v2-us",
+   "invoiceName": "RISE-4 | AMD Epyc 7313"
+  },
+  {
+   "service": "ns1028041.ip-40-160-29.us",
+   "reverse": "ns1028041.ip-40-160-29.us",
+   "range": "ADVANCE-3 | AMD EPYC 4464P",
+   "rack": "VIN0120B05B",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-61-Red-Panda-1",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-07-11",
+   "engagedUpTo": null,
+   "renew": {
+    "manualPayment": false,
+    "forced": false,
+    "period": 1,
+    "deleteAtExpiration": false,
+    "automatic": true
+   },
+   "serviceId": 10440437,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$255.00 USD",
+    "value": 255
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T11:35:20Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-07-11T11:22:50Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24adv03-v3-us",
+   "invoiceName": "ADVANCE-3 | AMD EPYC 4464P"
+  },
+  {
+   "service": "ns1028042.ip-40-160-30.us",
+   "reverse": "ns1028042.ip-40-160-30.us",
+   "range": "ADVANCE-3 | AMD EPYC 4464P",
+   "rack": "VIN0120B05B",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-62-Red-Panda-2",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-07-11",
+   "engagedUpTo": null,
+   "renew": {
+    "automatic": true,
+    "deleteAtExpiration": false,
+    "period": 1,
+    "forced": false,
+    "manualPayment": false
+   },
+   "serviceId": 10440446,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$255.00 USD",
+    "value": 255
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T11:40:49Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-07-11T11:26:10Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24adv03-v3-us",
+   "invoiceName": "ADVANCE-3 | AMD EPYC 4464P"
+  },
+  {
+   "service": "ns1028047.ip-40-160-30.us",
+   "reverse": "ns1028047.ip-40-160-30.us",
+   "range": "ADVANCE-3 | AMD EPYC 4464P",
+   "rack": "VIN0120B05B",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-64-Red-Panda-4",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-07-11",
+   "engagedUpTo": null,
+   "renew": {
+    "manualPayment": false,
+    "forced": false,
+    "deleteAtExpiration": false,
+    "automatic": true,
+    "period": 1
+   },
+   "serviceId": 10440333,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$255.00 USD",
+    "value": 255
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T11:47:18Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-07-11T11:26:10Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24adv03-v3-us",
+   "invoiceName": "ADVANCE-3 | AMD EPYC 4464P"
+  },
+  {
+   "service": "ns1028051.ip-40-160-30.us",
+   "reverse": "ns1028051.ip-40-160-30.us",
+   "range": "ADVANCE-3 | AMD EPYC 4464P",
+   "rack": "VIN0120B05B",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-65-Red-Panda-5",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-07-11",
+   "engagedUpTo": null,
+   "renew": {
+    "manualPayment": false,
+    "deleteAtExpiration": false,
+    "forced": false,
+    "period": 1,
+    "automatic": true
+   },
+   "serviceId": 10440343,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$255.00 USD",
+    "value": 255
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T11:48:19Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-07-11T11:26:10Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24adv03-v3-us",
+   "invoiceName": "ADVANCE-3 | AMD EPYC 4464P"
+  },
+  {
+   "service": "ns1029600.ip-40-160-70.us",
+   "reverse": "ns1029600.ip-40-160-70.us",
+   "range": "Scale-a6",
+   "rack": "VIN0121C01B",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-29-PDP",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-22",
+   "engagedUpTo": null,
+   "renew": {
+    "forced": false,
+    "deleteAtExpiration": false,
+    "period": 1,
+    "manualPayment": false,
+    "automatic": true
+   },
+   "serviceId": 10401575,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$1033.00 USD",
+    "value": 1033
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-02T03:37:08Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-23T03:19:00Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "23scaleamd06-v2-us",
+   "invoiceName": "Scale-a6"
+  },
+  {
+   "service": "ns1029913.ip-40-160-23.us",
+   "reverse": "ns1029913.ip-40-160-23.us",
+   "range": "ADVANCE-5 | AMD EPYC 8224P",
+   "rack": "VIN0120C03C",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-13-mongo-secondary",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-04-09",
+   "engagedUpTo": null,
+   "renew": {
+    "deleteAtExpiration": false,
+    "automatic": true,
+    "manualPayment": false,
+    "forced": false,
+    "period": 1
+   },
+   "serviceId": 10369158,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$504.00 USD",
+    "value": 504
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-02T02:56:05Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-04-10T02:42:55Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24adv05-v2-us",
+   "invoiceName": "ADVANCE-5 | AMD EPYC 8224P"
+  },
+  {
+   "service": "ns1030663.ip-40-160-32.us",
+   "reverse": "ns1030663.ip-40-160-32.us",
+   "range": "ADVANCE-3 | AMD EPYC 4464P",
+   "rack": "VIN0120D02C",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-08-hydra",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-03-22",
+   "engagedUpTo": null,
+   "renew": {
+    "manualPayment": false,
+    "period": 1,
+    "deleteAtExpiration": false,
+    "automatic": true,
+    "forced": false
+   },
+   "serviceId": 10087339,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$255.00 USD",
+    "value": 255
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T20:11:05Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-03-22T19:59:11Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24adv03-v2-us",
+   "invoiceName": "ADVANCE-3 | AMD EPYC 4464P"
+  },
+  {
+   "service": "ns1032224.ip-40-160-66.us",
+   "reverse": "ns1032224.ip-40-160-66.us",
+   "range": "HGR-HCI-i2",
+   "rack": "VIN0121C03C",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-19-pg-replica-and-builder",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-04-18",
+   "engagedUpTo": null,
+   "renew": {
+    "forced": false,
+    "automatic": true,
+    "deleteAtExpiration": false,
+    "manualPayment": false,
+    "period": 1
+   },
+   "serviceId": 10361542,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$1677.00 USD",
+    "value": 1677
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-02T02:46:37Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-04-17T15:42:35Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24hci-i2-v1-us",
+   "invoiceName": "HGR-HCI-i2"
+  },
+  {
+   "service": "ns1032420.ip-40-160-67.us",
+   "reverse": "ns1032420.ip-40-160-67.us",
+   "range": "HGR-HCI-i2",
+   "rack": "VIN0121C03C",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-28-mongo-secondary",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-12",
+   "engagedUpTo": null,
+   "renew": {
+    "manualPayment": false,
+    "automatic": true,
+    "period": 1,
+    "deleteAtExpiration": false,
+    "forced": false
+   },
+   "serviceId": 10376310,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$1677.00 USD",
+    "value": 1677
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T23:22:32Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-12T23:10:20Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24hci-i2-v1-us",
+   "invoiceName": "HGR-HCI-i2"
+  },
+  {
+   "service": "ns1033966.ip-40-160-67.us",
+   "reverse": "ns1033966.ip-40-160-67.us",
+   "range": "ADVANCE-5 | AMD EPYC 8224P",
+   "rack": "VIN0120E05B",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-20-AW-IW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-04-22",
+   "engagedUpTo": null,
+   "renew": {
+    "deleteAtExpiration": false,
+    "forced": false,
+    "manualPayment": false,
+    "period": 1,
+    "automatic": true
+   },
+   "serviceId": 10360359,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$504.00 USD",
+    "value": 504
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-02T03:10:30Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-04-23T02:58:42Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24adv05-v2-us",
+   "invoiceName": "ADVANCE-5 | AMD EPYC 8224P"
+  },
+  {
+   "service": "ns1034650.ip-40-160-27.us",
+   "reverse": "ns1034650.ip-40-160-27.us",
+   "range": "SCALE-a8 | AMD EPYC 9965",
+   "rack": "VIN0121F03A",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-49-PDP",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-28",
+   "engagedUpTo": null,
+   "renew": {
+    "automatic": true,
+    "deleteAtExpiration": false,
+    "forced": false,
+    "period": 1,
+    "manualPayment": false
+   },
+   "serviceId": 10393688,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$1530.00 USD",
+    "value": 1530
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T14:38:15Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-28T03:43:20Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "26scaleamd08-v3-us",
+   "invoiceName": "SCALE-a8 | AMD EPYC 9965"
+  },
+  {
+   "service": "ns1034652.ip-40-160-29.us",
+   "reverse": "ns1034652.ip-40-160-29.us",
+   "range": "SCALE-a8 | AMD EPYC 9965",
+   "rack": "VIN0121F03A",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-50-PDP",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-29",
+   "engagedUpTo": null,
+   "renew": {
+    "manualPayment": false,
+    "period": 1,
+    "forced": false,
+    "automatic": true,
+    "deleteAtExpiration": false
+   },
+   "serviceId": 10395598,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$1530.00 USD",
+    "value": 1530
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T05:56:31Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-28T03:43:20Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "26scaleamd08-v3-us",
+   "invoiceName": "SCALE-a8 | AMD EPYC 9965"
+  },
+  {
+   "service": "ns105102.ip-147-135-68.us",
+   "reverse": "ns105102.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A01",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-44-AW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-26",
+   "engagedUpTo": null,
+   "renew": {
+    "automatic": true,
+    "deleteAtExpiration": false,
+    "period": 1,
+    "forced": false,
+    "manualPayment": false
+   },
+   "serviceId": 10397315,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-02T00:23:29Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-27T00:11:33Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns105108.ip-147-135-68.us",
+   "reverse": "ns105108.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A01",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-42-AW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-26",
+   "engagedUpTo": null,
+   "renew": {
+    "manualPayment": false,
+    "period": 1,
+    "automatic": true,
+    "deleteAtExpiration": false,
+    "forced": false
+   },
+   "serviceId": 10395666,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T18:36:39Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-26T18:17:14Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns105111.ip-147-135-68.us",
+   "reverse": "ns105111.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A01",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-45-AW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-26",
+   "engagedUpTo": null,
+   "renew": {
+    "forced": false,
+    "period": 1,
+    "manualPayment": false,
+    "deleteAtExpiration": false,
+    "automatic": true
+   },
+   "serviceId": 10397314,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-02T00:24:29Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-27T00:11:16Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns105146.ip-147-135-68.us",
+   "reverse": "ns105146.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A02",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-34-AW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-26",
+   "engagedUpTo": null,
+   "renew": {
+    "period": 1,
+    "automatic": true,
+    "forced": false,
+    "manualPayment": false,
+    "deleteAtExpiration": false
+   },
+   "serviceId": 10395832,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T17:27:33Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-26T17:13:45Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns105162.ip-147-135-68.us",
+   "reverse": "ns105162.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A02",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-40-AW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-26",
+   "engagedUpTo": null,
+   "renew": {
+    "period": 1,
+    "forced": false,
+    "manualPayment": false,
+    "automatic": true,
+    "deleteAtExpiration": false
+   },
+   "serviceId": 10395651,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T18:27:35Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-26T18:17:12Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns105167.ip-147-135-68.us",
+   "reverse": "ns105167.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A02",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-43-AW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-26",
+   "engagedUpTo": null,
+   "renew": {
+    "manualPayment": false,
+    "period": 1,
+    "automatic": true,
+    "deleteAtExpiration": false,
+    "forced": false
+   },
+   "serviceId": 10395670,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T18:36:39Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-26T18:17:12Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns105222.ip-147-135-68.us",
+   "reverse": "ns105222.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A03",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-35-AW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-26",
+   "engagedUpTo": null,
+   "renew": {
+    "deleteAtExpiration": false,
+    "manualPayment": false,
+    "automatic": true,
+    "period": 1,
+    "forced": false
+   },
+   "serviceId": 10395837,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T17:28:33Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-26T17:13:45Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns105229.ip-147-135-68.us",
+   "reverse": "ns105229.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A03",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-33-AW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-26",
+   "engagedUpTo": null,
+   "renew": {
+    "period": 1,
+    "manualPayment": false,
+    "automatic": true,
+    "forced": false,
+    "deleteAtExpiration": false
+   },
+   "serviceId": 10395876,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T16:23:00Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-26T16:11:46Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns105233.ip-147-135-68.us",
+   "reverse": "ns105233.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A03",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-36-AW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-26",
+   "engagedUpTo": null,
+   "renew": {
+    "forced": false,
+    "period": 1,
+    "manualPayment": false,
+    "automatic": true,
+    "deleteAtExpiration": false
+   },
+   "serviceId": 10395827,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T17:28:33Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-26T17:12:10Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns105240.ip-147-135-68.us",
+   "reverse": "ns105240.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A03",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-37-AW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-26",
+   "engagedUpTo": null,
+   "renew": {
+    "deleteAtExpiration": false,
+    "automatic": true,
+    "forced": false,
+    "manualPayment": false,
+    "period": 1
+   },
+   "serviceId": 10395728,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T17:34:33Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-26T17:12:29Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns105262.ip-147-135-68.us",
+   "reverse": "ns105262.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A03",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-38-AW-IW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-26",
+   "engagedUpTo": null,
+   "renew": {
+    "forced": false,
+    "deleteAtExpiration": false,
+    "automatic": true,
+    "period": 1,
+    "manualPayment": false
+   },
+   "serviceId": 10395826,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T17:29:23Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-26T17:12:29Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns105277.ip-147-135-68.us",
+   "reverse": "ns105277.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A02",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-39-AW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-26",
+   "engagedUpTo": null,
+   "renew": {
+    "period": 1,
+    "automatic": true,
+    "manualPayment": false,
+    "forced": false,
+    "deleteAtExpiration": false
+   },
+   "serviceId": 10395716,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T17:33:33Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-26T17:14:09Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns105279.ip-147-135-68.us",
+   "reverse": "ns105279.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A02",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-41-AW-IW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-26",
+   "engagedUpTo": null,
+   "renew": {
+    "forced": false,
+    "period": 1,
+    "manualPayment": false,
+    "automatic": true,
+    "deleteAtExpiration": false
+   },
+   "serviceId": 10395664,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T18:28:35Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-26T18:16:44Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns105443.ip-147-135-68.us",
+   "reverse": "ns105443.ip-147-135-68.us",
+   "range": "BV-2",
+   "rack": "V117A05",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-51-AW-IW",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-05-30",
+   "engagedUpTo": null,
+   "renew": {
+    "manualPayment": false,
+    "forced": false,
+    "period": 1,
+    "deleteAtExpiration": false,
+    "automatic": true
+   },
+   "serviceId": 10391631,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$120.00 USD",
+    "value": 120
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-01T21:42:33Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-05-30T21:30:12Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "20bv022-us",
+   "invoiceName": "BV-2"
+  },
+  {
+   "service": "ns106907.ip-51-81-106.us",
+   "reverse": "ns106907.ip-51-81-106.us",
+   "range": "SYS-3 | Intel Xeon-E 2288G",
+   "rack": "V115B04",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-56-mongot",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-06-10",
+   "engagedUpTo": null,
+   "renew": {
+    "automatic": true,
+    "period": 1,
+    "deleteAtExpiration": false,
+    "forced": false,
+    "manualPayment": false
+   },
+   "serviceId": 10415312,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$60.00 USD",
+    "value": 60
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-02T03:22:29Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-06-11T03:12:51Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24sys032-us",
+   "invoiceName": "SYS-3 | Intel Xeon-E 2288G"
+  },
+  {
+   "service": "ns107496.ip-51-81-107.us",
+   "reverse": "ns107496.ip-51-81-107.us",
+   "range": "SYS-3 | Intel Xeon-E 2288G",
+   "rack": "V115B07",
+   "dc": "vin1",
+   "state": "ok",
+   "node": "node-55-mongot",
+   "expiration": "2026-12-01",
+   "status": "ok",
+   "creation": "2026-06-10",
+   "engagedUpTo": null,
+   "renew": {
+    "forced": false,
+    "automatic": true,
+    "deleteAtExpiration": false,
+    "manualPayment": false,
+    "period": 1
+   },
+   "serviceId": 10415311,
+   "price": {
+    "currencyCode": "USD",
+    "text": "$60.00 USD",
+    "value": 60
+   },
+   "priceInterval": 1,
+   "nextBilling": "2026-12-02T03:22:29Z",
+   "lifecycle": {
+    "pendingActions": [],
+    "terminationDate": null,
+    "creationDate": "2026-06-11T03:12:51Z",
+    "state": "active"
+   },
+   "engagement": null,
+   "planCode": "24sys032-us",
+   "invoiceName": "SYS-3 | Intel Xeon-E 2288G"
+  }
+ ]
+}

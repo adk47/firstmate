@@ -1,0 +1,61 @@
+# host=10.0.0.17 db=olap run_at_utc=2026-11-13T02:26:34Z session=default_transaction_read_only=on
+                   family                    |           status            | leaf_rels |                                                      gens                                                      |  size   |     bytes     
+---------------------------------------------+-----------------------------+-----------+----------------------------------------------------------------------------------------------------------------+---------+---------------
+ (unparsed)                                  | no-generation-suffix        |         2 |                                                                                                                | 176 kB  |        180224
+ cube_analytics_album                        | served                      |         7 | 627                                                                                                            | 43 GB   |   46657421312
+ cube_analytics_collaborator                 | served                      |         7 | 624                                                                                                            | 1014 GB | 1089073364992
+ cube_analytics_credit                       | neither                     |        14 | 1013,1017                                                                                                      | 10 GB   |   10932649984
+ cube_analytics_credit                       | served                      |         7 | 1014                                                                                                           | 9669 MB |   10138198016
+ cube_analytics_credit                       | staged                      |         7 | 1018                                                                                                           | 5414 MB |    5677391872
+ cube_analytics_credit_dates                 | neither                     |        21 | 1006,1007,638                                                                                                  | 51 GB   |   55240400896
+ cube_analytics_credit_dates                 | served                      |         7 | 639                                                                                                            | 21 GB   |   22198697984
+ cube_analytics_credit_dates                 | staged                      |         7 | 1008                                                                                                           | 24 GB   |   25900515328
+ cube_analytics_industry_stat_profile        | neither                     |         3 | 1005,1006,415                                                                                                  | 23 GB   |   25116164096
+ cube_analytics_industry_stat_profile        | served                      |         1 | 416                                                                                                            | 7752 MB |    8128380928
+ cube_analytics_industry_stat_profile        | staged                      |         1 | 1007                                                                                                           | 8295 MB |    8698068992
+ cube_analytics_industry_stat_profile_roster | neither                     |         2 | 1006,414                                                                                                       | 16 MB   |      16334848
+ cube_analytics_industry_stat_profile_roster | served                      |         1 | 415                                                                                                            | 8016 kB |       8208384
+ cube_analytics_industry_stat_profile_roster | staged                      |         1 | 1007                                                                                                           | 8280 kB |       8478720
+ cube_analytics_list                         | neither                     |        14 | 1013,1016                                                                                                      | 84 MB   |      88506368
+ cube_analytics_list                         | served                      |         7 | 1014                                                                                                           | 69 MB   |      72605696
+ cube_analytics_list                         | staged                      |         7 | 1017                                                                                                           | 43 MB   |      45031424
+ cube_analytics_list_dates                   | neither                     |        21 | 1005,1006,602                                                                                                  | 452 MB  |     473956352
+ cube_analytics_list_dates                   | served                      |         7 | 603                                                                                                            | 191 MB  |     200040448
+ cube_analytics_list_dates                   | staged                      |         7 | 1007                                                                                                           | 212 MB  |     222248960
+ cube_analytics_list_profile                 | neither                     |        14 | 1015,588                                                                                                       | 335 MB  |     350781440
+ cube_analytics_list_profile                 | served                      |         7 | 589                                                                                                            | 165 MB  |     173350912
+ cube_analytics_list_profile                 | staged                      |         7 | 1016                                                                                                           | 171 MB  |     179699712
+ cube_analytics_list_profile_dates           | neither                     |        14 | 1005,597                                                                                                       | 826 MB  |     866516992
+ cube_analytics_list_profile_dates           | served                      |         7 | 598                                                                                                            | 700 MB  |     734355456
+ cube_analytics_list_profile_dates           | staged                      |         7 | 1006                                                                                                           | 760 MB  |     797270016
+ cube_analytics_list_track                   | neither                     |        14 | 1012,591                                                                                                       | 124 GB  |  133027799040
+ cube_analytics_list_track                   | served                      |         7 | 592                                                                                                            | 60 GB   |   64730939392
+ cube_analytics_list_track                   | staged                      |         7 | 1013                                                                                                           | 64 GB   |   68918591488
+ cube_analytics_list_track_dates             | neither                     |        14 | 1003,581                                                                                                       | 223 GB  |  239072821248
+ cube_analytics_list_track_dates             | served                      |         7 | 582                                                                                                            | 191 GB  |  204548546560
+ cube_analytics_list_track_dates             | staged                      |         7 | 1004                                                                                                           | 204 GB  |  218879287296
+ cube_analytics_profile                      | neither                     |        56 | 1013,1014,1017,1018,1019,1020,1021,1022                                                                        | 13 GB   |   13879541760
+ cube_analytics_profile                      | served                      |         7 | 1023                                                                                                           | 3498 MB |    3667902464
+ cube_analytics_profile                      | staged                      |         7 | 1024                                                                                                           | 1237 MB |    1297022976
+ cube_analytics_profile_dates                | neither                     |        21 | 1006,1007,639                                                                                                  | 15 GB   |   15820677120
+ cube_analytics_profile_dates                | served                      |         7 | 640                                                                                                            | 11 GB   |   11679735808
+ cube_analytics_profile_dates                | staged                      |         7 | 1008                                                                                                           | 4873 MB |    5109932032
+ cube_analytics_profile_native_stage         | family-not-in-cube_suffixes |         7 | 1000                                                                                                           | 24 MB   |      24674304
+ cube_analytics_track                        | served                      |         7 | 626                                                                                                            | 956 GB  | 1026598281216
+                                             | family-not-in-cube_suffixes |         7 | 1000                                                                                                           | 24 MB   |      24674304
+                                             | neither                     |       208 | 1003,1005,1006,1007,1012,1013,1014,1015,1016,1017,1018,1019,1020,1021,1022,414,415,581,588,591,597,602,638,639 | 461 GB  |  494886150144
+                                             | no-generation-suffix        |         2 |                                                                                                                | 176 kB  |        180224
+                                             | served                      |        93 | 1014,1023,415,416,582,589,592,598,603,624,626,627,639,640                                                      | 2318 GB | 2488610029568
+                                             | staged                      |        72 | 1004,1006,1007,1008,1013,1016,1017,1018,1024                                                                   | 313 GB  |  335733538816
+(46 rows)
+
+ all_public_leaf_tables |  n  | database_size 
+------------------------+-----+---------------
+ 3099 GB                | 405 | 3104 GB
+(1 row)
+
+ nspname | rels |  size   
+---------+------+---------
+ public  |  405 | 3099 GB
+(1 row)
+

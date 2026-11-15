@@ -1,0 +1,39 @@
+# source=clickhouse-client --readonly 1 in pod chi-ticker-poc-poc-0-0-0 (ns data-processing) run_at_utc=2026-11-13T00:25:18Z query=21-ch-tables.sql
+    ┌─database───┬─name─────────────────────┬─engine─────────────────────────┬─total_rows─┬─size───────┬─metadata_modification_time─┐
+ 1. │ ticker_poc │ rollup_1d                │ ReplicatedAggregatingMergeTree │ 3440332801 │ 110.82 GiB │        2026-10-15 02:14:57 │
+ 2. │ ticker_poc │ rollup_1h                │ ReplicatedAggregatingMergeTree │ 1832257966 │ 59.08 GiB  │        2026-10-15 02:14:58 │
+ 3. │ ticker_poc │ raw_events               │ ReplicatedReplacingMergeTree   │  500634421 │ 17.00 GiB  │        2026-10-15 02:14:48 │
+ 4. │ ticker_poc │ rollup_1m                │ ReplicatedAggregatingMergeTree │  432993809 │ 14.41 GiB  │        2026-10-15 02:14:59 │
+ 5. │ ticker_poc │ catalog_observe          │ ReplicatedMergeTree            │  310962097 │ 11.02 GiB  │        2026-10-15 02:14:39 │
+ 6. │ ticker_poc │ raw_observe_census       │ ReplicatedMergeTree            │  692977749 │ 4.46 GiB   │        2026-10-15 02:14:55 │
+ 7. │ ticker_poc │ analytics_observe_census │ ReplicatedMergeTree            │  590332377 │ 3.63 GiB   │        2026-10-15 02:14:38 │
+ 8. │ ticker_poc │ dim_paid_entities        │ ReplicatedReplacingMergeTree   │   52348829 │ 2.02 GiB   │        2026-10-15 02:14:40 │
+ 9. │ ticker_poc │ processed_source_daily   │ ReplicatedReplacingMergeTree   │   16088901 │ 98.47 MiB  │        2026-10-15 02:14:46 │
+10. │ ticker_poc │ processed_profile_daily  │ ReplicatedReplacingMergeTree   │    2853646 │ 46.78 MiB  │        2026-10-15 02:14:45 │
+11. │ ticker_poc │ profile_box_stats        │ ReplicatedReplacingMergeTree   │      17558 │ 1.35 MiB   │        2026-10-15 02:14:48 │
+12. │ ticker_poc │ nowcast_ledger           │ ReplicatedReplacingMergeTree   │         40 │ 1.26 KiB   │        2026-10-15 02:14:43 │
+13. │ ticker_poc │ entity_set_snapshots     │ ReplicatedReplacingMergeTree   │          0 │ 0.00 B     │        2026-10-15 02:14:42 │
+14. │ ticker_poc │ ingest_errors            │ ReplicatedMergeTree            │          0 │ 0.00 B     │        2026-10-15 02:14:42 │
+15. │ ticker_poc │ nowcast_rate             │ ReplicatedReplacingMergeTree   │          0 │ 0.00 B     │        2026-10-15 02:14:45 │
+16. │ ticker_poc │ processed_track_daily    │ ReplicatedReplacingMergeTree   │          0 │ 0.00 B     │        2026-10-15 02:14:47 │
+17. │ ticker_poc │ raw_observe              │ ReplicatedMergeTree            │          0 │ 0.00 B     │        2026-10-15 02:14:54 │
+18. │ ticker_poc │ dict_nowcast_rate        │ Dictionary                     │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:18:22 │
+19. │ ticker_poc │ dict_paid_entities       │ Dictionary                     │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:18:22 │
+20. │ ticker_poc │ kafka_analytics_high     │ Kafka                          │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+21. │ ticker_poc │ kafka_analytics_medium   │ Kafka                          │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+22. │ ticker_poc │ kafka_analytics_observe  │ Kafka                          │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+23. │ ticker_poc │ kafka_catalog_observe    │ Kafka                          │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+24. │ ticker_poc │ kafka_raw_observe        │ Kafka                          │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+25. │ ticker_poc │ mv_1h_to_1d              │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+26. │ ticker_poc │ mv_1m_to_1h              │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+27. │ ticker_poc │ mv_analytics_observe     │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+28. │ ticker_poc │ mv_catalog_observe       │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+29. │ ticker_poc │ mv_errors_high           │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+30. │ ticker_poc │ mv_errors_medium         │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+31. │ ticker_poc │ mv_kafka_high_to_raw     │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+32. │ ticker_poc │ mv_kafka_medium_to_raw   │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+33. │ ticker_poc │ mv_raw_observe           │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+34. │ ticker_poc │ mv_raw_to_1m             │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+35. │ ticker_poc │ mv_ticker_publish        │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+36. │ ticker_poc │ ticker_out               │ Kafka                          │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-10-15 03:20:08 │
+    └────────────┴──────────────────────────┴────────────────────────────────┴────────────┴────────────┴────────────────────────────┘

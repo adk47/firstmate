@@ -1,0 +1,54 @@
+# source=clickhouse-client --readonly 1 in pod chi-ticker-prod-prod-0-0-0 (ns data-processing) run_at_utc=2026-11-13T00:25:17Z query=21-ch-tables.sql
+    ┌─database────┬─name────────────────────────────────┬─engine─────────────────────────┬─total_rows─┬─size───────┬─metadata_modification_time─┐
+ 1. │ ticker_prod │ rollup_1d_local                     │ ReplicatedAggregatingMergeTree │  578180317 │ 19.14 GiB  │        2026-07-07 10:22:54 │
+ 2. │ ticker_prod │ rollup_1h_local                     │ ReplicatedAggregatingMergeTree │  547399707 │ 18.68 GiB  │        2026-08-21 00:48:04 │
+ 3. │ ticker_prod │ dim_paid_entities                   │ ReplicatedReplacingMergeTree   │  212124418 │ 8.27 GiB   │        2026-06-13 19:49:11 │
+ 4. │ ticker_prod │ entity_set_snapshots                │ ReplicatedReplacingMergeTree   │      55350 │ 5.67 GiB   │        2026-07-14 14:44:18 │
+ 5. │ ticker_prod │ nowcast_rate                        │ ReplicatedReplacingMergeTree   │  295295676 │ 4.35 GiB   │        2026-07-14 14:43:42 │
+ 6. │ ticker_prod │ rollup_1m_local                     │ ReplicatedAggregatingMergeTree │   74936419 │ 2.56 GiB   │        2026-08-21 00:48:58 │
+ 7. │ ticker_prod │ raw_events_local                    │ ReplicatedReplacingMergeTree   │   86796852 │ 2.27 GiB   │        2026-07-07 10:22:52 │
+ 8. │ ticker_prod │ credits_raw_local                   │ ReplicatedReplacingMergeTree   │    3560666 │ 212.50 MiB │        2026-06-13 21:24:15 │
+ 9. │ ticker_prod │ processed_source_daily              │ ReplicatedReplacingMergeTree   │   20302050 │ 124.00 MiB │        2026-07-14 17:35:38 │
+10. │ ticker_prod │ processed_profile_daily             │ ReplicatedReplacingMergeTree   │    2930470 │ 48.57 MiB  │        2026-07-14 14:44:22 │
+11. │ ticker_prod │ catalog_observe_local               │ ReplicatedMergeTree            │     568780 │ 13.89 MiB  │        2026-06-13 21:24:22 │
+12. │ ticker_prod │ nowcast_baseline_staging            │ MergeTree                      │   10968100 │ 11.88 MiB  │        2026-08-06 22:49:25 │
+13. │ ticker_prod │ profile_box_stats                   │ ReplicatedReplacingMergeTree   │      19776 │ 1.82 MiB   │        2026-09-17 17:01:37 │
+14. │ ticker_prod │ nowcast_ledger_local                │ ReplicatedReplacingMergeTree   │       5332 │ 84.64 KiB  │        2026-07-14 14:44:08 │
+15. │ ticker_prod │ nowcast_diurnal_shape               │ ReplicatedReplacingMergeTree   │        636 │ 4.64 KiB   │        2026-07-14 14:43:47 │
+16. │ ticker_prod │ nowcast_ledger                      │ Distributed                    │       ᴺᵁᴸᴸ │ 2.42 KiB   │        2026-07-14 14:44:10 │
+17. │ ticker_prod │ catalog_observe                     │ Distributed                    │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-06-13 21:24:22 │
+18. │ ticker_prod │ credits_raw                         │ Distributed                    │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-06-13 21:24:15 │
+19. │ ticker_prod │ cube_industry_stat_profile          │ ReplicatedReplacingMergeTree   │          0 │ 0.00 B     │        2026-09-10 17:32:56 │
+20. │ ticker_prod │ cube_industry_stat_profile_manifest │ ReplicatedReplacingMergeTree   │          0 │ 0.00 B     │        2026-09-10 17:32:56 │
+21. │ ticker_prod │ ingest_errors                       │ Distributed                    │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-06-13 19:49:13 │
+22. │ ticker_prod │ ingest_errors_local                 │ ReplicatedMergeTree            │          0 │ 0.00 B     │        2026-06-13 19:49:13 │
+23. │ ticker_prod │ processed_track_daily               │ Distributed                    │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-07-14 14:44:28 │
+24. │ ticker_prod │ processed_track_daily_local         │ ReplicatedReplacingMergeTree   │          0 │ 0.00 B     │        2026-07-14 14:44:25 │
+25. │ ticker_prod │ raw_events                          │ Distributed                    │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-10-17 11:30:38 │
+26. │ ticker_prod │ raw_events__batched                 │ Distributed                    │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-06-13 19:49:12 │
+27. │ ticker_prod │ rollup_1d                           │ Distributed                    │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-06-13 19:49:15 │
+28. │ ticker_prod │ rollup_1h                           │ Distributed                    │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-06-13 19:49:14 │
+29. │ ticker_prod │ rollup_1m                           │ Distributed                    │       ᴺᵁᴸᴸ │ 0.00 B     │        2026-06-13 19:49:13 │
+30. │ ticker_prod │ cube_industry_stat_profile_view     │ View                           │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-09-10 17:32:56 │
+31. │ ticker_prod │ cube_windowed_stats_exact_view      │ View                           │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-08-26 14:07:42 │
+32. │ ticker_prod │ cube_windowed_stats_locf_view       │ View                           │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-08-26 14:07:42 │
+33. │ ticker_prod │ dict_nowcast_diurnal                │ Dictionary                     │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-07-14 14:43:49 │
+34. │ ticker_prod │ dict_paid_entities                  │ Dictionary                     │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-06-13 19:49:11 │
+35. │ ticker_prod │ mv_1h_to_1d                         │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-06-13 19:49:15 │
+36. │ ticker_prod │ mv_1m_to_1h                         │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-06-13 19:49:14 │
+37. │ ticker_prod │ mv_catalog_observe                  │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-06-13 21:24:22 │
+38. │ ticker_prod │ mv_dim_refresh                      │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-06-13 21:04:25 │
+39. │ ticker_prod │ mv_entity_set_snapshot_refresh      │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-07-15 02:38:09 │
+40. │ ticker_prod │ mv_errors_catalog                   │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-06-13 21:24:15 │
+41. │ ticker_prod │ mv_errors_high                      │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-06-13 21:01:54 │
+42. │ ticker_prod │ mv_errors_medium                    │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-06-13 21:01:54 │
+43. │ ticker_prod │ mv_kafka_credits                    │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-06-13 21:24:15 │
+44. │ ticker_prod │ mv_kafka_high_to_raw                │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-08-18 18:17:57 │
+45. │ ticker_prod │ mv_kafka_medium_to_raw              │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-08-18 18:17:57 │
+46. │ ticker_prod │ mv_nowcast_baseline_publish         │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-08-06 22:49:25 │
+47. │ ticker_prod │ mv_nowcast_baseline_sweep           │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-08-06 22:49:25 │
+48. │ ticker_prod │ mv_nowcast_diurnal_refresh          │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-07-15 07:04:26 │
+49. │ ticker_prod │ mv_nowcast_refresh                  │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-07-15 20:30:26 │
+50. │ ticker_prod │ mv_raw_to_1m                        │ MaterializedView               │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-06-13 19:49:13 │
+51. │ ticker_prod │ ticker_out_v1                       │ Kafka                          │       ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ       │        2026-07-30 15:13:55 │
+    └─database────┴─name────────────────────────────────┴─engine─────────────────────────┴─total_rows─┴─size───────┴─metadata_modification_time─┘
