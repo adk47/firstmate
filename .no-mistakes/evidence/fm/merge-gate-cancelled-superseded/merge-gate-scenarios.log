@@ -1,0 +1,33 @@
+=== cancelled run beside a SUCCESS run of the same check ===
+rollup: [{"name":"qa-review","conclusion":"SUCCESS","workflowName":"qa","startedAt":"2026-11-15T07:00:00Z"},{"name":"pr-title","conclusion":"CANCELLED","workflowName":"title","startedAt":"2026-11-15T07:00:00Z"},{"name":"pr-title","conclusion":"SUCCESS","workflowName":"title","startedAt":"2026-11-15T07:05:00Z"},{"name":"unit-tests","conclusion":"SUCCESS","workflowName":"tests","startedAt":"2026-11-15T07:00:00Z"}]
+merge gate: Muso-AI/core-backend#9 authorized at head 1111111111111111111111111111111111111111 (qa-review=SUCCESS, allowed reds=)
+RESULT: PASS (expected pass, exit 0)
+
+=== only a CANCELLED run of a check ===
+rollup: [{"name":"qa-review","conclusion":"SUCCESS","workflowName":"qa","startedAt":"2026-11-15T07:00:00Z"},{"name":"pr-title","conclusion":"CANCELLED","workflowName":"title","startedAt":"2026-11-15T07:00:00Z"},{"name":"unit-tests","conclusion":"SUCCESS","workflowName":"tests","startedAt":"2026-11-15T07:00:00Z"}]
+error: refusing to merge Muso-AI/core-backend#9
+  - the check pr-title is CANCELLED on head 1111111111111111111111111111111111111111
+RESULT: PASS (expected refuse, exit 1)
+
+=== old FAILURE superseded by newer SUCCESS in the same workflow (label re-trigger) ===
+rollup: [{"name":"qa-review","conclusion":"SUCCESS","workflowName":"qa","startedAt":"2026-11-15T07:00:00Z"},{"name":"verify","conclusion":"FAILURE","workflowName":"verify","startedAt":"2026-11-15T07:43:00Z"},{"name":"verify","conclusion":"SUCCESS","workflowName":"verify","startedAt":"2026-11-15T12:06:00Z"},{"name":"unit-tests","conclusion":"SUCCESS","workflowName":"tests","startedAt":"2026-11-15T07:00:00Z"}]
+merge gate: Muso-AI/core-backend#9 authorized at head 1111111111111111111111111111111111111111 (qa-review=SUCCESS, allowed reds=)
+RESULT: PASS (expected pass, exit 0)
+
+=== FAILURE in a different workflow sharing the check name (worst-wins across workflows) ===
+rollup: [{"name":"qa-review","conclusion":"SUCCESS","workflowName":"qa","startedAt":"2026-11-15T07:00:00Z"},{"name":"verify","conclusion":"FAILURE","workflowName":"verify-a","startedAt":"2026-11-15T07:43:00Z"},{"name":"verify","conclusion":"SUCCESS","workflowName":"verify-b","startedAt":"2026-11-15T12:06:00Z"},{"name":"unit-tests","conclusion":"SUCCESS","workflowName":"tests","startedAt":"2026-11-15T07:00:00Z"}]
+error: refusing to merge Muso-AI/core-backend#9
+  - the check verify is FAILURE on head 1111111111111111111111111111111111111111
+RESULT: PASS (expected refuse, exit 1)
+
+=== pending qa-review still outranks a SUCCESS of the same check ===
+rollup: [{"name":"qa-review","conclusion":"SUCCESS"},{"name":"qa-review","conclusion":"PENDING"},{"name":"unit-tests","conclusion":"SUCCESS","workflowName":"tests","startedAt":"2026-11-15T07:00:00Z"}]
+error: refusing to merge Muso-AI/core-backend#9
+  - the qa-review verdict on head 1111111111111111111111111111111111111111 is PENDING, not SUCCESS
+RESULT: PASS (expected refuse, exit 1)
+
+=== cancelled qa-review dropped beside a SUCCESS qa-review ===
+rollup: [{"name":"qa-review","conclusion":"CANCELLED","workflowName":"qa","startedAt":"2026-11-15T07:00:00Z"},{"name":"qa-review","conclusion":"SUCCESS","workflowName":"qa","startedAt":"2026-11-15T07:05:00Z"},{"name":"unit-tests","conclusion":"SUCCESS","workflowName":"tests","startedAt":"2026-11-15T07:00:00Z"}]
+merge gate: Muso-AI/core-backend#9 authorized at head 1111111111111111111111111111111111111111 (qa-review=SUCCESS, allowed reds=)
+RESULT: PASS (expected pass, exit 0)
+
