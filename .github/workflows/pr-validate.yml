@@ -2697,6 +2697,10 @@ jobs:
           # the anchor verifier behind both scale-drain gates: the checks themselves, the pinned admin
           # source (a caller CREDIT_REVIEW_ADMIN_SCRIPT is denied), and the file run as the wrapper runs it.
           python3 scripts/tests/test_verify_anchor.py
+          # the established-claimant rule, in shadow (docs/credit-verification/established-claimant.md): the
+          # profile bar, the same-user role-and-artist match, every hold honoured, a validator-declined
+          # request never approved, bounded statements, and that the module has no writer. Stdlib only.
+          python3 scripts/tests/test_established_claimant.py
           # the bulk send queue (docs/credit-verification/bulk-send-queue.md): one verdict per person from one
           # statement, one job per (user, stage), no send without a verdict or a recorded attempt, a body the
           # copy gate has not approved never reaches the sender, and the kill -9 mid-batch run. Stdlib only.

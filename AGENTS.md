@@ -1543,6 +1543,25 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   token resolve, per-item failure isolation, writes serialised after reads, gates still
   run).
 
+## The established-claimant rule records a decision in shadow, and approves nothing
+
+`scripts/credit_review/established_claimant.py` (policy `policies/established-claimant.json`, doc and the
+production count `docs/credit-verification/established-claimant.md`) reads the core replica and writes
+`decisions.jsonl` + `funnel.json`. It has no writer, no timer and no registry row. A request is established when
+its profile has 100+ approved and 1% or less rejected and the same user holds an approved credit in every claimed
+role with an artist of the same track.
+
+- **Approve only where the validator's own verdict approved** (`is_approved is True`). A validator-declined request
+  is an `ask`, never an approval (captain 2026-10-26); a record of any size does not change that.
+- **A hold is honoured for everyone.** The reading is `policy.never_ask`, not a second list: a hold no document
+  clears is `barred` and nobody is asked; a hold a document clears is an `ask`.
+- **Unmeasured approves nothing**: no verdict, an unreadable part or a verdict row the replica did not return is
+  `barred` or a failed run (exit 1), never a pass.
+- **Core's guard would refuse all 2,078 measured approves** (`proof_required`; `core_guard` on each row). Arming it
+  is a new approval automation: a recorded captain decision, a registry row, a registration in core and a write
+  gate that re-reads each row. The policy file's `mode` accepts `shadow` only.
+- The reads are five statements, 200 ids each, no self-join. Run it under `systemd-run --scope -p MemoryMax=2G`.
+
 ## A replica question costs ~2 s whatever it asks: ask once per person
 
 A `trino-query.sh` call is ~2 s of fixed cost (`kubectl get pods`, `kubectl exec`, the CLI's JVM); `SELECT 1` costs

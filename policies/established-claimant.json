@@ -1,0 +1,6 @@
+{
+  "_doc": "Thresholds of the established-claimant rule (scripts/credit_review/established_claimant.py, docs/credit-verification/established-claimant.md). mode is shadow and the module refuses any other value: it has no writer. Arming the rule is a new approval automation (a policies/credit-approval-automation.json row and a recorded captain decision), never an edit to this file.",
+  "mode": "shadow",
+  "min_profile_approved": 100,
+  "max_profile_rejected_share": 0.01
+}
