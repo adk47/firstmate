@@ -516,6 +516,8 @@ install -d -m 700 /var/lib/hydra-dr
    && -f "$HYDRA_ROOT/scripts/claim_verify/doc_sources.py" && -f "$HYDRA_ROOT/scripts/lib/page_identity.py" \
    && -f "$HYDRA_ROOT/policies/claim-doc-ladder.json" ]] \
   || fail "$HYDRA_ROOT/scripts/claim-doc-ladder.py, its claim_verify modules or its policy are missing"
+[[ -f "$HYDRA_ROOT/scripts/credit_review/precedent_ledger.py" && -f "$HYDRA_ROOT/scripts/credit_review/reconcile_approved.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/credit_review/precedent_ledger.py or reconcile_approved.py is missing"
 [[ -f "$HYDRA_ROOT/scripts/resolution-matcher.py" ]] \
   || fail "$HYDRA_ROOT/scripts/resolution-matcher.py missing"
 [[ -f "$HYDRA_ROOT/scripts/caroline-behavior-digest.py" ]] \
@@ -3259,6 +3261,55 @@ systemctl start "$mon" >/dev/null 2>&1 || fail "could not start $mon: claim docu
 [[ "$(systemctl is-active "$mon" 2>/dev/null)" == active ]] || fail "$mon is not active after start: claim documents would not be read"
 log "  $mon: active"
 
+# ─── Precedent approvals: their decision rows in the credit-review ledger ───
+# precedent_v1 approves in core's Postgres from inside a core-backend pod, which cannot open the
+# node-8 ledger, and it wrote no `decisions` / `decision_outcomes` row: every approval count read
+# from the ledger (applied_1h among them) left its approvals out. This pass reads core, READ-ONLY,
+# for every open claim and every precedent approval core changed in the last 6 h, and writes each
+# one's decision row, `approved` outcome and move to APPROVED in one SQLite transaction. It
+# approves nothing, writes nothing to core and sends nothing. A core read that does not answer is
+# exit 4 with nothing written: OnFailure (the table below) pages #clio_devops. systemd starts no
+# second pass while one runs, and a pass over a heavy batch can take longer than the period (the
+# replica cancels a statement at 60 s and the read is then made in smaller ones).
+# Stop switch: /etc/hydra/precedent-ledger.disabled (exit 0, nothing read, nothing written).
+# The one-time gap is `precedent_ledger.py backfill` (a plan; `--apply` inserts), run by hand.
+cat > /etc/systemd/system/precedent-ledger-reconcile.service << PRECLEDGERSVC
+[Unit]
+Description=HYDRA precedent approvals: record in the ledger what core holds
+
+[Service]
+Type=oneshot
+TimeoutStartSec=3000
+Nice=10
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/credit_review/precedent_ledger.py reconcile --since-hours 6
+PRECLEDGERSVC
+
+cat > /etc/systemd/system/precedent-ledger-reconcile.timer << PRECLEDGERTMR
+[Unit]
+Description=HYDRA precedent approvals into the ledger, every 10 min
+
+[Timer]
+OnCalendar=*:3/10
+Persistent=true
+Unit=precedent-ledger-reconcile.service
+
+[Install]
+WantedBy=timers.target
+PRECLEDGERTMR
+
+systemctl daemon-reload
+# FATAL, not a WARN: with the timer down no precedent approval reaches the ledger, which is the
+# gap this unit exists to close, and the service's OnFailure cannot page because it never starts.
+mon=precedent-ledger-reconcile.timer
+systemctl enable "$mon" >/dev/null 2>&1 || fail "could not enable $mon: precedent approvals would not reach the ledger"
+systemctl start "$mon" >/dev/null 2>&1 || fail "could not start $mon: precedent approvals would not reach the ledger"
+[[ "$(systemctl is-active "$mon" 2>/dev/null)" == active ]] || fail "$mon is not active after start: precedent approvals would not reach the ledger"
+log "  $mon: active"
+
 # ─── Codex OAuth keepalive at 15-min cadence ──────────────────
 # PROACTIVE complement to the watchdog: openclaw-watchdog.sh pages REACTIVELY
 # (journal 401 signature, after the fleet is already on the mini fallback);
@@ -4948,6 +4999,7 @@ AUX_ONFAILURE_UNITS=(
   caroline-safety-daily.service
   claim-list-build.service
   claim-doc-ladder.service
+  precedent-ledger-reconcile.service
   support-resolution-daily.service
   ops-intake-digest.service
   ops-intake-redteam.service

@@ -13,6 +13,10 @@ and no prev2.js printed the result line (https://github.com/Muso-AI/hydra/pull/1
 service command that pipes one into the other needs both and is not here either. Until it is, the
 only way a request reaches APPROVED is `backfill --apply`, run by a person.
 
+A precedent approval no longer waits on that: `precedent_ledger.py reconcile`
+(`precedent-ledger-reconcile.timer`) reads core for the approvals themselves and makes this same
+move, through the same `transition()`, in the transaction that writes each one's decision row.
+
 THIS IS THE FIRST WRITER OF `APPROVED`. Read this before assuming the state has a history:
 
   * `APPROVED` was declared in a docstring only (request_state.py, "approved (by proof, precedent,

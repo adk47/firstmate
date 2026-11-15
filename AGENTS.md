@@ -1658,6 +1658,31 @@ hand-written host file) walks the untold precedent approvals in chunks; the loop
   The pod copy is content-addressed (`/tmp/mklist2-<sha256[:12]>.js`), so a failed `kubectl cp` cannot leave an
   older revision of the predicate to be executed; a failed `get pod` stops it too.
 
+## A precedent approval reaches the ledger by a claim before core and a read of core after
+
+precedent_v1 approves in core from a pod that cannot open node-8's SQLite ledger, so no transaction covers both.
+`scripts/credit_review/precedent_ledger.py` (doc `docs/credit-verification/precedent-ledger.md`) is the order instead.
+
+- **`claim` before the core write, `reconcile` after, and only `reconcile` writes an approval.** It reads core
+  read-only and closes each claim `landed` (decision row, `approved` outcome, move to APPROVED, one transaction) or
+  `not_landed` (closed with what core said, nothing else written). A core read that fails writes nothing (exit 4).
+- **A claim is never an early `decisions` row.** That table is append-only and seven readers act on a request's
+  newest row there; a claim that did not land would stay as an `approve` over the request's hold.
+- **Nothing runs `claim` yet.** node-8 runs `/root/prev2.js`, a file in no repository (tracked copy:
+  https://github.com/Muso-AI/hydra/pull/1967), and it prints no plan line. Until it does,
+  `precedent-ledger-reconcile.timer` (every 10 min, `--since-hours 6`) records approvals from core's recently
+  changed rows. Stop switch: `/etc/hydra/precedent-ledger.disabled`.
+- **The row keeps `profile_id` and `user_id` NULL** (`evidence_kind` `precedent`): a profile id puts the request in
+  the verify-note audience, a user id counts it against the decider's daily caps. Its times are core's
+  `approval.at`, so a backfilled row is in no later hour's `applied_1h`.
+- **Core's all-time precedent approvals cannot be read in one statement.** The replica cancels at 60 s both the
+  filter on `metadata.approval.via` and a 30-day `updatedAt` window; one batch's rows each hold the whole batch's
+  precedent sets. `core_since` walks `updatedAt`, halves a cancelled slice, then lists ids and reads by id.
+- **An approval with no run name is still an approval.** 9,465 of core's 10,384 (two UPDATEs of 2026-11-10) have
+  no `approval.run`; their rows carry `prev-unnamed-<approval time>` (`run_id_of`). Skipping them closed 919.
+- **The one-time gap is `precedent_ledger.py backfill` (a plan), then `--apply`, run by hand on node-8 after a
+  deploy.** Until it runs, the ledger holds only the approvals of the timer's 6 h window onward.
+
 ## The standing review reads; it never steers
 
 `scripts/standing_review/review.py` (tick `scripts/standing-review-tick.sh`, every 2 h on ak47, the only box that

@@ -2595,6 +2595,11 @@ jobs:
           # request_state_log row; the backfill moves nothing when core half answers; a count that
           # could not be read is never 0. Runs against the LIVE schema, trigger included.
           python3 scripts/tests/test_reconcile_approved.py
+          # A precedent approval has its decision row in the ledger (credit_review/precedent_ledger.py):
+          # exactly one row per approval by whichever route it is offered; a claim is in no approval
+          # count; a claim whose core write did not land is closed with no approval left behind; a
+          # core half read writes nothing; a second backfill inserts zero. Stdlib only.
+          python3 scripts/tests/test_precedent_ledger.py
           # The outbound copy gate (scripts/outbound_copy/gate.py): a body with no SIGNED reviewer verdict on
           # its exact bytes is never approved; a stand-in reviewer can refuse and never approve; the sender
           # calls the gate between the claim and its one customer POST; a copy hold is a log, not a lock.
