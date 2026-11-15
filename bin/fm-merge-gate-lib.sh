@@ -136,7 +136,10 @@ fm_merge_gate_read_pr() {
     # worst-wins reading (a pending re-run still outranks an older success), but
     # a CANCELLED run is dropped once any non-cancelled run of the same name
     # exists: a concurrency group cancelling the older of two runs, or a re-run,
-    # supersedes it, as the forge's own merge box reads it. The body is folded onto one line because the payload is parsed as
+    # supersedes it, as the forge's own merge box reads it. Within ONE workflow
+    # run (same /actions/runs/<id>/ in the details URL) only the newest attempt
+    # of a check counts, so a re-run job that passed supersedes its own earlier
+    # failure; across different runs that share a check name worst-wins stays. The body is folded onto one line because the payload is parsed as
     # key=value lines.
     if ! fields=$(gh pr view "$number" --repo "$repo" \
       --json headRefOid,author,baseRefName,headRefName,state,mergedAt,body,statusCheckRollup \
@@ -152,6 +155,10 @@ fm_merge_gate_read_pr() {
             | group_by((.name // .context) // "")
             | map(if any(.[]; ((.conclusion // .state) // "") != "CANCELLED")
                   then map(select(((.conclusion // .state) // "") != "CANCELLED")) else . end)
+            | map(map(. + {__run: (((.detailsUrl // .targetUrl // "") | capture("/actions/runs/(?<r>[0-9]+)/") | .r) // "")})
+                  | (map(select(.__run == ""))
+                     + (map(select(.__run != "")) | group_by(.__run)
+                        | map(sort_by((.startedAt // .completedAt // "") | tostring) | last))))
             | add // [])[]
             | ("check=" + ((.name // .context) // "") + "\u001f" + ((.conclusion // .state) // "")))
         )' 2>/dev/null) || [ -z "$fields" ]; then

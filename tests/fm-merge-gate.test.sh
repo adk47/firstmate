@@ -145,10 +145,17 @@ write_pr_view() {
   local IFS=,
   for pair in $checks; do
     [ -n "$pair" ] || continue
+    # pair = name:conclusion[@run[#started]] - run keys the workflow run id in
+    # the details URL, started orders attempts within one run.
+    local extra='' run='' started=''
     name=${pair%%:*}
     conclusion=${pair#*:}
+    case "$conclusion" in *@*) run=${conclusion#*@}; conclusion=${conclusion%%@*} ;; esac
+    case "$run" in *#*) started=${run#*#}; run=${run%%#*} ;; esac
+    [ -n "$run" ] && extra="$extra,\"detailsUrl\":\"https://github.com/o/r/actions/runs/$run/job/1\""
+    [ -n "$started" ] && extra="$extra,\"startedAt\":\"2026-11-15T$started:00Z\""
     [ -n "$rollup" ] && rollup="$rollup,"
-    rollup="$rollup{\"__typename\":\"CheckRun\",\"name\":\"$name\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"}"
+    rollup="$rollup{\"__typename\":\"CheckRun\",\"name\":\"$name\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"$extra}"
   done
   unset IFS
   cat > "$case_dir/fixtures/pr-view.json" <<JSON
@@ -589,6 +596,36 @@ test_gate_only_cancelled_run_still_refuses() {
   set -e
   expect_code 1 "$rc" "a check whose only run is cancelled is still red"
   pass "a check with only a cancelled run still refuses"
+}
+
+test_gate_rerun_in_same_run_supersedes_failure() {
+  local case_dir rc
+  case_dir=$(make_case rerun-same-run)
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    body='Closes #7.' checks='qa-review:SUCCESS,verify:FAILURE@11#07:43,verify:SUCCESS@11#12:06,unit-tests:SUCCESS'
+  printf '[]\n' > "$case_dir/fixtures/pr-list.json"
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a re-run of the same job that passed must supersede its earlier failure"
+  pass "a re-run within one workflow run supersedes its earlier failure"
+}
+
+test_gate_failure_in_other_run_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case other-run-failure)
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    body='Closes #7.' checks='qa-review:SUCCESS,verify:FAILURE@11#07:43,verify:SUCCESS@12#12:06,unit-tests:SUCCESS'
+  printf '[]\n' > "$case_dir/fixtures/pr-list.json"
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a failure in a different workflow run sharing the check name is still red"
+  pass "a same-named failure in another workflow run still refuses"
 }
 
 # --- (v) prose around develop/beta is not a twin reference -----------------
@@ -1062,6 +1099,8 @@ test_gate_ignores_unrelated_issue_reference
 test_gate_null_pending_qa_before_success_refuses
 test_gate_cancelled_duplicate_is_superseded
 test_gate_only_cancelled_run_still_refuses
+test_gate_rerun_in_same_run_supersedes_failure
+test_gate_failure_in_other_run_still_refuses
 test_gate_ignores_develop_beta_prose
 test_gate_skipped_or_neutral_qa_outranks_success
 test_gate_muso_ai_without_qa_check_refuses
