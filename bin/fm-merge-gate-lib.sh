@@ -155,14 +155,16 @@ fm_merge_gate_conclusion_rank() {
 # worst of its conclusions, so a stale success cannot outvote a later pending or
 # failed verdict.
 fm_merge_gate_check_conclusion() {
-  local want=$1 line name conclusion found=''
+  local want=$1 line name conclusion found='' found_set=false
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     name=${line%%|*}
     conclusion=${line#*|}
     [ "$name" = "$want" ] || continue
-    if [ -z "$found" ]; then
+    [ -n "$conclusion" ] || conclusion=PENDING
+    if [ "$found_set" != true ]; then
       found=$conclusion
+      found_set=true
     elif [ "$(fm_merge_gate_conclusion_rank "$conclusion")" -gt "$(fm_merge_gate_conclusion_rank "$found")" ]; then
       found=$conclusion
     fi
@@ -235,7 +237,7 @@ ROWS
   # beta, deduplicated and bounded so an unrelated issue reference is not read as
   # a twin and a long body cannot turn the gate into an unbounded number of
   # forge reads.
-  refs=$(printf '%s' "$body" | grep -oiE '(develop|beta)([^0-9]{1,40})#?[0-9]+' | grep -oE '[0-9]+' | sort -un | head -10 || true)
+  refs=$(printf '%s' "$body" | grep -oiE '(develop|beta)([[:space:]]*#[0-9]+|/pull/[0-9]+)' | grep -oE '[0-9]+' | sort -un | head -10 || true)
   for ref in $refs; do
     n=$ref
     if ! line=$(gh api "repos/$repo/pulls/$n" \

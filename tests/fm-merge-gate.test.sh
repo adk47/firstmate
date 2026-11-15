@@ -33,6 +33,8 @@
 #   (r) an unreadable twin PR referenced by the body refuses
 #   (s) a repeated qa-review check reports its worst conclusion
 #   (t) an unrelated issue reference is not read as a twin
+#   (u) a null pending qa-review conclusion is not overwritten by a success
+#   (v) prose around develop/beta is not read as a twin reference
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -517,6 +519,44 @@ test_gate_ignores_unrelated_issue_reference() {
   pass "an unrelated issue reference is not read as a twin"
 }
 
+# --- (u) a null pending verdict is not overwritten by a success ------------
+
+test_gate_null_pending_qa_before_success_refuses() {
+  local case_dir rc
+  case_dir=$(make_case null-pending-qa)
+  write_workflows "$case_dir" qa-review.yml
+  write_pr_view "$case_dir" checks='qa-review:,qa-review:SUCCESS'
+
+  set +e
+  run_refusal_via_merge "$case_dir" -- --squash
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a null pending conclusion must outrank a later success"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
+  assert_contains "$(cat "$case_dir/err")" "qa-review verdict on head $HEAD is PENDING, not SUCCESS" \
+    "the refusal must report the pending verdict, not the later success"
+  pass "a null pending qa-review conclusion is not overwritten by a success"
+}
+
+# --- (v) prose around develop/beta is not a twin reference -----------------
+
+test_gate_ignores_develop_beta_prose() {
+  local case_dir rc
+  case_dir=$(make_case develop-beta-prose)
+  write_workflows "$case_dir" qa-review.yml
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    body='This develops the 2026 roadmap and beta testing #5.' \
+    checks='qa-review:SUCCESS,unit-tests:SUCCESS'
+  printf '[]\n' > "$case_dir/fixtures/pr-list.json"
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "prose around develop/beta must not be read as a twin"
+  pass "prose around develop/beta is not read as a twin reference"
+}
+
 # A backfill over past merges needs the verdict of a pull request that already
 # merged, so --check-only evaluates it instead of short-circuiting.
 test_gate_check_only_audits_a_merged_pull_request() {
@@ -772,6 +812,8 @@ test_gate_refuses_unreadable_twin_list
 test_gate_refuses_unreadable_body_twin
 test_gate_duplicate_qa_reports_worst_conclusion
 test_gate_ignores_unrelated_issue_reference
+test_gate_null_pending_qa_before_success_refuses
+test_gate_ignores_develop_beta_prose
 test_pr_merge_refuses_before_merge_call
 test_pr_merge_override_records_and_merges
 test_go_queue_refuses_row_and_continues
