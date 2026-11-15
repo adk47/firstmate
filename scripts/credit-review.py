@@ -640,6 +640,27 @@ def cmd_score_approve(args: argparse.Namespace) -> int:
             log("score-approve resumed")
             print("score-approve resumed.")
         return 0
+    if getattr(args, "skipped_profiles", False):
+        # Read-only: which profiles core answered HTTP 400 for, so their requests were not read or decided.
+        from credit_review import ledger as _ledger
+        path = args.ledger or _ledger.DEFAULT_PATH
+        try:
+            ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            rows = score_approve.unreadable_report(ro, datetime.now(timezone.utc))
+        except sqlite3.Error as exc:
+            print(f"score-approve skipped profiles: NOT READ (ledger {path}: {exc}). This is not a count of zero.")
+            return 1
+        if rows is None:
+            print(f"score-approve skipped profiles: NOT RECORDED in {path} (no run has written the skip table "
+                  f"yet). This is not a count of zero.")
+            return 1
+        print(f"score-approve skipped {len(rows)} profile(s) in the last 7 days (core answered HTTP 400 on the "
+              f"profile-scoped read; none of their requests was read or decided):")
+        for r in rows:
+            print(f"  {r['profile_id']}: skipped by {r['runs']} run(s), first {r['first']}, last {r['last']}, "
+                  f"{r['requests']} request(s) [{', '.join(r['request_ids'][:10])}"
+                  f"{' ...' if len(r['request_ids']) > 10 else ''}] - {r['reason']}")
+        return 0
     if score_approve.KILL_SWITCH.exists() or decide.KILL_SWITCH.exists():
         log("score-approve: kill switch present; nothing decided")
         print("NO_REPLY")
@@ -653,8 +674,11 @@ def cmd_score_approve(args: argparse.Namespace) -> int:
     res = score_approve.run(admin_api.AdminClient(), ledger.db, mode=args.mode, policy=policy, sp=sp)
     log(res.line())
     # QA @6c2a51b4 (2): reads cut short by core's rate limit are a failure, never a quiet no-op.
+    # 2026-11-15: a profile skipped on HTTP 400 is said out loud the first time (and again once a day while it
+    # lasts); every run's line carries it into run.log either way. It is not a failed run: the rest was read.
     if res.mode == "apply" and not (res.approved or res.write_errors or res.skipped_by_server
-                                    or res.read_exhausted or res.paused_mid_run or res.audit_failed):
+                                    or res.read_exhausted or res.paused_mid_run or res.audit_failed
+                                    or res.unreadable_new):
         print("NO_REPLY")
     else:
         print(res.line())
@@ -1289,6 +1313,9 @@ def parser() -> argparse.ArgumentParser:
     sa.add_argument("--pause", default=None, metavar="REASON",
                     help="stop every write now (Fable condition 10: audit precision < 95 %%), e.g. the audit id")
     sa.add_argument("--resume", action="store_true", help="lift a --pause (after Fable's review)")
+    sa.add_argument("--skipped-profiles", action="store_true",
+                    help="list the profiles the runs of the last 7 days skipped because core answered HTTP 400 "
+                         "(read-only; runs nothing)")
     sa.set_defaults(fn=cmd_score_approve)
 
     ex = sub.add_parser("explain", help="every decision + server outcome for one credit request")

@@ -75,6 +75,10 @@ BAND_HINT_ONLY = ["validator_band_hint"]         # Fable 15:40Z (1): this stamp 
 REQUESTER = "credit-trust-score-approve@hydra-ops"  # muso-admin-api.sh is_credit_trust_score_approval
 HELD_STATUSES = (decide.UNVERIFIED, decide.UVN)  # Fable 15:40Z: selection = unverified + UVN
 READ_EXHAUSTED = "core rate-limited the reads (HTTP 429 after backoff); the rest next run"
+# reread(): this many DISTINCT profiles asked, every one answered HTTP 400 and none answered rows = the read
+# itself is refused (a changed parameter, a wrapper fault), which is an outage and not "a profile to skip".
+# Profiles, not reads: one profile is read once per held status.
+ALL_REFUSED_MIN = 2
 # QA @f88ed225 (1): the per-run candidate_limit must be applied AFTER paid-first ordering, so
 # the replica scan reads the whole held population (small: ~2.3k rows on 10-20) up to this
 # hard cap. Hitting the cap means paid-first can no longer be guaranteed: the run fails loud.
@@ -219,6 +223,73 @@ def last_decided(db, now: datetime, days: int = 7) -> dict[str, str]:
         return {}
 
 
+# 2026-11-15: a profile core answers HTTP 400 for is skipped, never a run abort (reread). The skip is this
+# executor's own record, one row per refused read (profile and held status) per run: who, how many requests,
+# why. It is NOT a `decisions` row (every reader of that table treats a row as a credit decision, and nothing
+# was decided).
+# Read it with `credit-review.py score-approve --skipped-profiles`.
+UNREADABLE_TABLE = "score_approve_unreadable_profiles"
+UNREADABLE_REPORT_H = 24   # a profile is news once per this many hours; in between it is in run.log and the table
+UNREADABLE_SHOWN = 5       # profile ids named in the summary line; the table holds all of them
+
+
+def ensure_unreadable_schema(db) -> None:
+    db.execute(f"CREATE TABLE IF NOT EXISTS {UNREADABLE_TABLE} (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+               "run_id TEXT NOT NULL, at TEXT NOT NULL, profile_id TEXT NOT NULL, status TEXT NOT NULL, "
+               "requests INTEGER NOT NULL, request_ids TEXT NOT NULL, reason TEXT NOT NULL)")
+    db.execute(f"CREATE INDEX IF NOT EXISTS {UNREADABLE_TABLE}_profile_at ON {UNREADABLE_TABLE} (profile_id, at)")
+    db.commit()
+
+
+def recently_unreadable(db, now: datetime, hours: int = UNREADABLE_REPORT_H) -> set[str]:
+    """Profile ids (lower) core answered HTTP 400 for within ``hours``. Used for one thing only: a profile
+    already reported in the window is not announced again. Never a reason to skip a read and never an
+    ordering: a profile moved to the back of the candidates falls outside ``candidate_limit`` whenever the
+    list is longer than it (12,136 candidates against 2,000 on 2026-11-15), so it would not be asked, and
+    not be counted, until the window ran out."""
+    since = (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        return {str(pid).lower() for (pid,) in db.execute(
+            f"SELECT DISTINCT profile_id FROM {UNREADABLE_TABLE} WHERE at >= ?", (since,))}
+    except Exception:  # an unreadable ledger only loses the dedupe, never a guard
+        return set()
+
+
+def record_unreadable(db, run_id: str, now: datetime, skipped: list[dict[str, Any]], known: set[str]) -> int:
+    """One row per refused read (a profile holding both held statuses has two); returns how many DISTINCT
+    profiles were not already reported (``known``)."""
+    at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    for s in skipped:
+        db.execute(f"INSERT INTO {UNREADABLE_TABLE} (run_id, at, profile_id, status, requests, request_ids, reason) "
+                   "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                   (run_id, at, s["profile_id"], s["status"], len(s["request_ids"]), json.dumps(s["request_ids"]),
+                    s["reason"]))
+    db.commit()
+    return len({str(s["profile_id"]).lower() for s in skipped} - known)
+
+
+def unreadable_report(db, now: datetime, days: int = 7) -> list[dict[str, Any]] | None:
+    """Per profile over ``days``: how many runs skipped it, first and last time, the requests it held last.
+    Read-only (it creates nothing). None when the ledger has no skip table: no run of this code has written
+    to it, which is "not recorded", never "no profile was skipped"."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (UNREADABLE_TABLE,)).fetchone():
+        return None
+    since = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = []
+    for pid, runs, first, last in db.execute(
+            f"SELECT profile_id, COUNT(DISTINCT run_id), MIN(at), MAX(at) FROM {UNREADABLE_TABLE} WHERE at >= ? "
+            "GROUP BY profile_id ORDER BY MAX(at) DESC, profile_id", (since,)).fetchall():
+        ids: set[str] = set()
+        reason = ""
+        for raw, why in db.execute(f"SELECT request_ids, reason FROM {UNREADABLE_TABLE} WHERE profile_id = ? AND at = ?",
+                                   (pid, last)):
+            ids.update(json.loads(raw))
+            reason = why
+        out.append({"profile_id": pid, "runs": runs, "first": first, "last": last, "requests": len(ids),
+                    "request_ids": sorted(ids), "reason": reason})
+    return out
+
+
 # 2026-10-23 18:40Z/18:55Z: with 500 profiles per run (#1345) two runs hit the cron's 900 s timeout
 # and wrote nothing. Every live phase now has a wall-clock budget; work past it waits for the next
 # run (a transient hold, never cooled), so a run always finishes and writes what it decided.
@@ -241,12 +312,23 @@ WRITE_BATCH_WORST_S = 2 * (WRITE_PUT_TIMEOUT_S + WRITE_READBACK_TIMEOUT_S)   # 1
 def reread(admin: admin_api.Admin, wanted: list[tuple[str, str, float]], *, max_profiles: int = 150,
            pace_s: float = 1.0, sleep: Callable[[float], None] | None = None,
            note: list[str] | None = None, deadline: float | None = None,
-           clock: Callable[[], float] | None = None) -> dict[str, dict[str, Any]]:
+           clock: Callable[[], float] | None = None,
+           skipped: list[dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
     """The live rows, by profile-filtered admin reads (filtered, so never a deep scan), in the
     candidates' order. Core allows an agent identity 120 list calls a minute, shared with the
     decider (agentAdminListRateLimit), so reads are paced, at most ``max_profiles`` profiles a
     run, and a 429 backs off; a read that still fails ends the reading for this run (the rest
-    wait for the next run, nothing is decided on them)."""
+    wait for the next run, nothing is decided on them).
+
+    One profile core answers HTTP 400 for is THAT profile's fact (admin.BadRequest): it is appended to
+    ``skipped`` with its id, its requests and the reason, nothing is decided on its requests, and the next
+    profile is read. It does not spend the ``max_profiles`` budget (it returned no rows). 2026-11-15: one
+    legacy-shaped profile id aborted every run from the first read. Two things stay an abort, because
+    neither is "one unreadable profile": a caller that passes no ``skipped`` list (the skip would be
+    recorded nowhere), and a run where SEVERAL profiles were asked and every one answered 400 (the read
+    itself is broken, not an id). "Several" counts DISTINCT profile ids, never reads: a profile is read
+    once per held status, so one profile holding requests in both statuses answers 400 twice and is still
+    one profile (QA + Fable on f52836298: counted by read, that profile alone aborted the run)."""
     import time as _t
     sleep = sleep or _t.sleep
     by_profile: dict[tuple[str, str], set[str]] = {}
@@ -256,32 +338,50 @@ def reread(admin: admin_api.Admin, wanted: list[tuple[str, str, float]], *, max_
         by_profile.setdefault((pid, status), set()).add(rid)
     rows: dict[str, dict[str, Any]] = {}
     clock = clock or _t.monotonic
+    answered = 0
+    refused: dict[str, None] = {}   # the DISTINCT profile ids that answered 400, in the order asked
     for n, ((pid, status), ids) in enumerate(by_profile.items()):
-        if n >= max_profiles:
+        if answered >= max_profiles:
             if note is not None:
                 note.append(f"read {max_profiles} profiles (run budget); the rest next run")
             break
         if deadline is not None and clock() >= deadline:
             if note is not None:
-                note.append(f"read {n} profiles (time budget {READ_BUDGET_S}s); the rest next run")
+                note.append(f"read {answered} profiles (time budget {READ_BUDGET_S}s); the rest next run")
             break
         items = None
+        unreadable = False
         for attempt in range(3):
             if n or attempt:
                 sleep(pace_s if not attempt else 20.0 * attempt)
             try:
                 items = admin_api.list_requests(admin, status=status, limit=1000, page=1, profile_ids=[pid])
                 break
+            except admin_api.BadRequest:
+                if skipped is None:
+                    raise
+                unreadable = True
+                break
             except admin_api.AdminError as exc:
                 if "HTTP 429" not in str(exc):
                     raise
+        if unreadable:
+            refused[str(pid)] = None
+            skipped.append({"profile_id": pid, "status": status, "request_ids": sorted(ids),
+                            "reason": admin_api.BAD_REQUEST_REASON})
+            continue
         if items is None:
             if note is not None:
                 note.append(READ_EXHAUSTED)
             break
+        answered += 1
         for r in items:
             if str(r.get("id")) in ids:
                 rows[str(r["id"])] = r
+    if len(refused) >= ALL_REFUSED_MIN and not answered:
+        raise admin_api.AdminError(
+            f"every profile-scoped credit-requests read answered HTTP 400 ({len(refused)} of {len(refused)} "
+            f"profiles asked, first {next(iter(refused))}): the read is refused, not one profile")
     return rows
 
 
@@ -782,11 +882,30 @@ class ScoreResult:
     fanout_held: int = 0
     anchor_kinds: dict = field(default_factory=dict)
     read_exhausted: bool = False
+    # Profiles core answered HTTP 400 for: skipped, nothing decided on their requests, the run went on.
+    # Each is {profile_id, status, request_ids, reason}. unreadable_new = those not reported in the last
+    # UNREADABLE_REPORT_H hours (what makes a quiet apply run print its line).
+    unreadable_profiles: list[dict[str, Any]] = field(default_factory=list)
+    unreadable_new: int = 0
     audit_failed: bool = False
     paused_mid_run: bool = False
     write_errors: list[str] = field(default_factory=list)
     skipped_by_server: dict[str, int] = field(default_factory=dict)
     note: str = ""
+
+    def unreadable_note(self) -> str:
+        """The skip, by count and by profile id: '' when no profile was skipped."""
+        by_pid: dict[str, int] = {}
+        for s in self.unreadable_profiles:
+            by_pid[s["profile_id"]] = by_pid.get(s["profile_id"], 0) + len(s["request_ids"])
+        if not by_pid:
+            return ""
+        shown = [f"{pid} ({n} request(s))" for pid, n in list(by_pid.items())[:UNREADABLE_SHOWN]]
+        more = len(by_pid) - len(shown)
+        return (f"SKIPPED {len(by_pid)} profile(s) core could not read (HTTP 400 on the profile-scoped read): "
+                f"{sum(by_pid.values())} request(s) not read and not decided, the other profiles were processed: "
+                + ", ".join(shown)
+                + (f" and {more} more (score-approve --skipped-profiles lists all)" if more > 0 else ""))
 
     def line(self) -> str:
         top = sorted(self.held.items(), key=lambda kv: -kv[1])[:6]
@@ -806,6 +925,7 @@ class ScoreResult:
                    if self.watch_held else "")
                 + (f"; approved by anchor_kind {dict(sorted(self.anchor_kinds.items()))}" if self.anchor_kinds else "")
                 + ("; READS INCOMPLETE (HTTP 429 or scan cap)" if self.read_exhausted else "")
+                + (f"; {self.unreadable_note()}" if self.unreadable_profiles else "")
                 + ("; AUDIT SAMPLE NOT FILED: PAUSED" if self.audit_failed else "")
                 + (f"; server skipped {self.skipped_by_server}" if self.skipped_by_server else "")
                 + (f"; WRITE ERRORS: {'; '.join(self.write_errors[:3])}" if self.write_errors else "")
@@ -827,6 +947,7 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
     if mode not in ("shadow", "apply"):
         raise ValueError("mode must be shadow or apply")
     decide.ensure_schema(db)
+    ensure_unreadable_schema(db)
     now = now or datetime.now(timezone.utc)
     res = ScoreResult(run_id="score-" + now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6], mode=mode)
     gate = account_gate_mod.Cached(account_gate)
@@ -864,13 +985,22 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
     # behind every row that is due (paid still first among the due rows), so the spare budget reaches
     # the free tier instead of re-reading the same held paid rows every other run.
     cooling = recently_held(db, now)
+    # 2026-11-15: a profile core answered HTTP 400 for keeps its place in this order. It is asked again on
+    # every run that reaches it (one paced read, no profile budget), so each run counts it and a profile
+    # core starts reading again is decided on that run. refused_before only decides what is announced.
+    refused_before = recently_unreadable(db, now)
     wanted = sorted(wanted, key=lambda c: (str(c[0]).lower() in cooling,
                                            not (paying is not None and len(c) > 4 and c[4] in paying),
                                            seen.get(str(c[0]).lower(), ""), c[2] > 0))
     wanted = wanted[:sp.candidate_limit]
     notes: list[str] = []
+    skipped: list[dict[str, Any]] = []
     rows = reread(admin, wanted, max_profiles=sp.max_profiles_per_run, sleep=sleep, note=notes,
-                  deadline=t0 + READ_BUDGET_S) if wanted else {}
+                  deadline=t0 + READ_BUDGET_S, skipped=skipped) if wanted else {}
+    if skipped:
+        # Recorded before anything is decided: a run that dies later still leaves who was skipped and why.
+        res.unreadable_profiles = skipped
+        res.unreadable_new = record_unreadable(db, res.run_id, now, skipped, refused_before)
     if notes:
         res.note = "; ".join([res.note] + notes if res.note else notes)
     res.read_exhausted = READ_EXHAUSTED in notes

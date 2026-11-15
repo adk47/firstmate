@@ -976,5 +976,299 @@ class ScoreApprove(unittest.TestCase):
         self.assertIsNone(out["x"][0])
         self.assertIn("evidence unreadable", out["x"][1])
 
+
+
+# 2026-11-15: core's admin credit-requests list answers HTTP 400 for a profile id that is not strict RFC 4122
+# (assertUuidQuery.js, core-backend #10162). This is the real one: its version nibble is f.
+LEGACY_PID = "f8bd5f94-05c8-f52f-3129-6fa98f44e8d1"
+
+
+class RefusesProfile(FakeAdmin):
+    """Core as it answers: HTTP 400 for the read scoped to a refused profile, rows for every other one."""
+
+    def __init__(self, rows, refused=(LEGACY_PID,)):
+        super().__init__(rows)
+        self.refused = set(refused)
+
+    def get(self, path, params=None):
+        self.calls.append((path, dict(params or {})))
+        if params.get("profilesIds") in self.refused:
+            raise sa.admin_api.BadRequest(f"admin GET {path}?profilesIds={params['profilesIds']} returned HTTP 400")
+        self.calls.pop()
+        return super().get(path, params)
+
+
+class UnreadableProfile(unittest.TestCase):
+    """One profile core answers HTTP 400 for is skipped, counted and named; the run goes on."""
+    setUp = ScoreApprove.setUp
+    proof = ScoreApprove.proof
+    go = ScoreApprove.go
+    decisions = ScoreApprove.decisions
+
+    def skip_rows(self):
+        return self.db.execute(f"SELECT run_id, profile_id, status, requests, request_ids, reason "
+                               f"FROM {sa.UNREADABLE_TABLE} ORDER BY id").fetchall()
+
+    def test_one_profile_answering_400_is_skipped_and_the_run_approves_the_rest(self):
+        # The refused profile sorts FIRST (risk 0, oldest): before the fix the run ended on this read.
+        rows = [row("legacy1", pid=LEGACY_PID, created="2026-09-01T00:00:00Z"),
+                row("legacy2", pid=LEGACY_PID, created="2026-09-02T00:00:00Z"),
+                row("a", pid="pa", uid=501), row("b", pid="pb", uid=502), row("c", pid="pc", uid=503)]
+        admin = RefusesProfile(rows)
+        res, w = self.go(rows, admin=admin)
+        self.assertEqual(admin.calls[0][1]["profilesIds"], LEGACY_PID, "the refused profile was the first read")
+        self.assertEqual(sorted(i for c in w.calls for i in c[1]), ["a", "b", "c"])
+        self.assertEqual(res.approved, 3)
+        # Reported by count and by id, on the run's own result and in its one line.
+        self.assertEqual([s["profile_id"] for s in res.unreadable_profiles], [LEGACY_PID])
+        self.assertEqual(res.unreadable_profiles[0]["request_ids"], ["legacy1", "legacy2"])
+        self.assertEqual(res.unreadable_new, 1)
+        line = res.line()
+        self.assertIn("SKIPPED 1 profile(s)", line)
+        self.assertIn("HTTP 400", line)
+        self.assertIn(f"{LEGACY_PID} (2 request(s))", line)
+        self.assertIn("2 request(s) not read and not decided", line)
+        self.assertIn("3 approved", line)
+        # Nothing was decided on the requests that were not read, and the run is not a failed read.
+        d = self.decisions()
+        self.assertNotIn("legacy1", d)
+        self.assertNotIn("legacy2", d)
+        self.assertFalse(res.read_exhausted)
+        self.assertEqual(res.write_errors, [])
+        # Readable afterwards: one row, naming the profile, its requests and why.
+        (run_id, pid, status, n, ids, reason), = self.skip_rows()
+        self.assertEqual((run_id, pid, status, n), (res.run_id, LEGACY_PID, decide.UVN, 2))
+        self.assertEqual(json.loads(ids), ["legacy1", "legacy2"])
+        self.assertEqual(reason, sa.admin_api.BAD_REQUEST_REASON)
+
+    def test_a_refused_profile_in_the_middle_does_not_drop_the_profiles_after_it(self):
+        wanted = [("r1", "p1", 0.0), ("r2", "p2", 0.0), ("bad1", LEGACY_PID, 0.0), ("bad2", LEGACY_PID, 0.0),
+                  ("r3", "p3", 0.0), ("r4", "p4", 0.0)]
+        rows = [row(rid, pid=pid) for rid, pid, _ in wanted]
+        skipped, notes = [], []
+        out = sa.reread(RefusesProfile(rows), wanted, sleep=lambda _s: None, note=notes, skipped=skipped)
+        self.assertEqual(sorted(out), ["r1", "r2", "r3", "r4"])
+        self.assertEqual(skipped, [{"profile_id": LEGACY_PID, "status": decide.UVN, "request_ids": ["bad1", "bad2"],
+                                    "reason": sa.admin_api.BAD_REQUEST_REASON}])
+        self.assertEqual(notes, [], "a skipped profile is not a short read")
+
+    def test_a_refused_profile_does_not_spend_the_profile_budget_or_wait_out_a_backoff(self):
+        wanted = [("bad", LEGACY_PID, 0.0)] + [(f"r{i}", f"p{i}", 0.0) for i in range(3)]
+        rows = [row(rid, pid=pid) for rid, pid, _ in wanted]
+        skipped, notes, slept = [], [], []
+        admin = RefusesProfile(rows)
+        out = sa.reread(admin, wanted, max_profiles=3, sleep=slept.append, note=notes, skipped=skipped)
+        self.assertEqual(sorted(out), ["r0", "r1", "r2"], "3 readable profiles fit a budget of 3")
+        self.assertEqual(notes, [])
+        self.assertEqual(len(admin.calls), 4, "a 400 is asked once, never retried")
+        self.assertNotIn(20.0, slept, "a 400 is not a rate limit: no backoff")
+
+    def test_every_profile_answering_400_is_an_outage_not_a_skip(self):
+        wanted = [("x", "legacy-a", 0.0), ("y", "legacy-b", 0.0)]
+        rows = [row(rid, pid=pid) for rid, pid, _ in wanted]
+        skipped = []
+        with self.assertRaises(sa.admin_api.AdminError) as ctx:
+            sa.reread(RefusesProfile(rows, refused=("legacy-a", "legacy-b")), wanted, sleep=lambda _s: None,
+                      skipped=skipped)
+        self.assertNotIsInstance(ctx.exception, sa.admin_api.BadRequest)
+        self.assertIn("2 of 2 profiles", str(ctx.exception))
+        self.assertIn("legacy-a", str(ctx.exception))
+
+    def test_one_profile_holding_both_statuses_is_one_profile_and_never_an_outage(self):
+        # A profile is read once per held status, so this ONE profile answers 400 twice. Counted by read it
+        # was "2 of 2 refused" and the run aborted (QA + Fable on f52836298): the failure this fix is for.
+        wanted = [("l-uvn", LEGACY_PID, 0.0, decide.UVN), ("l-unv", LEGACY_PID, 0.0, decide.UNVERIFIED)]
+        rows = [row(rid, pid=pid, status=status) for rid, pid, _, status in wanted]
+        admin, skipped, notes = RefusesProfile(rows), [], []
+        out = sa.reread(admin, wanted, sleep=lambda _s: None, note=notes, skipped=skipped)
+        self.assertEqual(out, {})
+        self.assertEqual([(c[1]["profilesIds"], c[1]["status"]) for c in admin.calls],
+                         [(LEGACY_PID, decide.UVN), (LEGACY_PID, decide.UNVERIFIED)], "two reads, both refused")
+        self.assertEqual([(s["profile_id"], s["status"], s["request_ids"]) for s in skipped],
+                         [(LEGACY_PID, decide.UVN, ["l-uvn"]), (LEGACY_PID, decide.UNVERIFIED, ["l-unv"])])
+        self.assertEqual(notes, [])
+
+    def test_a_run_whose_first_profile_holds_both_statuses_skips_it_once_and_approves_the_rest(self):
+        rows = [row("l-uvn", pid=LEGACY_PID, created="2026-09-01T00:00:00Z"),
+                row("l-unv", pid=LEGACY_PID, status=decide.UNVERIFIED, created="2026-09-02T00:00:00Z"),
+                row("a", pid="pa", uid=501), row("b", pid="pb", uid=502)]
+        admin = RefusesProfile(rows)
+        res, w = self.go(rows, admin=admin)
+        self.assertEqual(sorted(i for c in w.calls for i in c[1]), ["a", "b"])
+        self.assertEqual(res.approved, 2)
+        # Two refused reads, ONE profile: counted once, named once, both of its requests accounted for.
+        self.assertEqual(sorted((s["profile_id"], s["status"]) for s in res.unreadable_profiles),
+                         sorted([(LEGACY_PID, decide.UVN), (LEGACY_PID, decide.UNVERIFIED)]))
+        self.assertEqual(res.unreadable_new, 1)
+        line = res.line()
+        self.assertIn("SKIPPED 1 profile(s)", line)
+        self.assertEqual(line.count(LEGACY_PID), 1)
+        self.assertIn(f"{LEGACY_PID} (2 request(s))", line)
+        self.assertIn("2 request(s) not read and not decided", line)
+        d = self.decisions()
+        self.assertNotIn("l-uvn", d)
+        self.assertNotIn("l-unv", d)
+        self.assertEqual(sorted((pid, status, n) for _run, pid, status, n, _ids, _why in self.skip_rows()),
+                         sorted([(LEGACY_PID, decide.UVN, 1), (LEGACY_PID, decide.UNVERIFIED, 1)]))
+        (rep,) = sa.unreadable_report(self.db, NOW)
+        self.assertEqual((rep["profile_id"], rep["runs"], rep["request_ids"]), (LEGACY_PID, 1, ["l-unv", "l-uvn"]))
+
+    def test_a_run_whose_only_profile_holds_both_statuses_is_a_skip_not_an_abort(self):
+        rows = [row("l-uvn", pid=LEGACY_PID), row("l-unv", pid=LEGACY_PID, status=decide.UNVERIFIED)]
+        res, w = self.go(rows, admin=RefusesProfile(rows))
+        self.assertEqual(w.calls, [])
+        self.assertIn("SKIPPED 1 profile(s)", res.line())
+        self.assertEqual(res.unreadable_new, 1)
+
+    def test_the_outage_rule_counts_profiles_not_reads(self):
+        # Two DISTINCT profiles, three refused reads, nothing answered: still the outage, and it says 2.
+        wanted = [("x1", "legacy-a", 0.0, decide.UVN), ("x2", "legacy-a", 0.0, decide.UNVERIFIED),
+                  ("y", "legacy-b", 0.0, decide.UVN)]
+        rows = [row(rid, pid=pid, status=status) for rid, pid, _, status in wanted]
+        with self.assertRaises(sa.admin_api.AdminError) as ctx:
+            sa.reread(RefusesProfile(rows, refused=("legacy-a", "legacy-b")), wanted, sleep=lambda _s: None,
+                      skipped=[])
+        self.assertNotIsInstance(ctx.exception, sa.admin_api.BadRequest)
+        self.assertIn("2 of 2 profiles", str(ctx.exception))
+        self.assertIn("first legacy-a", str(ctx.exception))
+
+    def test_the_only_candidate_profile_answering_400_is_still_a_skip(self):
+        rows = [row("only", pid=LEGACY_PID)]
+        res, w = self.go(rows, admin=RefusesProfile(rows))
+        self.assertEqual(w.calls, [])
+        self.assertEqual([s["profile_id"] for s in res.unreadable_profiles], [LEGACY_PID])
+        self.assertIn("SKIPPED 1 profile(s)", res.line())
+
+    def test_any_other_failed_read_still_ends_the_run(self):
+        rows = [row("a", pid="pa"), row("b", pid="pb")]
+
+        class Down(FakeAdmin):
+            def get(self, path, params=None):
+                raise sa.admin_api.AdminError("admin GET /admin/credit-requests returned HTTP 500")
+        with self.assertRaises(sa.admin_api.AdminError):
+            self.go(rows, admin=Down(rows))
+        self.assertEqual(self.skip_rows(), [], "a 500 is not recorded as a skipped profile")
+
+    def test_a_caller_with_nowhere_to_record_the_skip_gets_the_error(self):
+        rows = [row("bad", pid=LEGACY_PID), row("a", pid="pa")]
+        with self.assertRaises(sa.admin_api.BadRequest):
+            sa.reread(RefusesProfile(rows), [("bad", LEGACY_PID, 0.0), ("a", "pa", 0.0)], sleep=lambda _s: None)
+
+    def test_a_profile_skipped_before_keeps_its_place_is_asked_again_and_is_not_new(self):
+        """Production has more candidates than candidate_limit (12,136 against 2,000 on 2026-11-15): a
+        skipped profile moved behind the others would fall outside the limit, not be asked and not be
+        counted. It keeps its place, so the next run asks it again and counts it again."""
+        rows = [row("legacy", pid=LEGACY_PID, created="2026-09-01T00:00:00Z"), row("a", pid="pa", uid=501)]
+        first, _ = self.go(rows, admin=RefusesProfile(rows))
+        self.assertEqual(first.unreadable_new, 1)
+        rows2 = [row("legacy", pid=LEGACY_PID, created="2026-09-01T00:00:00Z"), row("b", pid="pb", uid=502),
+                 row("c", pid="pc", uid=503), row("d", pid="pd", uid=504)]
+        admin = RefusesProfile(rows2)
+        second, w = self.go(rows2, admin=admin, sp=sa.ScorePolicy(enabled=True, candidate_limit=2))
+        self.assertEqual([c[1]["profilesIds"] for c in admin.calls], [LEGACY_PID, "pb"],
+                         "asked again inside the candidate limit, in its own place")
+        self.assertEqual([i for c in w.calls for i in c[1]], ["b"])
+        self.assertEqual(second.unreadable_new, 0, "already reported inside the window")
+        self.assertEqual([s["profile_id"] for s in second.unreadable_profiles], [LEGACY_PID], "counted again")
+        self.assertIn(LEGACY_PID, second.line(), "every run's line still carries it")
+        self.assertEqual(len(self.skip_rows()), 2, "one row per run that skipped it")
+        (rep,) = sa.unreadable_report(self.db, NOW)
+        self.assertEqual((rep["profile_id"], rep["requests"], rep["request_ids"]), (LEGACY_PID, 1, ["legacy"]))
+
+    def test_a_profile_core_reads_again_is_decided_normally(self):
+        rows = [row("legacy", pid=LEGACY_PID), row("a", pid="pa", uid=501)]
+        self.go(rows, admin=RefusesProfile(rows))
+        res, w = self.go(rows)   # core now answers rows for it
+        self.assertIn("legacy", [i for c in w.calls for i in c[1]])
+        self.assertEqual(res.unreadable_profiles, [])
+        self.assertNotIn("SKIPPED", res.line())
+
+    def test_the_report_says_not_recorded_when_no_run_wrote_the_table(self):
+        self.assertIsNone(sa.unreadable_report(sqlite3.connect(":memory:"), NOW))
+        self.go([row("a")])
+        self.assertEqual(sa.unreadable_report(self.db, NOW), [], "a run that skipped nothing: a measured zero")
+
+    def test_the_admin_client_raises_bad_request_on_http_400_only(self):
+        script = Path(self.tmp) / "wrapper.sh"
+        for status, exc in ((400, sa.admin_api.BadRequest), (500, sa.admin_api.AdminError)):
+            script.write_text(f"#!/bin/bash\necho '{{\"http_status\": {status}, \"body\": {{\"message\": \"x\"}}}}'\n")
+            with self.assertRaises(sa.admin_api.AdminError) as ctx:
+                sa.admin_api.list_requests(sa.admin_api.AdminClient(script=str(script)), status=decide.UVN,
+                                           limit=1000, page=1, profile_ids=[LEGACY_PID])
+            self.assertIs(type(ctx.exception), exc, status)
+            self.assertIn(LEGACY_PID, str(ctx.exception))
+            self.assertIn(f"HTTP {status}", str(ctx.exception))
+
+    def _cli(self, res):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("credit_review_cli", ROOT / "scripts" / "credit-review.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        orig = sa.run
+        sa.run = lambda *a, **k: res
+        self.addCleanup(setattr, sa, "run", orig)
+        self.addCleanup(setattr, sa, "KILL_SWITCH", sa.KILL_SWITCH)
+        sa.KILL_SWITCH = Path(self.tmp) / "nope"
+        self.addCleanup(setattr, decide, "KILL_SWITCH", decide.KILL_SWITCH)
+        decide.KILL_SWITCH = Path(self.tmp) / "nope2"
+        orig_load, orig_sp = decide.Policy.load, sa.ScorePolicy.load
+        decide.Policy.load = staticmethod(lambda *a, **k: policy())
+        sa.ScorePolicy.load = staticmethod(lambda *a, **k: sa.ScorePolicy(enabled=True))
+        self.addCleanup(setattr, decide.Policy, "load", orig_load)
+        self.addCleanup(setattr, sa.ScorePolicy, "load", orig_sp)
+        return cli
+
+    def _run_cli(self, cli, **kw):
+        import io
+        from contextlib import redirect_stdout
+        args = cli.argparse.Namespace(**{"pause": None, "resume": False, "skipped_profiles": False, "mode": "apply",
+                                         "max_per_run": None, "ledger": os.path.join(self.tmp, "cli.sqlite3"), **kw})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cli.cmd_score_approve(args)
+        return rc, buf.getvalue()
+
+    def test_the_cli_announces_a_newly_skipped_profile_and_does_not_fail_the_run(self):
+        skip = {"profile_id": LEGACY_PID, "status": decide.UVN, "request_ids": ["legacy1"],
+                "reason": sa.admin_api.BAD_REQUEST_REASON}
+        res = sa.ScoreResult(run_id="score-x", mode="apply", unreadable_profiles=[skip], unreadable_new=1)
+        rc, out = self._run_cli(self._cli(res))
+        self.assertEqual(rc, 0, "one unreadable profile is not a failed run")
+        self.assertNotIn("NO_REPLY", out)
+        self.assertIn("SKIPPED 1 profile(s)", out)
+        self.assertIn(LEGACY_PID, out)
+        # Already reported in the window and nothing approved: quiet on the channel, the line is still logged.
+        res = sa.ScoreResult(run_id="score-y", mode="apply", unreadable_profiles=[skip], unreadable_new=0)
+        rc, out = self._run_cli(self._cli(res))
+        self.assertEqual((rc, out.strip()), (0, "NO_REPLY"))
+
+    def test_the_cli_lists_the_skipped_profiles_read_only(self):
+        rows = [row("legacy", pid=LEGACY_PID), row("a", pid="pa", uid=501)]
+        self.go(rows, admin=RefusesProfile(rows))
+        self.db.close()
+        path = os.path.join(self.tmp, "ledger.sqlite3")
+        before = Path(path).read_bytes()
+        cli = self._cli(None)
+        clock = _mock.patch.object(cli, "datetime", SimpleNamespace(now=lambda tz=None: NOW))  # the run was at NOW
+        clock.start()
+        self.addCleanup(clock.stop)
+        rc, out = self._run_cli(cli, skipped_profiles=True, ledger=path)
+        self.assertEqual(rc, 0)
+        self.assertIn("skipped 1 profile(s)", out)
+        self.assertIn(LEGACY_PID, out)
+        self.assertIn("legacy", out)
+        self.assertEqual(Path(path).read_bytes(), before, "the listing writes nothing")
+        # A ledger no run has written the table to, and one that is not there: neither is "0 skipped".
+        empty = os.path.join(self.tmp, "empty.sqlite3")
+        sqlite3.connect(empty).execute("CREATE TABLE t (x)").connection.commit()
+        rc, out = self._run_cli(cli, skipped_profiles=True, ledger=empty)
+        self.assertEqual(rc, 1)
+        self.assertIn("NOT RECORDED", out)
+        rc, out = self._run_cli(cli, skipped_profiles=True, ledger=os.path.join(self.tmp, "absent.sqlite3"))
+        self.assertEqual(rc, 1)
+        self.assertIn("NOT READ", out)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "absent.sqlite3")), "a read never creates a ledger")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

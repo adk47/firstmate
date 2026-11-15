@@ -32,6 +32,18 @@ class NotFound(AdminError):
     read failed, so a caller treats it as UNKNOWN - re-read, then defer."""
 
 
+class BadRequest(AdminError):
+    """HTTP 400: core refused THIS request as sent. On a read scoped to one id it is a fact about that id
+    and says nothing about the next one: core's admin credit-requests list validates ``profilesIds`` and
+    ``trackId`` as strict RFC 4122 (assertUuidQuery.js, core-backend #10162), so a legacy-shaped id (version
+    nibble outside 1-8, e.g. f8bd5f94-05c8-f52f-3129-6fa98f44e8d1) answers 400 on every read. A caller that
+    walks many ids skips the one that answered 400, COUNTS it with its id and reads the rest (2026-11-15:
+    one such profile aborted every score-approve run). It is never "no rows": the id was not read."""
+
+
+BAD_REQUEST_REASON = "core answered HTTP 400 to the read scoped to this id (it refuses the id as sent)"
+
+
 class Admin(Protocol):
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any: ...
 
@@ -64,6 +76,8 @@ class AdminClient:
         status = envelope.get("http_status") if isinstance(envelope, dict) else None
         if status == 404:
             raise NotFound(f"admin GET {path} returned HTTP 404")
+        if status == 400:
+            raise BadRequest(f"admin GET {path} returned HTTP 400")
         if not isinstance(status, int) or not 200 <= status < 300:
             raise AdminError(f"admin GET {path} returned HTTP {status}")
         body = envelope.get("body")
