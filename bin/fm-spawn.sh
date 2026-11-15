@@ -35,13 +35,16 @@
 #   positional, and batch pairs are all refused alongside it; only harness,
 #   model, and effort may change, which is what makes a harness switch one
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
-#   agent-free, which its backend classifier proves as `missing` (the window,
-#   pane, or terminal handle is gone, so nothing can be running there) or
-#   `dead` (a live process scan below the endpoint found no agent), on a
-#   backend with a proven in-place relaunch (tmux or herdr),
+#   agent-free, which its backend classifier proves as `dead` (a live process
+#   scan below the endpoint found no agent) - or, for tmux only, `missing` (the
+#   recorded window is gone, so nothing can be running there) - on a backend
+#   with a proven in-place relaunch (tmux or herdr),
 #   refuses unless the endpoint's shell is sitting in the recorded worktree,
 #   and clears the previous harness's per-task wiring before arming the new
-#   incarnation. Orca is the one exception to "same endpoint": when its
+#   incarnation. A tmux task whose recorded window reads `missing` has that
+#   window recreated in its recorded session, under its recorded name, starting
+#   in the recorded worktree, so the cwd proof reads the window the relaunch
+#   just created. Orca is the other exception to "same endpoint": when its
 #   classifier reports the recorded terminal `missing` (a stale handle, e.g.
 #   after an Orca or host restart) or `dead` (still listed, with an empty or
 #   shell-only pty), the replacement launches in a NEW terminal created in the
@@ -1271,12 +1274,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
     }
     RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   fi
-  # A gone endpoint is agent-free by construction: a tmux window or herdr pane
-  # that no longer exists cannot be hosting an agent, so `missing` relaunches
-  # exactly as `dead` does. Measured 2026-11-15: four tmux lanes whose windows
-  # were gone read `missing` and every relaunch was refused as if it were live.
+  # A gone endpoint is agent-free by construction. Measured 2026-11-15: four
+  # tmux lanes whose windows were gone read `missing` and every relaunch was
+  # refused as if it were live. Only tmux relaunches on `missing`, because only
+  # the tmux transaction below recreates the recorded window; every other
+  # backend's `missing` keeps its refusal, since none of them can recreate the
+  # endpoint the replacement must launch into.
   case "$RELAUNCH_STATE" in
-    dead|missing) ;;
+    dead) ;;
+    missing)
+      [ "$BACKEND" = tmux ] || {
+        echo "error: task $ID's endpoint reads 'missing' and backend '$BACKEND' has no proven way to recreate it; a relaunch requires a positively agent-free endpoint that still exists (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+        exit 2
+      }
+      ;;
     *)
       echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (missing, or dead with no agent below it; stop the agent first with bin/fm-control.sh $ID exit)" >&2
       exit 2
@@ -2535,6 +2546,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   WT_TARGET=$T
   SES=${T%%:*}
+  # `missing` is the tmux classifier's proof that a successful session inventory
+  # omitted the recorded window, so nothing can be hosting an agent there. The
+  # endpoint itself must therefore be recreated - same recorded session, same
+  # recorded window name, starting in the recorded worktree - before the cwd
+  # proof below, which reads that new window's stable id instead of letting
+  # display-message fall back to whichever window the active client is on.
+  if [ "$BACKEND" = tmux ] && [ "$RELAUNCH_STATE" = missing ]; then
+    WT_TARGET=$(fm_backend_tmux_ensure_task "$SES" "$W" "$WT") || exit 1
+  fi
 else
 case "$BACKEND" in
   tmux)
@@ -2962,7 +2982,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   relaunch_wt_real=$(real_path_or_raw "$WT")
   relaunch_seen=
   # A new Orca terminal starts in its Orca worktree, whose path was verified
-  # against the recorded worktree above; Orca exposes no cwd read.
+  # against the recorded worktree above; Orca exposes no cwd read. A recreated
+  # tmux window is not assumed from its creation either: it was created in the
+  # recorded worktree, and WT_TARGET names it by id, so the read below proves it
+  # rather than trusting the create.
   [ "$ORCA_RELAUNCH_NEWTERM" != 1 ] || relaunch_seen=$WT
   for _ in $(seq 1 10); do
     [ "$ORCA_RELAUNCH_NEWTERM" != 1 ] || break

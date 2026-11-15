@@ -96,21 +96,55 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
-    for a in "$@"; do
-      case "$a" in
+    target=''
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) target=${2:-}; shift 2 ;;
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*)
+          name=$target
+          case "$name" in
+            *:*) name=${name#*:} ;;
+          esac
+          case "$name" in
+            @*) name=$(awk -v id="$name" '$1 == id {print $2; exit}' "$D/window-ids" 2>/dev/null) ;;
+          esac
+          { [ -n "$name" ] && grep -Fqx "$name" "$D/windows" 2>/dev/null; } || exit 1
           if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
             : > "$FM_FAKE_CWD_RACE_READY"
             /bin/sleep 1
           fi
           cat "$D/cwd"; printf '\n'; exit 0 ;;
+        *) shift ;;
       esac
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  has-session) [ ! -e "$D/no-session" ] && exit 0; exit 1 ;;
+  new-window|new-session)
+    shift
+    wname='' start='' ses=''
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -F) shift 2 ;;
+        -t|-s) ses=${2:-}; shift 2 ;;
+        -n) wname=${2:-}; shift 2 ;;
+        -c) start=${2:-}; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    ses=${ses#=}
+    ses=${ses%:}
+    [ -f "$D/window-ids" ] || : > "$D/window-ids"
+    id="@$(( $(wc -l < "$D/window-ids") + 1 ))"
+    printf '%s %s %s %s\n' "$id" "$wname" "$ses" "$start" >> "$D/window-ids"
+    printf '%s\n' "$wname" >> "$D/windows"
+    [ -z "$start" ] || printf '%s' "$start" > "$D/cwd"
+    printf '%s\n' "$id"
+    exit 0 ;;
+  set-window-option) exit 0 ;;
 esac
 exit 0
 SH
@@ -129,6 +163,7 @@ new_case() {
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
+  : > "$dir/fake/window-ids"
   printf 'claude' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
@@ -1410,7 +1445,7 @@ test_spawn_relaunch_refuses_a_live_agent() {
 }
 
 test_spawn_relaunch_replaces_a_window_that_is_gone() {
-  local dir out rc
+  local dir out rc created
   dir=$(new_case window-gone rl38)
   add_ship_task "$dir" rl38 claude
   # A window tmux no longer has cannot be hosting an agent, so the task reads
@@ -1419,7 +1454,36 @@ test_spawn_relaunch_replaces_a_window_that_is_gone() {
   out=$(run_spawn "$dir" rl38 --relaunch --harness claude); rc=$?
   expect_code 0 "$rc" "relaunching a task whose window is gone should succeed"$'\n'"$out"
   assert_contains "$out" "spawned rl38" "the relaunch should report the replacement it launched"
+  created=$(awk '$2 == "fm-rl38" {print $3 "|" $4}' "$dir/fake/window-ids")
+  [ "$created" = "fmses|$dir/wt" ] \
+    || fail "the relaunch should recreate window fm-rl38 in session fmses at its recorded worktree, got '$created'"
   pass "fm-spawn --relaunch: a task whose tmux window is gone is relaunched, not refused"
+}
+
+test_spawn_relaunch_does_not_create_a_window_that_still_exists() {
+  local dir out rc
+  dir=$(new_case window-present rl39)
+  add_ship_task "$dir" rl39 claude
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl39 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "relaunching onto a window that still exists should succeed"$'\n'"$out"
+  [ ! -s "$dir/fake/window-ids" ] \
+    || fail "a relaunch onto an existing window must not create a second one, got '$(cat "$dir/fake/window-ids")'"
+  pass "fm-spawn --relaunch: an existing tmux window is adopted, never duplicated"
+}
+
+test_spawn_relaunch_recreates_a_gone_session_for_its_window() {
+  local dir out rc created
+  dir=$(new_case session-gone rl41)
+  add_ship_task "$dir" rl41 claude
+  : > "$dir/fake/windows"
+  : > "$dir/fake/no-session"
+  out=$(run_spawn "$dir" rl41 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "relaunching into a recorded session that is gone should succeed"$'\n'"$out"
+  created=$(awk '$2 == "fm-rl41" {print $3 "|" $4}' "$dir/fake/window-ids")
+  [ "$created" = "fmses|$dir/wt" ] \
+    || fail "the relaunch should recreate the recorded session with its window at the recorded worktree, got '$created'"
+  pass "fm-spawn --relaunch: a gone recorded session is recreated under its own name"
 }
 
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
@@ -1624,6 +1688,8 @@ test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_replaces_a_window_that_is_gone
+test_spawn_relaunch_does_not_create_a_window_that_still_exists
+test_spawn_relaunch_recreates_a_gone_session_for_its_window
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous

@@ -88,6 +88,11 @@ fm_backend_tmux_container_ensure() {
 #     treehouse cd's into the worktree, which would break name-based targeting.
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
+fm_backend_tmux_pin_window_name() {  # <window-id>
+  tmux set-window-option -t "$1" automatic-rename off 2>/dev/null || true
+  tmux set-window-option -t "$1" allow-rename off 2>/dev/null || true
+}
+
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
   local ses=$1 wname=$2 proj_abs=$3 wid
   if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
@@ -95,8 +100,32 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
     return 1
   fi
   wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
-  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
-  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  fm_backend_tmux_pin_window_name "$wid"
+  printf '%s\n' "$wid"
+}
+
+# fm_backend_tmux_ensure_task: recreate the task's recorded window in <session>
+# at <cwd> for a relaunch whose endpoint classifier proved the window gone. It
+# refuses an existing <window-name> so a stale `missing` read can never produce
+# a second copy of the task, and it recreates the recorded session itself (with
+# that window as its only window) when the whole session is gone. Prints the
+# created window's stable id, which the caller must prove the cwd against
+# rather than letting display-message fall back to the active client's window.
+fm_backend_tmux_ensure_task() {  # <session> <window-name> <cwd> -> prints window id
+  local ses=$1 wname=$2 cwd=$3 wid
+  if tmux has-session -t "=$ses" 2>/dev/null; then
+    wid=$(fm_backend_tmux_create_task "$ses" "$wname" "$cwd") || return 1
+    [ -n "$wid" ] || return 1
+    printf '%s\n' "$wid"
+    return
+  fi
+  if tmux list-windows -t "=$ses" -F '#{window_name}' 2>/dev/null | grep -qx "$wname"; then
+    echo "error: window $ses:$wname already exists" >&2
+    return 1
+  fi
+  wid=$(tmux new-session -dP -F '#{window_id}' -s "$ses" -n "$wname" -c "$cwd") || return 1
+  [ -n "$wid" ] || return 1
+  fm_backend_tmux_pin_window_name "$wid"
   printf '%s\n' "$wid"
 }
 
