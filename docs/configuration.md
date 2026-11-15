@@ -726,7 +726,7 @@ Its header owns the exact stall rules, the ladder, the caps, and the record form
 
 Before any ladder, a pass reads the captain-paused set once: `state/<id>.stopped` markers (owned by [`bin/fm-leave-stopped.sh`](../bin/fm-leave-stopped.sh)) and backlog items the captain holds.
 A paused lane is skipped by every pass and every lane ladder below - no re-ring, no relaunch, no connection action, no nudge, no backlog orphan report, and no wake - and it accrues no relaunch or stall history.
-If the held set cannot be read because the backlog backend is manual, the backlog tool is missing, or the read fails, the pass fails closed: it relaunches, steers, interrupts, and pages no lane, queues one `watchdog-held-unavailable` check wake naming the reason, and preserves its previous task and backlog history for a later readable pass.
+If the held set cannot be read because the backlog backend is manual, the backlog tool is missing, or the read fails, the pass fails closed: it relaunches, steers, interrupts, and pages no lane, queues at most one pending `watchdog-held-unavailable` check wake naming the reason, and preserves its previous task and backlog history for a later readable pass.
 A dry run queues nothing even on that path.
 
 A pass does six things in order.

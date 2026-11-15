@@ -27,6 +27,10 @@
 #     no declared-wait recheck, in normal and away mode alike. Its status log is
 #     still read by the signal path, because a line the task appends is a real
 #     state change.
+#   - bin/fm-watchdog-worker.sh skips the task before every lane ladder: no
+#     re-ring, no relaunch, no connection action, no nudge, and no wake, so its
+#     timer never restarts a worker the captain ordered left stopped and never
+#     spends the relaunch budget on it.
 #   - Nothing else changes: the record, worktree, endpoint, and backlog item
 #     stay exactly as they were. This is not teardown, not exit, not a hold.
 #     bin/fm-teardown.sh removes the marker with the rest of the task's state.
