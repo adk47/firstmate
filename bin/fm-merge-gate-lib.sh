@@ -27,13 +27,14 @@
 #
 # The gate reads through gh, because the verdict has to come from the forge's
 # own per-commit check rollup rather than from anything firstmate recorded.
-# A GitLab merge request is not gated here: bin/fm-pr-merge.sh's own live
-# pre-merge guards already require a successful pipeline at the exact head.
+# Every forge merge passes through the gate. A forge with no qa-review verdict
+# source, such as GitLab today, refuses with that exact reason; the caller's
+# recorded --override-gate <reason> is the only way past it.
 #
 # Usage (sourced): fm_merge_gate <owner/repo> <pr-number> <expected-head> \
-#                    [--recorded-head <sha>]
+#                    [--recorded-head <sha>] [--forge <github|gitlab>]
 # Usage (direct):  fm-merge-gate-lib.sh <owner/repo> <pr-number> <expected-head> \
-#                    [--recorded-head <sha>] [--check-only]
+#                    [--recorded-head <sha>] [--forge <github|gitlab>] [--check-only]
 # The direct form is the audit entry point; it never merges anything.
 # --check-only evaluates the verdict and checks even on a pull request that is
 # already merged, which is what a backfill over past merges needs: the ordinary
@@ -144,7 +145,7 @@ fm_merge_gate_conclusion_rank() {
     printf '3'
   else
     case "$1" in
-      SUCCESS|NEUTRAL|SKIPPED) printf '1' ;;
+      SUCCESS) printf '1' ;;
       *) printf '2' ;;
     esac
   fi
@@ -266,7 +267,7 @@ ROWS
 # Returns 0 when the merge is authorized, 1 when it is refused, 2 on a usage
 # error. Every refusal is one plain-English line naming the exact reason.
 fm_merge_gate() {
-  local repo='' number='' expected='' recorded=''
+  local repo='' number='' expected='' recorded='' forge=github
   local arg
   local refusals='' allowed='' qa='' qa_required=0 qa_rc=0
   local line name conclusion twin='' check_only=false
@@ -297,6 +298,15 @@ fm_merge_gate() {
         check_only=true
         shift
         ;;
+      --forge)
+        [ "$#" -ge 2 ] || { echo "error: --forge needs a forge name" >&2; return 2; }
+        forge=$2
+        shift 2
+        ;;
+      --forge=*)
+        forge=${arg#--forge=}
+        shift
+        ;;
       *)
         echo "error: unknown merge gate option: $arg" >&2
         return 2
@@ -310,6 +320,16 @@ fm_merge_gate() {
   esac
   case "$number" in
     ''|*[!0-9]*) echo "error: merge gate needs a numeric pull request number" >&2; return 2 ;;
+  esac
+
+  case "$forge" in
+    github) ;;
+    gitlab)
+      printf 'error: refusing to merge %s#%s: no qa-review verdict available on this forge\n' \
+        "$repo" "$number" >&2
+      return 1
+      ;;
+    *) echo "error: merge gate needs --forge github or --forge gitlab" >&2; return 2 ;;
   esac
 
   if ! fm_merge_gate_read_pr "$repo" "$number"; then

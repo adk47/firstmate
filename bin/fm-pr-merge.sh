@@ -53,16 +53,18 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
-# Before any GitHub merge, bin/fm-merge-gate-lib.sh decides whether the pull
+# Before any forge merge, bin/fm-merge-gate-lib.sh decides whether the pull
 # request's review verdict and check state authorize it: a qa-review verdict on
 # the current head that is not success, a head that moved since the verdict, any
 # red check other than the adk47 self-authorship credit-approval-guard, and a
 # master/main twin whose develop/beta counterpart is unmerged all refuse. A
-# verdict that cannot be read refuses too, because silence is not a GO. The
-# gate's own header owns the full rule set. --override-gate <reason> is the only
-# escape, and it records the reason, the operator, and the timestamp in the
-# task's metadata before the merge is attempted; it exists for the captain's
-# explicit "merge it anyway" word, never as a routine flag.
+# verdict that cannot be read refuses too, because silence is not a GO. A forge
+# with no qa-review verdict source, such as GitLab today, refuses for that
+# reason; its live pipeline guard below stays an additional check, never a
+# substitute. The gate's own header owns the full rule set. --override-gate
+# <reason> is the only escape, and it records the reason, the operator, and the
+# timestamp in the task's metadata before the merge is attempted; it exists for
+# the captain's explicit "merge it anyway" word, never as a routine flag.
 #
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
@@ -704,16 +706,14 @@ gitlab_confirm_merged() {
 # The gate runs before any metadata is rewritten, so the recorded head it
 # compares against is the one the verdict was read on. A refusal here is a
 # refusal of the whole command: nothing is recorded and no merge is attempted.
-if [ "$PROVIDER" = github ]; then
-  if [ -n "$OVERRIDE_REASON" ]; then
-    printf 'warning: the merge gate is overridden for %s: %s\n' "$URL" "$OVERRIDE_REASON" >&2
-    record_merge_gate_override
-  else
-    gate_args=()
-    [ -z "$RECORDED_HEAD" ] || gate_args+=(--recorded-head "$RECORDED_HEAD")
-    fm_merge_gate "$PR_OWNER/$PR_REPO" "$PR_NUMBER" "$(caller_match_head_commit "$@")" \
-      ${gate_args[@]+"${gate_args[@]}"} || exit 1
-  fi
+if [ -n "$OVERRIDE_REASON" ]; then
+  printf 'warning: the merge gate is overridden for %s: %s\n' "$URL" "$OVERRIDE_REASON" >&2
+  record_merge_gate_override
+else
+  gate_args=(--forge "$PROVIDER")
+  [ -z "$RECORDED_HEAD" ] || gate_args+=(--recorded-head "$RECORDED_HEAD")
+  fm_merge_gate "$PR_OWNER/$PR_REPO" "$PR_NUMBER" "$(caller_match_head_commit "$@")" \
+    ${gate_args[@]+"${gate_args[@]}"} || exit 1
 fi
 
 # Record before either forge call. This arms the merge poll without claiming a

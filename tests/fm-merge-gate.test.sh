@@ -35,6 +35,7 @@
 #   (t) an unrelated issue reference is not read as a twin
 #   (u) a null pending qa-review conclusion is not overwritten by a success
 #   (v) prose around develop/beta is not read as a twin reference
+#   (w) a skipped or neutral duplicate cannot outrank an earlier success
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -557,6 +558,27 @@ test_gate_ignores_develop_beta_prose() {
   pass "prose around develop/beta is not read as a twin reference"
 }
 
+# --- (w) a skipped or neutral duplicate cannot outrank a success -----------
+
+test_gate_skipped_or_neutral_qa_outranks_success() {
+  local case_dir rc conclusion
+  for conclusion in SKIPPED NEUTRAL; do
+    case_dir=$(make_case "duplicate-qa-$conclusion")
+    write_workflows "$case_dir" qa-review.yml
+    write_pr_view "$case_dir" checks="qa-review:SUCCESS,qa-review:$conclusion"
+
+    set +e
+    run_refusal_via_merge "$case_dir" -- --squash
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "a later $conclusion duplicate must outrank an earlier success"
+    assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
+    assert_contains "$(cat "$case_dir/err")" "qa-review verdict on head $HEAD is $conclusion" \
+      "the refusal must report $conclusion, not the earlier success"
+  done
+  pass "a skipped or neutral duplicate cannot outrank an earlier success"
+}
+
 # A backfill over past merges needs the verdict of a pull request that already
 # merged, so --check-only evaluates it instead of short-circuiting.
 test_gate_check_only_audits_a_merged_pull_request() {
@@ -814,6 +836,7 @@ test_gate_duplicate_qa_reports_worst_conclusion
 test_gate_ignores_unrelated_issue_reference
 test_gate_null_pending_qa_before_success_refuses
 test_gate_ignores_develop_beta_prose
+test_gate_skipped_or_neutral_qa_outranks_success
 test_pr_merge_refuses_before_merge_call
 test_pr_merge_override_records_and_merges
 test_go_queue_refuses_row_and_continues

@@ -15,7 +15,8 @@
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL,
 #       including a bundled short-option cluster that carries -R
-#   (i) a GitLab MR URL resolves and merges through glab instead of erroring
+#   (i) a GitLab MR URL resolves and merges through glab when the gate is
+#       explicitly overridden, and refuses without that override
 #   (j) glab is addressed by the host from the URL, never an assumed one
 #   (k) no merge method is imposed on GitLab, so the project's own one applies
 #   (l) each pre-merge condition refuses independently, and all of them report
@@ -418,6 +419,16 @@ run_pr_merge() {
     return 1
   fi
   return "$rc"
+}
+
+# Existing GitLab cases exercise the pre-merge pipeline guards, which sit behind
+# the gate. Supplying a recorded override reaches those guards while the gate
+# itself is covered by its own tests below.
+run_gitlab_merge_with_override() {
+  local case_dir=$1 id=$2 url=$3
+  shift 3
+  run_pr_merge "$case_dir" "$id" "$url" \
+    --override-gate "test: exercise the GitLab pre-merge guard" "$@"
 }
 
 write_github_outcome() {
@@ -1572,7 +1583,7 @@ test_gitlab_url_resolves_and_merges() {
   case_dir=$(make_gitlab_case gitlab-merges)
 
   set +e
-  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+  run_gitlab_merge_with_override "$case_dir" task-x1 "$MR_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -1591,6 +1602,57 @@ test_gitlab_url_resolves_and_merges() {
   pass "fm-pr-merge merges a GitLab merge request through glab instead of refusing it"
 }
 
+test_gitlab_gate_refuses_without_qa_source() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-gate-refuses)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-gate-refuses: the gate must refuse a forge with no qa-review source"
+  assert_grep "error: refusing to merge" "$case_dir/stderr" \
+    "gitlab-gate-refuses: the refusal did not name the merge request"
+  assert_grep "no qa-review verdict available on this forge" \
+    "$case_dir/stderr" "gitlab-gate-refuses: the refusal did not name the missing verdict source"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-gate-refuses: a merge was attempted without a qa-review verdict"
+  assert_no_grep "pr=$MR_URL" "$case_dir/state/task-x1.meta" \
+    "gitlab-gate-refuses: the merge request was recorded despite the refusal"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "gitlab-gate-refuses: the refusal armed a merge poll"
+  pass "the gate refuses a GitLab merge when no qa-review verdict source exists"
+}
+
+test_gitlab_gate_override_records_and_merges() {
+  local case_dir rc meta merge_line
+  case_dir=$(make_gitlab_case gitlab-gate-override)
+  meta=$case_dir/state/task-x1.meta
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    --override-gate "captain said merge it anyway" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitlab-gate-override: a recorded override should authorize the merge"
+  assert_grep "merge_gate_override=captain said merge it anyway" "$meta" \
+    "gitlab-gate-override: the override reason was not recorded"
+  assert_grep "merge_gate_override_by=" "$meta" \
+    "gitlab-gate-override: the override operator was not recorded"
+  assert_grep "merge_gate_override_at=" "$meta" \
+    "gitlab-gate-override: the override time was not recorded"
+  assert_grep "the merge gate is overridden for $MR_URL" "$case_dir/stderr" \
+    "gitlab-gate-override: the override was not announced"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes" ] \
+    || fail "gitlab-gate-override: unexpected merge invocation: '$merge_line'"
+  pass "an explicit recorded override authorizes a GitLab merge through the gate"
+}
+
 test_gitlab_host_comes_from_the_url() {
   local case_dir rc host path project_url url
   host=gl.self-hosted.example
@@ -1600,7 +1662,7 @@ test_gitlab_host_comes_from_the_url() {
   case_dir=$(make_gitlab_case gitlab-host-from-url)
 
   set +e
-  run_pr_merge "$case_dir" task-x1 "$url" \
+  run_gitlab_merge_with_override "$case_dir" task-x1 "$url" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -1622,7 +1684,7 @@ test_gitlab_imposes_no_merge_method() {
   case_dir=$(make_gitlab_case gitlab-no-method)
 
   set +e
-  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+  run_gitlab_merge_with_override "$case_dir" task-x1 "$MR_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -1642,7 +1704,7 @@ test_gitlab_extra_args_forwarded() {
   case_dir=$(make_gitlab_case gitlab-extra-args)
 
   set +e
-  run_pr_merge "$case_dir" task-x1 "$MR_URL" -- --remove-source-branch \
+  run_gitlab_merge_with_override "$case_dir" task-x1 "$MR_URL" -- --remove-source-branch \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -1660,7 +1722,7 @@ test_gitlab_merge_failure_propagates() {
   : > "$case_dir/glab-merge-fails"
 
   set +e
-  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+  run_gitlab_merge_with_override "$case_dir" task-x1 "$MR_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -1692,7 +1754,7 @@ test_gitlab_each_condition_refuses_independently() {
     case_dir=$(make_gitlab_case "gitlab-refuse-$name" "${spec%%|*}")
 
     set +e
-    run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    run_gitlab_merge_with_override "$case_dir" task-x1 "$MR_URL" \
       > "$case_dir/stdout" 2> "$case_dir/stderr"
     rc=$?
     set -e
@@ -1719,7 +1781,7 @@ test_gitlab_reports_every_failing_condition() {
     pipeline_status=failed "pipeline_sha=$MR_STALE_HEAD")
 
   set +e
-  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+  run_gitlab_merge_with_override "$case_dir" task-x1 "$MR_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -1748,7 +1810,7 @@ test_gitlab_stale_recorded_head_is_reported() {
   printf 'pr_head=%s\n' "$MR_STALE_HEAD" >> "$case_dir/state/task-x1.meta"
 
   set +e
-  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+  run_gitlab_merge_with_override "$case_dir" task-x1 "$MR_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -1779,7 +1841,7 @@ test_gitlab_unreadable_state_refuses() {
     esac
 
     set +e
-    run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    run_gitlab_merge_with_override "$case_dir" task-x1 "$MR_URL" \
       > "$case_dir/stdout" 2> "$case_dir/stderr"
     rc=$?
     set -e
@@ -1798,7 +1860,7 @@ test_gitlab_invalid_head_refuses() {
   case_dir=$(make_gitlab_case gitlab-invalid-head head=not-a-sha)
 
   set +e
-  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+  run_gitlab_merge_with_override "$case_dir" task-x1 "$MR_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -1988,7 +2050,7 @@ test_gitlab_refusal_reports_nothing() {
   printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' >"$case_dir/home/.fm-secondmate-parent"
 
   set +e
-  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+  FM_TEST_HOME="$case_dir/home" run_gitlab_merge_with_override "$case_dir" task-x1 "$MR_URL" \
     >"$case_dir/stdout" 2>"$case_dir/stderr"
   rc=$?
   set -e
@@ -2009,7 +2071,7 @@ test_gitlab_merge_reports_upward() {
   printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' >"$case_dir/home/.fm-secondmate-parent"
   url=$MR_URL
 
-  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+  FM_TEST_HOME="$case_dir/home" run_gitlab_merge_with_override "$case_dir" task-x1 "$url" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "gitlab-merge-reports: merge failed"
 
   assert_grep "done [key=merged-task-x1]: merged task-x1 $url" \
@@ -2024,7 +2086,7 @@ test_queued_gitlab_merge_leaves_the_poll_armed() {
   mkdir -p "$case_dir/home"
   : >"$case_dir/glab-stays-open"
 
-  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+  FM_TEST_HOME="$case_dir/home" run_gitlab_merge_with_override "$case_dir" task-x1 "$MR_URL" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" \
     || fail "queued-gitlab-merge: accepted merge command failed"
 
@@ -2221,6 +2283,8 @@ test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_github_still_forwards_sha_arg
 test_gitlab_url_resolves_and_merges
+test_gitlab_gate_refuses_without_qa_source
+test_gitlab_gate_override_records_and_merges
 test_gitlab_host_comes_from_the_url
 test_gitlab_imposes_no_merge_method
 test_gitlab_extra_args_forwarded
