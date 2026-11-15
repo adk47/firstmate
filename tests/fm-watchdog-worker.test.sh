@@ -976,13 +976,57 @@ test_a_refusal_does_not_outlive_the_endpoint_that_earned_it() {
     "a structural refusal was not escalated once"
   worker "$home" w1 alive
   tick "$home" "$((now + 120))" >/dev/null
-  assert_eq "$(jq -r '.tasks.w1.refusal' "$home/state/.watchdog-worker.json")" "" \
+  assert_eq "" "$(jq -r '.tasks.w1.refusal' "$home/state/.watchdog-worker.json")" \
     "a refusal survived the endpoint coming back"
   worker "$home" w1 dead
   tick "$home" "$((now + 240))" >/dev/null
   assert_eq "$(counter "$home" '^control .* relaunch')" "2" \
     "a later death inside the refusal window was never retried"
   pass "a refusal only suppresses relaunches while its own endpoint is unrecovered"
+}
+
+test_a_live_lane_keeps_the_refusal_its_stall_earned() {
+  local home now
+  home=$(make_home ladder-refused); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 alive
+  pane "$home" w1 busy 'a tool call that never returns'
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 1900))" >/dev/null
+  tick "$home" "$((now + 2600))" >/dev/null
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "1" \
+    "a live stalled lane never earned a refusal"
+  tick "$home" "$((now + 2700))" >/dev/null
+  tick "$home" "$((now + 2800))" >/dev/null
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "1" \
+    "a live lane re-attempted a refused relaunch on every pass"
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "1" \
+    "a live lane re-escalated a refusal it had already reported"
+  pass "a refusal survives the pass that earned it while the lane stays alive"
+}
+
+test_a_connection_relaunch_failure_is_not_charged_against_the_budget() {
+  local home now
+  home=$(make_home conn-transient); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 alive ship pi
+  pane "$home" w1 idle 'Error: Connection reset by peer'
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 700))" >/dev/null
+  tick "$home" "$((now + 710))" >/dev/null
+  tick "$home" "$((now + 720))" >/dev/null
+  tick "$home" "$((now + 730))" >/dev/null
+  assert_eq "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" "0" \
+    "a connection relaunch that never happened was charged against the hourly budget"
+  tick "$home" "$((now + 740))" >/dev/null
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "2" \
+    "a transient connection relaunch failure was not retried"
+  assert_eq "$(wakes "$home" | grep -c 'hourly relaunch budget')" "0" \
+    "relaunches that never happened were reported as a spent budget"
+  pass "a transient connection relaunch failure spends no budget and is retried"
 }
 
 test_a_transient_relaunch_failure_is_not_a_refusal() {
@@ -1024,6 +1068,7 @@ test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn() {
 test_a_refused_relaunch_spends_no_budget_and_escalates_once
 test_a_refused_relaunch_is_retried_only_after_its_window
 test_a_refusal_does_not_outlive_the_endpoint_that_earned_it
+test_a_live_lane_keeps_the_refusal_its_stall_earned
 test_a_transient_relaunch_failure_is_not_a_refusal
 test_a_structural_refusal_outside_the_old_phrase_list_spends_no_budget
 test_a_boot_transient_failure_keeps_the_lane_relaunch_history
@@ -1037,6 +1082,7 @@ test_a_dead_worker_comes_back_in_one_pass_with_no_wake
 test_an_unread_steer_is_interrupted_then_relaunched_once_each
 test_a_transient_inbox_relaunch_failure_is_not_announced_as_done
 test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model
+test_a_connection_relaunch_failure_is_not_charged_against_the_budget
 test_a_pi_lane_is_never_asked_to_move_to_a_model_it_cannot_reach
 test_a_review_seat_keeps_its_model_and_a_permanent_error_is_never_retried
 test_in_flight_backlog_items_without_a_record_are_reported_once

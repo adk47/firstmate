@@ -413,7 +413,7 @@ record_load() {
 # keeps empty fields intact; a tab would not, because IFS whitespace collapses.
 # Field order is the one task_load reads and the one the header documents:
 #   sig since stage stage_at rings relaunches steers woke
-#   istage istage_at ibase strikes refusal refusal_at
+#   istage istage_at ibase strikes refusal refusal_at refusal_state
 task_entry() {  # <id>
   jq -r --arg id "$1" '.[$id] // {} |
     [ (.sig // ""), (.since // 0), (.stage // 0), (.stage_at // 0),
@@ -421,7 +421,8 @@ task_entry() {  # <id>
       ((.steers // []) | join(",")),
       (if (.woke // false) then "true" else "false" end),
       (.istage // 0), (.istage_at // 0), (.ibase // ""),
-      ((.strikes // []) | join(",")), (.refusal // ""), (.refusal_at // 0) ]
+      ((.strikes // []) | join(",")), (.refusal // ""), (.refusal_at // 0),
+      (.refusal_state // "") ]
     | map(tostring) | join("\u001f")' "$WORK/tasks.json" 2>/dev/null
 }
 
@@ -432,7 +433,7 @@ task_entry() {  # <id>
 # clobbering each other's.
 task_load() {  # <id>
   IFS=$'\x1f' read -r sig since stage stage_at rings relaunches steers woke \
-    istage istage_at ibase strikes refusal refusal_at <<EOF
+    istage istage_at ibase strikes refusal refusal_at refusal_state <<EOF
 $(task_entry "$1")
 EOF
   case "$since" in ''|*[!0-9]*) since=0 ;; esac
@@ -446,7 +447,7 @@ EOF
 
 # task_store <id>: persist the caller's current loop values. One write path for
 # every rung, so adding a field can never leave one branch storing the old
-# shape. Reads the same fifteen locals task_load fills.
+# shape. Reads the same sixteen locals task_load fills.
 task_store() {  # <id>
   [ "$DRY_RUN" = 1 ] && return 0
   jq -n \
@@ -460,10 +461,12 @@ task_store() {  # <id>
     --arg ibase "${ibase-}" \
     --argjson strikes "$(csv_to_json "${strikes-}")" \
     --arg refusal "${refusal-}" --argjson refusal_at "${refusal_at:-0}" \
+    --arg refusal_state "${refusal_state-}" \
     '{ key: $id, value: { sig: $sig, since: $since, stage: $stage, stage_at: $stage_at,
        rings: $rings, relaunches: $relaunches, steers: $steers, woke: $woke,
        istage: $istage, istage_at: $istage_at, ibase: $ibase, strikes: $strikes,
-       refusal: $refusal, refusal_at: $refusal_at } }' \
+       refusal: $refusal, refusal_at: $refusal_at,
+       refusal_state: $refusal_state } }' \
     > "$WORK/entry.$1.json" 2>/dev/null || true
 }
 
@@ -475,7 +478,8 @@ task_reset() {  # <id> <relaunches>
   jq -n --arg id "$1" --argjson relaunches "$(csv_to_json "$2")" \
     '{ key: $id, value: { sig: "", since: 0, stage: 0, stage_at: 0, rings: [],
        relaunches: $relaunches, steers: [], woke: false, istage: 0, istage_at: 0,
-       ibase: "", strikes: [], refusal: "", refusal_at: 0 } }' \
+       ibase: "", strikes: [], refusal: "", refusal_at: 0,
+       refusal_state: "" } }' \
     > "$WORK/entry.$1.json" 2>/dev/null || true
 }
 
@@ -666,6 +670,7 @@ task_relaunch_refused() {  # <id> <state> [detail]
   local id=$1 state=$2 detail=${3-} reason=$RELAUNCH_REFUSAL tail
   refusal=$reason
   refusal_at=$(now_epoch)
+  refusal_state=$state
   tail="No relaunch budget was spent and it will not retry for $((REFUSAL_RETRY_SECS / 3600))h; the endpoint needs a hand"
   [ -z "$detail" ] || tail=$detail
   printf 'watchdog: %s cannot be relaunched on its endpoint (%s); not spending its relaunch budget, asking firstmate\n' \
@@ -682,8 +687,22 @@ task_relaunch_refused() {  # <id> <state> [detail]
 # lane is still inside its retry window, after escalating it once to firstmate.
 # Reads and updates the CALLER's refusal/refusal_at/woke locals, so every rung
 # in every pass honours the same window instead of re-earning the same refusal.
+# task_refusal_drop_stale <state>: a refusal is a fact about the endpoint that
+# earned it, so once the endpoint reads differently (a hand relaunch brought it
+# back, or it died) the record says nothing about this state and must not
+# suppress the rung. Clears the CALLER's refusal locals.
+task_refusal_drop_stale() {  # <state>
+  [ -n "${refusal-}" ] || return 0
+  [ "${refusal_state-}" = "$1" ] && return 0
+  refusal=''
+  refusal_at=0
+  refusal_state=''
+  woke=false
+}
+
 task_refusal_gate() {  # <id> <state>
   local id=$1 state=$2
+  task_refusal_drop_stale "$state"
   [ -n "${refusal-}" ] || return 1
   [ $(( $(now_epoch) - refusal_at )) -lt "$REFUSAL_RETRY_SECS" ] || return 1
   if [ "$woke" != true ]; then
@@ -885,7 +904,7 @@ chair_ensure() {
 boot_pass() {  # <boot>
   local boot=$1 id meta kind state ok=0 tried=0 deadline chair result rc
   local sig since stage stage_at rings relaunches steers strikes
-  local istage istage_at ibase refusal='' refusal_at=0 woke=false
+  local istage istage_at ibase refusal='' refusal_at=0 refusal_state='' woke=false
   deadline=$(( $(now_epoch) + BOOT_BUDGET_SECS ))
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -1047,7 +1066,7 @@ conn_error_shape() {  # <text>
 task_pass() {
   local meta id kind window now backend target harness state text busy prev_sig
   local since stage stage_at rings relaunches steers woke status_mtime changed stage_age
-  local sig='' istage istage_at ibase strikes refusal refusal_at
+  local sig='' istage istage_at ibase strikes refusal refusal_at refusal_state=''
   local ring_count relaunch_count steer_count minutes conn_err strike_count rc
   now=$(now_epoch)
   for meta in "$STATE"/*.meta; do
@@ -1087,14 +1106,9 @@ task_pass() {
     fi
 
     state=$(task_agent_state "$id" "$meta")
+    task_refusal_drop_stale "$state"
     case "$state" in
-      alive)
-        if [ -n "${refusal-}" ]; then
-          refusal=''
-          refusal_at=0
-          woke=false
-        fi
-        ;;
+      alive) ;;
       dead|missing)
         if [ "$DRY_RUN" = 1 ]; then
           printf '%s\t%s\tn/a\t-\t%d\t%d\twould relaunch (endpoint %s)\n' \
@@ -1210,6 +1224,10 @@ task_pass() {
           task_conn_relaunch "$id" "$kind" "$((changed / 60))" "$strike_count" || rc=$?
           if [ "$rc" -eq 2 ]; then
             task_relaunch_refused "$id" "$state"
+            continue
+          fi
+          if [ "$rc" -ne 0 ]; then
+            task_store "$id"
             continue
           fi
           strikes=$(csv_append "$strikes" "$now")
@@ -1465,7 +1483,7 @@ task_drain_relaunch() {  # <id> <why>
 inbox_pass() {
   local meta id kind backend target state oldest base age
   local sig since stage stage_at rings relaunches steers woke istage istage_at ibase strikes
-  local refusal refusal_at rc
+  local refusal refusal_at refusal_state rc
   local mins
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -1488,6 +1506,7 @@ inbox_pass() {
     [ -n "$target" ] || continue
 
     task_load "$id"
+    task_refusal_drop_stale "$state"
     # One ladder episode per message: a new oldest record starts again at the
     # bottom, and a rung already taken is never taken twice.
     if [ "$ibase" != "$base" ]; then
