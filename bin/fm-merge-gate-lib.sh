@@ -16,7 +16,11 @@
 #     named "PR must be raised via no-mistakes" on the current head;
 #   - the repository is in neither declared class, so QA coverage is unknown;
 #   - any check on the current head is red, except credit-approval-guard when
-#     the pull request author is adk47 (the by-design self-authorship check);
+#     the pull request author is adk47 (the by-design self-authorship check).
+#     A check name that ran more than once is read worst-wins, except that a
+#     CANCELLED run is dropped once any non-cancelled run of that name exists,
+#     and within one workflowName only the newest dated run counts; runs with
+#     no workflow name or no date keep worst-wins;
 #   - the pull request is a master/main twin in a declared twin repository whose
 #     develop/beta counterpart is not merged. The twin rule is GitHub-only and
 #     applies to core-backend and web-credits-next by default; elsewhere it is
