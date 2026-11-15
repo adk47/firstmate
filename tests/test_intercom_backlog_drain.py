@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -1504,6 +1505,174 @@ class WritePathTests(unittest.TestCase):
         self.assertEqual(drain.LINES["stale-close"],
                          "Your last message here was answered and the conversation has been quiet since, so we are "
                          "closing it. If you still need help, reply here at any time and it will open again.")
+
+
+TRIAGE = os.path.join(ROOT, "scripts", "intercom-backlog", "triage.py")
+tspec = importlib.util.spec_from_file_location("ib_triage", TRIAGE)
+triage = importlib.util.module_from_spec(tspec)
+sys.modules["ib_triage"] = triage
+tspec.loader.exec_module(triage)
+
+
+class TriageIdentityTests(unittest.TestCase):
+    """Who the contact is comes from credit_review/identity_resolver.py, through triage.main() itself.
+
+    The replica is a fake that answers each statement by what it reads; the verify ledger is a real,
+    empty SQLite file. On 2026-11-14 triage's own users-only matcher called 20 mobile claimants
+    "no account" and the drain told them to write from the address they were already signed in with."""
+
+    PROFILE = "0f0e7a52-9b1c-4c6e-8a55-3d2f6b1c9a10"       # what the mobile app logs into Intercom with
+
+    def run_triage(self, census_rows, *, users=(), claims=(), requests=(), claim_counts=(), users_by_id=()):
+        seen = []
+
+        def replica(sql, timeout=900):
+            seen.append(sql)
+            if "FROM postgresql_core.public.users" in sql:
+                if "neptuneprofessionalid" in sql:
+                    return [list(r) for r in users]
+                asked = sql.split("users WHERE id IN (", 1)[1].split(")", 1)[0].split(",")
+                have = {str(x) for x in users_by_id}
+                return [[i.strip()] for i in asked if i.strip() in have]
+            if "FROM postgresql_core.public.claiming WHERE CAST(profileid" in sql:
+                return [list(r) for r in claims]
+            if "team_users" in sql:
+                return []
+            if "credit_requests" in sql:
+                return [list(r) for r in requests]
+            if "public.claiming" in sql:
+                return [list(r) for r in claim_counts]
+            raise AssertionError("a replica statement this test does not know: " + sql[:90])
+
+        tmp = tempfile.mkdtemp()
+        src = os.path.join(tmp, "census.jsonl")
+        with open(src, "w") as f:
+            for r in census_rows:
+                f.write(json.dumps(r) + "\n")
+        ledger = os.path.join(tmp, "ledger.sqlite3")
+        db = sqlite3.connect(ledger)
+        db.execute("create table verify_messages (account_id text, day text, status text)")
+        db.commit()
+        db.close()
+        old = triage.trino, triage.LEDGER, sys.argv
+        triage.trino, triage.LEDGER, sys.argv = replica, ledger, ["triage.py", src]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                triage.main()
+        finally:
+            triage.trino, triage.LEDGER, sys.argv = old
+        with open(src.replace(".jsonl", ".triage.jsonl")) as f:
+            out = [json.loads(l) for l in f]
+        return {str(r["id"]): r for r in out}, seen
+
+    def contact(self, cid, external_id, topic="credit"):
+        return {"id": cid, "external_id": external_id, "topic": topic, "band": "30-90d"}
+
+    def test_a_mobile_contact_whose_intercom_id_is_a_claimed_profile_resolves_to_its_account(self):
+        # no users row carries the profile id (it is not a professional id or an Auth0 subject): the only
+        # tie is the account's own PROCESSED claim on that profile
+        got, _seen = self.run_triage(
+            [self.contact("1", self.PROFILE)],
+            claims=[(self.PROFILE, "77", "processed")],
+            requests=[("77", "unverified", "0", "2")])
+        row = got["1"]
+        self.assertEqual((row["user_id"], row["matched_by"]), ("77", "presented_profile"))
+        self.assertEqual(row["action"], "gate-team-review")
+        self.assertEqual(row["credits"]["pending"], 2)
+
+    def test_that_contact_is_not_sent_the_no_account_line(self):
+        got, _seen = self.run_triage(
+            [self.contact("1", self.PROFILE)],
+            claims=[(self.PROFILE, "77", "processed")],
+            requests=[("77", "approved", "0", "3")])
+        thread = drain.read_thread(conv("1"))
+        listed, klass, line, _mode, _basis = drain.classify(got["1"], thread, facts(), NOW)
+        self.assertEqual((listed, klass, line), ("send", "credit_all_decided", "credits-approved"))
+
+    def test_a_represented_profile_resolves_too(self):
+        got, _seen = self.run_triage(
+            [self.contact("1", self.PROFILE)],
+            users=[("77", "pro-77", "auth0|abc", self.PROFILE)])
+        self.assertEqual((got["1"]["user_id"], got["1"]["matched_by"]), ("77", "presented_profile"))
+
+    def test_a_web_contact_still_resolves_by_professional_id_and_auth0_subject(self):
+        got, _seen = self.run_triage(
+            [self.contact("1", "pro-77"), self.contact("2", "abc")],
+            users=[("77", "pro-77", "auth0|zzz", ""), ("78", "pro-78", "auth0|abc", "")])
+        self.assertEqual((got["1"]["user_id"], got["1"]["matched_by"]), ("77", "professional_id"))
+        self.assertEqual((got["2"]["user_id"], got["2"]["matched_by"]), ("78", "auth0_subject"))
+
+    def test_a_pending_claim_on_the_profile_confers_nothing(self):
+        got, _seen = self.run_triage(
+            [self.contact("1", self.PROFILE)],
+            claims=[(self.PROFILE, "77", "pending")])
+        self.assertEqual((got["1"]["user_id"], got["1"]["action"]), (None, "no-identity"))
+        self.assertEqual(got["1"]["identity_why"], "no Muso account owns this external_id")
+
+    def test_a_profile_two_accounts_hold_is_ambiguous_never_one_of_them(self):
+        got, _seen = self.run_triage(
+            [self.contact("1", self.PROFILE)],
+            claims=[(self.PROFILE, "77", "processed"), (self.PROFILE, "78", "processed")])
+        self.assertEqual((got["1"]["user_id"], got["1"]["action"]), (None, "ambiguous-identity"))
+
+    def test_another_accounts_reverted_claim_refuses_the_match(self):
+        got, _seen = self.run_triage(
+            [self.contact("1", self.PROFILE)],
+            claims=[(self.PROFILE, "77", "processed"), (self.PROFILE, "78", "reverted")])
+        self.assertEqual((got["1"]["user_id"], got["1"]["action"]), (None, "ambiguous-identity"))
+        self.assertIn("reverted", got["1"]["identity_why"])
+
+    def test_a_contact_with_no_external_id_is_no_identity(self):
+        got, _seen = self.run_triage([self.contact("1", "")])
+        self.assertEqual((got["1"]["user_id"], got["1"]["action"]), (None, "no-identity"))
+
+    def test_a_bare_account_number_still_resolves_to_that_account(self):
+        # the users.id fallback: the resolver owns nothing here, and users 77 is the contact's own row
+        got, _seen = self.run_triage(
+            [self.contact("1", "77")],
+            users=[("77", "pro-77", "auth0|abc", "")],
+            users_by_id=["77"],
+            requests=[("77", "unverified", "0", "2")])
+        row = got["1"]
+        self.assertEqual((row["user_id"], row["matched_by"]), ("77", "users_id"))
+        self.assertEqual(row["identity_why"], "")
+        self.assertEqual(row["action"], "gate-team-review")
+        self.assertEqual(row["credits"]["pending"], 2)
+
+    def test_the_resolver_wins_over_the_bare_account_number(self):
+        # "77" is BOTH a profile account 77 holds a processed claim on and the users.id of account 99
+        got, _seen = self.run_triage(
+            [self.contact("1", "77")],
+            users=[("99", "pro-99", "auth0|xyz", "")],
+            claims=[("77", "77", "processed")],
+            users_by_id=["77", "99"],
+            requests=[("77", "unverified", "0", "1"), ("99", "approved", "0", "4")])
+        row = got["1"]
+        self.assertEqual((row["user_id"], row["matched_by"]), ("77", "presented_profile"))
+        self.assertEqual(row["credits"]["pending"], 1)
+
+    def test_the_bare_account_number_never_overrides_a_refusal(self):
+        got, _seen = self.run_triage(
+            [self.contact("1", "77")],
+            users=[("77", "pro-77", "auth0|abc", "")],
+            claims=[("77", "77", "processed"), ("77", "78", "processed")],
+            users_by_id=["77"])
+        self.assertEqual((got["1"]["user_id"], got["1"]["action"]), (None, "ambiguous-identity"))
+        self.assertEqual(got["1"]["matched_by"], "")
+
+    def test_a_bare_account_number_no_users_row_has_is_no_identity(self):
+        got, _seen = self.run_triage(
+            [self.contact("1", "77")],
+            users=[("99", "pro-99", "auth0|xyz", "")],
+            users_by_id=["99"])
+        self.assertEqual((got["1"]["user_id"], got["1"]["action"]), (None, "no-identity"))
+        self.assertEqual(got["1"]["identity_why"], "no Muso account owns this external_id")
+
+    def test_a_legal_or_billing_topic_keeps_its_list_whoever_the_contact_is(self):
+        got, _seen = self.run_triage(
+            [self.contact("1", self.PROFILE, topic="legal"), self.contact("2", self.PROFILE, topic="billing")],
+            claims=[(self.PROFILE, "77", "processed")])
+        self.assertEqual((got["1"]["action"], got["2"]["action"]), ("captain-legal", "captain-billing"))
 
 
 if __name__ == "__main__":

@@ -25,13 +25,25 @@ approves are the bytes every person gets.
 
 | line | sent when |
 |---|---|
-| `no-account` | no single Muso account resolves from the contact |
+| `no-account` | no single Muso account resolves from the contact (the house resolver, then the bare account number; see below) |
 | `credits-approved` | the thread asks where a request stands, and every request on the account is approved |
 | `credits-decided` | as above, some approved and some declined |
 | `credits-declined` | as above, and every request on the account was declined |
 | `no-request` | as above, and the account has no credit request and no pending claim |
 | `late-reply` | the thread is about something else (a merge, a removal, stats) and has been quiet over 30 days |
 | `stale-close` | we wrote last, the customer has been silent over 90 days, no open promise: note, then close |
+
+**Who the contact is comes from `scripts/credit_review/identity_resolver.py`, in `triage.py`.** The contact's
+Intercom id resolves when it is, for exactly one account, the professional id, the Auth0 subject, or the
+presented profile (a processed claim, or the profile the account represents). The mobile app logs into Intercom
+with the presented profile. Until 2026-11-14 `triage.py` matched on the `users` table alone, so a mobile claimant
+read as `no-identity`: the first armed run sent the `no-account` line to 26 threads, and 20 of those contacts
+were signed in to an account the resolver finds. One recorded fallback follows the resolver: a contact whose
+Intercom id is a bare account number (`users.id`) is that account, so no contact that matched before reads as
+no account (firstmate 2026-11-14 21:42Z). The fallback is read only for an id the resolver leaves with no owner
+at all and never overrides a refusal, so an id two accounts own, or one another account's claim was reverted
+on, stays `ambiguous-identity`. `triage.py` writes `matched_by` (`users_id` when the fallback answered) and,
+for an unresolved contact, `identity_why` on every row. An email match is never an identity.
 
 **Send order is a recorded decision** (firstmate 2026-11-13 23:29Z): the threads whose customer already
 sent proof come first, because those customers did their part and are waiting on us; oldest first inside
