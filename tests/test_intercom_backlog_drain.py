@@ -205,6 +205,36 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(classify(census(), conv(), erasure=True)[:2], ("separate", "erasure"))
         self.assertEqual(classify(census(action=drain.overrides.HOLD_READ), conv())[:2], ("separate", "hand_read"))
 
+    def test_an_erasure_legal_or_refund_shape_is_separate_whatever_the_topic_says(self):
+        """2026-11-15: 11 threads the monitor shaped this way had the census topic "other" and were planned
+        for the late-reply line. The shape decides."""
+        for shape, klass in (("gdpr_erasure", "erasure"), ("legal_notice", "legal"), ("refund_dispute", "billing")):
+            for row in (census(action="draft-other", topic="other"), census(credits={"approved": 2}),
+                        census(uid="", action="no-identity"), census(credits={"unverified": 1})):
+                with self.subTest(shape=shape, action=row["action"], credits=row["credits"]):
+                    self.assertNotEqual(classify(row, conv(), shape="product_question")[0], "separate")
+                    got = classify(row, conv(), shape=shape)
+                    self.assertEqual(got[:3], ("separate", klass, ""))
+                    self.assertIn("monitor shape " + shape, got[4])
+
+    def test_a_separate_shape_is_never_closed_and_never_handed_back(self):
+        stale = conv(parts=[part("comment", "admin", BOT, NOW - 199 * DAY)])
+        recent = conv(created=NOW - 3 * DAY)
+        for shape in drain.SEPARATE_SHAPES:
+            with self.subTest(shape=shape):
+                self.assertEqual(classify(census(), stale)[0], "close")
+                self.assertEqual(classify(census(), stale, shape=shape)[:2], ("not_owed", "answered"))
+                self.assertEqual(classify(census(), stale, shape=shape, promises=["unbacked"])[0], "separate")
+                self.assertEqual(classify(census(topic="other"), recent, shape="product_question")[0], "caroline")
+                got = classify(census(topic="other"), recent, shape=shape)
+                self.assertEqual(got[0], "separate")
+                row = {"list": got[0], "class": got[1], "mode": got[3], "last_customer_at": NOW - 3 * DAY}
+                self.assertEqual(drain.handback_of(row, NOW), "")
+
+    def test_only_the_three_shapes_no_line_answers_are_separate(self):
+        for shape in drain.SEPARATE_SHAPES:
+            self.assertIn(shape, drain.monitor_rules.SHAPE_IDS)
+
     def test_an_erasure_request_outranks_automated_mail(self):
         self.assertEqual(classify(census(), conv(), erasure=True, shape="robot_mail")[0], "separate")
         self.assertEqual(classify(census(), conv(), shape="robot_mail")[:2], ("not_owed", "robot_mail"))
@@ -354,7 +384,7 @@ class Deps:
 
     def __init__(self, convs, *, statuses=None, claims=0, gate="approved", held_users=(), erasure=(), promises=None,
                  restricted=(), post_ok=True, close_state="closed", stage2="", assign_effect=True,
-                 staffed=()):
+                 staffed=(), shapes=None):
         self.stage2 = stage2
         self.staffed = tuple(staffed)
         self.assign_effect = assign_effect
@@ -366,6 +396,7 @@ class Deps:
         self.notes, self.notes_validated = [], []
         self.ledger = drain.verify_ledger.connect(":memory:")
         self._erasure, self._promises, self._restricted = set(erasure), promises or {}, frozenset(restricted)
+        self._shapes = shapes or {}
 
     now = staticmethod(lambda: NOW)
     sleep = staticmethod(lambda _s: None)
@@ -379,7 +410,7 @@ class Deps:
         return self._erasure
 
     def monitor(self):
-        return {}, self._promises
+        return self._shapes, self._promises
 
     def restricted(self):
         return self._restricted
@@ -696,6 +727,28 @@ class SendTests(unittest.TestCase):
         stats = self.run_send([plan_row(line="late-reply")], deps)
         self.assertEqual(deps.posts, [])
         self.assertIn("open erasure or access request on this thread", stats["skipped"])
+
+    def test_a_shape_the_monitor_reads_at_send_time_is_never_posted(self):
+        deps = Deps({"1": conv("1")}, shapes={"1": "refund_dispute"})
+        stats = self.run_send([plan_row(line="late-reply")], deps)
+        self.assertEqual((deps.posts, deps.validated, stats["sent"]), ([], [], 0))
+        self.assertEqual(stats["skipped"], {"monitor shape refund_dispute: outside this sender": 1})
+
+    def test_a_shape_read_at_send_time_closes_nothing_and_hands_nothing_back(self):
+        stale = conv("1", parts=[part("comment", "bot", OPERATOR, NOW - 199 * DAY)])
+        deps = Deps({"1": stale}, shapes={"1": "gdpr_erasure"})
+        stats = self.run_send([plan_row(line="stale-close", mode="close", conv_=stale)], deps)
+        self.assertEqual((deps.posts, deps.closed, stats["closed"]), ([], [], 0))
+        self.assertEqual(stats["skipped"], {"monitor shape gdpr_erasure: outside this sender": 1})
+        deps = Deps({"1": conv("1")}, shapes={"1": "legal_notice"})
+        stats = self.run_send([handback_row()], deps)
+        self.assertEqual((deps.notes, deps.notes_validated, stats["handback_posted"]), ([], [], 0))
+        self.assertEqual(stats["skipped"], {"monitor shape legal_notice: outside this sender": 1})
+
+    def test_a_shape_that_did_not_change_still_sends(self):
+        deps = Deps({"1": conv("1")}, shapes={"1": "proof_sent"})
+        stats = self.run_send([plan_row(line="late-reply")], deps)
+        self.assertEqual((stats["sent"], [p[0] for p in deps.posts], stats["skipped"]), (1, ["1"], {}))
 
     def test_one_message_per_user_per_day_and_one_reply_per_conversation_ever(self):
         convs = {"1": conv("1"), "2": conv("2")}

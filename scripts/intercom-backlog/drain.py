@@ -48,8 +48,10 @@ from the plan's copy). Unconfirmed is owed and it is visible; nothing re-posts a
 delivered without that reply.
 The plugin (conversation.admin.noted) sees that note, reads the thread live and runs Caroline's ordinary
 customer-message path. Older `owner` rows stay with their campaign. Billing, legal, erasure and hand-read
-threads are listed as `separate`. A thread held by a person or by the escalation queue, a restricted
-contact, and a user the fraud lens holds get nothing.
+threads are listed as `separate`, and so is any thread the monitor shapes as an erasure request, a legal
+notice or a refund dispute whatever its census topic says (SEPARATE_SHAPES; the shape is read again in the
+run). A thread held by a person or by the escalation queue, a restricted contact, and a user the fraud lens
+holds get nothing.
 
 WHO HOLDS THE THREAD (the monitor's ONE who-is-who rule: policies/caroline-shapes.json
 `monitor.non_human_admin_ids` / `staffed_team_ids`, falling back to caroline_monitor.rules). Caroline ->
@@ -138,6 +140,13 @@ LATE_REPLY_DAYS = 30            # a newer thread with a specific ask needs its o
 # Monitor shapes (scripts/caroline_monitor/rules.py) in which the customer asks where a request stands.
 STATUS_SHAPES = ("proof_sent", "request_status", "proof_what_needed", "credit_add_howto", "declined_why")
 STATUS_TOPICS = ("credit", "claim")   # census topics, used only when the monitor names no shape
+# Monitor shapes no fixed line here answers, and the `separate` class each one joins. The census topic is a
+# keyword read of the opening message; on 2026-11-15 it typed 11 threads the monitor shaped as an erasure
+# request, a legal notice or a refund dispute as "other", and the plan gave them the late-reply line
+# ("tell us what you need"). The shape decides, whatever the topic says (firstmate 2026-11-15 08:07Z).
+# Decision 2026-11-15 08:07Z: these rows are excluded from this sender by rule; erasure is owned by the GDPR
+# pipeline's DSAR ladder (docs/support/gdpr-pipeline.md), legal and refund by the legal / refund lane.
+SEPARATE_SHAPES = {"gdpr_erasure": "erasure", "legal_notice": "legal", "refund_dispute": "billing"}
 ESCALATION_TEAM = "7111842"     # openclaw-edge.json escalationTeamId: a thread escalated there is not ours
 HELD_HOLDERS = ("person", "escalation_team", "staffed_team")   # a person or a worked inbox
 ASSIGNABLE_HOLDERS = ("nobody", "bot")
@@ -376,27 +385,30 @@ def classify(row, thread, facts, now_s):
         special = action[len("captain-"):]
     elif action == overrides.HOLD_READ:
         special = "hand_read"
+    elif facts.get("shape") in SEPARATE_SHAPES:
+        special = SEPARATE_SHAPES[facts["shape"]]
+    label = special + (" (monitor shape " + facts["shape"] + ")" if facts.get("shape") in SEPARATE_SHAPES else "")
     held = thread["holder"] in HELD_HOLDERS
     ours_last = thread["last_word"] in OURS
     if thread["last_word"] not in OURS + ("customer",):
         return "not_owed", "nothing_said", "", "", "no message with words on the thread"
     if not ours_last:
         if special in ("erasure", "legal"):
-            return "separate", special, "", "", special + " thread: outside this sender"
+            return "separate", special, "", "", label + " thread: outside this sender"
         if facts.get("shape") in NOT_OWED_SHAPES:
             return "not_owed", facts["shape"], "", "", NOT_OWED_SHAPES[facts["shape"]]
         if special:
-            return "separate", special, "", "", special + " thread: outside this sender"
+            return "separate", special, "", "", label + " thread: outside this sender"
     else:
         silent_days = (now_s - thread["last_customer_at"]) / 86400 if thread["last_customer_at"] else 0
         if not facts.get("promises"):
             if silent_days <= STALE_DAYS:
                 return "not_owed", "answered", "", "", "we wrote last (" + thread["last_word"] + ")"
             if special or held or facts.get("restricted"):
-                return "not_owed", "answered", "", "", "we wrote last; " + (special or "held or restricted") + ": left open"
+                return "not_owed", "answered", "", "", "we wrote last; " + (label or "held or restricted") + ": left open"
             return "close", "stale", "stale-close", "close", f"we wrote last, customer silent {int(silent_days)} days, no open promise"
         if special:
-            return "separate", special, "", "", special + " thread with an open promise: outside this sender"
+            return "separate", special, "", "", label + " thread with an open promise: outside this sender"
     if held:
         return "held", thread["holder"], "", "", "held by " + thread["holder"].replace("_", " ")
     if facts.get("restricted"):
@@ -904,7 +916,7 @@ def run_send(plan, deps, *, apply=False, max_rows=MAX_PER_RUN, only=(), ledger_p
 
     try:
         erasure = deps.erasure()
-        _, promises = deps.monitor()
+        shape, promises = deps.monitor()
         restricted = deps.restricted()
         non_human, staffed = deps.who()
     except Unmeasured as e:
@@ -944,6 +956,9 @@ def run_send(plan, deps, *, apply=False, max_rows=MAX_PER_RUN, only=(), ledger_p
         if done >= max_rows:
             break
         cid = str(x.get("id") or "")
+        now_shape = shape.get(cid, "")
+        if now_shape in SEPARATE_SHAPES and (x.get("list") in ("send", "close") or x.get("handback")):
+            skip("monitor shape " + now_shape + ": outside this sender"); continue
         if x.get("list") not in ("send", "close"):
             if not x.get("handback"):
                 skip("not a hand-back this sender posts"); continue
