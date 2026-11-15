@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Doc-verify: never take a returned credit document at face value - SHADOW.
+"""Doc-verify: never take a returned credit document at face value.
 
 Design and operator view: docs/credit-verification/doc-verify.md.
 
@@ -19,6 +19,11 @@ Writes only its own store (/var/lib/hydra-credit-verify/doc-verify.sqlite);
 reads the H3 proof store read-only. No credit is changed and nothing is sent
 to anybody (no issuer email, no customer copy). Kill switch:
 /etc/hydra/credit-verify.disabled (shared with the H3 crons).
+
+This script records outcomes and has no apply mode. Whether a recorded
+outcome may approve a credit is decided in policy, not here: the
+`document_small_track` entry of policies/credit-approval-automation.json,
+read by credit_review/decide.py (`doc_class_active`).
 """
 
 from __future__ import annotations

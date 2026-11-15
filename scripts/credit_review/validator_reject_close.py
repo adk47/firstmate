@@ -9,8 +9,7 @@ reason_code 'reject_<rule>', only when ALL hold (any unreadable input = hold, ne
   - the account gate allows, the account is not watchlisted and holds no R8 account hold;
   - V9 shows no DSP anchor on the request (an anchored credit is the approve path's, never a close).
 Rows go to the decider ledger's append-only `decisions` in the coded-close shape (credit_review/coded_close.py),
-mode shadow (default) or apply. Apply additionally needs policies/credit-validator-reject-close.json apply_enabled
-with approved_by / approval_ref (r5 GO after the shadow read), no kill file, and emits executor reject trays citing
+mode shadow (default) or apply. Apply additionally needs policies/credit-validator-reject-close.json apply_enabled with approved_by / approval_ref (its own policy switch, currently off, plus the recorded approval, both fields unset; the r5 go-ahead it once waited on is retired), no kill file, and emits executor reject trays citing
 decisions:<id> - the L12 executor then closes ONE PUT per user per day, paid first (#1553), re-checking every rail.
 """
 from __future__ import annotations

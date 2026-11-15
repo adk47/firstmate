@@ -5,7 +5,9 @@
   credit-validator-reject-close.py --scope FILE --shadow             + append shadow rows to the decider ledger
   credit-validator-reject-close.py --scope FILE --apply --tray-dir D apply rows + executor reject trays (refused
                                                                       until policies/credit-validator-reject-close.json
-                                                                      enables apply after r5's GO on the shadow read)
+                                                                      enables apply with its recorded approved_by /
+                                                                      approval_ref: its own policy switch, currently
+                                                                      off; the r5 go-ahead is retired)
 
 FILE: any JSON with rows[].request_id (e.g. an old hand tray used ONLY as the scope list - every row is re-decided
 by this rule from fresh facts; nothing in the file decides anything). Read-only to core (Trino replica), the V9

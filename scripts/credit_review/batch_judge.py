@@ -13,7 +13,8 @@ phrases and the class rules - becomes one judge-only call on node-8:
   * the metered OpenRouter fallback runs only when the $0 ladder served nothing, and only through
     ``credit_review.decide.CappedJudge`` (the single owner of the per-run and $25/day caps);
   * the judge APPROVES NOTHING and writes nothing outside the llm ledger: this module has no core, admin or Intercom
-    path. Its verdict is the batch's signature of record; the tick (#1541, h2) applies only on ``may_apply``.
+    path. Its verdict is the batch's signature of record; the tick (#1541, h2) applies only what
+    ``applicable`` (the per-body rail) marks pass.
 
 Fail closed, everywhere -> the batch verdict is 'stop' (NO APPLY): a call that failed, timed out, was cut off
 (finish=length) or did not parse; a model outside ALLOWED_MODELS; an answer for another batch sha; an input body that

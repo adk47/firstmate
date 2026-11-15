@@ -1336,7 +1336,8 @@ class TrayAnchors(unittest.TestCase):
         p = subprocess.run([sys.executable, str(CLI), "anchors", "--tray", path, "--write"], capture_output=True,
                            text=True, env=env, timeout=60)
         self.assertEqual(p.returncode, 2)
-        self.assertIn("no server-side anchor endpoint", p.stderr)
+        self.assertIn("--write refused", p.stderr)
+        self.assertIn("credit-anchors-push.py", p.stderr)
 
 
 

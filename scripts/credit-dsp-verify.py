@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DSP evidence verifier for pending credit requests - SHADOW ONLY.
+"""DSP evidence verifier for pending credit requests.
 
 Design, rules and the process split: docs/credit-verification/dsp-evidence-verifier.md.
 
@@ -16,7 +16,8 @@ Subcommands:
                    server-side anchor record per row (kind dsp_anchor / dsp_label_line, schema dsp-anchor/1)
                    from the verifier's OWN standing verdict and packet, never from the tray; log every
                    record or refusal to dsp_anchors and print them as JSONL. Fable ruling
-                   l12-approvals-core = A. `--write` is refused: core has no anchor endpoint yet.
+                   l12-approvals-core = A. `--write` is refused: this subcommand only builds records, and
+                   posting them to core is credit-anchors-push.py.
   d5b              D5b (Fable 171): every request doc-verify reads `verified` gets a same-run capture (submit,
                    unless one is open or a final verdict is < 24 h old), verify reads it, and an APPROVE verdict
                    gets its dsp-anchor/1 record built locally. A document never upgrades a WAIT.
@@ -38,6 +39,10 @@ merge-candidates: only with --apply). Never writes to core, never messages anyon
 declines / links / merges: nothing it writes changes a credit or a profile. The only side effect
 outside the store is the fresh capture itself (a raw refresh, like any capture).
 Kill switches: /etc/hydra/credit-dsp-verify.disabled, and the shared /etc/hydra/credit-verify.disabled.
+
+This script records verdicts and has no approve mode. Whether a recorded APPROVE verdict may approve a credit
+is decided in policy, not here: policies/credit-approval-automation.json (the `fable-decider` approve scope the
+executor runs under, and this job's own `credit-dsp-verify-d5b` entry).
 """
 
 from __future__ import annotations
@@ -202,8 +207,8 @@ def cmd_anchors(args: argparse.Namespace) -> int:
         log(f"kill switch present at {k}; no anchors")
         return 0
     if args.write:
-        log("--write refused: core has no server-side anchor endpoint yet (Fable l12-approvals-core step 3: the "
-            "core PR for the anchor table / proof kind comes first). Records are built and logged locally only.")
+        log("--write refused: this subcommand builds anchor records and logs them locally only. Posting built "
+            "records to core (POST /admin/credit-anchors) is scripts/credit-anchors-push.py, per approve tray.")
         return 2
     _, out = runner.build_anchors(Store(args.store), json.loads(Path(args.tray).read_text(encoding="utf-8")), log=log)
     for o in out:
@@ -294,7 +299,7 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(fn=cmd_verify_packets)
     s = sub.add_parser("anchors")
     s.add_argument("--tray", required=True)
-    s.add_argument("--write", action="store_true", help="refused until core's anchor endpoint exists")
+    s.add_argument("--write", action="store_true", help="refused: records are posted to core by credit-anchors-push.py")
     s.set_defaults(fn=cmd_anchors)
     s = sub.add_parser("link-proposals", help="SHADOW profile-link proposals (decider ledger only, never core)")
     s.add_argument("--ledger", default=None, help="decider ledger (default $CREDIT_REVIEW_LEDGER)")

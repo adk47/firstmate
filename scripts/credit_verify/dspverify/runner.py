@@ -646,7 +646,8 @@ def build_anchors(store: Store, tray: dict[str, Any], *, now: datetime | None = 
                   log: Callable[[str], None] = lambda m: None) -> tuple[Stats, list[dict[str, Any]]]:
     """One anchor record per APPROVE tray row, built ONLY from the verifier's own standing verdict
     and packet for that request (never from the tray). Records are logged to dsp_anchors; nothing
-    is written to core here (the core anchor endpoint does not exist yet)."""
+    is written to core here - posting built records (POST /admin/credit-anchors) is
+    scripts/credit-anchors-push.py."""
     from . import anchor as anchor_mod
     st = Stats(new_run_id("anchors"), "anchors")
     store.start_run(st.run_id, "anchors")

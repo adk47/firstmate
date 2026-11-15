@@ -2,8 +2,9 @@
 """credit-batch-judge: run one outbound batch through b1's coded pre-layer and t01b's judge_batch (#1586).
 
   credit-batch-judge.py judge --items FILE --copy-ref REF    the batch's verdict row (#1586 signature_row, with the
-                                                             coded stops folded in) as JSON on stdout. SHADOW: the
-                                                             tick (h2) owns writing it and calling may_apply.
+                                                             coded stops folded in) as JSON on stdout. It records
+                                                             nothing: the tick (h2) owns writing the row and
+                                                             calling batch_judge.applicable.
   credit-batch-judge.py eval --cases FILE --ledger PATH [--model-all]
                                                              the labelled set, one batch per `case` group; per body
                                                              the final verdict vs the expected one; exit 1 on a miss.
@@ -15,6 +16,10 @@
 FILE: JSONL, one object per rendered body: {user_id, body_html, facts, copy_ref?} (+ case, expected for eval).
 The body goes to judge_batch exactly as rendered (judge_batch builds the ID-bound section); facts must be the
 RENDERER's own per-message facts.
+
+Whether a verdict lets a batch go out is not decided in this script: the tick asks batch_judge.applicable (the
+per-body rail). The judge's approval record is the `credit-batch-judge` entry of
+policies/credit-approval-automation.json.
 """
 from __future__ import annotations
 

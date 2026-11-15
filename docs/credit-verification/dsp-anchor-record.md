@@ -10,8 +10,9 @@
 |---|---|---|---|
 | 1. capture | `credit-dsp-verify.py submit --tray <tray.json>` (own job, credit-decider identity) | node-8 / cluster job; `kubectl exec` into an IDP `industry-proc-catalog-admin` pod | an instant-priority Spotify + Tidal capture per tray row, tagged with OUR request id |
 | 2. verdict | `credit-dsp-verify.py verify` | same job | `dsp_verdicts`: verdict + complete packet (shadow store) |
-| 3. anchor record | `credit-dsp-verify.py anchors --tray <tray.json>` | same job | `dsp_anchors` (local, append-only); **core write blocked until the core endpoint exists** |
-| 4. approve | the L12 executor (credit-refresh-t01b, `credit-fable-execute.py`) | its own job | approves ONLY through the proof-backed path that reads the server-written record |
+| 3. anchor record | `credit-dsp-verify.py anchors --tray <tray.json>` | same job | `dsp_anchors` (local, append-only); writes nothing to core |
+| 4. upload | `scripts/credit-anchors-push.py --tray <tray.json> [--apply]` | manual, per approve tray | core's `credit_anchor_records` (`POST /admin/credit-anchors`), one row per role and source (`credit_review/anchor_upload.py` owns the conversion) |
+| 5. approve | the L12 executor (credit-refresh-t01b, `credit-fable-execute.py`) | its own job | approves ONLY through the proof-backed path that reads the server-written record |
 
 The record is built from the verifier's **own** standing verdict and packet for that request, and only from a
 verdict this job produced in a `verify` run from a capture it filed for that request (`latest_captured_for`).
@@ -66,18 +67,26 @@ Common fields:
   blocking (gate, big, common, flagged, validator, duplicate); or the org name is not on the catalog's
   DSP label lines.
 
-## What core has today, and what the core side needs (for credit-refresh-t01b)
+## The core side (for credit-refresh-t01b)
 
-Read on core-backend `origin/master` b3ab901 / `origin/develop`, 2026-10-28 22:3xZ:
+**Current:** core carries `credit_anchor_records` and `POST /admin/credit-anchors` (core #11010/#11011), the
+approve scope reads them (`credit_review/policy.py` — L12 approvals are anchor-backed rows only), and
+`scripts/credit-anchors-push.py` is what puts a built record there. The conversion to core's per-(role, source)
+shape lives in `scripts/credit_review/anchor_upload.py::to_core_records`; core re-decides the claimant match and
+freshness, so nothing here can make a record match.
+
+The measurement below is kept as the design rationale it was written as. Read on core-backend `origin/master`
+b3ab901 / `origin/develop`, 2026-10-28 22:3xZ:
 
 - **There is no `credit_proofs` table on master or develop.** It arrives with https://github.com/Muso-AI/core-backend/pull/10686 (open, develop: credit verifier evidence store). Its `kind` is a document vocabulary (`split_sheet`, `contract`, `invoice`, `label_letter`, `dsp_screenshot`, `liner_notes`, `other`, pinned by a CHECK constraint), and every row is bound to an uploaded or external file (`s3Key` / `sha256`). A DSP capture is not a file, so **no proof kind fits `dsp_anchor` or `dsp_label_line`**.
 - **There are no credit cases on master or develop.** https://github.com/Muso-AI/core-backend/pull/10675 (master twin) is open; develop's #10641 was closed without merging.
 - The credit-ops proof-backed endpoints that `agentApprovalGuard.js` refers to ("a separate PR") do not exist. `credit-trust-decide`'s `server_proof` scope SQL is literally `FALSE` ("no such table yet").
 - What does exist: `POST /admin/credit-decisions` (`credit_decision_ledger`, kind `decision`, decider kind `fable` for `FABLE_DECIDER_ACCOUNTS`). It records decisions and vetoes. It never approves and is not an evidence store.
 
-So per the ruling's step 3, **B's table is the shape**: a core PR adding a server-written anchor table that
-only this capture job's service account can write, plus a scope that admits a declined row only when a
-record exists AND matches that row's request id, ISRC and role. Suggested table, mirroring this record:
+So per the ruling's step 3, **B's table was the shape the core PR was written to**: a server-written anchor
+table that only this capture job's service account can write, plus a scope that admits a declined row only when
+a record exists AND matches that row's request id, ISRC and role. Table as proposed, mirroring this record
+(core's shipped shape is `anchor_upload.to_core_records`'):
 
 ```
 credit_dsp_anchors(id uuid pk, request_id uuid not null, kind text check in ('dsp_anchor','dsp_label_line'),
@@ -87,8 +96,9 @@ credit_dsp_anchors(id uuid pk, request_id uuid not null, kind text check in ('ds
   created_at timestamptz not null default now())  -- append-only (no UPDATE/DELETE trigger)
 ```
 
-The approve scope's SQL twin would then admit a row only on: a `credit_dsp_anchors` row for the same
-`request_id`, `kind`, `isrcs` overlapping the request's server-held ISRC, every approved role in `roles`,
-`created_at` within 24 h, and `written_by` = the capture job's account. The executor never sends the record.
+The approve scope's SQL twin admits a row only on: an anchor row for the same `request_id`, `kind`, `isrcs`
+overlapping the request's server-held ISRC, every approved role in `roles`, `created_at` within 24 h, and
+`written_by` = the capture job's account. The executor never sends the record.
 
-Until that core endpoint exists, `anchors --write` exits 2 and the records stay in `dsp_anchors`.
+`anchors --write` exits 2: the subcommand only builds records into `dsp_anchors`. Posting built records to
+core (`POST /admin/credit-anchors`) is `scripts/credit-anchors-push.py`, per approve tray.
