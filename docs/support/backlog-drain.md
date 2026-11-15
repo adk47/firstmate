@@ -45,11 +45,16 @@ at all and never overrides a refusal, so an id two accounts own, or one another 
 on, stays `ambiguous-identity`. `triage.py` writes `matched_by` (`users_id` when the fallback answered) and,
 for an unresolved contact, `identity_why` on every row. An email match is never an identity.
 
-**Send order is a recorded decision** (firstmate 2026-11-13 23:29Z): the threads whose customer already
-sent proof come first, because those customers did their part and are waiting on us; oldest first inside
-each group; closes come after every answer. A run is capped at 200, so the order decides who is answered
-in a run, not just how the plan reads. Confirmed again 2026-11-14 on review finding
-send-order-puts-proof-sent-ahead-of-oldest.
+**Send order is a recorded decision.** A paying customer comes first (firstmate 2026-11-15 09:14Z: "paid
+first, then proof-sent, then oldest inside each group"); then the threads whose customer already sent
+proof, because those customers did their part and are waiting on us (firstmate 2026-11-13 23:29Z, confirmed
+2026-11-14 on review finding send-order-puts-proof-sent-ahead-of-oldest); then oldest first. Closes come
+after every answer, and inside the closes and the hand-backs a paying customer is first too. A contact
+with no account is not paid. A run is capped, so the order decides who is answered in a run, not just how
+the plan reads: the first four runs (200 sends, 2026-11-14 and 11-15) went out without the paid key
+(`plan_order` in `drain.py`). The three keys are lexicographic by decision (firstmate 2026-11-15 09:28Z,
+on review finding paid-group-not-oldest-first): inside the paying customers, those who already sent proof
+come first, then oldest.
 
 **A thread with an open promise gets a line only when the line is the promised update.** The monitor's
 ledger (`commitments`, open rows) lists what we told the customer we would do. The three

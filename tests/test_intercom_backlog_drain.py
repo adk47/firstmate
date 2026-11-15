@@ -1212,6 +1212,56 @@ class PlanTests(unittest.TestCase):
                          [("b", "send"), ("c", "send"), ("a", "send"), ("d", "close")])
         self.assertEqual(drain.summarize(plan)["by_list"], {"send": 3, "close": 1})
 
+    def test_a_paying_customer_comes_first_then_proof_sent_then_oldest(self):
+        # six answers and two closes; waiting_since ascending = oldest first
+        ids = ("old_free", "paid_new", "paid_old", "proof_free", "paid_proof", "free_new")
+        rows = [census(i, credits={"approved": 1}, uid=str(n)) for n, i in enumerate(ids, 70)]
+        for r, since, paid in zip(rows, (100, 600, 500, 400, 700, 300), (False, True, True, False, True, False)):
+            r["waiting_since"], r["paid"] = since, paid
+        closes = [census("close_free", uid="90"), census("close_paid", uid="91")]
+        closes[0]["waiting_since"], closes[1]["waiting_since"], closes[1]["paid"] = 50, 60, True
+        stale = [conv(c["id"], parts=[part("comment", "bot", OPERATOR, NOW - 199 * DAY)]) for c in closes]
+        threads = [drain.read_thread(conv(i)) for i in ids] + [drain.read_thread(c) for c in stale]
+        shapes = {"proof_free": "proof_sent", "paid_proof": "proof_sent"}
+        plan = drain.build_plan(rows + closes, threads, set(), shapes, {}, {}, {}, frozenset(), NOW)
+        self.assertEqual([(x["id"], x["list"]) for x in plan], [
+            ("paid_proof", "send"), ("paid_old", "send"), ("paid_new", "send"),      # paid: proof first, then oldest
+            ("proof_free", "send"), ("old_free", "send"), ("free_new", "send"),      # then the same for the rest
+            ("close_paid", "close"), ("close_free", "close")])                       # closes after every answer
+        self.assertEqual([x["order"] for x in plan], list(range(1, 9)))
+
+    def test_a_capped_run_answers_the_paying_customer_before_an_older_unpaid_one(self):
+        rows = [census("free", credits={"approved": 1}, uid="70"), census("paid", credits={"approved": 1}, uid="71")]
+        rows[0]["waiting_since"], rows[1]["waiting_since"], rows[1]["paid"] = 100, 900, True
+        rows[0]["email"], rows[1]["email"] = "free@example.test", "paid@example.test"
+        convs = {"free": conv("free"), "paid": conv("paid")}
+        plan = drain.build_plan(rows, [drain.read_thread(convs[r["id"]]) for r in rows], set(), {}, {}, {}, {},
+                                frozenset(), NOW)
+        said = []
+        stats = drain.run_send(plan, Deps(convs), apply=False, max_rows=1, out=said.append)
+        self.assertEqual((stats["dry"], [m for m in said if m.startswith("DRY ")]),
+                         (1, ["DRY paid answer credits-approved"]))
+
+    def test_an_unpaid_or_accountless_row_is_never_ahead_of_a_paid_one(self):
+        for unpaid in (False, None, 0, ""):
+            with self.subTest(unpaid=unpaid):
+                older = {"list": "send", "paid": unpaid, "shape": "proof_sent", "waiting_since": 1}
+                paid = {"list": "send", "paid": True, "shape": "", "waiting_since": 999}
+                self.assertLess(drain.plan_order(paid), drain.plan_order(older))
+        self.assertLess(drain.plan_order({"list": "send", "paid": False, "waiting_since": 999}),
+                        drain.plan_order({"list": "close", "paid": True, "waiting_since": 1}))
+
+    def test_the_hand_backs_are_walked_paid_first_then_oldest(self):
+        convs = {i: conv(i) for i in ("free_old", "paid_new", "paid_old")}
+        rows = [handback_row(i, uid=str(n), conv_=convs[i]) for n, i in enumerate(convs, 70)]
+        for r, since, paid in zip(rows, (100, 900, 500), (False, True, True)):
+            r["waiting_since"], r["paid"] = since, paid
+        said = []
+        stats = drain.run_send(rows, Deps(convs), apply=False, out=said.append)
+        self.assertEqual(stats["handback_dry"], 3)
+        self.assertEqual([m.split()[1] for m in said if m.startswith("DRY-HANDBACK")],
+                         ["paid_old", "paid_new", "free_old"])
+
     def test_a_restricted_second_contact_holds_the_row(self):
         rows = [census("a", credits={"approved": 1})]
         threads = [drain.read_thread(conv("a", contacts=2))]

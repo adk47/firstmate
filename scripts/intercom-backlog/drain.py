@@ -715,6 +715,26 @@ def append_ledger(path, row):
 
 # ---------------------------------------------------------------------------------------------- plan
 
+LIST_RANK = {"send": 0, "close": 1}
+
+
+def plan_order(x):
+    """The sort key of a plan row. Pure. A run is capped, so this decides WHO is answered, not how it reads.
+
+    Closes come after every answer. Inside a list: a paying customer first (firstmate 2026-11-15 09:14Z:
+    "paid first, then proof-sent, then oldest inside each group"; runs 1 to 4 sent oldest-first across paid
+    and unpaid alike), then the threads whose customer already sent proof (firstmate 2026-11-13 23:29Z: they
+    did their part and are waiting on us; confirmed 2026-11-14 on review finding
+    send-order-puts-proof-sent-ahead-of-oldest), then oldest first. A contact with no account is not paid.
+
+    The three keys are lexicographic by decision (firstmate 2026-11-15 09:28Z, on review finding
+    paid-group-not-oldest-first): inside the paying customers, those who already sent proof come first,
+    then oldest."""
+    return (LIST_RANK.get(x.get("list"), 2), not x.get("paid"),
+            x.get("shape") != "proof_sent" if x.get("list") == "send" else False,
+            int(x.get("waiting_since") or 0))
+
+
 def build_plan(rows, threads, erasure, shape, promises, docs, need, restricted, now_s):
     """Plan rows in send order. Pure: every read has already happened."""
     out = []
@@ -736,12 +756,7 @@ def build_plan(rows, threads, erasure, shape, promises, docs, need, restricted, 
         rec["handback"] = handback_of(rec, now_s)
         rec["handback_state"] = handback_state_of(rec, now_s)
         out.append(rec)
-    rank = {"send": 0, "close": 1}
-    # firstmate 2026-11-13 23:29Z: proof-sent threads first (those customers did their part and are waiting
-    # on us), then oldest first inside each group; closes after every answer. Confirmed again 2026-11-14 on
-    # review finding send-order-puts-proof-sent-ahead-of-oldest.
-    out.sort(key=lambda x: (rank.get(x["list"], 2), x["shape"] != "proof_sent" if x["list"] == "send" else False,
-                            x["waiting_since"]))
+    out.sort(key=plan_order)
     for i, x in enumerate(out, 1):
         x["order"] = i
     return out
@@ -848,8 +863,9 @@ def run_send(plan, deps, *, apply=False, max_rows=MAX_PER_RUN, only=(), ledger_p
         raise Refused(f"--only names lines that do not exist: {unknown}")
     sends = [x for x in plan if x.get("list") in ("send", "close") and (not only or x.get("line") in only)]
     sends.sort(key=lambda x: int(x.get("order") or 0))
+    # the hand-backs are capped per run too, so they take the same rule: paid first, then oldest
     handbacks = [] if only else sorted((x for x in plan if x.get("handback")),
-                                      key=lambda x: int(x.get("waiting_since") or 0))
+                                      key=lambda x: (not x.get("paid"), int(x.get("waiting_since") or 0)))
     rows = sends + handbacks
     stats = {"sent": 0, "closed": 0, "dry": 0, "failed": 0, "assigned": 0, "handback_posted": 0,
              "handback_dry": 0, "handback_pending": 0, "handback_unconfirmed": 0,
