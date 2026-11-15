@@ -57,8 +57,10 @@
 # request's review verdict and check state authorize it: a qa-review verdict on
 # the current head that is not success, a head that moved since the verdict, any
 # red check other than the adk47 self-authorship credit-approval-guard, and a
-# master/main twin whose develop/beta counterpart is unmerged all refuse. A
-# verdict that cannot be read refuses too, because silence is not a GO. Declared
+# master/main twin in a declared GitHub twin repository whose develop/beta
+# counterpart is unmerged all refuse; the twin check is skipped with a note on
+# any other repository or forge. A verdict that cannot be read refuses too,
+# because silence is not a GO. Declared
 # coverage decides on every forge: a QA-covered repository on a forge with no
 # verdict source refuses, a declared no-QA repository needs its attestation green
 # on GitLab and GitHub alike, and an undeclared repository refuses as coverage
