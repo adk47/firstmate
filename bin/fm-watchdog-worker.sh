@@ -117,10 +117,13 @@
 # a message the fleet already paid to write, so it is walked up its own ladder
 # by ABSOLUTE age of the oldest unhandled record - re-ring at 20 minutes,
 # interrupt and continue at 45, relaunch at 90 - one rung per message, never
-# repeated. The age ladder is the watchdog's own and does not replace the
-# watcher's per-attempt re-ring ladder, which keeps working on its own cadence
-# because a duplicated doorbell is free. A lane whose endpoint is not alive is
-# left to the relaunch rung above, which is what actually restores it.
+# repeated. The relaunch rung is charged to the same hourly budget and stopped
+# with the same one wake for firstmate as the connection rung below, and a
+# transient relaunch failure keeps the lane's place in the ladder so the next
+# pass tries again. The age ladder is the watchdog's own and does not replace
+# the watcher's per-attempt re-ring ladder, which keeps working on its own
+# cadence because a duplicated doorbell is free. A lane whose endpoint is not
+# alive is left to the relaunch rung above, which is what actually restores it.
 #
 # THE CONNECTION LADDER. A live lane whose pane is showing a connection error
 # or a connection reset and has produced nothing new for

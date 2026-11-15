@@ -819,6 +819,7 @@ A task the captain holds is deliberately stopped, so every pass skips it: its de
 First, on the first pass after a reboot, it relaunches every ordinary task whose endpoint is gone and then brings the chair up last, so a reboot needs no hand relaunch and nothing waits on the chair.
 Second, it restarts fleet-owned `fm-*` units systemd reports as failed, capped per unit per hour.
 Third, it walks each live lane's oldest unacknowledged steering message up an age ladder: a re-ring at 20 minutes, an interrupt plus a bounded continue at 45, and a relaunch at 90, one rung per message and never repeated.
+That relaunch is charged to the same hourly budget and stopped with the same one wake as the connection ladder below, and a transient relaunch failure keeps the message's place in the ladder for the next pass.
 The record it re-rings is the same durable one [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) writes, and the watcher's per-attempt ladder keeps running underneath, which is free because a duplicated doorbell is a no-op.
 Fourth, it relaunches every task it finds neither held nor left stopped whose endpoint reads `dead` or `missing` through `bin/fm-backend.sh`'s recovery-grade classifier; an `ambiguous`, `unreadable`, or `unverified` endpoint is recorded and left alone, because a duplicate agent in one worktree is worse than waiting another minute.
 A task the captain left stopped (`state/<id>.stopped`, written by `bin/fm-leave-stopped.sh`) is skipped by every pass exactly like a held one, because stopping its agent was the captain's own order and its dead endpoint is the expected state rather than a fault to repair.
@@ -881,7 +882,7 @@ FM_WATCHDOG_BACKLOG_LIST_MAX=25        # ids named in one report
 
 `FM_WATCHDOG_FALLBACK_MODEL` is the model spec the fleet already records for DeepSeek V4.1 Flash; set it empty on a home with no second gateway, where no lane can reach that model.
 
-The pass records what it did in `state/.watchdog-worker.json`: the boot identity, each task's last pane shape with when it last changed, its stall and inbox ladder stages, its connection strikes, its capped action history, each unit's restart history, and the identity of the last backlog difference it reported.
+The pass records what it did in `state/.watchdog-worker.json`: the boot identity, each task's last pane shape with when it last changed, its stall and inbox ladder stages, its connection strikes, its pending relaunch refusal and the endpoint state that earned it, its capped action history, each unit's restart history, and the identity of the last backlog difference it reported.
 `bin/fm-watchdog-worker.sh status` prints that record without acting, and a record carrying a different schema stamp is treated as no record at all.
 A pass holds `state/.watchdog-worker.lock`, so a slow pass never overlaps the next tick.
 
