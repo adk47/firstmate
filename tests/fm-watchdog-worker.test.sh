@@ -1183,6 +1183,23 @@ test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn() {
   pass "an Orca terminal Orca itself reports gone is replaced by fm-spawn --relaunch and carries its note"
 }
 
+test_an_orca_terminal_holding_only_a_shell_is_replaced_by_a_spawn() {
+  local home now out
+  home=$(make_home orca-dead); fake_tools "$home"
+  worker "$home" w1 dead ship pi orca
+  now=$(start_clock)
+  out=$(tick "$home" "$now")
+  assert_contains "$out" "watchdog: relaunched w1 after endpoint dead" \
+    "an Orca terminal holding only a shell was not replaced"
+  assert_eq "$(counter "$home" '^spawn w1 --relaunch')" "1" \
+    "the Orca replacement did not go through fm-spawn --relaunch"
+  assert_eq "$(counter "$home" '^control .* relaunch')" "0" \
+    "a shell-only Orca terminal was still handed to fm-control's unproven in-place relaunch"
+  [ -s "$home/steers" ] || fail "the replacement agent got no carry-over note"
+  [ -z "$(wakes "$home")" ] || fail "a successful Orca replacement still woke firstmate: $(wakes "$home")"
+  pass "an Orca terminal Orca still lists, with no agent below it, is replaced by fm-spawn --relaunch"
+}
+
 test_a_refused_relaunch_spends_no_budget_and_escalates_once
 test_a_refused_relaunch_is_retried_only_after_its_window
 test_a_refusal_does_not_outlive_the_endpoint_that_earned_it
@@ -1198,6 +1215,7 @@ test_an_orca_replacement_names_a_note_it_could_not_deliver
 test_a_spawn_preflight_refusal_spends_no_budget_and_retries_once
 test_a_transient_spawn_failure_is_not_a_refusal
 test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn
+test_an_orca_terminal_holding_only_a_shell_is_replaced_by_a_spawn
 test_a_task_left_stopped_is_never_relaunched_or_paged
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake
 test_an_unread_steer_is_interrupted_then_relaunched_once_each

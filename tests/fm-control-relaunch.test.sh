@@ -1409,6 +1409,19 @@ test_spawn_relaunch_refuses_a_live_agent() {
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
 
+test_spawn_relaunch_replaces_a_window_that_is_gone() {
+  local dir out rc
+  dir=$(new_case window-gone rl38)
+  add_ship_task "$dir" rl38 claude
+  # A window tmux no longer has cannot be hosting an agent, so the task reads
+  # `missing` and the relaunch is the ordinary one, not a refusal.
+  : > "$dir/fake/windows"
+  out=$(run_spawn "$dir" rl38 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "relaunching a task whose window is gone should succeed"$'\n'"$out"
+  assert_contains "$out" "spawned rl38" "the relaunch should report the replacement it launched"
+  pass "fm-spawn --relaunch: a task whose tmux window is gone is relaunched, not refused"
+}
+
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
   local dir meta target out rc
   dir=$(new_case symlink-meta rl37)
@@ -1610,6 +1623,7 @@ test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
+test_spawn_relaunch_replaces_a_window_that_is_gone
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous

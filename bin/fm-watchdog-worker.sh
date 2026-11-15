@@ -50,10 +50,12 @@
 # --note <text>` - the transaction the captain would run by hand - so the
 # endpoint, worktree, harness, model, and uncommitted work are preserved and the
 # note is the replacement agent's only carry-over context. The one exception is
-# an Orca terminal Orca no longer has (`missing`), where that in-place relaunch
-# is unproven and `bin/fm-spawn.sh <id> --relaunch` is the proven transaction:
-# it launches the replacement into a new terminal in the task's own recorded
-# Orca worktree and the note is delivered as one durable steer.
+# an Orca terminal that provably hosts no agent - `missing` (Orca no longer has
+# it) or `dead` (Orca still lists it, but a live scan below its pty found only
+# shells) - where that in-place relaunch is unproven and
+# `bin/fm-spawn.sh <id> --relaunch` is the proven transaction: it launches the
+# replacement into a new terminal in the task's own recorded Orca worktree and
+# the note is delivered as one durable steer.
 #
 # A REFUSED RELAUNCH IS NOT A RETRY. Some relaunches cannot succeed no matter
 # how often they run: the backend has no proven in-place relaunch, the endpoint
@@ -639,12 +641,15 @@ task_relaunch() {  # <id> <reason> <note> [model]
     state=''
   fi
   # Orca's in-place relaunch is unproven (bin/fm-control-lib.sh owns that
-  # table), but a terminal Orca itself reports gone provably hosts no agent, so
-  # the proven transaction there is bin/fm-spawn.sh --relaunch: it launches the
-  # replacement into a NEW terminal in the task's own recorded Orca worktree.
-  # Every other Orca endpoint still goes through fm-control, whose refusal is
-  # then recorded and escalated instead of retried.
-  if [ "$backend" = orca ] && [ "$state" = missing ]; then
+  # table), but a terminal that provably hosts no agent is replaceable through
+  # bin/fm-spawn.sh --relaunch, which launches the replacement into a NEW
+  # terminal in the task's own recorded Orca worktree. Two read states prove
+  # it: `missing` (a stale handle) and `dead` (Orca still lists the terminal,
+  # and a live scan below its pty found only shells - measured 2026-11-15 on
+  # six stopped lanes sitting at an empty prompt). Every other Orca endpoint
+  # still goes through fm-control, whose refusal is then recorded and escalated
+  # instead of retried.
+  if [ "$backend" = orca ] && { [ "$state" = missing ] || [ "$state" = dead ]; }; then
     out=$(fm_run_timed "$RELAUNCH_TIMEOUT_SECS" "$SPAWN_BIN" "$id" --relaunch \
       ${model_args[@]+"${model_args[@]}"} 2>&1)
     rc=$?

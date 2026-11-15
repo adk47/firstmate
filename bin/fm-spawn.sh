@@ -35,18 +35,22 @@
 #   positional, and batch pairs are all refused alongside it; only harness,
 #   model, and effort may change, which is what makes a harness switch one
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
-#   agent-free on a backend with a proven in-place relaunch (tmux or herdr),
+#   agent-free, which its backend classifier proves as `missing` (the window,
+#   pane, or terminal handle is gone, so nothing can be running there) or
+#   `dead` (a live process scan below the endpoint found no agent), on a
+#   backend with a proven in-place relaunch (tmux or herdr),
 #   refuses unless the endpoint's shell is sitting in the recorded worktree,
 #   and clears the previous harness's per-task wiring before arming the new
-#   incarnation. Orca is the one exception to "same endpoint": when Orca
-#   reports the recorded terminal gone (classifier verdict `missing`, e.g.
-#   after an Orca or host restart), the replacement launches in a NEW terminal
-#   created in the task's recorded Orca worktree, whose path must match the
-#   recorded worktree, and the record is republished with that terminal; a
-#   live or shell-only Orca terminal still refuses. Every structural refusal in
-#   --relaunch exits 2, distinct from the 1 a retryable launch failure reports,
-#   so a supervisor such as bin/fm-watchdog-worker.sh can tell "cannot succeed"
-#   from "try again".
+#   incarnation. Orca is the one exception to "same endpoint": when its
+#   classifier reports the recorded terminal `missing` (a stale handle, e.g.
+#   after an Orca or host restart) or `dead` (still listed, with an empty or
+#   shell-only pty), the replacement launches in a NEW terminal created in the
+#   task's recorded Orca worktree, whose path must match the recorded
+#   worktree, and the record is republished with that terminal; a live,
+#   ambiguous, or unreadable Orca terminal still refuses. Every structural
+#   refusal in --relaunch exits 2, distinct from the 1 a retryable launch
+#   failure reports, so a supervisor such as bin/fm-watchdog-worker.sh can tell
+#   "cannot succeed" from "try again".
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -1237,16 +1241,22 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # Every structural refusal in this Orca relaunch block exits 2, distinct from
   # the 1 a retryable launch failure reports, so a supervisor can tell them apart.
   if [ "$BACKEND" = orca ]; then
-    # Orca's in-place relaunch is unproven, but a terminal Orca itself reports
-    # gone (its classifier's `missing`: the terminal handle is stale, as after
-    # an Orca or host restart) provably hosts no agent. Only that case
-    # relaunches, into a NEW terminal in the task's own recorded Orca
-    # worktree; a live or shell-only terminal still refuses.
+    # Orca's in-place relaunch is unproven, but a terminal that provably hosts
+    # no agent is replaceable through the proven transaction: a NEW terminal in
+    # the task's own recorded worktree. Two read states prove that. `missing`
+    # means the handle is stale, as after an Orca or host restart. `dead` means
+    # Orca still lists the terminal but a scan of the live process tree below
+    # its pty found no agent, only shells - measured 2026-11-15 on six stopped
+    # lanes whose panes held an empty prompt. A live agent, an unexplained
+    # process, or a pty whose owner cannot be read still refuses.
     RELAUNCH_STATE=$(fm_backend_agent_state orca "$RELAUNCH_TARGET")
-    [ "$RELAUNCH_STATE" = missing ] || {
-      echo "error: task $ID's Orca terminal $RELAUNCH_TARGET reads '$RELAUNCH_STATE'; Orca relaunch only replaces a terminal Orca no longer has (missing), into a new terminal" >&2
-      exit 2
-    }
+    case "$RELAUNCH_STATE" in
+      missing|dead) ;;
+      *)
+        echo "error: task $ID's Orca terminal $RELAUNCH_TARGET reads '$RELAUNCH_STATE'; Orca relaunch replaces only a terminal that provably hosts no agent (missing, or dead below an agent-free pty), into a new terminal" >&2
+        exit 2
+        ;;
+    esac
     ORCA_WORKTREE_ID=$(fm_meta_get "$RELAUNCH_META" orca_worktree_id)
     [ -n "$ORCA_WORKTREE_ID" ] || {
       echo "error: task $ID has no recorded orca_worktree_id; refusing to relaunch" >&2
@@ -1261,10 +1271,17 @@ if [ "$RELAUNCH" -eq 1 ]; then
     }
     RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   fi
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 2
-  }
+  # A gone endpoint is agent-free by construction: a tmux window or herdr pane
+  # that no longer exists cannot be hosting an agent, so `missing` relaunches
+  # exactly as `dead` does. Measured 2026-11-15: four tmux lanes whose windows
+  # were gone read `missing` and every relaunch was refused as if it were live.
+  case "$RELAUNCH_STATE" in
+    dead|missing) ;;
+    *)
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (missing, or dead with no agent below it; stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 2
+      ;;
+  esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   # A relaunch keeps the temp root the task already recorded, so a task spawned
   # before the cache-directory move keeps the root its own teardown will remove
