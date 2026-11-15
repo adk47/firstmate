@@ -147,6 +147,67 @@ export interface IntercomAuthor {
   email?: string;
 }
 
+/**
+ * What a hand-back note carries about the promise it is following up on.
+ *
+ * firstmate 2026-11-15 15:03Z: the drain's first ten live hand-backs reached Caroline as a fresh
+ * customer message, and she answered "Anytime!" / "You are welcome" to people who had been waiting
+ * months on an open promise. The note was a bare marker, so the only thing in her turn was the
+ * customer's last word — which, on a thread we went quiet on, is usually "thanks".
+ *
+ * The field set is the one caroline-unanswered-drain-u1 specified (handback-fields-20261115.md) so
+ * the drain and the plugin agree on ONE marker line.
+ */
+export interface HandbackContext {
+  /** 1 for a note with no `v=` field (every note already on a thread), 2 for the current format. */
+  version: 1 | 2;
+  /** Why no fixed line answers this thread: `open_promise`, `specific_ask`, `owner_recent`. */
+  reason: string;
+  /** What we promised (`analytics`, `merge`, `credit_verification`, ...), or "" when none is open. */
+  kind: string;
+  /** When we made that promise, epoch seconds. 0 when none. */
+  promisedAt: number;
+  /** When the customer last wrote, epoch seconds. 0 when unknown. */
+  waitingSince: number;
+  /** True for the one follow-up to a hand-back reply that did not answer. */
+  followup: boolean;
+  /** The plan class in words (`open promise`, `specific ask`, ...). */
+  klass: string;
+  /**
+   * Who made the promise: `caroline`, `operator_bot` (the old workspace bot, admin 4359478) or
+   * `person` (a human agent). Empty on a v1 note, where the only author was Caroline.
+   */
+  promisedBy: string;
+  /**
+   * True when the customer asked about one of their own requests in this thread.
+   *
+   * It gates ONE sentence: the verification-queue status line is only truthful when there is a
+   * request to be in a queue for AND the customer asked about it. On 215473830027987 a customer
+   * asked about double-counted streams and got that line instead (firstmate 184).
+   */
+  askedAboutRequest: boolean;
+  /** The promise in our own words, taken from the thread at `promisedAt`. "" when none was found. */
+  promise: string;
+  /**
+   * The proof-ask we sent, taken from the thread: our last comment before the customer replied.
+   * Only meaningful for `kind: "ask_reply_words"`. "" when none was found.
+   */
+  ask: string;
+  /**
+   * The need code the ask was for (`proof_link`, `proof_document`, ...), from the note.
+   *
+   * A code, never a sentence: the words the customer reads come from the approved status
+   * template, so a new need cannot smuggle new copy in through the marker.
+   */
+  need: string;
+  /**
+   * True when the newest comment on the thread is the drain's stale-close line, which said the
+   * customer's message had been answered when it had not. The turn must not read its own bad
+   * close as the state of the world.
+   */
+  wrongClose: boolean;
+}
+
 // --- Session state ---
 
 export type AssigneeType = "admin" | "nobody_admin" | "bot";
@@ -166,6 +227,12 @@ export interface IntercomSessionState {
   createdAt: string;
   updatedAt: string;
   knownFacts?: KnownFacts;
+  /**
+   * Set when this turn was triggered by the backlog drain's hand-back note, and cleared once the
+   * turn has been dispatched. It carries the promise the customer is waiting on, so the reply is a
+   * status update rather than a greeting (firstmate 2026-11-15 15:03Z).
+   */
+  handback?: HandbackContext | null;
   escalationFiredAt?: string | null;
   // ClickUp ticket id from the escalation's Step 2, kept so a rollback of
   // `escalationFiredAt` (both farewell AND Slack failed, so the retry must be

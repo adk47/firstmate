@@ -8,6 +8,7 @@ import type {
   ImageAttachmentRef,
   DocumentAttachmentRef,
   UnsupportedAttachmentRef,
+  HandbackContext,
 } from "./types.js";
 import { MAX_PROCESSED_EVENT_IDS } from "./types.js";
 
@@ -321,6 +322,64 @@ export function customerSpokeLast(conversation: IntercomConversation): boolean {
 }
 
 /**
+ * True when the newest comment on the thread is by ANY admin on our side.
+ *
+ * Only used for a `followup=1` hand-back: those threads are the ones where our reply is the last
+ * comment, so `customerSpokeLast` is false by construction and the ordinary gate would refuse the
+ * one follow-up that is owed (caroline-unanswered-drain-u1, handback-fields-20261115.md).
+ *
+ * ANY admin, not only this bot. On about 378 of the queued threads the newest comment is the OLD
+ * WORKSPACE BOT's (admin 4359478) or a person's, because we never wrote on them today; requiring
+ * `botAdminId` refused every one of them and would have blocked most of the queue
+ * (caroline-unanswered-drain-u1, 2026-11-15 16:59Z). This matches `promiseFromThread`, which
+ * already reads any admin's comment for the same reason: a promise WE made is a promise the
+ * account made, whoever on this side typed it.
+ */
+export function weSpokeLast(conversation: IntercomConversation, _botAdminId?: string): boolean {
+  const parts = conversation.conversation_parts?.conversation_parts ?? [];
+  const last = [...parts]
+    .reverse()
+    .find(
+      (p) =>
+        p?.part_type === "comment" &&
+        Boolean(p?.author?.type) &&
+        (isCustomerAuthored(p.author?.type) || Boolean(String(p.body ?? "").replace(/<[^>]*>/g, "").trim())),
+    );
+  return last?.author?.type === "admin";
+}
+
+/**
+ * The drain's stale-close line, which on the reopened threads is the newest comment and is WRONG.
+ *
+ * The drain closed these threads saying "your last message here was answered", when the truth is
+ * that nobody answered it. It reopened them at 16:17Z with no message, so the wrong line is still
+ * the last thing on the thread. The turn has to know that line was ours and that it was wrong,
+ * otherwise it reads its own bad close as the state of the world
+ * (caroline-unanswered-drain-u1, 2026-11-15 16:59Z).
+ *
+ * Matched on the drain's own fixed copy (`scripts/intercom-backlog/drain.py`, `stale-close`), not
+ * on a paraphrase: if that copy changes, this stops matching and the block simply omits the line
+ * rather than asserting something it cannot see.
+ */
+const STALE_CLOSE_LINE =
+  /your last message here was answered and the conversation has been quiet since, so we are closing it/i;
+
+/** True when the newest admin comment is the drain's stale-close line. */
+export function lastWordWasWrongClose(conversation: IntercomConversation): boolean {
+  const parts = conversation.conversation_parts?.conversation_parts ?? [];
+  const last = [...parts]
+    .reverse()
+    .find(
+      (p) =>
+        p?.part_type === "comment" &&
+        Boolean(p?.author?.type) &&
+        (isCustomerAuthored(p.author?.type) || Boolean(String(p.body ?? "").replace(/<[^>]*>/g, "").trim())),
+    );
+  if (last?.author?.type !== "admin") return false;
+  return STALE_CLOSE_LINE.test(String(last?.body ?? "").replace(/<[^>]*>/g, " "));
+}
+
+/**
  * Rewrite every http(s) anchor so its TARGET is visible text.
  *
  * Intercom renders a pasted URL as a preview card:
@@ -367,6 +426,12 @@ export function surfaceLinkTargets(html: string): string {
 export const HANDBACK_MARKER = "hydra-handback:";
 
 /**
+ * Prefix of the synthetic webhook id the hand-back dispatch re-enters `handleWebhookEvent`
+ * with. It marks the turn as the hand-back turn, so the context is not retired on it.
+ */
+export const HANDBACK_DISPATCH_PREFIX = "handback:";
+
+/**
  * The reason code a hand-back note carries, or "" when this part is not one.
  *
  * The note must be authored by this workspace's bot admin: a note a person writes that happens to quote
@@ -385,6 +450,233 @@ export function handbackNoteReason(part: IntercomConversationPart | undefined, b
   if (!marker) return "";
   const reason = /reason=([A-Za-z0-9_.-]+)/.exec(marker);
   return reason ? reason[1] : "";
+}
+
+
+/**
+ * The context a hand-back note carries, or null when this part is not one (or carries none).
+ *
+ * The marker line is ONE rule in two languages: `scripts/intercom-backlog/drain.py handback_note`
+ * writes it and this reads it, and both copies change together. Two versions exist:
+ *
+ *   v1  hydra-handback: reason=<code> class=<words>
+ *   v2  hydra-handback: v=2 reason=<code> kind=<kind> promised_at=<epoch> waiting_since=<epoch> followup=<0|1> class=<words>
+ *
+ * `class` is last and may hold spaces; every other value is `[A-Za-z0-9_.-]+`. A note with no `v=`
+ * field is v1 and must keep working, because every note already on a thread is v1.
+ *
+ * The promise itself is NOT in the note: it is on the thread, in the comment we posted at
+ * `promised_at`, and `promiseFromThread` takes it from there. Carrying a copy in the note would let
+ * the two drift, and the thread is the thing the customer can see.
+ */
+export function handbackNoteContext(
+  part: IntercomConversationPart | undefined,
+  botAdminId: string,
+): HandbackContext | null {
+  if (!part || part.part_type !== "note") return null;
+  if (part.author?.type !== "admin" || String(part.author?.id ?? "") !== botAdminId) return null;
+  const lines = String(part.body ?? "")
+    .replace(/<[^>]*>/g, "\n")
+    .split("\n")
+    .map((line) => line.trim());
+  const marker = lines.find((line) => line.startsWith(HANDBACK_MARKER));
+  if (!marker) return null;
+  const rest = marker.slice(HANDBACK_MARKER.length).trim();
+  // `class=` is last and may hold spaces, so it is split off before the token scan.
+  const classAt = rest.search(/(?:^|\s)class=/);
+  const head = classAt >= 0 ? rest.slice(0, classAt) : rest;
+  const klass = classAt >= 0 ? rest.slice(classAt).replace(/^\s*class=/, "").trim() : "";
+  const fields: Record<string, string> = {};
+  for (const token of head.split(/\s+/)) {
+    const eq = token.indexOf("=");
+    if (eq > 0) fields[token.slice(0, eq)] = token.slice(eq + 1);
+  }
+  const reason = fields.reason ?? "";
+  if (!reason) return null;
+  const epoch = (raw: string | undefined): number => {
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
+  };
+  return {
+    version: fields.v === "2" ? 2 : 1,
+    reason,
+    kind: fields.kind && fields.kind !== "-" ? fields.kind : "",
+    promisedAt: epoch(fields.promised_at),
+    waitingSince: epoch(fields.waiting_since),
+    followup: fields.followup === "1",
+    klass,
+    promisedBy: fields.promised_by ?? "",
+    askedAboutRequest: false,
+    promise: "",
+    ask: "",
+    need: fields.need && fields.need !== "-" ? fields.need : "",
+    wrongClose: false,
+  };
+}
+
+/** The words a customer uses when they are asking about one of their own requests. */
+const REQUEST_ASK = /\b(request|requests|credit|credits|claim|claimed|merge|merged|ticket|tickets|verify|verified|verification|document|documents|proof|review|status|application|appeal|export|deletion|delete my account|gdpr)\b/i;
+
+/**
+ * The customer comments the hand-back is actually answering: everything after our last reply.
+ *
+ * A thread can carry several topics over months. Reading every customer comment ever written lets
+ * an old credit question authorise a queue line about a message that is about something else
+ * entirely (QA 2026-11-15, filters.ts:530). The hand-back answers the UNANSWERED message, so only
+ * that message's words may authorise anything.
+ *
+ * When we never replied, every customer comment is unanswered and all of them count.
+ */
+export function unansweredCustomerParts(
+  parts: readonly IntercomConversationPart[] | undefined,
+): IntercomConversationPart[] {
+  const all = parts ?? [];
+  let lastAdmin = -1;
+  for (let i = 0; i < all.length; i += 1) {
+    const p = all[i];
+    if (p?.part_type === "comment" && p?.author?.type === "admin") lastAdmin = i;
+  }
+  return all
+    .slice(lastAdmin + 1)
+    .filter((p) => p?.part_type === "comment" && isCustomerAuthored(p?.author?.type));
+}
+
+/**
+ * True when the customer asked about one of their own requests in the message we are answering.
+ *
+ * Used for ONE thing: the verification-queue status line is only truthful when the customer asked
+ * about a request. It is read from the customer's own words, never from the promise kind, because
+ * "we promised a merge" does not mean the customer asked about the merge today.
+ *
+ * Scoped to the unanswered message(s) — see `unansweredCustomerParts`. A broad word in a message we
+ * already answered is not a question we are being asked now.
+ */
+export function customerAskedAboutRequest(
+  parts: readonly IntercomConversationPart[] | undefined,
+): boolean {
+  for (const p of unansweredCustomerParts(parts)) {
+    const text = String(p?.body ?? "").replace(/<[^>]*>/g, " ");
+    if (REQUEST_ASK.test(text)) return true;
+  }
+  return false;
+}
+
+/**
+ * The promise in our own words, taken from the thread rather than from the note.
+ *
+ * The monitor derives `promised_at` from the thread's own parts, so the comment we posted at that
+ * time IS the promise. When no part has exactly that time, the newest comment of ours at or before
+ * the customer's last message is the best available answer, and when there is none the block says
+ * so rather than inventing one.
+ */
+export function promiseFromThread(
+  parts: readonly IntercomConversationPart[] | undefined,
+  botAdminId: string,
+  promisedAt: number,
+  waitingSince: number,
+): string {
+  // ANY admin's comment counts, not only this bot's. 275 of the threads the drain is about to
+  // hand back carry a promise from an OLD BOT (or from a human agent) whose admin id is not
+  // `botAdminId`; filtering on our own id found nothing on them and the block would have said
+  // "no promise on file" about a thread that plainly has one. A promise WE made is a promise
+  // the account made, whoever on this side typed it.
+  //
+  // Caroline's own comment still wins when there is a choice, because the monitor derives
+  // `promised_at` from the thread and a same-second tie should resolve to the bot.
+  const ours = (parts ?? [])
+    .filter(
+      (p) =>
+        p?.part_type === "comment" &&
+        p?.author?.type === "admin" &&
+        String(p?.body ?? "").replace(/<[^>]*>/g, "").trim().length > 0,
+    )
+    .map((p) => ({
+      at: Number(p.created_at ?? 0),
+      isBot: String(p.author?.id ?? "") === botAdminId,
+      text: String(p.body ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim(),
+    }))
+    .sort((a, b) => a.at - b.at);
+  type Our = (typeof ours)[number];
+  const atOrBefore = (limit: number): Our | undefined => {
+    if (!limit) return undefined;
+    let found: Our | undefined;
+    for (const part of ours) if (part.at <= limit) found = part;
+    return found;
+  };
+  // An exact `promised_at` hit is the promise itself, so prefer it to a later one from a
+  // different author; `botAdminId` breaks ties within the same second.
+  const exact = (limit: number): Our | undefined => {
+    if (!limit) return undefined;
+    const hits = ours.filter((p) => p.at === limit);
+    return hits.find((p) => p.isBot) ?? hits[0];
+  };
+  // NO last-resort fallback to the newest comment. On a follow-up thread the newest admin comment
+  // is the hand-back reply that did not answer ("Anytime!"), and quoting it as the promise we made
+  // presents the misfire as the original commitment (QA 2026-11-15, filters.ts:511). When nothing
+  // qualifies at or before the customer's last message there is no promise to quote, and the block
+  // says so rather than inventing one.
+  const chosen = exact(promisedAt) ?? atOrBefore(promisedAt) ?? exact(waitingSince) ?? atOrBefore(waitingSince);
+  if (!chosen) return "";
+  return chosen.text.length > 400 ? chosen.text.slice(0, 397) + "..." : chosen.text;
+}
+
+/**
+ * The time of the customer's newest comment, or 0 when they never wrote.
+ *
+ * A v1 hand-back note carries no `waiting_since`, so `promiseFromThread` had no cutoff and
+ * returned nothing - and the block then said "No promise is open" about a thread the note says
+ * has one (QA 2026-11-15, filters.ts:825). The customer's own last message is the safe cutoff:
+ * anything we said before it is a candidate promise, anything after it is our reply to them.
+ */
+export function customerLastSpokeAt(conversation: IntercomConversation): number {
+  const parts = conversation.conversation_parts?.conversation_parts ?? [];
+  let newest = 0;
+  for (const p of parts) {
+    if (p?.part_type !== "comment" || !isCustomerAuthored(p?.author?.type)) continue;
+    const at = Number(p.created_at ?? 0);
+    if (at > newest) newest = at;
+  }
+  return newest;
+}
+
+/**
+ * The proof-ask we sent, taken from the thread rather than from the note.
+ *
+ * 18 of 19 replies to a proof ask were WORDS: the customer wrote back instead of attaching
+ * anything, and nothing read what they said (firstmate 2026-11-15 16:38Z). The ask is our last
+ * comment before the customer's reply, so the turn can answer their question and re-state the one
+ * item still needed instead of asking again from scratch.
+ *
+ * Returns "" when we never wrote before they did, so the block says so rather than inventing an ask.
+ */
+export function askFromThread(
+  parts: readonly IntercomConversationPart[] | undefined,
+  botAdminId: string,
+  waitingSince: number,
+): string {
+  const all = (parts ?? [])
+    .filter((p) => p?.part_type === "comment")
+    .map((p) => ({
+      at: Number(p.created_at ?? 0),
+      isAdmin: p?.author?.type === "admin",
+      isBot: String(p?.author?.id ?? "") === botAdminId,
+      text: String(p?.body ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim(),
+    }))
+    .filter((p) => p.text.length > 0)
+    .sort((a, b) => a.at - b.at);
+  // The customer's last word is the reply we are answering; the ask is the newest admin comment
+  // before it. `waitingSince` is that reply's time, so "before" is the whole predicate.
+  const limit = waitingSince > 0 ? waitingSince : Number.POSITIVE_INFINITY;
+  const before = all.filter((p) => p.isAdmin && p.at < limit);
+  if (before.length === 0) return "";
+  // The NEWEST admin comment wins, whoever wrote it. Preferring the bot's older ask over a later
+  // human admin's ask quoted the wrong proof request: if Caroline asked for document A and a human
+  // then asked for link B, the block told the turn to chase A (QA 2026-11-15, filters.ts:628).
+  // Bot identity only breaks a same-second tie, where "newest" cannot decide.
+  const newestAt = before[before.length - 1].at;
+  const tied = before.filter((p) => p.at === newestAt);
+  const chosen = tied.find((p) => p.isBot) ?? tied[tied.length - 1];
+  return chosen.text.length > 400 ? chosen.text.slice(0, 397) + "..." : chosen.text;
 }
 
 export function classifyEvent(
@@ -515,4 +807,96 @@ export function trackEventId(eventId: string, processedIds: string[]): void {
 
 export function isSelfReply(messageId: string, outboundIds: string[]): boolean {
   return outboundIds.includes(messageId);
+}
+
+/**
+ * The [HAND_BACK] block: what Caroline is actually being asked to do.
+ *
+ * firstmate 2026-11-15 15:03Z: the drain's first ten live hand-backs reached her as a fresh
+ * customer message, and she answered "Anytime!" / "You are welcome" to people who had been waiting
+ * months on an open promise. The note carried a reason code and nothing else, so the only thing in
+ * her turn was the customer's last word — which, on a thread we went quiet on, is usually "thanks".
+ *
+ * Code-authored from the note the drain posted, never from customer text, and it sits directly
+ * above [CUSTOMER_MESSAGE] so it reads as "…and here is what this message actually is".
+ */
+/**
+ * The hand-back reasons that mean a promise is open, whatever the note could tell us about it.
+ *
+ * `owner_recent` is included: the drain posts it when the owner is recent, which is still an open
+ * item on our side. `specific_ask` is an ask we sent, which is also owed an answer.
+ */
+const PROMISE_BEARING_REASONS = new Set(["open_promise", "specific_ask", "owner_recent", "old_bot_promise"]);
+
+export function renderHandbackBlock(ctx: HandbackContext | null | undefined, nowSeconds?: number): string {
+  if (!ctx) return "";
+  const now = nowSeconds ?? Math.floor(Date.now() / 1000);
+  const waitedDays = ctx.waitingSince > 0 ? Math.max(0, Math.floor((now - ctx.waitingSince) / 86400)) : 0;
+  const waited = waitedDays > 0 ? `${waitedDays} day${waitedDays === 1 ? "" : "s"}` : "some time";
+  const made = ctx.promisedAt > 0 ? new Date(ctx.promisedAt * 1000).toISOString().slice(0, 10) : "";
+  const lines = [
+    "[HAND_BACK]",
+    "This conversation was handed back to you by the backlog drain. It is NOT a new message: the customer last wrote " +
+      waited +
+      " ago and nobody came back to them.",
+  ];
+  if (ctx.wrongClose) {
+    // The drain closed these threads saying the customer's message had been answered. It had not.
+    // The wrong line is still the newest comment, so the turn must be told it was ours and wrong.
+    lines.push(
+      "The last message on this thread is OUR close note saying their message was answered. That was wrong: nobody answered it. Do not repeat it, and do not treat it as the state of the thread.",
+    );
+  }
+  if (ctx.promisedBy === "operator_bot") {
+    // The old workspace bot made these promises in April to June. The customer may not
+    // remember the thread at all, and saying "we" as though it were yesterday is a lie about
+    // how long this has been open.
+    lines.push(
+      "This promise was made by an earlier version of this support bot, months ago. Say what was promised and when, in one sentence, and do not pretend it was recent.",
+    );
+    lines.push(
+      "Nobody picked it up. If that is still true, say so plainly. Do not say it was answered.",
+    );
+  }
+  if (ctx.kind === "ask_reply_words") {
+    // 18 of 19 replies to a proof ask were words, not an attachment, and nothing read them
+    // (firstmate 2026-11-15 16:38Z). The customer answered the ask in prose; the turn has to
+    // answer what they asked and re-state the ONE item still needed, not send the ask again.
+    if (ctx.ask) {
+      lines.push(`The proof ask we sent${made ? ` (on ${made})` : ""}: "${ctx.ask}"`);
+    } else {
+      lines.push("We sent a proof ask and its text was not found on the thread. Do not quote it.");
+    }
+    lines.push(
+      "The customer replied in WORDS, not with an attachment. Read what they wrote and answer the question they actually asked.",
+      ctx.need
+        ? `Then re-state the one item still needed (need code: ${ctx.need}) in the approved status-template wording. Do not ask for anything else.`
+        : "Then re-state the one item still needed in the approved status-template wording. Do not ask for anything else.",
+      "Do not send the ask again as though they had not replied, and do not say their reply was received as a document.",
+    );
+  } else if (ctx.promise) {
+    lines.push(`What we said we would do${made ? ` (on ${made})` : ""}: "${ctx.promise}"`);
+    lines.push("It was not done, or not reported. Say where it stands now.");
+  } else if (ctx.kind) {
+    lines.push(`We owe them a ${ctx.kind} answer and no promise text was found on the thread. Say where it stands now.`);
+  } else if (PROMISE_BEARING_REASONS.has(ctx.reason)) {
+    // The note says a promise is open but its text could not be found - a v1 note carries no
+    // timestamps, so there was nothing to look it up by. Saying "no promise is open" here would
+    // contradict the note and drop the follow-up that is owed (QA 2026-11-15, filters.ts:825).
+    lines.push(
+      "A promise IS open on this thread, but its text could not be found. Do not say there is no open promise, and do not invent what we said. Say where the thing stands now.",
+    );
+  } else {
+    lines.push("No promise is open on this thread. Answer what they actually asked.");
+  }
+  lines.push(
+    "Do not reply with thanks, do not greet them as if this were new, and do not ask what they need when the thread already says it.",
+    "State where the thing stands from a read you make in this turn. What you could not read is said as not confirmed, never as fine. Say what, if anything, is needed from them.",
+    ctx.askedAboutRequest
+      ? "The customer asked about one of their own requests, so you may say where that request stands."
+      : "The customer did NOT ask about a request. Do not say their request is in the verification queue, or that anything is in a queue.",
+    "No person, no date, no follow-up you cannot keep. One message.",
+    "[/HAND_BACK]",
+  );
+  return lines.join("\n");
 }

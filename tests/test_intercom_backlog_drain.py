@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1076,6 +1077,17 @@ class HandbackTests(unittest.TestCase):
         stored = note_body(note, html=True)
         thread = drain.read_thread(conv("1", parts=[part("note", "admin", BOT, NOW, body=stored)]))
         self.assertEqual(thread["handback_note_at"], NOW)
+
+    def test_the_hold_file_stops_every_hand_back(self):
+        """The hold is a file, not a promise: until the plugin that reads the note is deployed, a
+        bare marker note makes Caroline greet someone waiting months (firstmate 2026-11-15 15:03Z)."""
+        hold = os.path.join(self.tmp.name, "handback.disabled")
+        open(hold, "w").close()
+        deps = Deps({"1": conv("1")})
+        with mock.patch.object(drain, "HANDBACK_HOLD_FILE", hold):
+            stats = self.run_send([handback_row()], deps)
+        self.assertEqual((stats["handback_posted"], deps.notes), (0, []))
+        self.assertTrue(any(k.startswith("hand-back held") for k in stats["skipped"]), stats["skipped"])
 
     def test_a_plan_built_before_the_note_is_counted_by_its_age(self):
         for age, state, counted in ((3600, "pending", "handback_pending"),

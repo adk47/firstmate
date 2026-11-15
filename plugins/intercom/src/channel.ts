@@ -23,10 +23,12 @@ import { prepareMergeReply } from "./merge-reply-guard.js";
 import { renderCanaryLine, resolveCanaryToken } from "./canary-token.js";
 import { guardOutbound, watchInbound, type SafetyDeps } from "./caroline-safety.js";
 import { echoesGuardFeedback, GUARD_MAX_RETRIES, renderGuardFeedback } from "./guard-feedback.js";
+import { handbackGreetingViolation, handbackUnaskedStatusViolation } from "./handback-reply-guard.js";
 import { readOpenRequestFact, resetOpenRequestFact } from "./request-state-signal.js";
 import { stripUnbackedHandoff, UNBACKED_HANDOFF_RULE } from "./unbacked-handoff.js";
 import { appendSafetyLedger } from "./safety-ledger.js";
-import { surfaceLinkTargets } from "./filters.js";
+import { surfaceLinkTargets, renderHandbackBlock } from "./filters.js";
+import type { HandbackContext } from "./types.js";
 import { initStateStore, loadSessions, saveSessions } from "./state-store.js";
 import {
   buildEscalationSlackMessage,
@@ -1137,6 +1139,12 @@ export function buildAgentRawBody(
    * they send (INJECTION_MARKER_REGEX).
    */
   guardFeedback?: string | null,
+  /**
+   * The backlog drain's hand-back context for this turn (filters.ts handbackNoteContext). Code-authored
+   * from the note the drain posted, never from customer text. It sits directly above
+   * [CUSTOMER_MESSAGE] so it reads as "…and here is what this message actually is".
+   */
+  handback?: HandbackContext | null,
 ): string {
   const sanitized = sanitizeCustomerMessage(surfaceLinkTargets(message));
   const kbBlock = renderKnowledgeBaseBlock(kbSnippets ?? []);
@@ -1147,6 +1155,7 @@ export function buildAgentRawBody(
   // Empty string when no token is configured (dev, CI, a fresh host before the deploy step runs).
   const canaryLine = renderCanaryLine(canary);
   const attachmentBlock = renderAttachmentStatusBlock(unreadable ?? []);
+  const handbackBlock = renderHandbackBlock(handback);
   const lines: string[] = enrichment ? buildEnrichmentLines(enrichment) : [];
   if (!enrichment?.verifiedEmail && facts.accountEmail) {
     lines.push(`- account email: ${facts.accountEmail}`);
@@ -1164,13 +1173,14 @@ export function buildAgentRawBody(
   // block (docs/designs/2026-09-22-jev-caroline-router.md §B) goes last,
   // immediately before [CUSTOMER_MESSAGE], so it reads as "…and here is how
   // to handle what follows".
-  if (!kbBlock && !contextBlock && !attachmentBlock && !jevBlock && !canaryLine && !guardFeedback) return sanitized;
+  if (!kbBlock && !contextBlock && !attachmentBlock && !jevBlock && !canaryLine && !guardFeedback && !handbackBlock) return sanitized;
   return [
     ...(canaryLine ? [canaryLine] : []),
     ...(kbBlock ? [kbBlock] : []),
     ...(contextBlock ? [contextBlock] : []),
     ...(attachmentBlock ? [attachmentBlock] : []),
     ...(jevBlock ? [jevBlock] : []),
+    ...(handbackBlock ? [handbackBlock] : []),
     ...(guardFeedback ? [guardFeedback] : []),
     "[CUSTOMER_MESSAGE]",
     sanitized,
@@ -1567,6 +1577,7 @@ export const intercomPlugin = createChatChannelPlugin({
               resolveJevBlockForDispatch(account.jev?.enabled, state.jev),
               resolveCanaryToken(),
               turn.guardFeedback,
+              state.handback,
             ),
             messageId: turn.messageId,
             timestamp: latest.timestamp,
@@ -1865,7 +1876,24 @@ export const intercomPlugin = createChatChannelPlugin({
               let guardFeedback: string | null = null;
               const first = await dropUnbackedHandoff(guard.body, 1);
               guard.body = first.body;
-              if (first.onlyPromise) {
+              // A hand-back turn is a status update on a promise we made, so a pleasantry is a
+              // refusal, not a reply (handback-reply-guard.ts). Checked before the output guard so
+              // the retry is asked for the status template rather than for a generic fix.
+              const handbackGreeting = handbackGreetingViolation(guard.body, state.handback);
+              // The queue line is only truthful when the customer asked about a request. On
+              // 215473830027987 a customer asked about double-counted streams and was told their
+              // request was in the verification queue (firstmate 2026-11-15 16:26Z).
+              const handbackUnaskedStatus = handbackUnaskedStatusViolation(guard.body, state.handback);
+              if (handbackGreeting || handbackUnaskedStatus) {
+                guardFeedback =
+                  GUARD_MAX_RETRIES > 0
+                    ? renderGuardFeedback([
+                        { family: "promise", rule: (handbackGreeting ?? handbackUnaskedStatus)!, excerpt: "" },
+                      ])
+                    : null;
+                guard.body = BLOCKED_REPLY_FALLBACK;
+                outputBlocked = true;
+              } else if (first.onlyPromise) {
                 guardFeedback =
                   GUARD_MAX_RETRIES > 0 ? renderGuardFeedback([{ family: "promise", rule: UNBACKED_HANDOFF_RULE, excerpt: "" }]) : null;
                 guard.body = BLOCKED_REPLY_FALLBACK;
@@ -1928,7 +1956,24 @@ export const intercomPlugin = createChatChannelPlugin({
                     const og2 = await runOutputGuard(second.body, 2);
                     guard.body = og2.body;
                     outputBlocked = og2.blocked;
-                    if (!og2.blocked) {
+                    // The hand-back guards run on attempt 1 and must run on attempt 2 as well.
+                    // A retry that reproduces "Anytime!" or an unasked verification-queue line
+                    // would otherwise be delivered: the retry is a second chance at the same
+                    // reply, not an exemption from the rules that refused the first one
+                    // (QA 2026-11-15, channel.ts:1955).
+                    if (!outputBlocked) {
+                      const retryHandback =
+                        handbackGreetingViolation(guard.body, state.handback) ??
+                        handbackUnaskedStatusViolation(guard.body, state.handback);
+                      if (retryHandback) {
+                        log?.warn?.(
+                          `[intercom:output-guard] [${tag}] conv=${result.conversationId} RETRY-REFUSED rule=${retryHandback} (fallback line posted)`,
+                        );
+                        guard.body = BLOCKED_REPLY_FALLBACK;
+                        outputBlocked = true;
+                      }
+                    }
+                    if (!og2.blocked && !outputBlocked) {
                       mergePrep = retryMerge;
                       log?.info?.(`[intercom:output-guard] [${tag}] conv=${result.conversationId} RETRY-PASSED (corrected reply posted)`);
                     }

@@ -415,8 +415,10 @@ describe("merge-reply guard on the 2026-10-30 transcripts (firstmate 017)", () =
     // caroline-guard-g1: a reply the output guard replaced never carried the paragraph.
     expect(src.slice(prep, send)).toMatch(/if \(mergePrep\.commit\(delivered && !outputBlocked\)\) saveSessions\(accountSessions\)/);
     expect(src.slice(prep, send)).toContain("guard.body = mergePrep.body;");
-    // The swap happens only for a retry the output guard passed.
-    expect(src.slice(prep, send)).toMatch(/if \(!og2\.blocked\) \{\s*mergePrep = retryMerge;/);
+    // The swap happens only for a retry the output guard passed AND the hand-back guards did not
+    // refuse. The retry is a second chance at the same reply, not an exemption from the rules that
+    // refused the first one (QA 2026-11-15, channel.ts:1955).
+    expect(src.slice(prep, send)).toMatch(/if \(!og2\.blocked && !outputBlocked\) \{\s*mergePrep = retryMerge;/);
     expect(src.slice(prep, send).match(/mergePrep = /g)).toHaveLength(2);
   });
 

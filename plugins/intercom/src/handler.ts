@@ -10,7 +10,7 @@ import type {
   DocumentAttachmentRef,
 } from "./types.js";
 import { RateLimitError } from "./outbound.js";
-import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, customerSpokeLast, handbackNoteReason } from "./filters.js";
+import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, customerSpokeLast, weSpokeLast, handbackNoteContext, promiseFromThread, customerAskedAboutRequest, askFromThread, customerLastSpokeAt, lastWordWasWrongClose, HANDBACK_DISPATCH_PREFIX } from "./filters.js";
 import { checkEscalation, assessRisk, type AssessRiskDeps } from "./escalation.js";
 import { restrictionFor } from "./restricted-accounts.js";
 import { escalationGoesToQueue, humanHold } from "./assignment-policy.js";
@@ -327,9 +327,13 @@ async function handbackByNote(
   if (live.state !== "open") return null;
   const parts = live.conversation_parts?.conversation_parts ?? [];
   const newestNote = [...parts].reverse().find((part) => part?.part_type === "note");
-  const reason = handbackNoteReason(newestNote, botAdminId);
-  if (!reason) return null;
-  if (!customerSpokeLast(live)) return null;
+  const handback = handbackNoteContext(newestNote, botAdminId);
+  if (!handback) return null;
+  const reason = handback.reason;
+  // A follow-up note is posted on a thread where OUR reply is the last comment, because the
+  // hand-back reply did not answer. customerSpokeLast is false there by construction, so for
+  // followup=1 the condition is "the newest comment is ours and no customer comment came after it".
+  if (!customerSpokeLast(live) && !(handback.followup && weSpokeLast(live, botAdminId))) return null;
   const adminAssigneeId =
     live.admin_assignee_id != null
       ? String(live.admin_assignee_id)
@@ -339,10 +343,31 @@ async function handbackByNote(
   if (adminAssigneeId !== botAdminId) return null;
   const next = state ?? createInitialSessionState(conversationId, "");
   handleAssignment(next, botAdminId, "admin", botAdminId);
+  // The note's context is what turns this from "a customer said thanks" into "we owe this person a
+  // status update on a promise we made on <date>". Without it the only thing in the turn is their
+  // last word, and the reply is a greeting (firstmate 2026-11-15 15:03Z).
+  // A v1 note carries no timestamps, so fall back to the customer's own last message as the
+  // cutoff: anything we said before it is a candidate promise, anything after is our reply to
+  // them. Without this a v1 note found no promise and the block said "No promise is open" about
+  // a thread the note says has one (QA 2026-11-15, filters.ts:825).
+  const cutoff = handback.waitingSince > 0 ? handback.waitingSince : customerLastSpokeAt(live);
+  handback.promise = promiseFromThread(parts, botAdminId, handback.promisedAt, cutoff);
+  // Read from the CUSTOMER's own words, not from the promise kind: "we promised a merge" does not
+  // mean they asked about the merge today. It gates the verification-queue status line, which is
+  // only truthful when there is a request and they asked about it (firstmate 2026-11-15 16:26Z).
+  handback.askedAboutRequest = customerAskedAboutRequest(parts);
+  // For a words-reply to a proof ask, the ask itself comes from the thread: our last comment
+  // before the customer replied. The note carries only the need code, so no new copy can arrive
+  // through the marker.
+  handback.wrongClose = lastWordWasWrongClose(live);
+  if (handback.kind === "ask_reply_words") {
+    handback.ask = askFromThread(parts, botAdminId, handback.waitingSince);
+  }
+  next.handback = handback;
   const answer = await handleWebhookEvent(
     {
       ...payload,
-      id: `handback:${newestNote?.id ?? conversationId}`,
+      id: `${HANDBACK_DISPATCH_PREFIX}${newestNote?.id ?? conversationId}`,
       topic: "conversation.user.replied",
       data: { ...payload.data, item: live },
     },
@@ -354,6 +379,14 @@ async function handbackByNote(
   if (answer.result.action === "dispatch_to_agent") {
     console.info(`[intercom:handler] hand-back by note conv=${conversationId} reason=${reason}`);
   }
+  // NOT cleared here. `handleWebhookEvent` only QUEUES the agent turn; channel.ts builds the raw
+  // body and runs the reply guards later, from this same session state. Clearing at this point
+  // made `state.handback` null for the turn that actually answers, so the [HAND_BACK] block never
+  // reached the agent and both guards were inert (QA 2026-11-15, handler.ts:368).
+  //
+  // The context is cleared by the next ORDINARY inbound instead (see the customer_message branch
+  // below), which is the only thing that can make it stale: a hand-back turn is the turn it was
+  // written for, and a later customer message is a new turn that must not inherit it.
   return answer;
 }
 
@@ -422,6 +455,17 @@ export async function handleWebhookEvent(
 
   switch (classified.kind) {
     case "customer_message": {
+      // A hand-back context belongs to the hand-back turn. A new customer message is a new turn,
+      // so it must not inherit a promise from the previous one. This is where the context is
+      // retired, rather than at the end of the hand-back dispatch, because the dispatch only
+      // queues the turn (see handbackByNote).
+      //
+      // The hand-back dispatch re-enters this function as a synthetic `conversation.user.replied`
+      // with the id `handback:<note id>`. That IS the hand-back turn, so it must not retire the
+      // context it was just given (QA 2026-11-15: clearing here made the block and the greeting
+      // guard read null on the very turn they exist for).
+      const isHandbackDispatch = typeof payload.id === "string" && payload.id.startsWith(HANDBACK_DISPATCH_PREFIX);
+      if (state?.handback && !isHandbackDispatch) state.handback = null;
       // Channel-tag hard skip — runs before live-check, no API call needed.
       // The webhook payload includes the conversation's current tags; if any
       // matches a configured blocked channel (case-insensitive) we drop the

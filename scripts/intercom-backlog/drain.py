@@ -202,6 +202,11 @@ PROMISE_MET_BY = {"credits-approved": _DECIDED_KEEPS, "credits-decided": _DECIDE
 # must equal plugins/intercom/src/filters.ts HANDBACK_MARKER; no test compares the two copies
 HANDBACK_MARKER = "hydra-handback:"
 HANDBACK_MAX_PER_RUN = 25       # each hand-back starts a model turn
+# A hand-back note is only useful once the plugin that reads it is deployed: before that, the note
+# reaches Caroline as a bare marker and she answers the customer's last word, which on a thread we
+# went quiet on is usually "thanks" (firstmate 2026-11-15 15:03Z). The hold is a file, not a promise,
+# so "the drain holds hand-backs until it is deployed" is something the code enforces.
+HANDBACK_HOLD_FILE = "/etc/hydra/intercom-backlog-handback.disabled"
 HANDBACK_PACE_S = 2.0
 # ONE hand-back note per thread, no repeats and no retry policy (firstmate 2026-11-14 12:32Z): a note is
 # an attempt, the thread itself is the record, and a hand-back not read back within this window is listed
@@ -1007,6 +1012,9 @@ def run_send(plan, deps, *, apply=False, max_rows=MAX_PER_RUN, only=(), ledger_p
                 skip("the customer no longer spoke last"); continue
             if thread["holder"] in HELD_HOLDERS:
                 skip("held by " + thread["holder"].replace("_", " ")); continue
+            if os.path.exists(HANDBACK_HOLD_FILE):
+                skip("hand-back held: " + HANDBACK_HOLD_FILE + " exists (the plugin that reads the note is not deployed)")
+                continue
             already = note_already_on(cid, thread)
             if already:
                 skip("hand-back already posted (" + already + ")"); continue
