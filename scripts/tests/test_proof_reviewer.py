@@ -1091,7 +1091,124 @@ class ProofReviewerTest(unittest.TestCase):
                 self.assertIn(GATE_COPY[need], rendered)
                 self.assertIsNone(said.search(rendered))
 
-    def test_the_cron_runs_it_hourly_and_names_its_kill_file(self) -> None:
+    # ---- a run that reached verdicts and left no row is a failure, never a quiet success ------------------------
+    def verified_note(self, request: str = A) -> int:
+        row = self.note(ids=(request,))
+        self.read(self.doc(requests=(request,)), request=request, outcome="verified",
+                  reason="independently confirmed by xc_dsp", need=None)
+        return row
+
+    def ledger_answers(self, result: str, *, only: str | None = None) -> None:
+        """`record_proof_review` answering `result` and writing nothing, for every credit or for `only`."""
+        real = vl.record_proof_review
+
+        def answer(db, **kw):
+            if only is None or kw["request_ids"] == [only]:
+                return {"result": result}
+            return real(db, **kw)
+
+        vl.record_proof_review = answer
+        self.addCleanup(setattr, vl, "record_proof_review", real)
+
+    def test_a_run_that_reached_a_verdict_and_wrote_no_row_exits_non_zero(self) -> None:
+        self.verified_note()
+        self.ledger_answers("not_tagged")
+        rc, out = self.run_op("apply")
+        self.assertEqual(rc, pr.EX_NO_ROWS)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(out["accepted"], 1)
+        self.assertEqual(out["record:not_tagged"], 1)
+        self.assertEqual(out["on_file"], 0)
+        self.assertIn("reached 1 verdict(s) and wrote zero verify_proof_reviews rows", out["error"])
+        self.assertIn(out["run_id"], out["error"])
+        self.assertIsNone(self.review())
+
+    def test_the_exit_code_is_not_one_the_run_already_uses(self) -> None:
+        self.assertEqual(pr.EX_NO_ROWS, 70)
+
+    def test_the_guard_counts_the_rows_on_file_and_not_the_runs_own_counter(self) -> None:
+        self.verified_note()
+        self.ledger_answers("ok")                               # the run counts a write the ledger does not hold
+        rc, out = self.run_op("apply")
+        self.assertEqual(out["recorded"], 1)
+        self.assertEqual(out["on_file"], 0)
+        self.assertEqual(rc, pr.EX_NO_ROWS)
+        self.assertIsNone(self.review())
+
+    def test_a_run_with_nothing_under_review_exits_zero(self) -> None:
+        rc, out = self.run_op("apply")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("error", out)
+        self.assertNotIn("on_file", out)
+
+    def test_a_run_whose_every_credit_waits_on_the_reader_reached_no_verdict_and_exits_zero(self) -> None:
+        self.note()
+        self.read(self.doc(), outcome="unknown", reason="tooling: provider down", need=None)
+        self.ledger_answers("not_tagged")                       # never asked: the run has no verdict to record
+        rc, out = self.run_op("apply")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["wait_reader"], 1)
+        self.assertNotIn("error", out)
+        self.assertNotIn("on_file", out)
+
+    def test_a_run_that_wrote_a_row_exits_zero(self) -> None:
+        self.verified_note()
+        rc, out = self.run_op("apply")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["on_file"], 1)
+        self.assertNotIn("error", out)
+        self.assertEqual(self.review()["outcome"], "accepted")
+
+    def test_a_run_that_wrote_one_row_of_two_exits_zero_and_counts_the_other(self) -> None:
+        self.verified_note(A)
+        self.verified_note(B)
+        self.ledger_answers("not_tagged", only=B)
+        rc, out = self.run_op("apply")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["on_file"], 1)
+        self.assertEqual(out["record:ok"], 1)
+        self.assertEqual(out["record:not_tagged"], 1)
+        self.assertNotIn("error", out)
+        self.assertEqual(self.review(A)["outcome"], "accepted")
+        self.assertIsNone(self.review(B))
+
+    def test_a_run_never_counts_the_rows_of_another_run_with_its_run_id(self) -> None:
+        self.verified_note(A)
+        rc, first = self.run_op("apply")
+        self.assertEqual(rc, 0)
+        self.assertEqual(first["on_file"], 1)
+        self.verified_note(B)
+        self.ledger_answers("not_tagged")
+        rc, second = self.run_op("apply")                       # the same second, so the same run id
+        self.assertEqual(second["run_id"], first["run_id"])
+        self.assertEqual(second["on_file"], 0)
+        self.assertEqual(rc, pr.EX_NO_ROWS)
+
+    def test_a_failed_run_still_writes_the_reader_backlog(self) -> None:
+        self.verified_note(A)
+        self.note(ids=(B,))
+        self.read(self.doc(requests=(B,)), request=B, outcome="unknown", reason="tooling: provider down", need=None)
+        self.ledger_answers("not_tagged")
+        rc, out = self.run_op("apply")
+        self.assertEqual(rc, pr.EX_NO_ROWS)
+        self.assertEqual(out["wait_reader"], 1)
+        self.assertEqual(json.loads(Path(self.waiting).read_text())["wait_reader"], 1)
+
+    def test_plan_reaches_verdicts_writes_nothing_and_exits_zero(self) -> None:
+        self.verified_note()
+        rc, out = self.run_op("plan")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["accepted"], 1)
+        self.assertNotIn("error", out)
+        self.assertNotIn("on_file", out)
+
+    def test_the_rule_is_verdicts_reached_and_no_row_on_file(self) -> None:
+        self.assertIsNotNone(pr.unwritten(5, 0, "pr-x"))
+        self.assertIsNone(pr.unwritten(0, 0, "pr-x"))
+        self.assertIsNone(pr.unwritten(5, 1, "pr-x"))
+        self.assertIsNone(pr.unwritten(5, 5, "pr-x"))
+
+    def test_the_cron_runs_it_hourly_and_is_armed(self) -> None:
         jobs = {j["name"]: j for j in json.loads((ROOT / "cron-jobs.json").read_text())["jobs"]}
         job = jobs["credit-proof-reviewer"]
         self.assertEqual(job["payload"]["argv"],
@@ -1099,7 +1216,8 @@ class ProofReviewerTest(unittest.TestCase):
         self.assertEqual(job["payload"]["kind"], "command")
         self.assertEqual(job["sessionTarget"], "isolated")
         self.assertEqual(job["delivery"]["mode"], "none")
-        self.assertFalse(job["enabled"])
+        self.assertEqual(job["schedule"]["expr"], "55 * * * *")
+        self.assertTrue(job["enabled"])
 
 
 if __name__ == "__main__":

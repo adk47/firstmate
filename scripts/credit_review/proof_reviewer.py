@@ -54,6 +54,13 @@ decides nothing twice. A rejected credit is decided again only when a new docume
 `proof_marker.py`'s job.
 
 Kill file: /etc/hydra/proof-reviewer.disabled (exit 0, nothing read or written).
+
+Exit codes: 0 the run's record adds up; 2 a store could not be read (nothing written); 70 (`EX_NO_ROWS`) an
+`apply` reached verdicts and not one of them is on file in `verify_proof_reviews` when the ledger is read back
+(`unwritten`). The last one is never a quiet success: `verify_proof_reviews` stood at zero rows for as long as it
+did because every run that wrote nothing exited 0. A run where every credit waits on our reader reached no
+verdict, so it owes no row and exits 0 with its `wait_reader` count: that backlog is the reader's, and the
+reader has its own guard (`credit-doc-verify.py` `EX_NO_TRACE`).
 """
 from __future__ import annotations
 
@@ -79,6 +86,7 @@ PROOF_STORE = "/var/lib/hydra-credit-verify/proof.sqlite"
 KILL = "/etc/hydra/proof-reviewer.disabled"
 WAITING = os.environ.get("CREDIT_REVIEW_WAITING", "/var/lib/hydra/credit-review/proof-reader-waiting.json")
 MAX_NOTES = 200
+EX_NO_ROWS = 70              # EX_SOFTWARE: the run reached verdicts and the ledger holds none of them (unwritten)
 
 # The need codes the send gate renders (intercom-verify-request.sh proof_need_line). A test pins this list to it.
 NEED_READABLE = "readable_document"
@@ -626,6 +634,43 @@ def revert(db: sqlite3.Connection, *, run_id: str, now: datetime) -> dict[str, i
     return {"reverted": out["reverted"], "changed_since": out["changed_since"]}
 
 
+def unwritten(processed: int, written: int, run_id: str) -> str | None:
+    """Why this `apply` failed although nothing raised, or None when its record adds up.
+
+    `processed` is the credits the run reached a verdict for and handed to `record_proof_review` (within
+    `--max-notes`); a credit waiting on our reader is not one of them, because the run reached nothing for it.
+    `written` is the `verify_proof_reviews` rows found on file for this run (`on_file`), never the counter the run
+    kept for itself. Verdicts reached and no row on file is a failure. Some rows on file is not: a credit the
+    ledger refused (`record:not_tagged` and the like) is counted in the run's output and audited row by row."""
+    if processed > 0 and written == 0:
+        return (f"reached {processed} verdict(s) and wrote zero verify_proof_reviews rows under {run_id}: "
+                "no credit on a tagged note was reviewed by this run")
+    return None
+
+
+def decision_floor(db: sqlite3.Connection) -> int:
+    """The newest audit row before this run writes (0 when the table is not there yet): two runs inside one second
+    share a `run_id`, and a run must never count another run's rows as its own."""
+    there = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='proof_review_decisions'").fetchone()
+    if there is None:
+        return 0
+    return int(db.execute("SELECT COALESCE(MAX(id), 0) FROM proof_review_decisions").fetchone()[0])
+
+
+def on_file(path: str, run_id: str, floor: int) -> int:
+    """The `verify_proof_reviews` rows this run left on file, read back on a connection of its own after the
+    commit. A verdict is this run's when its audit row (newer than `floor`, `result` ok) names the row that is
+    there now: the same match `revert` deletes on."""
+    db = _ro(path)
+    try:
+        return int(db.execute(
+            "SELECT COUNT(*) FROM proof_review_decisions d JOIN verify_proof_reviews v ON v.family=d.family "
+            "AND v.request_id=d.request_id AND v.reviewed_by=d.reviewer AND v.reviewed_at=d.decided_at "
+            "WHERE d.run_id=? AND d.id>? AND d.result='ok' AND d.reverted_at IS NULL", (run_id, floor)).fetchone()[0])
+    finally:
+        db.close()
+
+
 def _rw(path: str) -> sqlite3.Connection:
     if not Path(path).is_file():
         raise Unreadable(f"{path} does not exist (the reviewer never creates a ledger)")
@@ -674,13 +719,23 @@ def main(argv: list[str] | None = None) -> int:
         db = _rw(a.ledger) if a.op == "apply" else _ro(a.ledger)
         todo, n = plan(db, ev, now=now, max_notes=a.max_notes)
         out: dict[str, Any] = {"op": a.op, "rule": RULE, "doc_verify": DV_VERSION, **dict(sorted(n.items()))}
+        silent: str | None = None
         if a.op == "apply":
             out["run_id"] = "pr-" + now.strftime("%Y%m%dT%H%M%SZ")
+            floor = decision_floor(db)
             out.update(dict(sorted(apply(db, todo, run_id=out["run_id"], now=now).items())))
+            processed = sum(len(note["credits"]) for note in todo)
+            if processed:
+                out["on_file"] = on_file(a.ledger, out["run_id"], floor)
+                silent = unwritten(processed, out["on_file"], out["run_id"])
         elif a.list:
             out["verdicts"] = [{"request_id": c["request_id"], **c["verdict"].public()}
                                for note in todo for c in note["credits"]]
         write_waiting(a.waiting_file, now=now, n=n)
+        if silent:
+            # the run's counters are still printed: they say where the verdicts went (`record:<result>`)
+            print(json.dumps({**out, "error": silent}))
+            return EX_NO_ROWS
         print(json.dumps(out))
         return 0
     except (Unreadable, sqlite3.Error, OSError) as exc:

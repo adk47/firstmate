@@ -120,6 +120,16 @@ stable `/health` 264 s after start. ~2,100 rows are protected at ANY `pruneAfter
 the last 2 backups (7.0 GB each) are in `/var/backups/hydra-main-sessions/<UTC-ts>/`.
 Restore and disarm steps are in that script's header.
 
+**`cron-jobs.json` is what a deploy imports; the gateway's SQLite store decides what runs.** The scheduler reads
+`cron_jobs` in `/root/.openclaw-main/state/openclaw.sqlite`, never the file. Editing `cron-jobs.json` on the host
+arms nothing: a live flip is `openclaw cron enable <id>`, and it lasts until the next deploy, whose import
+(`deploy.sh`, `saveCronStore`: delete and re-insert the whole repo set, `enabled` included) writes the repo's value
+back. So a job armed by hand stays armed only if the repo says `enabled: true` before that deploy. Seen 2026-11-15
+on `credit-proof-reviewer`. Read what is live from the store (`cron_jobs.enabled`), and a job's runs from
+`cron_run_receipts`: a command cron's non-zero exit is `status: error`, `command exited with code N`, and
+`cron-health-watchdog.sh` pages once the job has errored on `MIN_STREAK` consecutive runs (default 2, so one
+errored run between ok runs never pages).
+
 **Two payload shapes, strictly enforced by the CLI.** "Run a task" = `--session
 isolated` (default) + `--message` + `--announce --channel slack --to <target>`;
 `--at "+0s"` makes a one-shot (defaults `deleteAfterRun:true`). `--session main`

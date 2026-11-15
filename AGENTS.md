@@ -1275,7 +1275,8 @@ Counts: `data/proof-processing-ovh-e1/tools/measure.py` on node-8.
   version and the model), sends nothing and approves nothing in core. A document doc-verify has not read, or
   read only as `unknown`, gets no verdict at any age: the credit stays under review waiting on our reader
   (every run's output carries `wait_reader` and `wait_reader_oldest_days`), never on a person and never removal-due; `credit-review.py --proof-review` is an ops
-  override. The cron ships unarmed (`enabled: false`): arming it is a decision, not a side effect of a merge.
+  override. The cron is armed (2026-11-15). An `apply` that reached verdicts and left no row on file exits 70:
+  with the cron off, 662 marked notes had 0 reviews and nothing failed.
 - **A tag is not a decision.** No job turns a read document into a core decision: the document class is
   `approved: false` in `policies/credit-approval-automation.json`, `doc_approvals` is empty and core's
   `credit_document_verdicts` has 0 rows. Report the stages separately (filed, read, answered, decided, told);

@@ -12,7 +12,7 @@ job that owns each stage, what is still duplicated, and what is not armed. The m
 | read | `credit-doc-verify.py run` (cron `credit-doc-verify`) | hourly :50 | `proof_intake`, the document bytes, sources the customer does not control | `dv_outcomes` in `doc-verify.sqlite` (shadow) |
 | decide | credits: `credit_review/doc_approve.py` through `decide.py`. Claims: `claim-doc-ladder.py` | not armed; 4 h (shadow) | `dv_outcomes` | `doc_approvals`; `claim-doc-ladder/decisions.sqlite` |
 | mark | `credit_review/proof_marker.py apply` (cron `credit-proof-marker`) | hourly :45 | `proof_intake` (read-only), `verify_messages` | `verify_messages.proof_tagged_at`, one `proof_marks` row per tag |
-| review | `credit_review/proof_reviewer.py apply` (cron `credit-proof-reviewer`, ships unarmed: `enabled: false`) | hourly :55 once armed | `verify_messages` under review, `dv_outcomes`, `dv_llm_calls`, `proof_intake` (all read-only) | `verify_proof_reviews` through `verify_ledger.record_proof_review`, one `proof_review_decisions` row per credit |
+| review | `credit_review/proof_reviewer.py apply` (cron `credit-proof-reviewer`, armed 2026-11-15) | hourly :55 | `verify_messages` under review, `dv_outcomes`, `dv_llm_calls`, `proof_intake` (all read-only) | `verify_proof_reviews` through `verify_ledger.record_proof_review`, one `proof_review_decisions` row per credit |
 | tell | the existing senders, each behind the outbound copy gate | per campaign | the ledger | `verify_messages` |
 
 Nothing on this page sends a message or approves a credit in core. The file and mark stages never judge. The
@@ -149,7 +149,18 @@ rows name is reviewed and any was rejected. A run is one `BEGIN IMMEDIATE` trans
 `proof_review_decisions` row, the tags it settles and the record of which tags it cleared land together or not at
 all, so a run killed part-way leaves the ledger as it found it and the next run decides the same notes. A rejected credit is decided again only when a new document re-tags its note, which is
 `proof_marker.py`'s job, unchanged. The backlog is the same command with a larger bound. Kill file:
-`/etc/hydra/proof-reviewer.disabled`. An unreadable store is exit 2 and nothing is written. `proof_review_decisions` is created by the reviewer, not by `verify_ledger.SCHEMA`,
+`/etc/hydra/proof-reviewer.disabled`. An unreadable store is exit 2 and nothing is written. An `apply` that reached
+verdicts and left no `verify_proof_reviews` row on file exits 70 (`EX_NO_ROWS`): the run reads the ledger back on a
+connection of its own and prints `on_file`, the rows it finds for its own audit rows, so the count is the ledger's and
+not the run's. A run that reached no verdict (nothing under review, or every credit waiting on the reader) owes no
+row and exits 0. The exit pages through the path every cron has: the gateway records `command exited with code 70`
+as an errored receipt, and `cron-health-watchdog.sh` pages once the job has errored on `MIN_STREAK` consecutive
+runs (default 2), so at the hourly schedule a page follows the second consecutive exit 70 while a single exit 70
+between ok runs does not page. The cron was armed on 2026-11-15: with it off,
+`verify_proof_reviews` held 0 rows against 662 `proof_marks`; its first run (`pr-20261115T125207Z`) wrote 1,381 rows
+(3 accepted, 1,378 rejected) and left 1,817 credits waiting on the reader. Measurements, the 20 requests picked for
+a known-answer check and what the decide stage still needs: `data/proof-return-path-arm-r1/report.md`.
+`proof_review_decisions` is created by the reviewer, not by `verify_ledger.SCHEMA`,
 for the reason `proof_marks` is. Claim notes are skipped: their documents are `claim-doc-ladder.py`'s.
 
 ## What the seven named processors are
