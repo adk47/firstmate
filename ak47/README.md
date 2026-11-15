@@ -179,8 +179,9 @@ five hours with no `devops.log` line, and nothing watching the tick's silence
 closely enough to notice. The tick is the sampler, so a sampler that can hang is
 a loop that can die.
 
-The walk now runs under `timeout` (`AK47_DU_BUDGET`, default 300 s) and measures
-the top-level entries in batches, so a tree too big to finish inside the budget
+The walk now runs under `timeout` (`AK47_DU_BUDGET`, default 300 s): one
+whole-tree `du` is tried first, and if it does not finish the walk measures the
+top-level entries in batches within half the budget, so a tree too big to finish
 still yields a real lower bound with its coverage recorded in `tmp_gb_partial`
 (`<entries measured>/<entries present>`) rather than nothing at all. A partial
 walk caches its number but does **not** stamp `tmp_gb_ok`: only a walk that

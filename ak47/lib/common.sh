@@ -125,7 +125,7 @@ ak47_cache_age() {
 ak47_tmp_gb() {
   local ttl=${AK47_DU_TTL:-1800} budget=${AK47_DU_BUDGET:-300} v
   local retry=${AK47_DU_RETRY:-900} marker="$AK47_STATE/.tmp-gb-walk-failed" retrying=0
-  # A failed walk is remembered for a while. Retrying a 90 s timeout on every
+  # A failed walk is remembered for a while. Retrying a 300 s timeout on every
   # call is how the tick spent its whole interval failing to measure: the retry
   # interval is deliberate, not a sigh of relief.
   if [ -r "$marker" ]; then

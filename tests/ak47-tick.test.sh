@@ -718,6 +718,10 @@ test_a_privileged_tick_rings_the_reclaim_and_does_not_swap_inline
 
 test_a_stale_size_walk_is_reported_once_per_episode() {
   reset_tree
+  # A successful delivery is what commits the episode key; without it the tick
+  # correctly re-files every run. Do not depend on an earlier test's fake inbox.
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$FM_HOME/bin/fm-inbox.sh"
+  chmod +x "$FM_HOME/bin/fm-inbox.sh"
   local slow=$SANDBOX/slowbin-ep
   mkdir -p "$slow"
   printf '#!/bin/sh\nexec sleep 300\n' >"$slow/du"
@@ -737,6 +741,8 @@ test_a_stale_size_walk_is_reported_once_per_episode() {
 
 test_a_measurable_tree_ends_the_episode() {
   reset_tree
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$FM_HOME/bin/fm-inbox.sh"
+  chmod +x "$FM_HOME/bin/fm-inbox.sh"
   local slow=$SANDBOX/slowbin-ep2
   mkdir -p "$slow"
   printf '#!/bin/sh\nexec sleep 300\n' >"$slow/du"
