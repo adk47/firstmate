@@ -1,0 +1,22 @@
+# classify_held.py at b3b9bf191, run read-only on node-8 2026-11-15 ~08:30Z
+# input: /root/h2-runs/sched/20261115T0500Z/need-asks-all.json
+# KNOWN FLAW in this version: "newest intake" is the user's newest arrival overall, ties broken by intake id. For a
+# user held only by a same-second sibling that can be the HELD document itself, not the one holding it, so
+# askable_unasked is overstated here (held_table.py, which takes the newest intake that holds the first held need,
+# counts 110 on the list where this counts 125). A corrected run follows in classify-held-0610Z-v2.txt.
+list generated_at=2026-11-15T06:10:23+00:00 window=90d paid_users=725
+held on at least one need: 161
+  askable_unasked: 120
+  read:unverifiable: 28
+  asked_in_window: 5
+  read:unknown: 4
+  unread: 2
+  read:verified: 2
+held on every need: 71
+  askable_unasked: 35
+  read:unverifiable: 28
+  read:unknown: 4
+  unread: 2
+  read:verified: 2
+  [stuck, held only by a same-second intake: 50]
+  [stuck, a later intake: 21]

@@ -580,19 +580,83 @@ def fraud_facts(uid: int, query: Query) -> list[str]:
     return out
 
 
-def newer_intake(doc_at: str, arrivals: list[Any] | tuple[Any, ...], named: set[str] | frozenset[str] = frozenset()) -> bool:
-    """L11c 'anything newer holds' (QA #1418): did ANY intake of this user arrive after the named document? The ONE
-    predicate shared by the send-time check (need_facts) and the batch builder's selection (need_asks.payloads).
+INTAKE_READ = "read"          # read by doc-verify, and no document ask for its requests inside the window: holds nothing
+INTAKE_UNREAD = "unread"      # no doc-verify outcome, or our reader did not answer (`unknown`): ours to read, it holds
+INTAKE_ASKED = "asked"        # a document ask for one of its requests went out inside the window: it holds
+
+
+def newer_intake(doc_at: str, arrivals: list[Any] | tuple[Any, ...], named: set[str] | frozenset[str] = frozenset(),
+                 states: dict[str, str] | None = None) -> bool:
+    """L11c (QA #1418): does an intake of this user that arrived after the named document hold the ask about it? The
+    ONE predicate shared by the send-time check (need_facts) and the batch builder's selection (need_asks.payloads).
     An arrival is (received_at, intake_id) (a bare time = a pre-intake-id row). QA #1513: whole-second times cannot
     order two intakes of the same second, so a DIFFERENT intake (not one the message names) in the SAME second as the
-    named document counts as newer too."""
+    named document counts as newer too.
+    `states` is intake_states(): a newer intake holds while it is unread (it may be the answer, and it is ours to
+    read) or while a document ask for it is inside the window (the customer has an open ask about their newer
+    document). A newer intake that has been read and has no such ask holds nothing: what it needs is asked about in
+    its own right (need_asks.payloads takes the newest document first), and it is no reason to keep an older
+    document's ask back for ever. An intake `states` does not name holds. states=None (the states could not be read)
+    is the rule before states existed: anything newer holds."""
     t = _ts(doc_at)
     for a in arrivals:
         at, iid = (a[0], str(a[1] or "")) if isinstance(a, (list, tuple)) else (a, "")
         ts = _ts(at)
         if ts > t or (ts == t and iid and iid not in named):
-            return True
+            if states is None or states.get(iid, INTAKE_UNREAD) != INTAKE_READ:
+                return True
     return False
+
+
+def intake_states(uid: int, now: float | None = None) -> dict[str, str]:
+    """{intake id: INTAKE_READ | INTAKE_UNREAD | INTAKE_ASKED} for every proof_intake row of this user, from our own
+    stores only (proof store, doc-verify store, verify ledger; no replica read). An intake is READ when doc-verify has
+    an outcome bound to it and none of its latest outcomes is `unknown` (the binding is need_facts': the row's own
+    intake id, and a row with none belongs to the file's FIRST arrival). It is ASKED when a document ask (gap-ask or
+    proof-need-ask, attempted or sent) for one of the requests it was read against went out inside
+    verify_ledger.REASK_LOCK_DAYS, counted on the note's day as verify_ledger.asked_within counts it. A store that
+    cannot be read raises Unknown: the caller then holds on anything newer, as before."""
+    from credit_review import verify_ledger            # noqa: PLC0415  (lazy, as fraud_lens: the window is its constant)
+    try:
+        pdb = _ro(PROOF_STORE)
+        pcols = {r[1] for r in pdb.execute("PRAGMA table_info(proof_intake)")}
+        pid_col = "coalesce(intake_id, '')" if "intake_id" in pcols else "'rowid:' || rowid"
+        intakes = list(pdb.execute(f"SELECT lower(file_sha256), {pid_col} FROM proof_intake WHERE user_id=? "
+                                   "ORDER BY received_at, rowid", (uid,)))
+        earliest: dict[str, str] = {}
+        for sha, iid in intakes:
+            earliest.setdefault(sha, iid)
+        db = _ro(DV_STORE)
+        dcols = {r[1] for r in db.execute("PRAGMA table_info(dv_outcomes)")}
+        iid_col = "coalesce(intake_id, '')" if "intake_id" in dcols else "''"
+        latest: dict[tuple[str, str, str], str] = {}        # (request, document, intake) -> its latest outcome
+        for rid, proof, outcome, row_intake in db.execute(
+                f"SELECT lower(request_id), lower(proof_id), outcome, {iid_col} FROM dv_outcomes WHERE user_id=? "
+                "ORDER BY at, id", (uid,)):
+            latest[(str(rid), str(proof), str(row_intake) or earliest.get(str(proof), ""))] = str(outcome)
+        reads: dict[str, list[tuple[str, str]]] = {}
+        for (rid, _proof, iid), outcome in latest.items():
+            reads.setdefault(iid, []).append((rid, outcome))
+        out = {iid: INTAKE_READ if reads.get(iid) and all(o != "unknown" for _r, o in reads[iid]) else INTAKE_UNREAD
+               for _sha, iid in intakes if iid}
+        since = (datetime.fromtimestamp(now if now is not None else time.time(), timezone.utc)
+                 - timedelta(days=verify_ledger.REASK_LOCK_DAYS)).strftime("%Y-%m-%d")
+        asks = verify_ledger.GAP_LIKE
+        rids = sorted({rid for iid, state in out.items() if state == INTAKE_READ for rid, _o in reads[iid]})
+        asked: set[str] = set()
+        ldb = _ro(LEDGER) if rids else None
+        for i in range(0, len(rids), 400):
+            chunk = rids[i:i + 400]
+            asked |= {str(r[0]) for r in ldb.execute(
+                "SELECT lower(r.request_id) FROM verify_requests r JOIN verify_messages m ON m.id = r.message_row "
+                f"WHERE r.campaign IN ({','.join('?' * len(asks))}) AND r.status IN ('attempted','sent') "
+                f"AND m.day > ? AND lower(r.request_id) IN ({','.join('?' * len(chunk))})", (*asks, since, *chunk))}
+    except sqlite3.Error as exc:
+        raise Unknown(f"intake states unreadable: {exc}") from exc
+    for iid, state in out.items():
+        if state == INTAKE_READ and any(rid in asked for rid, _o in reads[iid]):
+            out[iid] = INTAKE_ASKED
+    return out
 
 
 def need_facts(uid: int, keys: list[str], doc_sha: str, doc_at: str, need_code: str = "",
@@ -677,7 +741,11 @@ def need_facts(uid: int, keys: list[str], doc_sha: str, doc_at: str, need_code: 
         # matches another intake (a same-sha re-upload) could make that re-upload look already read; it holds
         if not any(sha in named and _ts(at) == _ts(doc_at) and doc_intakes.get(sha) == iid for sha, at, iid in intakes):
             out["newer"].append("doc_at_not_the_arrival_of_the_named_intake")
-        if newer_intake(doc_at, [(at, iid) for _sha, at, iid in intakes], set(doc_intakes.values())):
+        try:
+            states: dict[str, str] | None = intake_states(uid)
+        except Unknown:
+            states = None                             # not measured: anything newer holds
+        if newer_intake(doc_at, [(at, iid) for _sha, at, iid in intakes], set(doc_intakes.values()), states):
             out["newer"].append("newer_document:proof_intake")
     except sqlite3.Error as exc:
         raise Unknown(f"need facts unreadable: {exc}") from exc

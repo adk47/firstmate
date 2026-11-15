@@ -587,8 +587,8 @@ def core_proof_requested(rids: list[str], query: uvn_status.Query) -> set[str]:
 
 def payloads(users: list[dict[str, Any]], query: uvn_status.Query, asked: set[str] | None = None,
              held_out: list[str] | None = None, filtered_out: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
-    """ONE gate payload per user (Fable [key=l11c-plural]): the first need group, counterparty first, that still has
-    pending requests nobody asked about. The unit is (user, DOCUMENT) (p1 156): the message is about the documents of
+    """ONE gate payload per user (Fable [key=l11c-plural]): the need group with the NEWEST document that still has
+    pending requests nobody asked about, counterparty first when two needs share that time. The unit is (user, DOCUMENT) (p1 156): the message is about the documents of
     that need sent on the NEWEST day in one filing thread (named by kind + date in the copy, Fable 166) and names
     EVERY pending, not-yet-asked request of THOSE documents (re-read against the replica now). Other documents and the other need wait: the gate's 7-day rule defers
     them to a later run."""
@@ -608,11 +608,17 @@ def payloads(users: list[dict[str, Any]], query: uvn_status.Query, asked: set[st
         rows = {r["request_id"].lower(): r for r in pend.get(uid, [])
                 if not r["_incomplete"] and r["_no_ask"] != uvn_status.NEVER_ASKED}
         n_out, n_held = len(out), len(held)
-        for need in NEED_ORDER:
-            cand = [a for a in u["asks"] if a["need"] == need and a["request_id"].lower() in rows
-                    and a["request_id"].lower() not in asked]
-            if not cand:
-                continue
+        by_need = {need: [a for a in u["asks"] if a["need"] == need and a["request_id"].lower() in rows
+                          and a["request_id"].lower() not in asked] for need in NEED_ORDER}
+        # the ask is about the NEWEST document we can ask about: the need whose newest document arrived last goes
+        # first (NEED_ORDER when two share that second; the sort is stable). Until intake states existed the hold
+        # below gave the same order by holding every older need, and gave nobody when two needs shared a second.
+        order = sorted((n for n in NEED_ORDER if by_need[n]), reverse=True,
+                       key=lambda n: max(a["doc_received_at"] for a in by_need[n])[:19])
+        states: dict[str, str] | None = None
+        states_read = False
+        for need in order:
+            cand = by_need[need]
             newest = max(cand, key=lambda a: (a["doc_received_at"], a["doc_sha"]))
             # Fable 166: the documents of this need sent on the NEWEST day, in the same filing thread ("the documents
             # you sent on {date}" when several); older documents wait for a later run. A request with several such
@@ -636,12 +642,20 @@ def payloads(users: list[dict[str, Any]], query: uvn_status.Query, asked: set[st
                 docs = [a for a in docs if a["request_id"].lower() == group[0]["request_id"].lower()]
             # QA #1418 (03:1xZ) / QA #1513: judged AFTER the group is built (and, for a distributor ask, narrowed to its one
             # request), with the SAME rule the send applies (comm_state.newer_intake over the intakes the MESSAGE
-            # NAMES, i.e. exactly need.doc_intakes below): a need whose newest document is older than any intake of this
-            # user, or shares its second with an intake the message does not name (another thread's same-second
-            # document), would be held at send - skip it here, so the batch reaches the need that CAN go and a held
-            # user never takes a --max-users slot run after run. Rows built before 'arrivals' existed are not filtered.
+            # NAMES, i.e. exactly need.doc_intakes below): a need whose newest document is older than an intake of this
+            # user that HOLDS (comm_state.intake_states: one we have not read, or one a document ask went out for
+            # inside the window), or shares its second with such an intake the message does not name, would be held
+            # at send - skip it here, so a held user never takes a --max-users slot run after run. A newer intake that
+            # was read and has no ask of its own holds nothing. Rows built before 'arrivals' existed are not filtered.
+            named = {str(a.get("intake_id") or "") for a in docs if a.get("intake_id")}
+            if not states_read and comm_state.newer_intake(newest["doc_received_at"], u.get("arrivals") or [], named):
+                states_read = True                  # read once per user, and only for a user with something newer
+                try:
+                    states = comm_state.intake_states(uid)
+                except comm_state.Unknown:
+                    states = None                   # not measured: anything newer holds
             if comm_state.newer_intake(newest["doc_received_at"], u.get("arrivals") or [],
-                                       {str(a.get("intake_id") or "") for a in docs if a.get("intake_id")}):
+                                       named, states if states_read else None):
                 held.append(f"user {uid}: {need} (an intake newer than its newest document)")
                 continue
             n_docs = len({a["doc_sha"] for a in docs})

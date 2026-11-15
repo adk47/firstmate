@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +34,12 @@ class NeedAsksTest(unittest.TestCase):
         p = unittest.mock.patch.object(na, "STALE_FILING_DAYS", 10 ** 6)
         p.start(); self.addCleanup(p.stop)
         self.d = Path(tempfile.mkdtemp())
+        # the intake states (comm_state.intake_states) are NOT measured in this class: its stores are absent, so every
+        # test here runs the unmeasured rule (anything newer holds) and never reads a host's real stores.
+        # NewerIntakeStatesTest measures them.
+        for name in ("PROOF_STORE", "DV_STORE", "LEDGER"):
+            p = unittest.mock.patch.object(na.comm_state, name, str(self.d / f"absent-{name}.sqlite"))
+            p.start(); self.addCleanup(p.stop)
         self.dv = str(self.d / "dv.sqlite")
         db = sqlite3.connect(self.dv)
         db.execute("CREATE TABLE dv_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, proof_id TEXT, request_id TEXT, "
@@ -351,7 +357,9 @@ class NeedAsksTest(unittest.TestCase):
 
     def test_qa_1418_a_held_old_need_never_blocks_a_readable_new_one(self):
         # QA #1418 04:52Z repro: day-1 counterparty need, day-2 readable need. Counterparty is FIRST in NEED_ORDER, but
-        # its newest document is older than the day-2 intake -> the send would hold it; the readable need goes instead
+        # its newest document is older than the day-2 intake -> the send would hold it; the readable need goes instead.
+        # The need with the newest document is now taken FIRST, so the older need is never judged for this user: it is
+        # no longer listed as held behind an ask that went.
         u = {"user_id": "1", "paid": True, "arrivals": ["2026-10-18T09:30:00Z", "2026-10-19T10:00:00Z"], "asks": [
             {"request_id": "r1", "need": "counterparty_signed_or_registered", "doc_sha": SHA_A,
              "doc_received_at": "2026-10-18T09:30:00Z", "doc_kind": "image", "filing_conversation": "777", "matched_by": ""},
@@ -361,7 +369,7 @@ class NeedAsksTest(unittest.TestCase):
         held = []
         ps = na.payloads([u], self.q, None, held)
         self.assertEqual([(p["need"]["code"], [c["request_id"] for c in p["credits"]]) for p in ps], [("readable_document", ["r2"])])
-        self.assertEqual(held, ["user 1: counterparty_signed_or_registered (an intake newer than its newest document)"])
+        self.assertEqual(held, [])
         # and comm_state, at send, agrees on both (one predicate)
         from credit_review import comm_state as cs
         self.assertTrue(cs.newer_intake("2026-10-18T09:30:00Z", u["arrivals"]))
@@ -1977,6 +1985,139 @@ class ApprovedForAnotherUserTest(unittest.TestCase):
         path.write_text(json.dumps({"users": [], "backlog": []}))
         with self.assertRaises(na.NeedError):
             na.send_elsewhere(list_path=str(path), query=lambda _s: [], runner=FakeGate(), ledger_path=self.ledger())
+
+
+class NewerIntakeStatesTest(unittest.TestCase):
+    """The ask is about the NEWEST intake, and a newer intake holds an older document's ask only while it is unread or
+    while a document ask for it is inside the window. One user: document A (10-18, unreadable) then document B (10-19,
+    needs a counterparty signature). Builder (need_asks.payloads) and send (comm_state.need_facts) are held to the
+    same answer in every case."""
+
+    T_A, T_B = "2026-10-18T09:30:00Z", "2026-10-19T10:00:00Z"
+
+    def setUp(self):
+        from credit_review import verify_ledger
+        self.vl = verify_ledger
+        self.cs = na.comm_state
+        self.d = Path(tempfile.mkdtemp())
+        for name in ("PROOF_STORE", "DV_STORE", "LEDGER"):
+            p = unittest.mock.patch.object(self.cs, name, str(self.d / f"{name}.sqlite"))
+            p.start(); self.addCleanup(p.stop)
+        db = sqlite3.connect(self.cs.PROOF_STORE)
+        db.execute("CREATE TABLE proof_intake (user_id INTEGER, file_sha256 TEXT, received_at TEXT, mime TEXT, "
+                   "conversation_id TEXT, intake_id TEXT, matched_by TEXT DEFAULT 'professional_id')")
+        db.executemany("INSERT INTO proof_intake (user_id, file_sha256, received_at, mime, conversation_id, intake_id) "
+                       "VALUES (1,?,?,?,?,?)", [(SHA_A, self.T_A, "image/jpeg", "777", "1:a"),
+                                                (SHA_B, self.T_B, "application/pdf", "778", "1:b")])
+        db.commit(); db.close()
+        db = sqlite3.connect(self.cs.DV_STORE)
+        db.execute("CREATE TABLE dv_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, proof_id TEXT, request_id TEXT, "
+                   "user_id INTEGER, outcome TEXT, need TEXT, intake_id TEXT)")
+        db.commit(); db.close()
+        self.read(SHA_A, "r1", "unverifiable", "readable_document", "1:a")
+        self.vl.connect(self.cs.LEDGER).close()
+        self.user = {"user_id": "1", "paid": True, "arrivals": [[self.T_A, "1:a"], [self.T_B, "1:b"]], "asks": [
+            {"request_id": "r1", "need": "readable_document", "doc_sha": SHA_A, "doc_received_at": self.T_A,
+             "doc_kind": "image", "filing_conversation": "777", "matched_by": "", "intake_id": "1:a"}]}
+
+    def read(self, sha, rid, outcome, need, intake):
+        db = sqlite3.connect(self.cs.DV_STORE)
+        db.execute("INSERT INTO dv_outcomes (at, proof_id, request_id, user_id, outcome, need, intake_id) "
+                   "VALUES ('2026-10-20T00:00:00Z',?,?,1,?,?,?)", (sha, rid, outcome, need, intake))
+        db.commit(); db.close()
+
+    def b_is_askable(self):
+        self.read(SHA_B, "r2", "unverifiable", "counterparty_signed_or_registered", "1:b")
+        self.user["asks"].append(
+            {"request_id": "r2", "need": "counterparty_signed_or_registered", "doc_sha": SHA_B, "doc_received_at": self.T_B,
+             "doc_kind": "PDF", "filing_conversation": "778", "matched_by": "", "intake_id": "1:b"})
+
+    def ask_sent(self, rid, days_ago):
+        day = (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+        db = self.vl.connect(self.cs.LEDGER)
+        cur = db.execute(
+            "INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, "
+            "request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, sent_at) "
+            "VALUES ('proof-need-ask','initial','u1@x.com','1',?,'sent','comment',?,1,'U','r',?,?,?)",
+            (day, json.dumps([rid]), day, day, day))
+        db.execute("INSERT INTO verify_requests (campaign, request_id, message_row, status, attempts, updated_at) "
+                   "VALUES ('proof-need-ask', ?, ?, 'sent', 1, ?)", (rid, cur.lastrowid, day))
+        db.commit(); db.close()
+
+    def q(self, sql):
+        if "FROM postgresql_core.public.users" in sql:
+            return [["1", "u1@x.com", "Jane", "", ""]]
+        return [[r, "1", "p1", "t1", f"Song {r}", '[{"name": "Big Star"}]', "{Mixing}", "40", "{}", "{}"] for r in ("r1", "r2")]
+
+    def built(self, asked=()):
+        held = []
+        ps = na.payloads([self.user], self.q, set(asked), held)
+        return [(p["need"]["code"], [c["request_id"] for c in p["credits"]]) for p in ps], held
+
+    def send_holds_a(self):
+        """The send-time twin: would the gate hold an ask that names document A?"""
+        return self.cs.need_facts(1, ["r1"], SHA_A, self.T_A, "readable_document", doc_intakes={SHA_A: "1:a"})["newer"]
+
+    HELD_A = ["user 1: readable_document (an intake newer than its newest document)"]
+
+    def test_an_unasked_newer_intake_is_the_one_asked_about(self):
+        # readable_document comes AFTER counterparty in NEED_ORDER only by accident here: make the OLDER document the
+        # counterparty one too, so the order of needs cannot be what picks B
+        self.b_is_askable()
+        self.assertEqual(self.built(), ([("counterparty_signed_or_registered", ["r2"])], []))
+        self.user["asks"][0]["need"], self.user["asks"][1]["need"] = "counterparty_signed_or_registered", "readable_document"
+        self.assertEqual(self.built(), ([("readable_document", ["r2"])], []))     # still B: the newest document
+
+    def test_a_newer_intake_asked_about_inside_the_window_holds_the_older_document(self):
+        self.b_is_askable()
+        self.ask_sent("r2", days_ago=3)
+        self.assertEqual(self.cs.intake_states(1), {"1:a": "read", "1:b": "asked"})
+        self.assertEqual(self.built(asked={"r2"}), ([], self.HELD_A))
+        self.assertEqual(self.send_holds_a(), ["newer_document:proof_intake"])
+
+    def test_an_ask_older_than_the_window_no_longer_holds(self):
+        self.b_is_askable()
+        self.ask_sent("r2", days_ago=self.vl.REASK_LOCK_DAYS + 1)
+        self.assertEqual(self.cs.intake_states(1)["1:b"], "read")
+        self.assertEqual(self.built(asked={"r2"}), ([("readable_document", ["r1"])], []))
+        self.assertEqual(self.send_holds_a(), [])
+
+    def test_a_newer_intake_we_have_not_read_holds(self):
+        # no doc-verify outcome for B at all, then one our reader could not answer: both are ours to read, both hold
+        self.assertEqual(self.cs.intake_states(1)["1:b"], "unread")
+        self.assertEqual(self.built(), ([], self.HELD_A))
+        self.assertEqual(self.send_holds_a(), ["newer_document:proof_intake"])
+        self.read(SHA_B, "r2", "unknown", "", "1:b")
+        self.assertEqual(self.cs.intake_states(1)["1:b"], "unread")
+        self.assertEqual(self.built(), ([], self.HELD_A))
+
+    def test_a_newer_intake_read_with_nothing_to_ask_holds_nothing(self):
+        # B was read and there is no ask to make about it (verified; the same goes for a need we do not send): it is
+        # not on the list, nobody was asked about it, and it no longer keeps document A's ask back
+        self.read(SHA_B, "r2", "verified", "", "1:b")
+        self.assertEqual(self.cs.intake_states(1), {"1:a": "read", "1:b": "read"})
+        self.assertEqual(self.built(), ([("readable_document", ["r1"])], []))
+        self.assertEqual(self.send_holds_a(), [])
+
+    def test_two_documents_of_one_second_in_two_threads_no_longer_hold_each_other(self):
+        # the 50-user class: both read, neither asked about. Before, each held the other on every run.
+        self.b_is_askable()
+        sqlite3.connect(self.cs.PROOF_STORE).executescript(f"UPDATE proof_intake SET received_at='{self.T_A}';")
+        self.user["arrivals"] = [[self.T_A, "1:a"], [self.T_A, "1:b"]]
+        self.user["asks"][1]["doc_received_at"] = self.T_A
+        self.assertEqual(self.built(), ([("counterparty_signed_or_registered", ["r2"])], []))
+        self.assertTrue(self.cs.newer_intake(self.T_A, self.user["arrivals"], {"1:b"}))            # unmeasured: holds
+        self.assertFalse(self.cs.newer_intake(self.T_A, self.user["arrivals"], {"1:b"}, self.cs.intake_states(1)))
+
+    def test_states_that_cannot_be_read_are_the_old_rule(self):
+        self.b_is_askable()
+        self.read(SHA_B, "r3", "verified", "", "1:b")
+        Path(self.cs.LEDGER).unlink()
+        with self.assertRaises(self.cs.Unknown):
+            self.cs.intake_states(1)
+        self.assertEqual(self.send_holds_a(), ["newer_document:proof_intake"])
+        self.user["asks"].pop()                                  # only document A is left to ask about
+        self.assertEqual(self.built(), ([], self.HELD_A))
 
 
 if __name__ == "__main__":
