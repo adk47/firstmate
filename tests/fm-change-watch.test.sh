@@ -2390,7 +2390,6 @@ pass "a single-service repository still measures a build or script change"
 # and a run still in flight is a deploy that has not landed yet rather than a
 # measurement gap that ends the watch.
 
-HYDRA_WF='.github/workflows/deploy.yml'
 hydra_runs() {  # <home> <json>
   mkdir -p "$1/gh/runs-Muso-AI"
   printf '%s\n' "$2" > "$1/gh/runs-Muso-AI/hydra-.github_workflows_deploy.yml.json"
