@@ -965,6 +965,26 @@ test_a_refused_relaunch_is_retried_only_after_its_window() {
   pass "a recorded refusal is retried only once its retry window closes"
 }
 
+test_a_refusal_does_not_outlive_the_endpoint_that_earned_it() {
+  local home now
+  home=$(make_home refused-recovered); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "1" \
+    "a structural refusal was not escalated once"
+  worker "$home" w1 alive
+  tick "$home" "$((now + 120))" >/dev/null
+  assert_eq "$(jq -r '.tasks.w1.refusal' "$home/state/.watchdog-worker.json")" "" \
+    "a refusal survived the endpoint coming back"
+  worker "$home" w1 dead
+  tick "$home" "$((now + 240))" >/dev/null
+  assert_eq "$(counter "$home" '^control .* relaunch')" "2" \
+    "a later death inside the refusal window was never retried"
+  pass "a refusal only suppresses relaunches while its own endpoint is unrecovered"
+}
+
 test_a_transient_relaunch_failure_is_not_a_refusal() {
   local home now i
   home=$(make_home transient); fake_tools "$home"
@@ -1003,6 +1023,7 @@ test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn() {
 
 test_a_refused_relaunch_spends_no_budget_and_escalates_once
 test_a_refused_relaunch_is_retried_only_after_its_window
+test_a_refusal_does_not_outlive_the_endpoint_that_earned_it
 test_a_transient_relaunch_failure_is_not_a_refusal
 test_a_structural_refusal_outside_the_old_phrase_list_spends_no_budget
 test_a_boot_transient_failure_keeps_the_lane_relaunch_history

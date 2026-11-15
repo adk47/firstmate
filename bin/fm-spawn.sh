@@ -1231,8 +1231,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # A relaunch must PROVE the previous agent is gone before it launches another
   # one into the same endpoint, and only backends whose in-place relaunch is
   # proven may do it (bin/fm-control-lib.sh owns that capability table).
-  # Every structural refusal in this preflight exits 2, distinct from the 1 a
-  # retryable launch failure reports, so a supervisor can tell them apart.
+  # Every structural refusal in this Orca relaunch block exits 2, distinct from
+  # the 1 a retryable launch failure reports, so a supervisor can tell them apart.
   if [ "$BACKEND" = orca ]; then
     # Orca's in-place relaunch is unproven, but a terminal Orca itself reports
     # gone (its classifier's `missing`: the terminal handle is stale, as after

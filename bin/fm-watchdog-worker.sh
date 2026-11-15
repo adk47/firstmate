@@ -1088,7 +1088,13 @@ task_pass() {
 
     state=$(task_agent_state "$id" "$meta")
     case "$state" in
-      alive) ;;
+      alive)
+        if [ -n "${refusal-}" ]; then
+          refusal=''
+          refusal_at=0
+          woke=false
+        fi
+        ;;
       dead|missing)
         if [ "$DRY_RUN" = 1 ]; then
           printf '%s\t%s\tn/a\t-\t%d\t%d\twould relaunch (endpoint %s)\n' \
