@@ -688,23 +688,35 @@ task_relaunch_refused() {  # <id> <state> [detail]
 # Reads and updates the CALLER's refusal/refusal_at/woke locals, so every rung
 # in every pass honours the same window instead of re-earning the same refusal.
 # task_refusal_drop_stale <state>: a refusal is a fact about the endpoint that
-# earned it, so once the endpoint reads differently (a hand relaunch brought it
-# back, or it died) the record says nothing about this state and must not
-# suppress the rung. Clears the CALLER's refusal locals.
+# earned it, so once the endpoint gives a different liveness answer (a hand
+# relaunch brought it back, or it died) the record says nothing new and must not
+# suppress the rung. An unmeasurable read is not an answer, so it keeps the
+# record. Clears the CALLER's refusal locals.
 task_refusal_drop_stale() {  # <state>
   [ -n "${refusal-}" ] || return 0
   [ "${refusal_state-}" = "$1" ] && return 0
+  case "$1" in
+    alive|dead) ;;
+    *) return 0 ;;
+  esac
   refusal=''
   refusal_at=0
   refusal_state=''
   woke=false
 }
 
+# task_refusal_active <state>: whether a recorded refusal still suppresses the
+# relaunch rung for this state. Never mutates, so a dry run can ask it too.
+task_refusal_active() {  # <state>
+  [ -n "${refusal-}" ] || return 1
+  [ "${refusal_state-}" = "$1" ] || return 1
+  [ $(( $(now_epoch) - refusal_at )) -lt "$REFUSAL_RETRY_SECS" ]
+}
+
 task_refusal_gate() {  # <id> <state>
   local id=$1 state=$2
   task_refusal_drop_stale "$state"
-  [ -n "${refusal-}" ] || return 1
-  [ $(( $(now_epoch) - refusal_at )) -lt "$REFUSAL_RETRY_SECS" ] || return 1
+  task_refusal_active "$state" || return 1
   if [ "$woke" != true ]; then
     printf 'watchdog: %s still cannot be relaunched (%s); asking firstmate\n' "$id" "$refusal"
     wake_firstmate "watchdog-refused-$id" \
@@ -1111,8 +1123,13 @@ task_pass() {
       alive) ;;
       dead|missing)
         if [ "$DRY_RUN" = 1 ]; then
-          printf '%s\t%s\tn/a\t-\t%d\t%d\twould relaunch (endpoint %s)\n' \
-            "$id" "$state" "$(quiet_minutes_of "$id" "$now")" "$(inbox_minutes_of "$id")" "$state"
+          if task_refusal_active "$state"; then
+            printf '%s\t%s\tn/a\t-\t%d\t%d\twould escalate (relaunch refused; retried after %sh)\n' \
+              "$id" "$state" "$(quiet_minutes_of "$id" "$now")" "$(inbox_minutes_of "$id")" "$((REFUSAL_RETRY_SECS / 3600))"
+          else
+            printf '%s\t%s\tn/a\t-\t%d\t%d\twould relaunch (endpoint %s)\n' \
+              "$id" "$state" "$(quiet_minutes_of "$id" "$now")" "$(inbox_minutes_of "$id")" "$state"
+          fi
         fi
         # A refusal this endpoint already earned is a fact about the backend and
         # the terminal, not about this pass: re-attempting it launches nothing,
@@ -1194,7 +1211,7 @@ task_pass() {
       printf '%s\t%s\t%s\t%s\t%d\t%d\t%s\n' "$id" "$state" "$busy" \
         "$([ "$conn_err" = 1 ] && printf conn-error || printf ok)" \
         "$((changed / 60))" "$(inbox_minutes_of "$id")" \
-        "$(dry_plan "$id" "$busy" "$changed" "$conn_err" "$stage" "$strikes" "$(inbox_minutes_of "$id")")"
+        "$(dry_plan "$id" "$state" "$busy" "$changed" "$conn_err" "$stage" "$strikes" "$(inbox_minutes_of "$id")")"
     fi
 
     # THE CONNECTION LADDER. A live lane frozen on a transport error is not
@@ -1375,16 +1392,21 @@ quiet_minutes_of() {  # <id> <now>
   printf '%s' "$(( ($2 - since) / 60 ))"
 }
 
-# dry_plan <id> <busy> <changed> <conn_err> <stage> <strikes> <inbox-minutes>:
-# what this pass would do to one lane, computed from the same inputs the live
-# ladders use and never acting. Only the dry-run table reads it, and the inbox
-# ladder comes first because that is the order the real pass runs in.
-dry_plan() {  # <id> <busy> <changed> <conn_err> <stage> <strikes> <inbox-min>
-  local busy=$2 changed=$3 conn_err=$4 stage=$5 strikes=$6
-  local inbox_secs=$(( ${7:-0} * 60 ))
+# dry_plan <id> <state> <busy> <changed> <conn_err> <stage> <strikes>
+# <inbox-minutes>: what this pass would do to one lane, computed from the same
+# inputs the live ladders use and never acting. Only the dry-run table reads it,
+# and the inbox ladder comes first because that is the order the real pass runs
+# in.
+dry_plan() {  # <id> <state> <busy> <changed> <conn_err> <stage> <strikes> <inbox-min>
+  local state=$2 busy=$3 changed=$4 conn_err=$5 stage=$6 strikes=$7
+  local inbox_secs=$(( ${8:-0} * 60 ))
   if [ "$inbox_secs" -ge "$INBOX_RING_SECS" ]; then
     if [ "$inbox_secs" -ge "$INBOX_RELAUNCH_SECS" ]; then
-      printf 'inbox: would relaunch'
+      if task_refusal_active alive; then
+        printf 'inbox: would escalate (relaunch refused; retried after %sh)' "$((REFUSAL_RETRY_SECS / 3600))"
+      else
+        printf 'inbox: would relaunch'
+      fi
     elif [ "$inbox_secs" -ge "$INBOX_INTERRUPT_SECS" ]; then
       printf 'inbox: would interrupt and continue'
     else
@@ -1402,6 +1424,10 @@ dry_plan() {  # <id> <busy> <changed> <conn_err> <stage> <strikes> <inbox-min>
     # looking for a change that never happens.
     if [ "$(csv_recent "$relaunches" "$(now_epoch)" "$HOUR")" -ge "$RELAUNCH_PER_HOUR" ]; then
       printf 'conn: would escalate (relaunch budget spent)'
+      return 0
+    fi
+    if task_refusal_active "$state"; then
+      printf 'conn: would escalate (relaunch refused; retried after %sh)' "$((REFUSAL_RETRY_SECS / 3600))"
       return 0
     fi
     local kind harness
@@ -1429,7 +1455,13 @@ dry_plan() {  # <id> <busy> <changed> <conn_err> <stage> <strikes> <inbox-min>
     else
       case "$stage" in
         0) printf 'would re-ring' ;;
-        1|2) printf 'would relaunch' ;;
+        1|2)
+          if task_refusal_active "$state"; then
+            printf 'would escalate (relaunch refused; retried after %sh)' "$((REFUSAL_RETRY_SECS / 3600))"
+          else
+            printf 'would relaunch'
+          fi
+          ;;
         *) printf 'would escalate' ;;
       esac
     fi

@@ -1006,6 +1006,42 @@ test_a_live_lane_keeps_the_refusal_its_stall_earned() {
   pass "a refusal survives the pass that earned it while the lane stays alive"
 }
 
+test_a_flapping_unreadable_read_keeps_the_refusal() {
+  local home now
+  home=$(make_home refused-flap); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "1" \
+    "a structural refusal was never earned"
+  worker "$home" w1 unreadable
+  tick "$home" "$((now + 120))" >/dev/null
+  worker "$home" w1 dead
+  tick "$home" "$((now + 240))" >/dev/null
+  tick "$home" "$((now + 360))" >/dev/null
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "1" \
+    "an unmeasurable read cleared a refusal, so the refused relaunch was retried"
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "1" \
+    "a flapping endpoint re-escalated a refusal it had already reported"
+  pass "a refusal survives a flapping unmeasurable read of the same endpoint"
+}
+
+test_a_dry_run_reports_a_suppressed_relaunch() {
+  local home now out
+  home=$(make_home dry-refused); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  out=$(WD_ARGS=--dry-run tick "$home" "$((now + 120))")
+  assert_contains "$out" "would escalate (relaunch refused" \
+    "the dry run promised a relaunch the pass would refuse"
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "1" \
+    "the dry run ran a lifecycle command"
+  pass "a dry run plans no relaunch while a refusal suppresses it"
+}
+
 test_a_connection_relaunch_failure_is_not_charged_against_the_budget() {
   local home now
   home=$(make_home conn-transient); fake_tools "$home"
@@ -1069,6 +1105,8 @@ test_a_refused_relaunch_spends_no_budget_and_escalates_once
 test_a_refused_relaunch_is_retried_only_after_its_window
 test_a_refusal_does_not_outlive_the_endpoint_that_earned_it
 test_a_live_lane_keeps_the_refusal_its_stall_earned
+test_a_flapping_unreadable_read_keeps_the_refusal
+test_a_dry_run_reports_a_suppressed_relaunch
 test_a_transient_relaunch_failure_is_not_a_refusal
 test_a_structural_refusal_outside_the_old_phrase_list_spends_no_budget
 test_a_boot_transient_failure_keeps_the_lane_relaunch_history
