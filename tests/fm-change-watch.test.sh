@@ -2481,6 +2481,38 @@ grep -q 'carrying aaaa1111 yet' "$HOME_DS/state/change-watch/ds1-1957/read-failu
   || fail "an unrelated run was not stated as awaiting a run that carries the merge: $(cat "$HOME_DS/state/change-watch/ds1-1957/read-failures" 2>/dev/null)"
 pass "a deploy run is the one whose tree carries the merged commit"
 
+# However many unrelated runs were created before the one whose tree carries the
+# merge, the carrier is still found and scored: a bounded scan of the oldest few
+# dropped it and ended the watch unmeasured instead of reporting the failure.
+HOME_CC=$(hydra_world cc "$MERGED")
+run_hydra_cw "$HOME_CC" 1790000000 register cc1 'https://github.com/Muso-AI/hydra/pull/1980' >/dev/null \
+  || fail "hydra register failed"
+CC_RUNS=$(hydra_run 2026-09-21T15:00:00Z completed failure oldtip01)
+for n in 02 03 04 05 06; do
+  CC_RUNS="$CC_RUNS,$(hydra_run "2026-09-21T15:0${n#0}:00Z" completed success "oldtip$n")"
+done
+hydra_runs "$HOME_CC" "[$CC_RUNS,$(hydra_run 2026-09-21T15:30:00Z completed failure "$OLDER")]"
+printf '%s\n' "$MERGED" > "$HOME_CC/gh/contains-$OLDER"
+run_hydra_cw "$HOME_CC" 1790000900 sample cc1-1980 900 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_CC" cc1-1980 900)" = 0 ] \
+  || fail "a carrier created after more than five unrelated runs was not read as a failed deploy: $(cat "$HOME_CC/state/change-watch/cc1-1980/samples.log" 2>/dev/null)"
+line=$(run_hydra_cw "$HOME_CC" 1790000900 verdict cc1-1980)
+case "$line" in
+  *"regressed at +15m on deploy_run"*) ;;
+  *) fail "a failed carrier run after six unrelated runs did not regress the release: $line" ;;
+esac
+hydra_runs "$HOME_CC" "[$CC_RUNS,$(hydra_run 2026-09-21T15:30:00Z completed success "$OLDER")]"
+run_hydra_cw "$HOME_CC" 1790003600 sample cc1-1980 3600 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_CC" cc1-1980 3600)" = 1 ] \
+  || fail "a successful carrier created after more than five unrelated runs was not proven: $(cat "$HOME_CC/state/change-watch/cc1-1980/samples.log" 2>/dev/null)"
+rm -f "$HOME_CC/gh/contains-$OLDER"
+run_hydra_cw "$HOME_CC" 1790007200 sample cc1-1980 7200 >/dev/null || fail "sample failed"
+[ -z "$(deploy_run_value "$HOME_CC" cc1-1980 7200)" ] \
+  || fail "a run whose tree carries nothing of the merge was scored"
+grep -q 'carrying aaaa1111 yet' "$HOME_CC/state/change-watch/cc1-1980/read-failures" \
+  || fail "a window of unrelated runs was not stated as awaiting a carrier: $(cat "$HOME_CC/state/change-watch/cc1-1980/read-failures" 2>/dev/null)"
+pass "the carrier scan finds the run carrying the merge past many unrelated runs"
+
 # A run still in flight is the deploy not having landed yet: the reading waits,
 # it is not a gap, and the watch still reaches proven once the deploy succeeds.
 HOME_IF=$(hydra_world if "$MERGED")

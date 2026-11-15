@@ -2008,7 +2008,7 @@ print(count)
 # neither this release's success nor its regression.
 cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch> [<merge-sha>]
   local repo=$1 workflow=$2 since=$3 sha=${4:-}
-  local gh_cmd=${FM_CW_GH:-gh} out rc=0 cands created runsha status conclusion checked=0 carried=''
+  local gh_cmd=${FM_CW_GH:-gh} out rc=0 cands created runsha status conclusion carried=''
   if [ -n "${FM_CW_GH_DIR:-}" ]; then
     local safe=${workflow//[\/ ]/_}
     [ -f "$FM_CW_GH_DIR/runs-$repo-$safe.json" ] || {
@@ -2075,10 +2075,6 @@ for run in candidates:
     if [ "$status" = "-" ]; then status=''; fi
     if [ "$conclusion" = "-" ]; then conclusion=''; fi
     if [ "$runsha" != "$sha" ]; then
-      # Bounded: the containment lookup is one more forge read per run, so a long
-      # list of unrelated runs cannot spend the sample's budget proving nothing.
-      [ "$checked" -lt 5 ] || continue
-      checked=$((checked + 1))
       cw_forge_run_carries "$repo" "$sha" "$runsha" || continue
     fi
     carried=1
