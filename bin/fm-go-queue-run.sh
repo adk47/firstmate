@@ -19,8 +19,10 @@
 # approved; the gate refuses the row when the live head has moved off it, so a
 # stale approval cannot authorize a newer commit.
 #
-# Usage: fm-go-queue-run.sh <queue-file> [--dry-run]
-#   --dry-run  print each row's decision without merging anything.
+# Usage: fm-go-queue-run.sh <queue-file>
+#
+# For a read-only audit of a row, use bin/fm-merge-gate-lib.sh with
+# --check-only; this runner has no preview mode.
 #
 # Environment: FM_HOME selects the firstmate home whose state/ and data/ the
 # merge records go to; it defaults to this script's repository root.
@@ -39,11 +41,9 @@ usage() {
 }
 
 QUEUE=
-DRY_RUN=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --dry-run) DRY_RUN=true; shift ;;
     --) shift; break ;;
     -*) echo "error: unknown option: $1" >&2; exit 2 ;;
     *)
@@ -115,19 +115,6 @@ while IFS= read -r line || [ -n "$line" ]; do
 
   url="https://github.com/$repo/pull/$number"
   printf 'row %d: %s %s (%s)\n' "$lineno" "$repo#$number" "$expected" "$method"
-
-  if [ "$DRY_RUN" = true ]; then
-    # The gate's check-only mode: it reads the verdict and the checks and
-    # reports the decision without merging.
-    if "$SCRIPT_DIR/fm-merge-gate-lib.sh" "$repo" "$number" "$expected"; then
-      printf 'row %d: would merge\n' "$lineno"
-      merged=$((merged + 1))
-    else
-      printf 'row %d: refused by the merge gate\n' "$lineno" >&2
-      skipped=$((skipped + 1))
-    fi
-    continue
-  fi
 
   if out=$("$SCRIPT_DIR/fm-pr-merge.sh" "$task" "$url" -- \
       "--$method" --admin --match-head-commit "$expected" 2>&1); then

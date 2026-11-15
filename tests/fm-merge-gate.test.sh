@@ -28,7 +28,6 @@
 #       merges
 #   (o) bin/fm-go-queue-run.sh merges only through the gate, and a refused row
 #       is reported and skipped
-#   (p) bin/fm-go-queue-run.sh --dry-run reports the decision without merging
 #   (q) an unreadable twin list refuses rather than passing
 #   (r) an unreadable twin PR referenced by the body refuses
 #   (s) a repeated qa-review check reports its worst conclusion
@@ -59,7 +58,7 @@ OLD_HEAD=2222222222222222222222222222222222222222
 
 # A fake gh that serves JSON fixtures through the real jq, so the gate's own
 # --jq program is exercised rather than bypassed. Fixtures live in the case dir:
-# pr-view.json, workflows.json, pr-list.json, pulls-<n>.json. A missing fixture
+# pr-view.json, pr-list.json, pulls-<n>.json. A missing fixture
 # is a failed read, which is how the unreadable-verdict case is built.
 write_gh_mock() {
   local case_dir=$1
@@ -88,7 +87,6 @@ case "${1:-}" in
   api)
     path=${2:-}
     case "$path" in
-      */contents/.github/workflows) serve "$FM_TEST_GH_FIXTURES/workflows.json" ;;
       */pulls/*) serve "$FM_TEST_GH_FIXTURES/pulls-${path##*/}.json" ;;
       *) exit 1 ;;
     esac
@@ -164,21 +162,6 @@ write_pr_view() {
 JSON
 }
 
-# write_workflows <case_dir> <name>...: the repository's workflow file names.
-write_workflows() {
-  local case_dir=$1 name first=true
-  shift
-  {
-    printf '['
-    for name in "$@"; do
-      [ "$first" = true ] || printf ','
-      first=false
-      printf '{"name":"%s"}' "$name"
-    done
-    printf ']\n'
-  } > "$case_dir/fixtures/workflows.json"
-}
-
 # write_pr_list <case_dir> <number> <base> <state> <mergedAt>: the pull requests
 # on the same head branch, which is how a develop/beta twin is found.
 write_pr_list() {
@@ -228,7 +211,6 @@ run_refusal_via_merge() {
 test_gate_refuses_qa_no_go() {
   local case_dir rc
   case_dir=$(make_case qa-no-go)
-  write_workflows "$case_dir" qa-review.yml ci.yml
   write_pr_view "$case_dir" checks='qa-review:FAILURE,unit-tests:SUCCESS'
 
   set +e
@@ -249,7 +231,6 @@ test_gate_refuses_qa_no_go() {
 test_gate_refuses_absent_qa_verdict() {
   local case_dir rc
   case_dir=$(make_case qa-absent)
-  write_workflows "$case_dir" qa-review.yml ci.yml
   write_pr_view "$case_dir" checks='unit-tests:SUCCESS'
 
   set +e
@@ -268,7 +249,6 @@ test_gate_refuses_absent_qa_verdict() {
 test_gate_refuses_verdict_on_older_head() {
   local case_dir rc
   case_dir=$(make_case qa-stale-head)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" checks='qa-review:SUCCESS,unit-tests:SUCCESS'
 
   printf 'pr_head=%s\n' "$OLD_HEAD" >> "$case_dir/state/task-x1.meta"
@@ -290,7 +270,6 @@ test_gate_refuses_verdict_on_older_head() {
 test_gate_refuses_red_check() {
   local case_dir rc
   case_dir=$(make_case red-check)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" checks='qa-review:SUCCESS,unit-tests:FAILURE'
 
   set +e
@@ -309,7 +288,6 @@ test_gate_refuses_red_check() {
 test_gate_allows_adk47_credit_guard() {
   local case_dir rc
   case_dir=$(make_case adk47-credit-guard)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" author=adk47 \
     checks='qa-review:SUCCESS,credit-approval-guard:FAILURE'
 
@@ -328,7 +306,6 @@ test_gate_allows_adk47_credit_guard() {
 test_gate_refuses_credit_guard_for_other_author() {
   local case_dir rc
   case_dir=$(make_case other-author-credit-guard)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" author=someone-else \
     checks='qa-review:SUCCESS,credit-approval-guard:FAILURE'
 
@@ -348,7 +325,6 @@ test_gate_refuses_credit_guard_for_other_author() {
 test_gate_refuses_unmerged_develop_twin() {
   local case_dir rc
   case_dir=$(make_case unmerged-twin)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" base=master headref=feature/x \
     checks='qa-review:SUCCESS,unit-tests:SUCCESS'
   write_pr_list "$case_dir" 12 develop OPEN null
@@ -369,7 +345,6 @@ test_gate_refuses_unmerged_develop_twin() {
 test_gate_allows_merged_develop_twin() {
   local case_dir rc
   case_dir=$(make_case merged-twin)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" base=master headref=feature/x \
     checks='qa-review:SUCCESS,unit-tests:SUCCESS'
   write_pr_list "$case_dir" 12 develop MERGED '"2026-11-03T10:00:00Z"'
@@ -387,7 +362,6 @@ test_gate_allows_merged_develop_twin() {
 test_gate_refuses_moved_head() {
   local case_dir rc
   case_dir=$(make_case moved-head)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" checks='qa-review:SUCCESS,unit-tests:SUCCESS'
 
   set +e
@@ -406,7 +380,6 @@ test_gate_refuses_moved_head() {
 test_gate_refuses_unreadable_verdict() {
   local case_dir rc
   case_dir=$(make_case unreadable)
-  write_workflows "$case_dir" qa-review.yml
   # No pr-view.json: the read fails, and a failed read is not a GO.
 
   set +e
@@ -425,7 +398,6 @@ test_gate_refuses_unreadable_verdict() {
 test_gate_passes_green_with_qa_go() {
   local case_dir rc
   case_dir=$(make_case green)
-  write_workflows "$case_dir" qa-review.yml ci.yml
   write_pr_view "$case_dir" checks='qa-review:SUCCESS,unit-tests:SUCCESS,lint:SKIPPED'
 
   set +e
@@ -445,7 +417,6 @@ test_gate_passes_green_with_qa_go() {
 test_gate_rejects_unrecorded_red_allow() {
   local case_dir rc
   case_dir=$(make_case unrecorded-red-allow)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" checks='qa-review:SUCCESS,verify-twin-label:FAILURE'
 
   set +e
@@ -463,7 +434,6 @@ test_gate_rejects_unrecorded_red_allow() {
 test_gate_refuses_unreadable_twin_list() {
   local case_dir rc
   case_dir=$(make_case unreadable-twin-list)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" base=master headref=feature/x \
     checks='qa-review:SUCCESS,unit-tests:SUCCESS'
 
@@ -483,7 +453,6 @@ test_gate_refuses_unreadable_twin_list() {
 test_gate_refuses_unreadable_body_twin() {
   local case_dir rc
   case_dir=$(make_case unreadable-body-twin)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" base=master headref=feature/x \
     body='twin develop #42' checks='qa-review:SUCCESS,unit-tests:SUCCESS'
   printf '[]\n' > "$case_dir/fixtures/pr-list.json"
@@ -504,7 +473,6 @@ test_gate_refuses_unreadable_body_twin() {
 test_gate_duplicate_qa_reports_worst_conclusion() {
   local case_dir rc
   case_dir=$(make_case duplicate-qa)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" checks='qa-review:SUCCESS,qa-review:PENDING'
 
   set +e
@@ -523,7 +491,6 @@ test_gate_duplicate_qa_reports_worst_conclusion() {
 test_gate_ignores_unrelated_issue_reference() {
   local case_dir rc
   case_dir=$(make_case unrelated-issue)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" base=master headref=feature/x \
     body='Closes #7.' checks='qa-review:SUCCESS,unit-tests:SUCCESS'
   printf '[]\n' > "$case_dir/fixtures/pr-list.json"
@@ -541,7 +508,6 @@ test_gate_ignores_unrelated_issue_reference() {
 test_gate_null_pending_qa_before_success_refuses() {
   local case_dir rc
   case_dir=$(make_case null-pending-qa)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" checks='qa-review:,qa-review:SUCCESS'
 
   set +e
@@ -560,7 +526,6 @@ test_gate_null_pending_qa_before_success_refuses() {
 test_gate_ignores_develop_beta_prose() {
   local case_dir rc
   case_dir=$(make_case develop-beta-prose)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" base=master headref=feature/x \
     body='This develops the 2026 roadmap and beta testing #5.' \
     checks='qa-review:SUCCESS,unit-tests:SUCCESS'
@@ -580,7 +545,6 @@ test_gate_skipped_or_neutral_qa_outranks_success() {
   local case_dir rc conclusion
   for conclusion in SKIPPED NEUTRAL; do
     case_dir=$(make_case "duplicate-qa-$conclusion")
-    write_workflows "$case_dir" qa-review.yml
     write_pr_view "$case_dir" checks="qa-review:SUCCESS,qa-review:$conclusion"
 
     set +e
@@ -745,7 +709,6 @@ test_gate_red_check_name_with_pipe_refuses() {
 test_gate_check_only_audits_a_merged_pull_request() {
   local case_dir rc
   case_dir=$(make_case check-only-merged)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" state=MERGED merged_at='"2026-11-03T12:00:00Z"' \
     checks='qa-review:FAILURE,unit-tests:SUCCESS'
 
@@ -819,7 +782,6 @@ case "${1:-}" in
     path=${2:-}
     case "$path" in
       graphql) cat "$FM_TEST_GH_OUTCOME" ;;
-      */contents/.github/workflows) serve "$FM_TEST_GH_FIXTURES/workflows.json" ;;
       */pulls/*) serve "$FM_TEST_GH_FIXTURES/pulls-${path##*/}.json" ;;
       *) exit 1 ;;
     esac
@@ -851,7 +813,6 @@ run_pr_merge() {
 test_pr_merge_refuses_before_merge_call() {
   local case_dir rc
   case_dir=$(make_case pr-merge-refuses)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" checks='qa-review:FAILURE,unit-tests:SUCCESS'
   write_gh_axi_mock "$case_dir"
   extend_gh_mock_for_outcome "$case_dir"
@@ -875,7 +836,6 @@ test_pr_merge_refuses_before_merge_call() {
 test_pr_merge_override_records_and_merges() {
   local case_dir rc meta
   case_dir=$(make_case pr-merge-override)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" checks='qa-review:FAILURE,unit-tests:SUCCESS'
   write_gh_axi_mock "$case_dir"
   extend_gh_mock_for_outcome "$case_dir"
@@ -905,7 +865,6 @@ test_pr_merge_override_records_and_merges() {
 test_go_queue_refuses_row_and_continues() {
   local case_dir rc queue
   case_dir=$(make_case go-queue)
-  write_workflows "$case_dir" qa-review.yml
   write_pr_view "$case_dir" checks='qa-review:FAILURE,unit-tests:SUCCESS'
   write_gh_axi_mock "$case_dir"
   extend_gh_mock_for_outcome "$case_dir"
@@ -935,40 +894,6 @@ test_go_queue_refuses_row_and_continues() {
   assert_contains "$(cat "$case_dir/out")" "0 merged, 1 not merged" \
     "the queue must report the row as not merged"
   pass "the queue merges only through the gate, and a refused row is skipped"
-}
-
-# --- (p) --dry-run reports without merging --------------------------------
-
-test_go_queue_dry_run_merges_nothing() {
-  local case_dir rc queue
-  case_dir=$(make_case go-queue-dry-run)
-  write_workflows "$case_dir" qa-review.yml
-  write_pr_view "$case_dir" checks='qa-review:SUCCESS,unit-tests:SUCCESS'
-  write_gh_axi_mock "$case_dir"
-  extend_gh_mock_for_outcome "$case_dir"
-  : > "$case_dir/gh-axi.log"
-  queue="$case_dir/queue.txt"
-  printf '%s\n' "task-x1 $REPO 9 $HEAD squash" > "$queue"
-
-  set +e
-  FM_ROOT_OVERRIDE="$ROOT" \
-  FM_HOME="$ROOT" \
-  FM_STATE_OVERRIDE="$case_dir/state" \
-  FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
-  FM_TEST_GH_LOG="$case_dir/gh.log" \
-  FM_TEST_GH_FIXTURES="$case_dir/fixtures" \
-  FM_TEST_GH_HEAD="$HEAD" \
-  FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
-  FM_CONFIG_OVERRIDE="$case_dir/config" \
-  PATH="$case_dir/fakebin:$PATH" \
-    "$QUEUE_RUN" "$queue" --dry-run >"$case_dir/out" 2>"$case_dir/err"
-  rc=$?
-  set -e
-  expect_code 0 "$rc" "a dry run over an authorized row must succeed"
-  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "a dry run must never reach the merge call"
-  assert_contains "$(cat "$case_dir/out")" "would merge" \
-    "a dry run must report the decision it would have made"
-  pass "--dry-run reports the decision without merging"
 }
 
 # A named test may be run alone, which is how the ungated-script proof in the
@@ -1012,4 +937,3 @@ test_gate_red_check_name_with_pipe_refuses
 test_pr_merge_refuses_before_merge_call
 test_pr_merge_override_records_and_merges
 test_go_queue_refuses_row_and_continues
-test_go_queue_dry_run_merges_nothing
