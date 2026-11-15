@@ -145,14 +145,14 @@ write_pr_view() {
   local IFS=,
   for pair in $checks; do
     [ -n "$pair" ] || continue
-    # pair = name:conclusion[@run[#started]] - run keys the workflow run id in
-    # the details URL, started orders attempts within one run.
+    # pair = name:conclusion[@wf[#started]] - wf keys the workflow name,
+    # started orders that workflow's runs.
     local extra='' run='' started=''
     name=${pair%%:*}
     conclusion=${pair#*:}
     case "$conclusion" in *@*) run=${conclusion#*@}; conclusion=${conclusion%%@*} ;; esac
     case "$run" in *#*) started=${run#*#}; run=${run%%#*} ;; esac
-    [ -n "$run" ] && extra="$extra,\"detailsUrl\":\"https://github.com/o/r/actions/runs/$run/job/1\""
+    [ -n "$run" ] && extra="$extra,\"workflowName\":\"wf-$run\",\"detailsUrl\":\"https://github.com/o/r/actions/runs/$run/job/1\""
     [ -n "$started" ] && extra="$extra,\"startedAt\":\"2026-11-15T$started:00Z\""
     [ -n "$rollup" ] && rollup="$rollup,"
     rollup="$rollup{\"__typename\":\"CheckRun\",\"name\":\"$name\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"$extra}"
@@ -609,8 +609,8 @@ test_gate_rerun_in_same_run_supersedes_failure() {
   run_gate "$case_dir" "$REPO" 9 "$HEAD"
   rc=$?
   set -e
-  expect_code 0 "$rc" "a re-run of the same job that passed must supersede its earlier failure"
-  pass "a re-run within one workflow run supersedes its earlier failure"
+  expect_code 0 "$rc" "a later run of the same workflow that passed must supersede its earlier failure"
+  pass "a later run within one workflow supersedes its earlier failure"
 }
 
 test_gate_failure_in_other_run_still_refuses() {
@@ -624,8 +624,8 @@ test_gate_failure_in_other_run_still_refuses() {
   run_gate "$case_dir" "$REPO" 9 "$HEAD"
   rc=$?
   set -e
-  expect_code 1 "$rc" "a failure in a different workflow run sharing the check name is still red"
-  pass "a same-named failure in another workflow run still refuses"
+  expect_code 1 "$rc" "a failure in a different workflow sharing the check name is still red"
+  pass "a same-named failure in another workflow still refuses"
 }
 
 # --- (v) prose around develop/beta is not a twin reference -----------------
