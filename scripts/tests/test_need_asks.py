@@ -168,6 +168,16 @@ class NeedAsksTest(unittest.TestCase):
         self.assertEqual(classes[0], "core_proof_request")
         self.assertIs(na.core_proof_requested, real)
 
+    def test_a_mixed_batch_lists_paying_users_first_whatever_order_the_source_rows_came_in(self):
+        # every listed user's first document arrived in the same second, so only the paying flag and then the user id
+        # decide the order (credit_review/audience_order.py). The paying users carry the LARGER ids on purpose: a list
+        # that merely followed the user id, or the order of the replica's rows, would put 1 and 2 first.
+        self.paying.write_text(json.dumps({"ids": [4, 8]}))
+        want = [("4", True), ("8", True), ("1", False), ("2", False)]
+        self.assertEqual([(u["user_id"], u["paid"]) for u in self.build()["users"]], want)
+        self.pending = dict(reversed(list(self.pending.items())))        # the replica returns its rows the other way
+        self.assertEqual([(u["user_id"], u["paid"]) for u in self.build()["users"]], want)
+
     def test_the_audience(self):
         res = self.build()
         first = res

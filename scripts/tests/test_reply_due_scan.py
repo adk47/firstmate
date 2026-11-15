@@ -240,6 +240,23 @@ class ReplyDueScanTest(unittest.TestCase):
         self.assertEqual(c["skipped_never"], 1)                                   # user 15
         self.assertEqual(doc["users"][0]["_thread"]["mapped_by"], "email")
 
+    def test_a_tied_wait_lists_paid_first_then_the_numeric_user_id_whatever_the_search_order(self):
+        # four more due threads whose customer part arrived in the same second as user 1's: only the paying flag and
+        # then the user id decide the order (credit_review/audience_order.py). The paying users carry the larger ids
+        # on purpose, so a list that followed the search or the id alone would put 22 and 24 first.
+        at = NOW - 6 * DAY
+        for u in (24, 23, 22, 21):
+            conv, contact, pro = f"2{u}", f"c{u}", f"pro-{u}"
+            self.ic.add(thread(conv, contact, "about my credits", [cust(f"2{u}", at)]), contact, pro, at)
+            self.pro_of[str(u)], self.names[str(u)], self.contact_of[str(u)] = pro, f"N{u}", contact
+            self.open_rows.append([str(u), f"r{u}", "user_verification_needed", "false", "false"])
+        self.paying.write_text(json.dumps({"ids": [2, 15, 21, 23]}))
+        self.q = replica(self.pro_of, self.emails_of, self.open_rows, self.names)
+        want = [21, 23, 2, 1, 22, 24]
+        self.assertEqual([u["user_id"] for u in self.build()["users"]], want)
+        self.ic.search.reverse()                                        # the customer's search returns its rows the other way
+        self.assertEqual([u["user_id"] for u in self.build()["users"]], want)
+
     def test_the_signing_header_carries_every_recipient_fact(self):
         doc = self.build()
         two = next(t for t in doc["facts"] if t["user_id"] == 2)

@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from credit_review import verify_notify  # noqa: E402
+from credit_review import audience_order, verify_notify  # noqa: E402
 
 PROOF_STORE = "/var/lib/hydra-credit-verify/proof.sqlite"
 DV_STORE = "/var/lib/hydra-credit-verify/doc-verify.sqlite"
@@ -342,7 +342,8 @@ def build(*, proof_store: str = PROOF_STORE, paying_path: str = PAYING, query: Q
         counts[f"list_{key}_{'paid' if uid in paying else 'free'}"] += 1
     stamp = now.isoformat(timespec="seconds")
     for k in lists:
-        lists[k].sort(key=lambda x: (not x["paid"], x["first_received"]))
+        lists[k].sort(key=lambda x: audience_order.key(paid=x["paid"], waiting_since=x["first_received"],
+                                                       user_id=x["user_id"]))
     return {"generated_at": stamp, "lists": lists, "counts": dict(counts)}
 
 

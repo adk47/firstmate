@@ -838,6 +838,7 @@ calls `send_all([p])` once per user in apply mode (a fresh replica re-plan, `ask
 one-payload batch and runs it with `workers = 1`. The pool is real for the families that hand `send_all` a batch
 (`claim_proof_ask`, `need_asks`). Batching uvn-status's apply walk would widen the window between those reads and the
 send, so it is a separate change that needs a ruling, not a side effect of this one.
+
 - **A timeout is not erased by the retry's answer.** The gate claims the user BEFORE it posts, so when the first POST
   times out and a retry answers `SKIPPED already-notified`, the run cannot tell "the timed-out POST landed" from "it
   died after claiming". That user is `timeout` (UNMEASURED), never `skipped`: a skip asserts we know nothing went out.
@@ -865,6 +866,39 @@ send, so it is a separate change that needs a ruling, not a side effect of this 
 - Why: at 15:05Z a note step hit the 180 s timeout, the exception escaped the send loop, the runner died before
   writing its artefact, and the tick read the missing file as "a refusal spike" - it auto-killed every family while
   nothing had been refused and the rest of the batch was still owed.
+
+## A signed apply reads the replica per batch, not per unsigned user (2026-11-12)
+
+The tick's apply sends only to its check's accepted set, and a user outside it takes no slot. `uvn_status.run()` used
+to size each batch read to the slots left, so when the check signed one fewer than `--max-users` a single slot stayed
+open for the whole page and the walk re-read accounts, the fraud lens and the pending rows once per unsigned user.
+Measured on node-8, 2026-11-12 08:00Z, at a tick cap of 10: the free apply sent 9 in 6 minutes and then walked 101
+unsigned users for 32 more; the paid apply walked 70 for 12. The tick reached its 6,000 s budget having sent 18, and
+`r1-free` and all four claim segments waited for the next tick.
+
+A signed apply now reads `SIGNED_APPLY_BATCH` (200, the tick's page) list entries per batch. The slots still bound the
+sends, and the cursor still stops where the check stopped (`APPLY_RAW_END`). One accounting change: when the cap fills,
+the users after the last send used to get a `deferred / run_size` row and now get `filtered / not_in_signed_accepted`,
+like every other unsigned user in the page. A signed user the cap did not reach is still `deferred / run_size`.
+
+## The send order is decided when the list is built (2026-11-12)
+
+The tick walks each user-level audience list in list order and the runner only filters it by segment, so the list IS
+the send order. `scripts/credit_review/audience_order.py` is the one rule, used by `owing_proof`, `need_asks`,
+`receipts`, `reply_due_scan` and `paid_band_ask`: **paying at-risk, then paying, then free; the longest wait first; the
+user id last.** `claim_list` is a per-CLAIM list with its own total key (`audience`, `at_risk`, `filed_at`,
+`claim_id`), so it is not on this rule.
+
+- **Where it was implicit before.** Each builder had its own `(not paid, waited)` lambda (owing_proof popped a
+  private `_tier`). Paid-first was explicit; the tie was not. Two users with the same wait kept the order the replica
+  or a dict returned them in: on a synthetic tie, 6 shuffles of the source rows wrote 6 different lists. The 08:00Z
+  list of 2026-11-12 had 0 ties in 3,345 users, which is why nothing showed it.
+- **`paid` is the builder's flag, and a checker must use the same one.** owing_proof marks a user paying when the
+  request's WORKSPACE has an active or trialing subscription (`PAID_WS`). A check keyed on the subscription's owner
+  user id reads a seat on someone else's team plan as free and reports an inversion the list does not contain.
+- Pinned builder by builder, each on a tied wait and shuffled source rows: `test_audience_order.py`
+  (`owing_proof`, `paid_band_ask`; two mutation cases that must fail), `test_need_asks.py`, `test_receipts.py` and
+  `test_reply_due_scan.py`.
 
 <!-- Reviewed baseline: deploy overwrites - 2026-10-27 (claim-lane-resume-c2, firstmate 035): node-8 holds the #1377-era text of this file, copied outside a deploy at 00:36:52Z; main is the reviewed text (proof ask and gap ask locked, claim status on). -->
 

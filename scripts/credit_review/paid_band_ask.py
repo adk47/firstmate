@@ -17,8 +17,9 @@ scope decides WHO is asked, never which of their rows the note may mention.
 Bounds, all enforced here, none of them a new switch:
   - the row predicate (BAND_SQL): status user_verification_needed, deletedat null, is_approved, total_risk < 30,
     band_hint A/B, spotifypopularity 1-59, metadata.proofRequest IS NULL;
-  - `max_ask_users_per_day` from policies/credit-trust-decide.json (400): DISTINCT USERS, paid before free,
-    oldest request first. Unreadable policy = REFUSAL (nothing listed), never a silent 0;
+  - `max_ask_users_per_day` from policies/credit-trust-decide.json (400): DISTINCT USERS, in the shared send
+    order (`audience_order`): paid before free, oldest request first, the user id last. Unreadable policy =
+    REFUSAL (nothing listed), never a silent 0;
   - paid only when --paid-only (the default): the captain's cohort is paying customers.
 A user already told (a sent `uvn-status` ask) or holding a core proofRequest marker is already out of the
 owing_proof build, so this lane can never re-ask them.
@@ -56,7 +57,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from credit_review import owing_proof, uvn_status, verify_ledger, verify_notify  # noqa: E402
+from credit_review import audience_order, owing_proof, uvn_status, verify_ledger, verify_notify  # noqa: E402
 
 POLICY = os.environ.get("CREDIT_TRUST_DECIDE_POLICY", "/opt/hydra/policies/credit-trust-decide.json")
 CAP_KEY = "max_ask_users_per_day"
@@ -191,8 +192,9 @@ def scope(build: dict[str, Any], band: dict[int, set[str]], cap: int, *, paid_on
     not_owed: dict[str, int] = {}
     if owes is not None:
         users, not_owed = owes(users)
-    # paid before free, then the oldest owed request first: the same order the ask lane already uses
-    users.sort(key=lambda u: (0 if u.get("paid") else 1, str(u.get("oldest") or "")))
+    # THE send order (audience_order): paying at-risk, paying, free; the oldest owed request first; the user id last
+    users.sort(key=lambda u: audience_order.key(paid=u.get("paid"), at_risk=u.get("at_risk"),
+                                                waiting_since=u.get("oldest") or "", user_id=u.get("user_id")))
     kept, dropped = users[:cap], users[cap:]
     doc = {
         "generated_at": build.get("generated_at"),

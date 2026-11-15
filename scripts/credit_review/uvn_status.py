@@ -272,6 +272,7 @@ def gate_lock_open(wrapper: str, var: str) -> bool:
     return re.search(rf"^readonly {re.escape(var)}=1$", text, re.M) is not None
 DAILY_MAX = policy_credit_cap()  # the ask
 MAX_CALLS_PER_USER = 5
+SIGNED_APPLY_BATCH = 200          # list entries one batch read covers in a signed apply (the tick's page is 200)
 # 14:2xZ eligibility-first paging: one run may examine at most this many raw list entries per candidate it is allowed
 # to keep, so a long run of already-told / documented / handled rows can never turn a tick into a no-op
 # while still bounding the scan cost (a replica + ledger read per entry, no live call).
@@ -1786,8 +1787,15 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             return report
     budget_stop = False
     try:
+        # A signed apply (the tick's) sends only to the check's accepted set, and a user outside it never takes a slot
+        # (QA #1611). Sized to the slots left, the walk asked next_batch for ONE user at a time once a single slot
+        # stayed open, and re-read accounts, lens and pending rows for every unsigned user left in the page: on node-8
+        # 2026-11-12 08:00Z that was 101 users and 32 min after the last send (70 users, 12 min in the paid segment),
+        # and the claim families never ran. The slots still bound the SENDS (room() is asked again per user below);
+        # the batch is only how many list entries one replica read covers.
+        signed_apply = mode == "apply" and verify_notify.APPLY_ONLY is not None
         while (want := room()[0]) > 0 and not budget_stop:
-            batch = next_batch(want)
+            batch = next_batch(max(want, SIGNED_APPLY_BATCH) if signed_apply else want)
             if not batch:
                 break
             if mode != "apply":

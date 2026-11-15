@@ -42,7 +42,8 @@ Bounds — none of them a new switch:
 - **Cap**: `max_ask_users_per_day` from `policies/credit-trust-decide.json` (**400** distinct users/day, one knob
   shared with the decider). Unreadable, malformed or ≤ 0 is a **refusal** — nothing is listed. `--max-users` may
   lower the cap, never raise it.
-- **Paid only** by default; paid first, oldest owed request first.
+- **Paid only** by default; the shared send order (`audience_order`): paying at-risk, then paying, then free; the
+  oldest owed request first; the user id last.
 - A user already asked (sent `uvn-status`) or holding a core `proofRequest` is out of the `owing_proof` build
   already, so this lane can never re-ask them.
 - It names **users**, not rows: one ask per user, ever, so the note names the user's owed rows.

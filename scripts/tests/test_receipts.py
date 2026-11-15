@@ -224,6 +224,23 @@ class ReceiptsTest(unittest.TestCase):
         self.assertEqual(c["skip_weak_identity"], 1)                     # user 9: email-only match, no receipt
         self.assertNotIn("9", [u["user_id"] for u in q + r])
 
+    def test_a_tied_wait_lists_paid_first_then_the_numeric_user_id_whatever_the_source_order(self):
+        # four users whose first document arrived in the same second: only the paying flag and then the user id decide
+        # the order (credit_review/audience_order.py). The paying users carry the larger ids on purpose, and the rows
+        # are inserted newest-id-first, so a list that followed the source or the id alone would put 20 and 22 first.
+        at = "2026-10-24T08:00:00Z"
+        db = sqlite3.connect(self.store)
+        for i, u in enumerate((23, 22, 21, 20)):
+            db.execute("INSERT INTO proof_intake (intake_id, user_id, subject, candidate_request_ids_json, "
+                       "conversation_id, source, file_sha256, received_at, filed_by, matched_by) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (f"{u}:t", u, "credit", json.dumps([f"r{u}"]), "777", "intercom", f"shat{u}", at, "b1",
+                        "professional_id"))
+            self.pending[u] = {f"r{u}": ("processing", 0)}
+        db.commit(); db.close()
+        Path(self.paying).write_text(json.dumps({"ids": [1, 2, 21, 23]}))
+        self.assertEqual([u["user_id"] for u in self.build()["lists"]["queued"]],
+                         ["21", "23", "1", "20", "22", "6"])
+
     def test_the_fraud_lens_hold_list_marks_a_held_account(self):
         Path(self.holds).write_text('{"user_id": "6", "kind": "approval_hold"}\n')
         res = self.build()

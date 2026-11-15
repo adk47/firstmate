@@ -43,7 +43,7 @@ from typing import Any, Callable
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from credit_review import comm_state  # noqa: E402
+from credit_review import audience_order, comm_state  # noqa: E402
 
 PAYING = "/var/lib/credit-trust/paying-users.json"
 DV_STORE = "/var/lib/hydra-credit-verify/doc-verify.sqlite"
@@ -506,7 +506,8 @@ def build(*, ic: Intercom = comm_state.intercom, query: Query = comm_state.trino
                   "reply_due": {"part": first[u]["part"], "conversation": first[u]["conv"]},
                   "_thread": {"assignee": first[u]["assignee"], "prior_note": first[u]["prior_note"],
                               "waiting_since": first[u]["at"], "mapped_by": first[u]["mapped_by"]}} for u in uids]
-        users.sort(key=lambda x: (not x["paid"], x["_thread"]["waiting_since"]))
+        users.sort(key=lambda x: audience_order.key(paid=x["paid"], waiting_since=x["_thread"]["waiting_since"],
+                                                    user_id=x["user_id"]))
         # Fable d2: the deployed trigger rules, run here with the replica inputs the batched reads supplied. A user whose
         # inputs could not be read keeps the thread-only trigger (the full check decides, as before); nothing here is a
         # send decision - a non_status verdict lists a hand-off, a status verdict buys the full check.

@@ -68,7 +68,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from credit_review import comm_state, owing_proof, receipts, uvn_status, verify_notify  # noqa: E402
+from credit_review import audience_order, comm_state, owing_proof, receipts, uvn_status, verify_notify  # noqa: E402
 
 CAMPAIGN = "proof-need-ask"
 LOCK = "PROOF_NEED_ASK_COPY_APPROVED"
@@ -480,7 +480,8 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
                           "request_id": rid, "reason": "wait:no_sendable_document",
                           "due_at": (t_now + timedelta(days=1)).isoformat(timespec="seconds")})
             counts["wait_no_sendable_document"] += 1
-    users.sort(key=lambda u: (not u["paid"], u["asks"][0]["doc_received_at"]))
+    users.sort(key=lambda u: audience_order.key(paid=u["paid"], waiting_since=u["asks"][0]["doc_received_at"],
+                                                user_id=u["user_id"]))
     facts = replica_facts(query or uvn_status.trino, [u.get("user_id") for u in users]) if users else {}
     for u in users:
         u["facts"] = facts_of(u, facts)

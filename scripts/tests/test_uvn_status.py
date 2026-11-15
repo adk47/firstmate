@@ -1002,6 +1002,61 @@ class UvnStatusTests(unittest.TestCase):
         self.assertEqual(sorted(o["user"] for o in rep.outcomes if o["reason"] == "not_in_signed_accepted"),
                          ["1", "2", "3", "4"])
 
+    def test_a_signed_apply_reads_the_replica_per_BATCH_not_once_per_unsigned_user(self):
+        # node-8 2026-11-12 08:00Z: the check signed 9 of --max-users 10, so one slot stayed open for the whole apply.
+        # The walk then asked next_batch for ONE user at a time and re-read accounts, lens and pending rows for each of
+        # the 101 unsigned users left in the page: 32 min after the last send (12 min in the paid segment), sending
+        # nobody. An unsigned user never takes a slot (QA #1611), so a signed apply must not size its batch to the slots.
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 41)]
+        self.write_list()
+        inner, reads = replica(range(1, 41)), []
+
+        def counting(sql):
+            reads.append("accounts" if "public.users" in sql else "other")
+            return inner(sql)
+        import unittest.mock
+        with unittest.mock.patch.object(uvn_status.verify_notify, "APPLY_ONLY", frozenset({"2"})):
+            rep, gate = self.run_(mode="apply", query=counting, max_users=2)
+        self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["2"])               # the signed user, nobody else
+        self.assertEqual(sorted(int(o["user"]) for o in rep.outcomes if o["reason"] == "not_in_signed_accepted"),
+                         [1] + list(range(3, 41)))                                       # every row still accounted for
+        self.assertLessEqual(reads.count("accounts"), 3, reads.count("accounts"))        # was one read per unsigned user
+        self.assertLessEqual(len(reads), 12, len(reads))
+
+    def test_a_signed_apply_batch_longer_than_the_slots_still_stops_sending_at_the_cap(self):
+        # the batch read covers more list entries than there are slots; the slots still bound the SENDS. Three users are
+        # signed and the run may send two: the third is left for a later run with a row, and is never sent. The users
+        # before it that the check did not accept are 'not in the signed set' (no slot, no gate call); nobody has two rows
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 21)]
+        self.write_list()
+        import unittest.mock
+        with unittest.mock.patch.object(uvn_status.verify_notify, "APPLY_ONLY", frozenset({"2", "5", "9"})):
+            rep, gate = self.run_(mode="apply", query=replica(range(1, 21)), max_users=2)
+        self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["2", "5"])
+        row9 = [o for o in rep.outcomes if str(o["user"]) == "9"]
+        self.assertEqual([(o["result"], o["reason"]) for o in row9], [("deferred", "run_size")])
+        rows = {str(o["user"]): (o["result"], o["reason"]) for o in rep.outcomes}
+        self.assertEqual(len(rep.outcomes), len(rows))                                   # one row per user, never two
+        self.assertEqual(sorted(rows, key=int), [str(u) for u in range(1, 21) if u not in (2, 5)])
+        self.assertEqual({u for u, r in rows.items() if r == ("filtered", "not_in_signed_accepted")},
+                         {str(u) for u in range(1, 21) if u not in (2, 5, 9)})
+        self.assertEqual({u for u, r in rows.items() if r == ("deferred", "run_size")}, {"9"})
+        self.assertEqual(rep.page["end"], 8, rep.page)           # the next run starts AT the signed user it did not reach
+
+    def test_a_signed_apply_batch_never_moves_the_cursor_past_what_its_CHECK_examined(self):
+        # the cap is filled exactly (two signed, two slots), so the batch read has already covered list entries the
+        # check never got to (it stopped after raw entry 5). They are not sent and get a 'not in the signed set' row,
+        # but the cursor stays where the check stopped (QA #1662): the next run examines them, nobody waits a rotation
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 21)]
+        self.write_list()
+        import unittest.mock
+        with unittest.mock.patch.object(uvn_status.verify_notify, "APPLY_ONLY", frozenset({"2", "5"})), \
+             unittest.mock.patch.object(uvn_status.verify_notify, "APPLY_RAW_END", 5):
+            rep, gate = self.run_(mode="apply", query=replica(range(1, 21)), max_users=2)
+        self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["2", "5"])
+        self.assertEqual(rep.page["end"], 5, rep.page)
+        self.assertEqual({(o["result"], o["reason"]) for o in rep.outcomes}, {("filtered", "not_in_signed_accepted")})
+
     def test_successive_pages_reach_past_a_page_of_persistent_deferrals(self):
         # QA #1612 (1): the first 5 entries are deferred on every run; the caller advances start_entry from report.page,
         # so the next run walks entries 6-10 and accepts there - candidate 6 is never starved

@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from credit_review import verify_notify  # noqa: E402
+from credit_review import audience_order, verify_notify  # noqa: E402
 
 LEDGER = "/var/lib/hydra/credit-review/ledger.sqlite3"
 ACCOUNT_HOLDS = "/opt/firstmate/fraud-lens/out/account_holds.jsonl"
@@ -276,7 +276,7 @@ def build(*, query: Query | None = None, ledger_path: str = LEDGER, holds_path: 
                 paid = any(r[4] == "1" for r in rs)
                 users.append({"user_id": str(uid), "paid": paid, "skip": None, "at_risk": uid in risky,
                               "request_ids": sorted(fresh), "class": NEW_ROWS, "oldest": min(r[3] for r in fresh.values()),
-                              "_tier": 0 if (paid and uid in risky) else 1 if paid else 2, "facts": _facts_of(fresh)})
+                              "facts": _facts_of(fresh)})
                 counts[f"list_{NEW_ROWS}_{'paid' if paid else 'free'}"] += 1
             # uvn-reminder-14: the rows a sent ask named and that are still owed. The ledger decides who is due
             # (reminder_states); every reason it gives for leaving a user out is counted, so each build logs the funnel.
@@ -289,21 +289,22 @@ def build(*, query: Query | None = None, ledger_path: str = LEDGER, holds_path: 
                     paid = any(r[4] == "1" for r in rs)
                     users.append({"user_id": str(uid), "paid": paid, "skip": None, "at_risk": uid in risky,
                                   "request_ids": sorted(named), "class": REMINDER,
-                                  "oldest": min(r[3] for r in named.values()),
-                                  "_tier": 0 if (paid and uid in risky) else 1 if paid else 2, "facts": _facts_of(named)})
+                                  "oldest": min(r[3] for r in named.values()), "facts": _facts_of(named)})
                     counts[f"list_{REMINDER}_{'paid' if paid else 'free'}"] += 1
             continue
         paid = any(r[4] == "1" for r in rs)
-        tier = 0 if (paid and uid in risky) else 1 if paid else 2
         oldest = min(r[3] for r in owe.values())
         users.append({"user_id": str(uid), "paid": paid, "skip": None, "at_risk": uid in risky,
-                      "request_ids": sorted(owe), "class": cls, "oldest": oldest, "_tier": tier,
+                      "request_ids": sorted(owe), "class": cls, "oldest": oldest,
                       # r5 signing rule: what the replica said for each named row at list-build time
                       "facts": _facts_of(owe)})
         counts[f"list_{cls}_{'paid' if paid else 'free'}"] += 1
-        if tier == 0:
+        if audience_order.tier(paid, uid in risky) == audience_order.AT_RISK:
             counts["list_paid_at_risk"] += 1
-    users.sort(key=lambda u: (u.pop("_tier"), u["oldest"]))
+    # THE order, decided here at build (audience_order): paying at-risk, paying, free; oldest request first; the user
+    # id last, so two users with the same oldest request never keep the order the replica returned their rows in
+    users.sort(key=lambda u: audience_order.key(paid=u["paid"], at_risk=u["at_risk"], waiting_since=u["oldest"],
+                                                user_id=u["user_id"]))
     counts["at_risk_source"] = risk_src  # type: ignore[assignment]
     return {"generated_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"), "users": users,
             "counts": dict(counts), "replica_facts": facts_header(users)}
