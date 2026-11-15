@@ -13,9 +13,10 @@ What it reuses, and never restates: which part is a reply, who is a person, what
 shape of the ask are `caroline_monitor.rules` (`read_events`, `classify`); who is waiting on us is
 `caroline_monitor.backlog.waiting_since`; the Intercom reads are `caroline_monitor.collect`.
 
-It reads Intercom (search and GET only) and the monitor's own facts file, read-only. It sends nothing, assigns
-nothing and writes nothing outside `--out`. Its output carries conversation ids and signal names, never message
-text; `show` prints one masked thread to the terminal for a person or an agent to read, and stores nothing.
+It reads Intercom (search and GET only), the monitor's own facts file and the output guard's ledger, all
+read-only. It sends nothing, assigns nothing and writes nothing outside `--out`. Its output carries conversation
+ids and signal names, never message text; `show` prints one masked thread to the terminal for a person or an agent
+to read, and stores nothing.
 
     caroline_coach.py tick [--minutes 30] [--out DIR]     one reading, as JSON on stdout (and kept under DIR)
     caroline_coach.py line  < tick.json                   the one-line status for that reading
@@ -42,6 +43,11 @@ from caroline_monitor import backlog, collect, fixloop, rules  # noqa: E402
 
 SCHEMA = "caroline-coach.v1"
 FACTS_DB = "/var/lib/hydra/caroline-monitor/monitor.sqlite"
+# The output guard's own record of what it refused, one JSON row per event (plugins/intercom/src/safety-ledger.ts).
+# It is the only place that says WHY a reply was replaced with the fallback line: the conversation shows the
+# fallback and nothing else. Read-only, and a file that cannot be read is `not_measured`, never "no reason".
+SAFETY_LEDGER = "/var/lib/hydra/injection-watch/ledger.jsonl"
+GUARD_WHY_MAX = 3             # reasons kept per conversation, newest first
 HOUR, DAY = 3600, 86400
 AGING_HOURS = 24              # "aging": the customer wrote last and has waited this long
 AGING_READ_DAYS = 7           # aging threads younger than this are read in full each tick; older ones are counted
@@ -244,6 +250,97 @@ def fetch_all(token, ids, request=None, workers=collect.WORKERS):
     return threads, errors, gone
 
 
+def guard_reasons(ids, path=SAFETY_LEDGER, now=None, days=AGING_READ_DAYS):
+    """{conversation id: [why the guard refused, newest first]} from the guard's own ledger.
+
+    A `guard_fallback` signal says a reply was replaced with the fallback line; it does not say which rule fired,
+    and the conversation cannot: the customer only ever saw the fallback. The ledger can, so the pattern table can
+    name the cause instead of guessing at it. Only rows for the ids asked about are kept, and only the newest
+    GUARD_WHY_MAX reasons per conversation.
+
+    Returns `{"not_measured": reason}` when the ledger cannot be read: an unreadable ledger is not "no reason".
+    """
+    now = now or int(time.time())
+    wanted = {str(c) for c in ids}
+    if not wanted:
+        return {}
+    files = [path]
+    try:                       # the ledger is sealed daily; a thread from last week is in a sealed file
+        folder = os.path.dirname(path)
+        base = os.path.basename(path)
+        for name in sorted(os.listdir(folder)):
+            if name.startswith(base + ".sealed-"):
+                full = os.path.join(folder, name)
+                if now - os.path.getmtime(full) <= days * DAY:
+                    files.append(full)
+    except OSError:
+        pass                   # no sealed files is normal; the current file is still read below
+    found, read_any = {}, False
+    for full in files:
+        try:
+            with open(full, encoding="utf-8", errors="replace") as fh:
+                read_any = True
+                for raw in fh:
+                    try:
+                        row = json.loads(raw)
+                    except ValueError:
+                        continue
+                    cid = str(row.get("ref") or "")
+                    if cid not in wanted:
+                        continue
+                    why = guard_why_of(row)
+                    if why:
+                        found.setdefault(cid, []).append((str(row.get("ts") or ""), why))
+        except OSError as exc:
+            if full == path:
+                return {"not_measured": f"{type(exc).__name__}: {exc}"[:200]}
+    if not read_any:
+        return {"not_measured": "the guard's ledger was not read"}
+    out = {}
+    for cid, rows in found.items():
+        seen, kept = set(), []
+        for _, why in sorted(rows, reverse=True):
+            if why not in seen:
+                seen.add(why)
+                kept.append(why)
+        out[cid] = kept[:GUARD_WHY_MAX]
+    return out
+
+
+def guard_why_of(row):
+    """One reason string for a ledger row, or '' when the row is not a REFUSAL.
+
+    Only an enforced, terminal refusal is a reason a reply was replaced with the fallback line. The ledger also
+    records rows that refused nothing, and counting those would name a cause that did not fire: an `output_note`
+    is a passing answer that was noted, an `output_guard` row in shadow mode (`enforced: false`) did not stop
+    anything, and a retry whose outcome is `pending` or `passed` did not fail. A conversation that was refused once
+    and answered properly later would otherwise be reported as refused for the later row's reason (QA 2026-11-15).
+
+    `enforced` is the guard's own word for "this row replaced the reply" and every `output_guard` row has carried
+    it since the guard shipped (caroline-safety.ts), so it alone decides. `mode` is not read: a row that says
+    `enforced: false` refused nothing whatever else it says, and a row with no `enforced` is not a known refusal.
+    """
+    kind = row.get("kind")
+    if kind == "output_guard_retry":
+        if str(row.get("outcome") or "") != "unusable":
+            return ""
+        why = str(row.get("why") or "")
+        return f"retry:{why}" if why else "retry:unusable"
+    if kind == "unbacked_handoff":
+        return "unbacked_handoff" if str(row.get("action") or "") == "fallback" else ""
+    if kind == "output_guard":
+        if row.get("enforced") is not True:
+            return ""
+        names = []
+        for f in row.get("flags") or []:
+            if not isinstance(f, dict) or not f.get("rule"):
+                continue
+            family = str(f.get("family") or "")
+            names.append(f"{family}:{f['rule']}" if family and family != "note" else str(f["rule"]))
+        return "guard:" + ",".join(names[:2]) if names else ""
+    return ""
+
+
 def read_aging(db_path, now):
     """Who has waited on us for AGING_HOURS or more, from the monitor's facts. A file that cannot be read is
     `not_measured` with the reason, never an empty list: "nobody is waiting" and "could not look" are different."""
@@ -282,7 +379,7 @@ def read_aging(db_path, now):
             "read_ids": [cid for _, cid in recent[:AGING_READ_CAP]]}
 
 
-def tick(token, now, minutes=30, db_path=FACTS_DB, request=None, register=None):
+def tick(token, now, minutes=30, db_path=FACTS_DB, request=None, register=None, ledger_path=SAFETY_LEDGER):
     since = now - minutes * 60
     cfg = (register or {}).get("monitor") or {}
     non_human = tuple(cfg.get("non_human_admin_ids") or rules.DEFAULT_NON_HUMAN_ADMINS)
@@ -322,8 +419,29 @@ def tick(token, now, minutes=30, db_path=FACTS_DB, request=None, register=None):
                 out[kind] = out.get(kind, 0) + 1
         return out
 
+    def count_guard_why(convs):
+        """{reason: count} over the threads the guard refused, so the pattern table names the cause."""
+        out = {}
+        for c in convs:
+            why = c.get("guard_why")
+            if why:
+                out[why] = out.get(why, 0) + 1
+        return out
+
     win = [row_of(c, True) for c in touched if c in threads]
     read_old = [row_of(c, False) for c in aging_ids if c in threads]
+    # Why the guard refused, for the threads where it did. The conversation cannot say (the customer only saw the
+    # fallback line), so the guard's own ledger is read for exactly those ids. A ledger that cannot be read leaves
+    # every such row `guard_why: not measured` and the reading says so: an unknown cause is not "no cause".
+    guarded = [c["id"] for c in win + read_old if "guard_fallback" in c["signals"]]
+    reasons = guard_reasons(guarded, path=ledger_path, now=now) if guarded else {}
+    for c in win + read_old:
+        if "guard_fallback" in c["signals"]:
+            why = reasons.get("not_measured") or reasons.get(c["id"])
+            if isinstance(why, list):
+                c["guard_why"] = ", ".join(why)
+            else:
+                c["guard_why"] = f"not measured: {why}" if why else "not measured"
     # The monitor's facts are up to two hours old. A thread they list as waiting that the live read shows
     # answered since is counted apart and is in no signal count: nobody is waiting on it any more.
     old = [c for c in read_old if c["waiting"]]
@@ -339,14 +457,16 @@ def tick(token, now, minutes=30, db_path=FACTS_DB, request=None, register=None):
     aging_out = {k: v for k, v in aging.items() if k != "read_ids"}
     if "not_measured" not in aging:
         aging_out.update({"read": len(read_old), "answered_since": len(read_old) - len(old),
-                          "by_signal": count(old), "by_cannot": count_cannot(old), "conversations": old})
+                          "by_signal": count(old), "by_cannot": count_cannot(old),
+                          "by_guard_why": count_guard_why(old), "conversations": old})
     return {
         "schema": SCHEMA, "as_of": now, "as_of_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
         "rules": rules.RULES_VERSION, "signals": SIGNALS, "not_measured": NOT_MEASURED,
         "window": {"minutes": minutes, "since": since, "listed": len(rows), "intercom_total_count": total,
                    "short_read": bool(total is not None and len(rows) < total), "read": len(win),
                    "gone": len(gone), "read_errors": len(errors), "struggling": sum(1 for c in win if c["signals"]),
-                   "by_signal": count(win), "by_cannot": count_cannot(win), "conversations": win},
+                   "by_signal": count(win), "by_cannot": count_cannot(win),
+                   "by_guard_why": count_guard_why(win), "conversations": win},
         "aging": aging_out, "by_signal_shape": by_shape,
     }
 
@@ -367,9 +487,11 @@ def line(doc):
     partial = (f" (PARTIAL: {a['not_read_over_limit']} more under {AGING_READ_DAYS} days not read, limit"
                f" {a['read_limit']} a tick)" if a["not_read_over_limit"] else "")
     answered = f", {a['answered_since']} answered since that reading" if a["answered_since"] else ""
+    refused = ", ".join(f"{k} {v}" for k, v in sorted(a.get("by_guard_why", {}).items(), key=lambda kv: -kv[1]))
     return head + (f"; customer last over {a['hours']}h: {a['count']} plus {a['robot_mail']} robot mail"
                    f" (monitor's reading, {a['facts_age_min']} min old), {a['read']} of them under {AGING_READ_DAYS}"
-                   f" days read{partial}{answered}: {worst}")
+                   f" days read{partial}{answered}: {worst}"
+                   + (f"; guard refused: {refused}" if refused else ""))
 
 
 def show(token, cid, request=None):

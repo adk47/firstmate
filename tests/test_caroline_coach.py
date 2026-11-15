@@ -449,5 +449,122 @@ class TickTests(unittest.TestCase):
         self.assertEqual(code.count("collect.fetch_thread("), 2)
 
 
+class GuardReasonTests(unittest.TestCase):
+    """Why the guard refused, from the guard's own ledger.
+
+    A `guard_fallback` signal says a reply was replaced with the fallback line; the conversation cannot say which
+    rule fired, because the customer only ever saw the fallback. The ledger can, and the rows below are the shapes
+    it actually writes (plugins/intercom/src/safety-ledger.ts): an `output_guard` row carrying flags, an
+    `unbacked_handoff` row whose action is `fallback`, and an `output_guard_retry` row carrying `why`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "ledger.jsonl")
+
+    def write(self, *rows, path=None):
+        with open(path or self.path, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+
+    def test_the_guard_row_names_the_rule_that_refused_the_reply(self):
+        self.write({"ts": "2026-11-12T03:52:42.683Z", "kind": "output_guard", "ref": "100", "enforced": True,
+                    "flags": [{"family": "contradict", "rule": "fact_unverified:status_chase", "excerpt": "x"}]})
+        self.assertEqual(coach.guard_reasons(["100"], path=self.path, now=NOW), {"100": ["guard:contradict:fact_unverified:status_chase"]})
+
+    def test_a_handoff_that_was_replaced_and_a_retry_that_failed_are_both_reasons(self):
+        self.write({"ts": "2026-11-15T11:00:14.139Z", "kind": "unbacked_handoff", "ref": "100", "action": "fallback"},
+                   {"ts": "2026-11-15T11:00:14.140Z", "kind": "output_guard_retry", "ref": "100", "outcome": "unusable",
+                    "why": "only_person_promise"})
+        self.assertEqual(coach.guard_reasons(["100"], path=self.path, now=NOW),
+                         {"100": ["retry:only_person_promise", "unbacked_handoff"]})
+
+    def test_a_retry_that_passed_is_not_a_reason_and_another_conversation_is_not_read(self):
+        self.write({"ts": "2026-11-15T11:00:38.357Z", "kind": "output_guard_retry", "ref": "100", "outcome": "passed"},
+                   {"ts": "2026-11-15T11:00:38.357Z", "kind": "output_guard", "ref": "999", "enforced": True,
+                    "flags": [{"family": "promise", "rule": "timeframe_within"}]})
+        self.assertEqual(coach.guard_reasons(["100"], path=self.path, now=NOW), {})
+
+    def test_the_same_reason_twice_is_named_once_and_at_most_three_are_kept(self):
+        self.write(*[{"ts": f"2026-11-15T11:00:0{i}.000Z", "kind": "output_guard", "ref": "100", "enforced": True,
+                      "flags": [{"family": "contradict", "rule": "fact_unverified:status_chase"}]} for i in range(3)],
+                   {"ts": "2026-11-15T11:00:09.000Z", "kind": "output_guard", "ref": "100", "enforced": True,
+                    "flags": [{"family": "promise", "rule": "timeframe_within"}]},
+                   {"ts": "2026-11-15T11:00:10.000Z", "kind": "output_guard", "ref": "100", "enforced": True,
+                    "flags": [{"family": "reveal", "rule": "staff_name"}]},
+                   {"ts": "2026-11-15T11:00:11.000Z", "kind": "output_guard", "ref": "100", "enforced": True,
+                    "flags": [{"family": "off_topic", "rule": "code_fence"}]})
+        got = coach.guard_reasons(["100"], path=self.path, now=NOW)["100"]
+        self.assertEqual(len(got), coach.GUARD_WHY_MAX)
+        self.assertEqual(got[0], "guard:off_topic:code_fence")          # newest first
+        self.assertEqual(len(set(got)), len(got))
+
+    def test_a_row_that_refused_nothing_is_not_a_reason(self):
+        """A note is a passing answer, a shadow-mode guard row stopped nothing, and a pending retry may still pass.
+        Counting any of them would name a cause that did not fire for a conversation refused earlier (QA 2026-11-15)."""
+        self.write({"ts": "2026-11-15T11:00:00.000Z", "kind": "output_note", "ref": "100",
+                    "flags": [{"family": "note", "rule": "altered_approved_line:status_chase"}]},
+                   {"ts": "2026-11-15T11:00:01.000Z", "kind": "output_guard", "ref": "100", "mode": "shadow",
+                    "enforced": False, "flags": [{"family": "contradict", "rule": "fact_unverified:status_chase"}]},
+                   {"ts": "2026-11-15T11:00:02.000Z", "kind": "output_guard_retry", "ref": "100", "outcome": "pending"},
+                   {"ts": "2026-11-15T11:00:03.000Z", "kind": "unbacked_handoff", "ref": "100", "action": "stripped"})
+        self.assertEqual(coach.guard_reasons(["100"], path=self.path, now=NOW), {})
+
+    def test_a_later_answer_that_passed_does_not_replace_the_reason_of_the_earlier_refusal(self):
+        """The case QA named: refused once (the customer saw the fallback), then answered properly. The later rows
+        are newer, so a reader that took them would report the note's rule as why the fallback was sent."""
+        self.write({"ts": "2026-11-15T10:00:00.000Z", "kind": "output_guard", "ref": "100", "mode": "enforce",
+                    "enforced": True, "attempt": 2,
+                    "flags": [{"family": "contradict", "rule": "fact_unverified:status_chase"}]},
+                   # the next turn: refused, retried, and the corrected retry passed with a note
+                   {"ts": "2026-11-15T11:00:00.000Z", "kind": "output_guard_retry", "ref": "100", "outcome": "pending",
+                    "flags": [{"family": "promise", "rule": "timeframe_within"}]},
+                   {"ts": "2026-11-15T11:00:05.000Z", "kind": "output_note", "ref": "100",
+                    "flags": [{"family": "note", "rule": "altered_approved_line:status_chase"}]},
+                   {"ts": "2026-11-15T11:00:05.001Z", "kind": "output_guard_retry", "ref": "100", "outcome": "passed"})
+        self.assertEqual(coach.guard_reasons(["100"], path=self.path, now=NOW),
+                         {"100": ["guard:contradict:fact_unverified:status_chase"]})
+
+    def test_only_the_guards_own_enforced_flag_makes_a_guard_row_a_refusal(self):
+        """`enforced` is the guard's word for "this row replaced the reply". A row that says `enforced: false` refused
+        nothing even when its `mode` says enforce, and a row that does not say is not a known refusal."""
+        flags = [{"family": "contradict", "rule": "fact_unverified:status_chase"}]
+        self.write({"ts": "2026-11-15T11:00:00.000Z", "kind": "output_guard", "ref": "100", "mode": "enforce",
+                    "enforced": False, "flags": flags},
+                   {"ts": "2026-11-15T11:00:01.000Z", "kind": "output_guard", "ref": "100", "mode": "enforce",
+                    "flags": flags},
+                   {"ts": "2026-11-15T11:00:02.000Z", "kind": "output_guard", "ref": "100", "mode": "enforce",
+                    "enforced": "true", "flags": flags})
+        self.assertEqual(coach.guard_reasons(["100"], path=self.path, now=NOW), {})
+
+    def test_a_sealed_ledger_is_read_and_one_that_cannot_be_read_is_not_measured(self):
+        sealed = self.path + ".sealed-20261112T061131Z"
+        self.write({"ts": "2026-11-12T03:52:42.683Z", "kind": "output_guard", "ref": "100", "enforced": True,
+                    "flags": [{"family": "contradict", "rule": "fact_unverified:status_chase"}]}, path=sealed)
+        self.write()                                                    # the current file is empty
+        self.assertEqual(coach.guard_reasons(["100"], path=self.path, now=NOW),
+                         {"100": ["guard:contradict:fact_unverified:status_chase"]})
+        missing = coach.guard_reasons(["100"], path=os.path.join(self.tmp, "nope.jsonl"), now=NOW)
+        self.assertIn("not_measured", missing)
+
+    def test_a_reading_says_why_the_guard_refused_and_never_reads_as_no_reason(self):
+        self.write({"ts": "2026-11-15T11:00:14.140Z", "kind": "output_guard_retry", "ref": "1", "outcome": "unusable",
+                    "why": "only_person_promise"})
+        guarded = thread([part(60, "a", "Thanks for your message.")], cid="1", tags=[rules.GUARD_TAG],
+                         tag_at={rules.GUARD_TAG: NOW - 600})
+        patch = mock.patch.object(coach.collect, "reduce_thread", lambda detail: detail["__reduced__"])
+        patch.start()
+        self.addCleanup(patch.stop)
+        db = facts_db(self.tmp, ())
+        doc = coach.tick("tok", NOW, 30, db, request=Intercom([guarded]), ledger_path=self.path)
+        self.assertEqual(doc["window"]["by_guard_why"], {"retry:only_person_promise": 1})
+        self.assertEqual(doc["window"]["conversations"][0]["guard_why"], "retry:only_person_promise")
+        # the same reading with a ledger that cannot be read: the cause is unknown, and it says so
+        doc = coach.tick("tok", NOW, 30, db, request=Intercom([guarded]),
+                         ledger_path=os.path.join(self.tmp, "nope.jsonl"))
+        self.assertTrue(doc["window"]["conversations"][0]["guard_why"].startswith("not measured: "))
+        self.assertEqual(list(doc["window"]["by_guard_why"]), [doc["window"]["conversations"][0]["guard_why"]])
+
+
 if __name__ == "__main__":
     unittest.main()
