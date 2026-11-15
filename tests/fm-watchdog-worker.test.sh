@@ -520,6 +520,31 @@ test_a_transient_inbox_relaunch_failure_is_not_announced_as_done() {
   pass "a transient inbox relaunch failure neither announces nor consumes the rung"
 }
 
+test_a_spent_inbox_relaunch_budget_stops_retrying_and_escalates_once() {
+  local home now
+  home=$(make_home inbox-budget); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 alive
+  pane "$home" w1 idle 'waiting'
+  steer "$home" w1 5500
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$now" >/dev/null
+  assert_eq "3" "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" \
+    "a failed inbox relaunch attempt was not charged against the hourly budget"
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$now" >/dev/null
+  assert_eq "3" "$(counter "$home" '^control w1 relaunch')" \
+    "a spent relaunch budget still retried the unread inbox's relaunch"
+  assert_eq "1" "$(wakes "$home" | grep -c 'hourly relaunch budget')" \
+    "an unread inbox whose relaunches all failed never reached firstmate"
+  assert_eq "0" "$(jq -r '.tasks.w1.istage' "$home/state/.watchdog-worker.json")" \
+    "a failed inbox relaunch claimed the rung"
+  pass "an unread inbox retries its failed relaunch on the budget, then escalates once"
+}
+
 test_a_stalled_worker_climbs_the_ladder_and_escalates_once() {
   local home now out
   home=$(make_home ladder); fake_tools "$home"
@@ -1177,6 +1202,7 @@ test_a_task_left_stopped_is_never_relaunched_or_paged
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake
 test_an_unread_steer_is_interrupted_then_relaunched_once_each
 test_a_transient_inbox_relaunch_failure_is_not_announced_as_done
+test_a_spent_inbox_relaunch_budget_stops_retrying_and_escalates_once
 test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model
 test_a_connection_relaunch_failure_is_charged_against_the_budget
 test_a_pi_lane_is_never_asked_to_move_to_a_model_it_cannot_reach

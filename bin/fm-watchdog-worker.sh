@@ -426,8 +426,17 @@ record_load() {
 # Field order is the one task_load reads and the one the header documents:
 #   sig since stage stage_at rings relaunches steers woke
 #   istage istage_at ibase strikes refusal refusal_at refusal_state
+# An entry this pass already stored is newer than the record snapshot it loaded,
+# so task_load reads that row instead and the inbox pass's budget charge survives
+# the task pass that follows it.
 task_entry() {  # <id>
-  jq -r --arg id "$1" '.[$id] // {} |
+  local src="$WORK/tasks.json" entry=false
+  if [ -f "$WORK/entry.$1.json" ] && [ ! -L "$WORK/entry.$1.json" ]; then
+    src="$WORK/entry.$1.json"
+    entry=true
+  fi
+  jq -r --arg id "$1" --argjson entry "$entry" '
+    (if $entry then (.value // {}) else (.[$id] // {}) end) |
     [ (.sig // ""), (.since // 0), (.stage // 0), (.stage_at // 0),
       ((.rings // []) | join(",")), ((.relaunches // []) | join(",")),
       ((.steers // []) | join(",")),
@@ -435,7 +444,7 @@ task_entry() {  # <id>
       (.istage // 0), (.istage_at // 0), (.ibase // ""),
       ((.strikes // []) | join(",")), (.refusal // ""), (.refusal_at // 0),
       (.refusal_state // "") ]
-    | map(tostring) | join("\u001f")' "$WORK/tasks.json" 2>/dev/null
+    | map(tostring) | join("\u001f")' "$src" 2>/dev/null
 }
 
 # task_load <id>: read one task's row into the CALLER's locals. Bash's dynamic
@@ -1553,7 +1562,7 @@ task_drain_relaunch() {  # <id> <why>
 inbox_pass() {
   local meta id kind backend target state oldest base age
   local sig since stage stage_at rings relaunches steers woke istage istage_at ibase strikes
-  local refusal refusal_at refusal_state rc
+  local refusal refusal_at refusal_state rc relaunch_count
   local mins
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -1589,28 +1598,38 @@ inbox_pass() {
       if task_refusal_gate "$id" "$state"; then
         continue
       fi
-      rc=0
-      task_drain_relaunch "$id" "$mins minutes" || rc=$?
-      if [ "$rc" -eq 2 ]; then
-        # A refusal is not a rung: the lane is unreplaceable here, so the ladder
-        # stops climbing and firstmate gets the exact reason instead.
-        task_relaunch_refused "$id" "$state" \
-          "No relaunch budget was spent and it will not retry for $((REFUSAL_RETRY_SECS / 3600))h; its steering inbox stays unread and the lane needs a hand"
-        continue
+      relaunch_count=$(csv_recent "$relaunches" "$(now_epoch)" "$HOUR")
+      if [ "$relaunch_count" -lt "$RELAUNCH_PER_HOUR" ]; then
+        rc=0
+        task_drain_relaunch "$id" "$mins minutes" || rc=$?
+        if [ "$rc" -eq 2 ]; then
+          # A refusal is not a rung: the lane is unreplaceable here, so the ladder
+          # stops climbing and firstmate gets the exact reason instead.
+          task_relaunch_refused "$id" "$state" \
+            "No relaunch budget was spent and it will not retry for $((REFUSAL_RETRY_SECS / 3600))h; its steering inbox stays unread and the lane needs a hand"
+          continue
+        fi
+        relaunches=$(csv_append "$relaunches" "$(now_epoch)")
+        if [ "$rc" -ne 0 ]; then
+          # The rung was not taken: the lane keeps its place in the ladder so a
+          # transient relaunch failure is retried rather than announced as done,
+          # and the attempt is charged so a spent budget stops the retrying.
+          task_store "$id"
+          continue
+        fi
+        istage=3
+        istage_at=$(now_epoch)
+        if [ "$DRY_RUN" != 1 ]; then
+          touch "$WORK/touched.$id" 2>/dev/null || true
+        fi
+        wake_firstmate "watchdog-inbox-$id" \
+          "check: watchdog relaunched $id because its steering inbox went unread for $mins minutes; if it still does not drain, the lane needs a hand"
+      elif [ "$woke" != true ]; then
+        printf 'watchdog: %s steering inbox unread and out of relaunches; asking firstmate\n' "$id"
+        wake_firstmate "watchdog-inbox-$id" \
+          "check: watchdog $id's steering inbox has gone unread for $mins minutes and its hourly relaunch budget ($RELAUNCH_PER_HOUR) is spent; it needs a hand"
+        woke=true
       fi
-      if [ "$rc" -ne 0 ]; then
-        # The rung was not taken: the lane keeps its place in the ladder so a
-        # transient relaunch failure is retried rather than announced as done.
-        task_store "$id"
-        continue
-      fi
-      istage=3
-      istage_at=$(now_epoch)
-      if [ "$DRY_RUN" != 1 ]; then
-        touch "$WORK/touched.$id" 2>/dev/null || true
-      fi
-      wake_firstmate "watchdog-inbox-$id" \
-        "check: watchdog relaunched $id because its steering inbox went unread for $mins minutes; if it still does not drain, the lane needs a hand"
     elif [ "$age" -ge "$INBOX_INTERRUPT_SECS" ] && [ "$istage" -lt 2 ]; then
       task_interrupt_continue "$id" "$mins minutes" || true
       istage=2
