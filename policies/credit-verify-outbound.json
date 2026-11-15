@@ -1,6 +1,11 @@
 {
   "_doc": "credit-verify-outbound.sh CAPACITY caps (Fable 10-30 23:4xZ: the fixed small daily caps go; the safety is the auto-kill: bounce / spam / unsub > 2 %, any fraud hit, the zero-read, v1's 2 h sample). daily_cap = users messaged per campaign per UTC day by segment (credit: the runner's own segment record; claim: ledger rows of the campaign). shared_daily_cap = every campaign of the group together per UTC day (m2's shared send CEILINGS inside notify: credit 2,500 / claim 500; messaging-monitoring-m2, H-DevOps #4598 - this file's claim cap is the live 25, under that ceiling). A campaign with no row or no group never applies (fail closed). Raising a cap is a PR. holds = the Gmail-side DATED WINDOWS [key=dated-windows-are-data] (l1 ruling 2026-11-02, ruling-o-retire-1102.md): a code literal with a date in it is a CI red with a countdown on it. holds.gmail is the /o promise clause (an extra sentence in a uvn-status ask) and the hold on gmail-vouched users: clause_open=false retires it, due_at closes it on the clock. The gate re-reads this file on every run, so closing needs no deploy. Reviewed baseline: deploy overwrites - 2026-11-13 (verif-reask-14d-r1): node-8 holds a copy of this file edited in place (sha256 4321089f93b3a4422925f468e794bd4ef7c7395b6ba7587d133e9d2b4e5fb3d9, mtime 2026-11-13T07:01Z, read 18:22Z and again 22:26Z), which the deploy's delta gate would otherwise stop on. Repo aligned to the live node-8 values - these are NOT new decisions, they are the values node-8 already runs, carried so the deploy changes none of them: daily_cap.uvn-status paid/free 2500/2500 -> 2000/2000; daily_cap.proof-need-ask paid/free 2500/2500 -> 400/400; shared_daily_cap.claim 500 -> 25; tick_cap.uvn-status {free: 60} -> {paid: 50, free: 50}; and the rows absent from the repo copy and live on node-8: tick_cap.proof-need-ask {paid: 50, free: 5}, tick_cap.claim-proof-ask {paid: 25, free: 25}, and the four armed_families rows (uvn-status 2026-10-31T18:02Z, status-doc-received 2026-11-03T12:56Z, claim-proof-ask 2026-11-03T18:58Z, proof-need-ask 2026-11-10T02:17Z) with their live unsigned_from values. Nothing is raised. That copy is also written outside a deploy (an operator's edit; the node-8 watchdog that sets tick_cap.uvn-status to 0/0 on a hard stop), and with the marker above a deploy writes this file over whatever is there: compare the live copy with this one before deploying a change to it. The only additions are the uvn-reminder-14 rows (captain 2026-11-13 15:08Z: one reminder to a verification non-responder after 14 days; 50 per tick across paid + free to start). armed_families = which family may APPLY on the unattended tick, and from when (credit-verify-outbound.sh read_arming: present = only a family's own row arms it). uvn-new-rows rows added 2026-11-14 (ask-never-asked-r1, firstmate 22:48Z): the follow-up ask to a user we already asked, about owed requests no ask named. 5 users per tick across paid + free together (NR_CAP in the tick, tick_cap here can only lower it), daily_cap 120 = 24 hourly ticks x 5. The cap is low on purpose: the family has never sent, and it rises only by a PR that cites the first runs. Every body needs its own signed copy verdict (policies/outbound-copy-enforce.json).",
   "armed_families": {
+    "uvn-status:c2": {
+      "live": true,
+      "paid": true,
+      "unsigned_from": "2026-11-15T08:18Z"
+    },
     "uvn-status": {
       "live": true,
       "paid": true,
@@ -30,6 +35,11 @@
       "live": true,
       "paid": true,
       "unsigned_from": "2026-11-14T22:48Z"
+    },
+    "proof-refusal": {
+      "live": true,
+      "paid": true,
+      "unsigned_from": "2026-11-15T13:41Z"
     }
   },
   "daily_cap": {
@@ -64,6 +74,10 @@
     "uvn-new-rows": {
       "paid": 120,
       "free": 120
+    },
+    "proof-refusal": {
+      "paid": 395,
+      "free": 395
     }
   },
   "groups": {
@@ -73,7 +87,8 @@
       "proof-need-ask",
       "wait-apology",
       "uvn-reminder-14",
-      "uvn-new-rows"
+      "uvn-new-rows",
+      "proof-refusal"
     ],
     "claim": [
       "claim-status",
@@ -105,6 +120,10 @@
     "uvn-new-rows": {
       "paid": 5,
       "free": 5
+    },
+    "proof-refusal": {
+      "paid": 100,
+      "free": 100
     }
   },
   "holds": {

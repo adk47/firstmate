@@ -976,6 +976,57 @@ the `uvn-status` body over the new rows only. Evidence and the measured audience
   that is not a JSON object with a `users` list, fails the family: the tick exits 1 and the other families still
   run. Only an empty list is "nobody is listed". A skip there would leave the tick green with nobody asked.
 
+## The proof refusal (`--campaign proof-refusal`, captain 2026-11-15)
+
+The note that tells a person why the document they sent did not verify a credit, and what would. Measured
+audience and the held classes: `data/proof-refusal-send-r1/report.md`.
+
+- **The copy is one sentence per track and one closing**, with no greeting and no sign-off:
+  `{title} was not verified. Reason: {reason}. What would change this: {evidence}.`, then once, last,
+  `Reply to this conversation with it and the check runs again automatically. Without it, the result stands.`
+  A one-track note is one of the three bodies approved on 2026-11-15T13:41Z (corr=208a8463f735ff45), byte for
+  byte. A note about several tracks repeats the sentence per track with that track's own reason.
+- **Three pairs have a body**: `doesnt_name_you` or `other_track` with `counterparty_signed_or_registered`, and
+  `unreadable` with `readable_document`. `{evidence}` is `proof_reviewer.ASK_LINES` for the need code;
+  `scripts/tests/test_proof_refusal.py` holds the gate's words equal to it. Any other pair in a credits file
+  refuses the whole note (`refusal_uncoded`): a track is never dropped silently and never given another track's
+  reason.
+- **A row is listed only where the reader recorded the need the body names**
+  (`proof_review_decisions.ask_need`, `proof_refusal.build`). The rest are held and counted by class in the list:
+  the reader's distributor-dashboard need (the `proof-need-ask` family owns it, with a code issued at send), a row
+  the reader named no need for, a reason with no approved wording (`not_a_document`, `other_role`), a row with no
+  account. On 2026-11-15 14:53Z that was 630 of 6,659 rejected rows, 81 people.
+- **The send reads each listed request again** (`proof_refusal.payloads`): one no longer pending, one held for a
+  cause no document clears (`policy.never_ask`, through `uvn_status`), one another ask class holds, one a
+  `proof-need-ask` already named and one this campaign already wrote about are dropped with the reason.
+- **The send reads the reviewer's decision again** (`proof_refusal.moved`). The list is built once per tick and
+  the reviewer runs beside it, so a row stands only while its `verify_proof_reviews` row is still that rejection
+  and its newest unreverted `proof_review_decisions` row is still a rejection for that reason, with that need, on
+  that account. It is read for the whole page in every mode (a moved row is dropped as `decision_changed`), and
+  on an apply once more per person immediately before that person's own gate call: any moved row holds the whole
+  person (`deferred`, `decision_changed`, nothing claimed), and the next tick's build lists them from what the
+  ledger says then. A ledger that cannot be re-read sends nothing; at the gate call it stops the run.
+- **Ledger:** a notice (`NOTICE_CAMPAIGNS`): one message per request ever, it is not an ask and starts no expiry
+  window. It keeps the 7-day rule (`DEFERRED messaged_7d`): a person who had any note from this gate in the last
+  7 days waits and is offered again. Each sent row's `refs_json` names the `verify_proof_reviews` row every
+  request answers (`review_family`, `review_reason`, `review_need`).
+- **The lint** (`refusal_copy_guard`) reads the note with every title, artist and role replaced, so a song called
+  "Review" passes and a banned word in our own sentence does not. A note over 1,500 words is refused, not cut.
+- **Every body needs its own signed approve.** The campaign is `enforce` in `policies/outbound-copy-enforce.json`
+  and the sender holds an `observed` pass for it. The reviewer reads it as a class 2 message of
+  `policies/outbound-copy-rubric.md`. The first tick that renders a body sends none: it waits for the reviewer
+  round and goes on a later tick.
+- **The tick family** (`refusal_families` in `scripts/credit-verify-outbound.sh`): after the credit families and
+  before the need ask; paid then free; a 100-entry page. `PR_CAP` is 100 per tick across paid and free together
+  (a constant; `tick_cap` can only lower it) and the policy's `daily_cap` of 395 counts the campaign's own ledger
+  rows across both segments.
+- **No run without a clean read-back.** Before the list is built the tick runs `proof_refusal.py readback` over
+  every note the campaign has sent: sent = claimed, 0 hard bounces, 0 spam complaints. Exit 3 (one of them does
+  not hold) or 2 (the ledger or a contact could not be read) sends no refusal that tick, fails the family (the
+  tick exits 1, the other groups still run) and pages once per distinct finding. It needs no kill file to stop
+  and clears itself when the read is clean again; `/etc/hydra/proof-refusal.disabled` stops the campaign in the
+  gate.
+
 ## What bounds a tick's sends: order, the claim slice, the not-reached page, class C, the gate's reads (`[key=claims-never-starved]`, `[key=class-c-precheck]`, `[key=gate-reads-beside]`, 2026-11-12)
 
 Measured on node-8 on 2026-11-12: 44 sends by 16:35Z, every one of them `uvn-status`. Five things bound a tick, and

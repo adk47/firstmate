@@ -107,6 +107,14 @@ R14_ENTRIES="$(cfg CVO_R14_ENTRIES 100)"
 # The cap rises only by PR, on the evidence of those runs: constants, never env or a state file.
 NR_CAP="$(cfg CVO_NR_CAP 5)"
 NR_ENTRIES="$(cfg CVO_NR_ENTRIES 100)"
+# proof-refusal (captain 2026-11-15): the note that tells a person why the document they sent did not verify a credit
+# and what would. PR_RUNNER builds its list from the proof reviewer's rejected rows and sends through the gate.
+# PR_CAP is the family's cap per TICK across paid + free together (SHARED_TICK_CAP below), paid first: one run sends at
+# most 100, and the next run starts only after the read-back of every note sent so far (refusal_families).
+# PR_ENTRIES is the page it walks per segment. The cap rises only by PR: constants, never env or a state file.
+PR_RUNNER="$(cfg CVO_PR_RUNNER "$HYDRA_ROOT/scripts/credit_review/proof_refusal.py")"
+PR_CAP="$(cfg CVO_PR_CAP 100)"
+PR_ENTRIES="$(cfg CVO_PR_ENTRIES 100)"
 CLAIM_CAP="$(cfg CVO_CLAIM_CAP 250)"
 REFUSAL_SPIKE="$(cfg CVO_REFUSAL_SPIKE 0.20)"
 FIRST_CAP=100                          # [key=scale-now]: a family's first unsigned ticks, until v1's 10-sample line
@@ -218,6 +226,7 @@ page_entries() {
   if [ "$1" = uvn-status ] && [ "$2" = free ] && [ "$3" = uvn-status ]; then echo "$CHECK_ENTRIES_SEND"
   elif [ "$1" = uvn-reminder-14 ]; then echo "$R14_ENTRIES"
   elif [ "$1" = uvn-new-rows ]; then echo "$NR_ENTRIES"
+  elif [ "$1" = proof-refusal ]; then echo "$PR_ENTRIES"
   else echo "$CHECK_ENTRIES"; fi
 }
 # [key=tick-budget-page-fit] (2026-11-11): the smallest page a paged family will still run with. A page that does not
@@ -285,6 +294,16 @@ declare -A UNSIGNED_FROM=(
   #   3. the audience is the ledger's rule (verify_ledger.new_rows_user_done): only a user with a SENT uvn-status ask.
   # On node-8 the policy's armed_families row is what arms it (a row with no date clears this one).
   [uvn-new-rows]="2026-11-14T22:48Z"
+  # proof-refusal: dated by the reviewer's GO on its three rendered bodies (corr=208a8463f735ff45, 2026-11-15T13:41Z)
+  # and the captain's instruction of the same day. Not a read-back batch, so the rails are code:
+  #   1. no body is sent without a SIGNED approve of its exact bytes (the sender holds an `observed` pass for this
+  #      campaign too; policies/outbound-copy-enforce.json lists it under `enforce`), judged as a class 2 message of
+  #      policies/outbound-copy-rubric.md;
+  #   2. PR_CAP (100) is ONE budget per tick across paid + free (SHARED_TICK_CAP), and policy tick_cap only lowers it;
+  #   3. no run starts until every note the campaign has sent reads back: sent = claimed, 0 hard bounces, 0 spam
+  #      complaints (refusal_families; a read that cannot be made sends nothing either).
+  # On node-8 the policy's armed_families row is what arms it (a row with no date clears this one).
+  [proof-refusal]="2026-11-15T13:41Z"
   [uvn-status]="2026-10-31T18:02Z"     # AE-send-3: 3/3 = would-send 3, health + zero-read clean (h2 18:05Z, n1 465)
   [status-team-review]="2026-10-31T08:20Z"   # /k-ap 7: 7/7 = the signed set, health + zero-read clean (not a timer family yet)
   [claim-status]="2026-10-31T17:55Z"   # c2 batch 5 FREE 250: ledger 5763-6052 == the checked/signed 250, health + zero-read clean (p1 488)
@@ -374,7 +393,7 @@ declare -A FIRST_SPENT=()   # this tick's sends per shared-first family (the led
 # A family listed here has ONE budget per tick across all of its segments, for as long as it is listed (FIRST_CAP's
 # shape, with the family's own number and no ramp): charged by the ledger's count of each apply's sends (TICK_SPENT),
 # in the order credit_families() calls the segments - paid first, free takes what is left.
-declare -A SHARED_TICK_CAP=( [uvn-reminder-14]="$R14_CAP" [uvn-new-rows]="$NR_CAP" )
+declare -A SHARED_TICK_CAP=( [uvn-reminder-14]="$R14_CAP" [uvn-new-rows]="$NR_CAP" [proof-refusal]="$PR_CAP" )
 declare -A TICK_SPENT=()
 # the bats harness only (cfg's seam): every family unsigned at its full cap, so the family tests exercise the applies
 UNSIGNED_ALL="$(cfg CVO_UNSIGNED_ALL 0)"
@@ -408,7 +427,7 @@ PY
 }
 if [ "${1:-}" = "--print-config" ]; then
   for v in CVO_HARNESS HYDRA_ROOT KILL KILL2 LIVE_FLAG PAID_FLAG EXCLUDE STATE PY RUNNER OWING RECEIPTS HEALTH ZERO_READ \
-           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP RD_CHECKS RD_BUDGET POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP REFUSAL_SPIKE NEED_RUNNER FIRST_CAP R14_CAP R14_ENTRIES NR_CAP NR_ENTRIES UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES CHECK_ENTRIES_SEND PAGE_FLOOR TICK_BUDGET_S TICK_HARD_S CLAIM_GROUP_BUDGET_S STARVED_PAGE_AT STARVED_REPAGE_EVERY CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER APPLY_USER_WORST_S APPLY_WORKERS TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
+           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP RD_CHECKS RD_BUDGET POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP REFUSAL_SPIKE NEED_RUNNER FIRST_CAP R14_CAP R14_ENTRIES NR_CAP NR_ENTRIES PR_RUNNER PR_CAP PR_ENTRIES UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES CHECK_ENTRIES_SEND PAGE_FLOOR TICK_BUDGET_S TICK_HARD_S CLAIM_GROUP_BUDGET_S STARVED_PAGE_AT STARVED_REPAGE_EVERY CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER APPLY_USER_WORST_S APPLY_WORKERS TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
            CLAIM_PROOF_STATE CLAIM_PROOF_LIMIT_H CLAIM_PROOF_UNREAD_H CLAIM_PROOF_REPEAT_MIN; do
     printf '%s=%s\n' "$v" "${!v}"
   done
@@ -803,9 +822,11 @@ try:
     group = next(g for g, cs in pol["groups"].items() if campaign in cs)
     shared = int(pol["shared_daily_cap"][group])
     day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    if group == "credit" and campaign != "proof-need-ask":
+    if group == "credit" and campaign not in ("proof-need-ask", "proof-refusal"):
         done = uvn_status.segment_used_today(ledger, campaign, seg, day)
-    elif campaign == "proof-need-ask":   # need_asks keeps no segment record: its own ledger rows today (both segments)
+    elif campaign in ("proof-need-ask", "proof-refusal"):
+        # need_asks and proof_refusal keep no segment record: the campaign's own ledger rows today (both segments), so
+        # a daily_cap row is the campaign's cap for the DAY, never one cap per segment
         done = sqlite3.connect(f"file:{ledger}?mode=ro", uri=True).execute(
             "SELECT count(*) FROM verify_messages WHERE day=? AND campaign=? AND status IN ('sent','attempted')",
             (day, campaign)).fetchone()[0]
@@ -1096,7 +1117,7 @@ family_run() {
   # never starve the rest. The check, bodies and apply of one tick walk the SAME page (the value read here).
   local cur_file="" cur=0 paged=0
   # r5 639 / p1 638: the proof-need-ask family (need_asks) pages the same way (it ran unpaged for 85+ min at 16:20Z)
-  { [ "$sub" = uvn-status ] || [ "$sub" = need-send ]; } && paged=1
+  { [ "$sub" = uvn-status ] || [ "$sub" = need-send ] || [ "$sub" = refusal-send ]; } && paged=1
   if [ "$paged" = 1 ]; then
     cur_file="$STATE/cursor-$tag"
     cur="$(cat "$cur_file" 2>/dev/null || echo 0)"; [[ "$cur" =~ ^[0-9]{1,9}$ ]] || cur=0
@@ -1106,6 +1127,7 @@ family_run() {
   local page=0; [ "$paged" = 1 ] && page="$(page_entries "$name" "$seg" "$sub")"
   local pg=(); [ "$paged" = 1 ] && pg=(--max-entries "$page" --start-entry "$cur")
   local runner="$RUNNER"; if [ "$sub" = need-send ]; then runner="$NEED_RUNNER"; sub=send; fi
+  if [ "$sub" = refusal-send ]; then runner="$PR_RUNNER"; sub=send; fi
   # [key=scale-now]: the family's unsigned date (unset = SIGNED-only) and its cap before v1's 10-sample line
   local fam="$name"; [ "$name" = r1 ] && fam=status-doc-received
   local unsigned=""
@@ -1238,6 +1260,7 @@ family_run() {
   local campaign; campaign="$(printf '%s\n' "$@" | awk 'p{print; exit} $0=="--campaign"{p=1}')"
   [ -n "$campaign" ] || campaign="$sub"   # the claim runners: the subcommand IS the campaign
   [ "$runner" = "$NEED_RUNNER" ] && campaign=proof-need-ask
+  [ "$runner" = "$PR_RUNNER" ] && campaign=proof-refusal
   local rm n daily; rm="$(room "$campaign" "$seg" "$cap")"
   if [[ "$rm" == ERR* ]] || ! [[ "$rm" =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]]; then
     # QA #1541: an unreadable policy / ledger is an operational failure, not an exhausted cap - stop and page
@@ -1550,7 +1573,7 @@ import datetime as _dt
 # "uvn-status:c2" is a SUB-class of uvn-status, not a family ([key=class-c-is-a-row]): its row arms the /c2 corrected
 # ask and nothing else, and the uvn-status row still decides whether the family applies at all
 KNOWN = {"r1", "status-doc-received", "uvn-status", "claim-status", "claim-proof-ask", "proof-need-ask", "reply-due",
-         "uvn-status:c2", "uvn-reminder-14", "uvn-new-rows"}
+         "uvn-status:c2", "uvn-reminder-14", "uvn-new-rows", "proof-refusal"}
 def _instant(v):
     for fmt in ("%Y-%m-%dT%H:%MZ", "%Y-%m-%dT%H:%M:%SZ"):
         try:
@@ -1603,8 +1626,8 @@ if [ "$ARMING" = "policy" ]; then
     _key="$_fam"; _datekey="$_fam"
     case "$_fam" in
       r1|status-doc-received) _key="r1"; _datekey="status-doc-received" ;;
-      uvn-status|claim-status|claim-proof-ask|proof-need-ask|reply-due|uvn-status:c2|uvn-reminder-14|uvn-new-rows) ;;
-      *) log "ARMING ROW IGNORED: '$_fam' is not a family this tick runs (r1|status-doc-received, uvn-status, claim-status, claim-proof-ask, proof-need-ask, uvn-reminder-14, uvn-new-rows); it arms nothing"
+      uvn-status|claim-status|claim-proof-ask|proof-need-ask|reply-due|uvn-status:c2|uvn-reminder-14|uvn-new-rows|proof-refusal) ;;
+      *) log "ARMING ROW IGNORED: '$_fam' is not a family this tick runs (r1|status-doc-received, uvn-status, claim-status, claim-proof-ask, proof-need-ask, uvn-reminder-14, uvn-new-rows, proof-refusal); it arms nothing"
          continue ;;   # read_arming() already fails such a row closed; this is the belt to its braces
     esac
     ARMED_LIVE["$_key"]="$_live"; ARMED_PAID["$_key"]="$_paid"
@@ -2025,6 +2048,79 @@ print("%d listed (%d paid, %d free)" % (len(u), sum(1 for x in u if x.get("paid"
     "$list" 2>/dev/null || echo "(not readable here; the runner reads the list itself)")"
   family uvn-new-rows "$seg" "$list" "$NR_CAP" uvn-status --campaign uvn-new-rows --no-correction
 }
+# [key=proof-refusal-family] (captain 2026-11-15): the refusal note. One group of its own, after the credit families and
+# before the need ask, so an ask and a refusal for one person are never decided in the same breath: the gate's 7-day
+# rule holds whichever comes second, and the builder leaves out every request a proof-need-ask already named.
+#   read-back -> build -> paid -> free
+# The read-back is the family's entry condition, not a report: it reads EVERY note the campaign has sent (sent =
+# claimed, 0 hard bounces, 0 spam complaints) before any list is built. A failed read-back (rc 3) and one that could
+# not be made (rc 2) both send nothing; neither is repaired here, and the next tick asks again.
+PR_LIST=""
+refusal_readback() { # 0 = every note sent so far reads back clean (or none was sent yet); 1 = this tick sends none
+  local rc out="$OUT/proof-refusal-readback.json" stamp="$STATE/proof-refusal-readback.paged" what sum
+  py "$PR_RUNNER" readback --ledger "$LEDGER" --out "$out" > "$OUT/proof-refusal-readback.out" 2>&1; rc=$?
+  if [ "$rc" = 0 ]; then
+    log "proof-refusal read-back: ok $(head -c 300 "$OUT/proof-refusal-readback.out")"
+    rm -f "$stamp" 2>/dev/null || true
+    return 0
+  fi
+  if [ "$rc" = 3 ]; then what="STOP (sent != claimed, a hard bounce or a spam complaint)"
+  else what="UNMEASURED (rc=$rc: the ledger or a contact could not be read)"; fi
+  log "proof-refusal read-back: $what; no refusal is sent this tick: $(tail -c 400 "$OUT/proof-refusal-readback.out")"
+  # one page per distinct finding: an unchanged stop is quiet, a new one pages at once
+  sum="$(cksum < "$OUT/proof-refusal-readback.out" 2>/dev/null | tr -d ' \n')"
+  if [ "$(cat "$stamp" 2>/dev/null)" != "$rc:$sum" ]; then
+    page "proof-refusal read-back $what; the family sends nothing until it reads back clean. See $OUT/proof-refusal-readback.out"
+    { printf '%s\n' "$rc:$sum" > "$stamp.tmp" && mv -f "$stamp.tmp" "$stamp"; } 2>/dev/null || true
+  fi
+  return 1
+}
+build_refusal_list() { # <label>
+  local rc
+  py "$PR_RUNNER" build --ledger "$LEDGER" --out "$OUT/proof-refusal-all.json" > "$OUT/proof-refusal.out" 2>&1; rc=$?
+  if [ "$rc" != 0 ] && builder_deadline "$rc" "proof-refusal builder ($1)"; then return 1; fi
+  if [ "$rc" != 0 ]; then
+    log "proof-refusal builder failed ($1): rc=$rc $(tail -c 300 "$OUT/proof-refusal.out")"
+    return 1
+  fi
+  # the exclude file (users another lane messages today) holds them out of this family too; the runner takes no
+  # --exclude-users, so the tick filters its list, as it does the need list
+  py - "$OUT/proof-refusal-all.json" "$EXCLUDE" "$OUT/proof-refusal.json" <<'PY' >> "$OUT/tick.log" || { log "proof-refusal list filter failed ($1)"; return 1; }
+import json, os, sys
+src, excl, out = sys.argv[1:4]
+doc = json.load(open(src))
+held = {l.strip() for l in open(excl) if l.strip() and not l.startswith("#")} if os.path.exists(excl) else set()
+users = doc.get("users") or []
+keep = [u for u in users if str(u.get("user_id")) not in held]
+if keep:
+    json.dump({**doc, "users": keep}, open(out, "w"))
+else:
+    open(out, "w").close()                       # an empty audience: the family logs and skips
+print(f"proof-refusal list: {len(users)} users, {len(users) - len(keep)} held out by the exclude file")
+PY
+  PR_LIST="$OUT/proof-refusal.json"
+  log "audiences: proof-refusal ($1) $(head -c 600 "$OUT/proof-refusal.out")"
+  return 0
+}
+refusal_families() {
+  if [ ! -r "$PR_RUNNER" ]; then log "proof-refusal: $PR_RUNNER is not deployed; skipped"; return 0; fi
+  # As for the reminder and the new-rows family: a policy with no row for this campaign means it never applies, and
+  # ONLY that. family() would read a missing row as an unreadable cap source and end the whole tick.
+  if [ "$(py -c 'import json,sys
+try:
+    p = json.load(open(sys.argv[1])); c = sys.argv[2]
+except Exception:
+    print("unreadable"); raise SystemExit(0)
+row = (p.get("daily_cap") or {}).get(c) if isinstance(p, dict) else None
+grp = [g for g, cs in ((p.get("groups") or {}) if isinstance(p, dict) else {}).items() if isinstance(cs, list) and c in cs]
+print("row" if isinstance(row, dict) and "paid" in row and "free" in row and grp else "norow")' "$POLICY" proof-refusal 2>/dev/null)" = norow ]; then
+    log "proof-refusal: the policy has no daily_cap row or no group for proof-refusal; skipped (a campaign with no row never applies)"; return 0
+  fi
+  refusal_readback || return 1
+  build_refusal_list "rebuild before the refusal family" || return 1
+  family proof-refusal paid "$PR_LIST" "$PR_CAP" refusal-send || return $?   # paid first: it takes the shared 100
+  family proof-refusal free "$PR_LIST" "$PR_CAP" refusal-send || return $?
+}
 claim_families() {
   if [ ! -s "$CLAIM_LIST" ]; then log "claim families: no claim list at $CLAIM_LIST (the claim lane drops it); skipped"; return 0; fi
   # QA #1541: the exclude file holds users out of EVERY family - the claim runners take no --exclude-users, so the
@@ -2129,6 +2225,7 @@ GROUP_END_S=$(( $(elapsed) + CLAIM_GROUP_BUDGET_S ))
 run_group "claim families" claim_families || exit 1
 GROUP_END_S=""
 run_group "credit families" credit_families || exit 1
+run_group "refusal family" refusal_families || exit 1
 run_group "need families" need_families || exit 1
 if [ -n "$FAILED_GROUPS" ]; then
   log "tick done with FAILED group(s): $FAILED_GROUPS (the other groups ran); exit 1"

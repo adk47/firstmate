@@ -2681,6 +2681,10 @@ jobs:
           python3 scripts/tests/test_verify_ledger_proof_need.py
           # the L11c audience + sender path (credit_review/need_asks.py; the gate owns copy, lock and guards).
           python3 scripts/tests/test_need_asks.py
+          # proof-refusal (credit_review/proof_refusal.py): the audience rule (a row is listed only where an approved
+          # body names the need the reader recorded), the send-time re-read, the read-back, and the pin that holds
+          # the gate's evidence words equal to proof_reviewer.ASK_LINES.
+          python3 scripts/tests/test_proof_refusal.py
           # the verification scale drain (data/verification-scale-plan.md): the deterministic ladder, the
           # idempotency key, sharding, byte-identical re-runs and the kill -9 chaos proof. Stdlib only.
           python3 scripts/tests/test_scale_drain.py

@@ -185,6 +185,31 @@ chosen by that table, never by the caller. A listed family whose file is missing
 it is never reviewed under the default rubric instead. A campaign with its own family is enforced whatever the mode
 table says. Two families exist: `gdpr` (the statutory letters) and `support` (the campaign `agent-reply`).
 
+### The default rubric's two classes (captain 2026-11-15)
+
+Rule 3 of the default rubric ("never give a reason for a denial") is scoped, not dropped. The rubric has a section
+"The two classes", and the reviewer tells the class from the message itself:
+
+- **Class 1, risk and fraud denials.** Rule 3 in full: denied for now or the verification did not prove out, the
+  person can resubmit later, nothing more. The `decline` campaign is this class, and the gate's own lint for the
+  `denied` stage (`denial_reason`, `denial_no_resubmit`) is unchanged.
+- **Class 2, proof-insufficiency outcomes.** A statement about a document the person sent: the reason, what would
+  change it, "Reply to this conversation". It is one fixed sentence per track and one closing, with the three
+  approved reason and evidence pairs listed in the rubric. The campaign `proof-refusal` sends it, at stage `ask`.
+  The class names five outcomes; wording exists for three, and the rubric tells the reviewer that
+  `not_a_document` and `other_role` are not approve until their pair is listed.
+- A class 2 message that drifts into class 1 territory (an accusation, fraud, a named internal gate) is refused,
+  and a denial that gives a reason is not approved.
+
+This is not a family: `proof-refusal` is reviewed under the default rubric and is enforced by its row in
+`policies/outbound-copy-enforce.json` plus the sender's own hold on an `observed` pass.
+
+**Editing the default rubric voids every verdict signed under it.** A verdict names the rubric's sha256, so after
+a deploy of a changed `policies/outbound-copy-rubric.md` every body of an enforced campaign is
+`copy_review_pending` again until the reviewer host (after `install-reviewer-host.sh`) signs it, and every observed
+campaign's rows read `observed:pending`. On 2026-11-15 that was `uvn-reminder-14` and `uvn-new-rows`, both armed.
+Plan the reviewer round with the merge.
+
 ## A reply an agent wrote
 
 Until 2026-11-14 a customer-facing reply through `scripts/intercom-ops-write.sh` needed `--approved-by` with the

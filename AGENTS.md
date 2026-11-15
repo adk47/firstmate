@@ -986,6 +986,13 @@ frame + rubric sha256). Full doc, the sender list and what is deliberately outsi
   Intercom POSTs and fails on one that is neither gated nor argued onto `NOT_BEHIND_THIS_GATE`.
 - **A denial is three sentences**: denied for now / verification didn't prove out, "You can resubmit for the credit
   again later.", sign-off. No reason, no accusation word; the code lint outranks the model on both.
+- **"No reason" is scoped to risk and fraud denials** (captain 2026-11-15; the rubric's "The two classes"). A
+  statement about a document the person sent (class 2: the reason, what would change it, reply here) is the
+  `proof-refusal` campaign's fixed sentence and nothing else. Wording exists for three of the five outcomes; do not
+  add a pair to the rubric without approved copy.
+- **Editing `policies/outbound-copy-rubric.md` voids every verdict signed under it** (a verdict names the rubric's
+  sha256): after that deploy every enforced campaign holds each body as `copy_review_pending` until the reviewer
+  host is re-installed and signs again. Plan the reviewer round with the merge.
 - A message family with other duties gets its own rubric file + `RUBRIC_FAMILY` row (chosen by code, never the
   caller); a listed family with no file is held, never reviewed under the default rubric.
 - **A reply no person asked for goes out on the gate's signed approve, never on a person's Slack id**:
@@ -1640,6 +1647,30 @@ measured audience: `docs/credit-verification/verify-request-notes.md` §"The day
   family. Do not count the builder's `uvn_new_rows` class as people this family will ask.
 - **5 users per tick across paid and free** (`NR_CAP` in `scripts/credit-verify-outbound.sh`). Raise it only by a PR
   that cites the first runs' output; never by env, a state file or the policy (`tick_cap` only lowers).
+
+## The proof refusal: told only where the body is true, and never without a clean read-back
+
+`proof-refusal` (captain 2026-11-15) tells a person why the document they sent did not verify a credit and what
+would. Doc: `docs/credit-verification/verify-request-notes.md` §"The proof refusal"; measured audience:
+`data/proof-refusal-send-r1/report.md`.
+
+- **A rejected row is listed only where an approved body names the need the READER recorded**
+  (`proof_review_decisions.ask_need`; `credit_review/proof_refusal.py` `PAIRS`). Mapping a reason to a need by
+  table would have told 422 people a split sheet changes a result the reader said a dashboard screenshot with a
+  code changes; those rows are `proof-need-ask`'s. Of 6,659 rejected rows on 2026-11-15, 630 (81 people) were listed and
+  40 people could be sent a note on a first run. Never report rejected rows as people this note reaches.
+- **`{evidence}` is `proof_reviewer.ASK_LINES` by need code**, pinned to the gate's words by
+  `scripts/tests/test_proof_refusal.py`. A reason and need with no approved body refuses the whole note in the
+  gate; it never drops a track or borrows another track's reason.
+- **The list is not the decision.** The reviewer runs beside the tick, so `proof_refusal.moved` re-reads the
+  review row and the newest unreverted decision for the page, and on an apply again per person immediately
+  before that person's gate call; a row that moved is not sent under the old reason, since one message per
+  request would keep the right one from ever going.
+- **One sentence set per track, the closing once, no greeting and no sign-off.** Do not add a line: the reviewer
+  approves the note as the rubric's class 2 template and refuses anything beside it.
+- **The tick runs `proof_refusal.py readback` before every run** (sent = claimed, 0 hard bounces, 0 spam
+  complaints over every note the campaign sent). A stop or an unmeasured read sends none that tick and pages once
+  per finding. 100 per tick across paid and free (`PR_CAP`), 395 a day (policy), paid first.
 
 ## The notify tick tells every affirmed user and carries the others
 

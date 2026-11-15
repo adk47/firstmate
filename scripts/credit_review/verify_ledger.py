@@ -120,6 +120,7 @@ CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "
              "claim-proof-ask", "claim-status", "gap-ask", "merge-pending", "credit-hold-status", "claim-proof-pending", "proof-need-ask",
              "merge-claim-first",
              "credit-approved-elsewhere",   # send-locked; see APPROVED_ELSEWHERE below
+             "proof-refusal",   # the reason-bearing note for a rejected document; see PROOF_REFUSAL below
              "agent-reply",   # a reply an agent composed, sent on the copy gate's signed verdict; see AGENT_REPLY
              "reply-ref",   # [key=product-dispute-refs]: r5's approved reply set, reply_due answers only
              "refund-confirm",   # fable-copy-1103-d2/refund-confirm: a refund that ALREADY happened, told once per refund id
@@ -201,6 +202,11 @@ GAP_LIKE = (GAP_ASK, PROOF_NEED_ASK)
 # conflict rule decided `credit_approved_for_another_user`. A notice: only its own rows block it (one message per
 # request, ever), it is not an ask for the one-ask locks, and it closes no ask.
 APPROVED_ELSEWHERE = "credit-approved-elsewhere"
+# proof-refusal (captain 2026-11-15, the three bodies approved corr=208a8463f735ff45): the note that tells a person
+# why the document they sent did not verify a credit and what would. A notice: only its own rows block it (one
+# message per request, ever), it is not an ask for the one-ask locks or the 90-day re-ask lock, and it closes no ask.
+# It is deliberately not an ASK_CAMPAIGN: a refusal starts no expiry window on the request it names.
+PROOF_REFUSAL = "proof-refusal"
 # The notes the gap ask may follow inside 7 days (one per day still holds): the doc-received
 # status note says "we have the document you sent ... we'll message you here as soon as it's
 # checked", and the gap ask is that message (firstmate, verify-ask-wiring-h2 inbox 003).
@@ -212,7 +218,7 @@ STATUS_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", C
 NOTICE_CAMPAIGNS = ("takeback-notice", "withdrawal-confirm", "status-doc-received", "status-team-review",
                     "email-changed", "email-changed-dup", CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN, MERGE_PENDING, MERGE_CLAIM_FIRST,
                     CLAIM_PENDING_CAMPAIGN, CREDIT_HOLD_CAMPAIGN, "reply-ref", BACKLOG_REPLY, DECLINE_CAMPAIGN,
-                    APPROVED_ELSEWHERE, AGENT_REPLY)
+                    APPROVED_ELSEWHERE, PROOF_REFUSAL, AGENT_REPLY)
 # Campaigns whose gate refusals are re-checkable (firstmate 076, 082, 083): a refusal holds the
 # USER (campaign, user_key or user_id) in verify_refusal_holds for RECHECK_DAYS (the runner and the gate skip
 # them until next_recheck_at, whatever requests are listed); a later send clears it; after
@@ -262,9 +268,11 @@ KINDS = ("initial", "reminder-14", "reminder-25", AFTER_REJECTION, CLAIM_REMINDE
 # Days after a WINDOWED note (reminder-14/25) or a claim-proof-ask note (reminder-7) at which each
 # reminder becomes due.
 REMINDER_DAYS = {"reminder-14": 14, "reminder-25": 25, CLAIM_REMINDER: 7}
-# The reviewer's reason for a rejection: a fixed list, recorded on the review row and in the audit file ONLY. No
-# copy shows it (captain 2026-10-29 13:2xZ + decline-copy-ruling.md: a decline never states a reason, and the five
-# strings are exactly "which check failed"). It stays here because the decider's CLI validates against it and the
+# The reviewer's reason for a rejection: a fixed list, recorded on the review row and in the audit file. No copy
+# shows a code, and a DECLINE never states a reason (captain 2026-10-29 13:2xZ + decline-copy-ruling.md). Scoped by
+# the captain on 2026-11-15: a statement about a document the person sent is not a denial of the person, so the
+# proof-refusal campaign selects one approved sentence by (reason, the reader's recorded need) for the three
+# reasons that have one (credit_review/proof_refusal.PAIRS). The decider's CLI validates against this list and the
 # removal path reports it to a human.
 REJECTION_REASONS = ("doesnt_name_you", "other_track", "other_role", "unreadable", "not_a_document")
 WINDOW_DAYS = 30            # windowed (new provisional approval) notes only
@@ -1350,7 +1358,9 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
             if why:
                 db.execute("COMMIT")
                 return {"result": "recent", "reason": why, "request_ids": fresh}
-        if campaign == DECLINE_CAMPAIGN and enforce_cap:
+        if campaign in (DECLINE_CAMPAIGN, PROOF_REFUSAL) and enforce_cap:
+            # proof-refusal keeps the same cooldown (firstmate 2026-11-15: a refusal never lands inside 7 days of
+            # another note from this gate, an ask included; the person waits and is offered again)
             why = decline_user_done(db, user_key, day=day, user_id=user_id)
             if why:
                 db.execute("COMMIT")
@@ -3108,7 +3118,7 @@ def _main(argv: list[str] | None = None) -> int:
         if a.user_key and a.campaign in GAP_LIKE:
             why = gap_user_done(db, a.user_key, user_id=a.user_id)
             out["user_done"], out["recent"], out["recent_why"] = "", bool(why), why
-        if a.user_key and a.campaign == DECLINE_CAMPAIGN:
+        if a.user_key and a.campaign in (DECLINE_CAMPAIGN, PROOF_REFUSAL):
             why = decline_user_done(db, a.user_key, day=a.day or utcnow().strftime("%Y-%m-%d"), user_id=a.user_id)
             out["user_done"], out["recent"], out["recent_why"] = "", bool(why), why
         if a.campaign == UVN_NEW_ROWS:

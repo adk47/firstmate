@@ -217,6 +217,15 @@ Two later PRs do that, each on its own:
 Arming a document decision is a new approval automation: a recorded captain decision and a registry row, never a
 side effect of a feeder or marker change.
 
+## Telling a person their document was rejected
+
+A `rejected` review is told by the `proof-refusal` campaign
+(`credit_review/proof_refusal.py`, `docs/credit-verification/verify-request-notes.md` §"The proof refusal"), and
+only where an approved body names the need the reader recorded. On 2026-11-15 14:53Z that was 630 of 6,659
+rejected rows: 3,790 rows carry the reader's distributor-dashboard need and belong to `proof-need-ask`, 2,154 carry
+no recorded need, and 85 have a reason with no approved wording. So "rejected" is not "told", and most rejected
+rows are not this note's to tell: `data/proof-refusal-send-r1/report.md`.
+
 ## Reading the path
 
 `data/proof-processing-ovh-e1/tools/measure.py` prints the stage counts (documents on file, notes answered,

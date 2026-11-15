@@ -105,7 +105,7 @@ set -euo pipefail
 #
 # Usage:
 #   intercom-verify-request.sh send --credits-file FILE --approved-by <SlackUID|fable-ruling-YYYYMMDD-N> \
-#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|decline|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask|credit-approved-elsewhere] [--kind initial|reminder-14|reminder-25 \
+#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|decline|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask|credit-approved-elsewhere|proof-refusal] [--kind initial|reminder-14|reminder-25 \
 #        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued|received (status-doc-received) | no-ask|count (status-team-review)] \
 #       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, claim-status, email-changed, gap-ask, merge-pending,
 #        credit-hold-status, claim-proof-pending, proof-need-ask)] [--inapp-fallback] [--channel inapp (uvn-status, status notes,
@@ -179,6 +179,16 @@ set -euo pipefail
 # message per request, ever; never within 7 days of another note from this gate. This gate does not decide who is
 # in that state and re-reads nothing about it: the caller's list is the conflict rule's decision.
 # Its bytes need the reviewer's APPROVAL in every mode (policies/outbound-copy-enforce.json lists it as enforced).
+# proof-refusal (captain 2026-11-15, Fable GO corr=208a8463f735ff45 13:41Z): the ONE note that names why a document
+# did not verify a credit. FILE carries user.id and one credits entry per rejected request (request_id, role,
+# track_title, artist_name, reason, need), where reason is the proof reviewer's recorded reason and need is the need
+# code the reviewer recorded for that request (proof_review_decisions.ask_need). Only three pairs have a body:
+# doesnt_name_you or other_track with counterparty_signed_or_registered, and unreadable with readable_document; any
+# other pair refuses the whole note (refusal_uncoded), because "what would change this" is never filled from a code
+# the reader did not record. Each entry also carries review_family, the family of the verify_proof_reviews row it
+# answers; the ledger row keeps (review_family, request_id, reason, need) per request. One sentence set per track, each with that track's own reason, then the closing once.
+# No greeting, no sign-off, no added sentence. One message per request, ever; never within 7 days of another note
+# from this gate. Its bytes need the reviewer's APPROVAL in every mode (policies/outbound-copy-enforce.json).
 #
 # FILE is JSON: {"user": {"email": "...", "id": "<muso user id>", "professional_id": "<users.neptuneProfessionalId>",
 #                         "auth_id": "<auth0 subject>", "first_name": "..."},
@@ -374,6 +384,16 @@ readonly CLAIM_PROOF_PENDING_COPY_APPROVED=0
 #       in a PR that records the reviewer's signed approval of the rendered bodies and the captain's yes; until then
 #       --dry-run renders it and every real send is refused before the ledger is read.
 readonly APPROVED_ELSEWHERE_COPY_APPROVED=0
+#   PROOF_REFUSAL_COPY_APPROVED  proof-refusal: the three reason-bearing bodies. OPEN on Fable's GO of the three
+#       rendered bodies (corr=208a8463f735ff45, 2026-11-15T13:41Z) with its two conditions, both held in code: the
+#       upload instruction is "Reply to this conversation" (refusal_copy_guard refuses a mailbox), and the evidence
+#       line is proof_reviewer.ASK_LINES per need code (pinned equal by scripts/tests/test_proof_refusal.py).
+readonly PROOF_REFUSAL_COPY_APPROVED=1
+# The most words one proof-refusal body may carry (firstmate 2026-11-15: a longer body stops and is reported).
+readonly REFUSAL_MAX_WORDS=1500
+# The send-time lint of a proof-refusal, asserted on the note's own words with every title, role and artist replaced
+# (refusal_copy_guard): no promise in the future tense, no person or queue, no wait wording, no mailbox.
+readonly REFUSAL_FORBIDDEN='\b(I|we) +(will|shall|are going to)\b|\b(team|staff|agent|specialist|representative|colleague|someone|human|manager|supervisor)\b|\ba person\b|\bescalat|\bforward|\bhand(ed|ing)? +(off|over)\b|\bpass(ed|ing)? +(this|it|you) +(on|along|to)\b|\bticket\b|\bqueue\b|\breview|\binvestigat|\blook(ing)? +into\b|\bget back to\b|\breach out\b|\bbe in touch\b|\bfollow up\b|\blet you know\b|\bsoon\b|\bshortly\b|\basap\b|\bbusiness days?\b|\bbear with\b|\bbe patient\b|\bplease wait\b|\bunfortunately\b|\bsorry\b|\bapolog|@'
 #   PROOF_NEED_ASK_COPY_APPROVED  proof-need-ask (proof-loop captain card L11c, the four per-need lines + common
 #       opening + closing, verbatim): LOCKED until the captain's yes lands in a PR that flips it.
 #       UNLOCKED 2026-10-29 by Fable ruling [key=l11c-asks] (captain 14:3xZ status-wording delegation + 03:2xZ "use fable
@@ -539,6 +559,7 @@ readonly APPROVAL_REF_MERGE_PENDING="captain 2026-10-28 12:4xZ: \"go live today 
 readonly APPROVAL_REF_OWING_PROOF="captain U7RP6HKUZ 2026-10-27 20:1xZ: \"are you sure all users that need to be communicated have been already? If not get on it - make this a durable process that does not rely on my computer; do this all on OVH.\"; copy = Fable verify-program-lead-fable-l1 copy-owing-proof-1027 (20:2xZ), sent only on the captain's yes (L14a S1 credit-hold-status / L14b S2 claim-proof-pending)"
 readonly APPROVAL_REF_PROOF_NEED_ASK="captain 2026-10-27 21:5xZ: every user who owes proof is told exactly what we need (proof-loop-lead-fable-p1 plan section 1); copy = proof-loop captain card L11c (22:5xZ), verbatim per need code; sent only on the captain's yes"
 readonly APPROVAL_REF_APPROVED_ELSEWHERE="firstmate brief humanless-need-asks-r1 2026-11-14: a request blocked by another person's approved credit gets a decision and a message; the line itself is unapproved and send-locked (APPROVED_ELSEWHERE_COPY_APPROVED)"
+readonly APPROVAL_REF_PROOF_REFUSAL="captain 2026-11-15: the people whose document the reader rejected are told once, with the reason and what would change it; Fable GO on the three rendered bodies corr=208a8463f735ff45 2026-11-15T13:41Z (reply in this conversation, evidence = proof_reviewer ASK_LINES per need code); firstmate decisions 001 and 002: one sentence set per track, only where the reader recorded the need the body names"
 readonly APPROVAL_REF_REMOVAL="firstmate 2026-10-16 15:14Z, captain-driven: owners of credits WE removed must be told which credit and role, why, and how to dispute by replying with a document (support measured 35 owners never told). Fraud removals stay silent by captain order (firstmate 2026-10-16 15:48Z)."
 # Ruling refund-confirm-1103 (Fable d2, 2026-11-03 22:0xZ, relayed to this lane as firstmate inbox 109): customers
 # whose money ALREADY moved are told so without waiting on a human Slack id. The copy is the ruling's own text; the
@@ -1287,6 +1308,13 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live and the status notes; credit-approved-elsewhere has one copy."
     [ "$KIND" = "initial" ] || refuse "credit-approved-elsewhere has no follow-ups: one message per request, ever."
     ;;
+  proof-refusal)
+    # One message per user for every rejected request that has a body. Every track is written out (MAX_LISTED is
+    # not read by this copy: there is no "and N more", because each track carries its own reason).
+    MAX_CREDITS=1000; MAX_LISTED=1000; COPY="refusal"; APPROVAL_REF="$APPROVAL_REF_PROOF_REFUSAL"
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live and the status notes; proof-refusal's body is picked by each credit's reason and need."
+    [ "$KIND" = "initial" ] || refuse "proof-refusal has no follow-ups: one message per request, ever."
+    ;;
   gap-ask)
     # Fable's gap ask for credits whose document on file does not cover them (stage-2
     # need_more). Once per credit; up to 3 track/role pairs, then "and N more".
@@ -1320,7 +1348,7 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live; wait-apology has one copy, d2's file verbatim."
     [ "$KIND" = "initial" ] || refuse "wait-apology has no follow-ups: one message per user, ever."
     ;;
-  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, decline, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask, wait-apology, uvn-new-rows, uvn-reminder-14 or credit-approved-elsewhere (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
+  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, decline, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask, wait-apology, uvn-new-rows, uvn-reminder-14, credit-approved-elsewhere or proof-refusal (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
 esac
 # C11 (p1 223): --check-recipient is the dry run that equals the send. It runs every send-time check a real send runs
 # up to the claim (the ledger peek, core_notice, the go-live guards, comm_state, the status-note Intercom reads, the
@@ -1487,7 +1515,9 @@ INPUT="$("$JQ_BIN" -c '
                               corroboration_url: ((.corroboration_url // "") | clean),
                               profile_id: ((.profile_id // "") | clean), track_id: ((.track_id // "") | clean),
                               ask_class: ((.ask_class // "") | clean | ascii_downcase | .[0:32]),
-                              is_approved: ((.is_approved // "") | clean | ascii_downcase | .[0:8]) } ] }' "$CREDITS_FILE")"
+                              is_approved: ((.is_approved // "") | clean | ascii_downcase | .[0:8]),
+                              need: ((.need // "") | clean | ascii_downcase | .[0:48]),
+                              review_family: ((.review_family // "") | tostring | if test("^[0-9]{1,12}$") then . else "" end) } ] }' "$CREDITS_FILE")"
 
 INPUT_FILING_CONV="$("$JQ_BIN" -r '(.user.filing_conversation // "") | tostring' "$CREDITS_FILE" 2>/dev/null || true)"
 # R1 is delivered INTO the filing conversation (p1's batch-1 signature: the thread comm_state's R5-R7 and G3 judged),
@@ -1897,6 +1927,21 @@ if [ "$CAMPAIGN" = "credit-approved-elsewhere" ]; then
   notreq="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select(.request_id | test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") | not)] | length')"
   [ "$notreq" -eq 0 ] || refuse "credit-approved-elsewhere: $notreq credit(s) carry an id that is not a credit request id. Nothing was sent or claimed."
 fi
+if [ "$CAMPAIGN" = "proof-refusal" ]; then
+  printf '%s' "$USER_ID" | grep -qE '^[0-9]{1,12}$' || refuse "proof-refusal needs user.id, the Muso account id."
+  notreq="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select(.request_id | test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") | not)] | length')"
+  [ "$notreq" -eq 0 ] || refuse "proof-refusal: $notreq credit(s) carry an id that is not a credit request id. Nothing was sent or claimed."
+  # Only the three approved pairs render. The need is the one the reader recorded for the request, never one a table
+  # assigns to the reason: a pair with no body refuses the WHOLE note, so no track is ever told the wrong evidence.
+  uncoded="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select(
+      ((.reason == "doesnt_name_you" or .reason == "other_track") and .need == "counterparty_signed_or_registered")
+      or (.reason == "unreadable" and .need == "readable_document") | not)] | length')"
+  [ "$uncoded" -eq 0 ] || refuse "refusal_uncoded: $uncoded credit(s) carry a reason and need with no approved body (the bodies are doesnt_name_you or other_track with counterparty_signed_or_registered, and unreadable with readable_document). Nothing was sent or claimed."
+  noreview="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select(.review_family == "")] | length')"
+  [ "$noreview" -eq 0 ] || refuse "proof-refusal: $noreview credit(s) name no review row (review_family, the family of the verify_proof_reviews row this note answers). Nothing was sent or claimed."
+  norole="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select(.reason == "doesnt_name_you") | select([(.role // "") | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0)] | length == 0)] | length')"
+  [ "$norole" -eq 0 ] || refuse "proof-refusal: $norole credit(s) name no role, and that body names the role the document did not show. Nothing was sent or claimed."
+fi
 if [ "$CAMPAIGN" = "gap-ask" ]; then
   # The verdict is read HERE, from the proof store, never taken from the caller: every credit's
   # latest stage-2 verdict (every claimed role) must be need_more for THIS account, the account
@@ -1997,6 +2042,9 @@ if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "proof-need-ask" ] && [ "$PROOF_NEED_ASK
 fi
 if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "proof-need-ask" ] && [ "$NEED_CODE" = "distributor_dashboard_with_code" ] && [ -z "$DISTRIBUTOR_COPY_APPROVED" ]; then
   printf 'HELD distributor_copy_unapproved credits=%s; nothing was sent or claimed\n' "$N"; exit 3
+fi
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "proof-refusal" ] && [ "$PROOF_REFUSAL_COPY_APPROVED" != "1" ]; then
+  refuse "the proof-refusal copy is not approved for sending (PROOF_REFUSAL_COPY_APPROVED=0); --dry-run renders exactly what would be sent."
 fi
 if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "credit-approved-elsewhere" ] && [ "$APPROVED_ELSEWHERE_COPY_APPROVED" != "1" ]; then
   refuse "the credit-approved-elsewhere copy is not approved for sending (APPROVED_ELSEWHERE_COPY_APPROVED=0). Nobody has approved this line yet; --dry-run renders exactly what would be sent."
@@ -2218,8 +2266,10 @@ readonly ASKED_DAY ASKED_LABEL
 # couldn't read it", "it isn't one of the documents we can accept") - a specification of which
 # check failed, which is the lesson a forged document learns from, and over-communication on a
 # decline. A decline is now the `decline` campaign's single approved sentence, in PR 2 of this
-# pair (intercom-verify-request.sh `decline`), and nothing here may name a reason again: the
-# reason stays in the decider ledger and the audit file for humans.
+# pair (intercom-verify-request.sh `decline`), and no decline may name a reason again: the
+# reason stays in the decider ledger and the audit file for humans. The one place a reviewer's
+# reason selects a sentence is the proof-refusal campaign (captain 2026-11-15: a statement about
+# a document the person sent, with what would change it; refusal_note), never a decline.
 ALL_IDS="$(ids_csv "$INPUT")"
 
 # ---------------------------------------------------------------------------------------
@@ -2712,6 +2762,36 @@ def approved_elsewhere($fn; $c; $maxl):
           segs: ([ {p: "Hi \($fn), a quick update on your credit requests: \($lines | andjoin)\(if $rest > 0 then " and \($rest) more" else "" end) are already verified for another person, so we can't add them to your profile from the requests alone."},
                    {p: "If you share those credits, reply to this message with a document that names you for each role: \($docs)"} ] + sig) }
     end;
+# proof-refusal (captain 2026-11-15; Fable GO corr=208a8463f735ff45 on the three rendered bodies). The ONLY copy in
+# this script that names why a document did not verify a credit; the decline below still names none. One sentence
+# set per track, each with that track's own reason and the evidence line of the need the reader recorded, then the
+# closing sentence once. One track is ONE paragraph: byte for byte an approved body. No greeting and no sign-off.
+# refusal_evidence is proof_reviewer.ASK_LINES per need code, word for word (pinned by test_proof_refusal.py).
+def refusal_evidence: {
+  counterparty_signed_or_registered: "a split sheet or agreement signed by the artist or label, a PRO registration that lists you in your role, or a royalty statement that names the track",
+  readable_document: "the same document as a PDF or a clear photo of the whole page"}[.];
+def refusal_note($c):
+  def roles: [ (.role // "") | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0) ];
+  def uniq: reduce .[] as $y ([]; if any(.[]; ascii_downcase == ($y | ascii_downcase)) then . else . + [$y] end);
+  def reason_line:
+    if .reason == "doesnt_name_you" and .need == "counterparty_signed_or_registered" then
+      (if (.r | length) == 0 then error("refusal_no_role") else . end)
+      | "the document you sent does not name you as \(.r | join(", ")) on \(.t)"
+    elif .reason == "other_track" and .need == "counterparty_signed_or_registered" then
+      "the document you sent credits you on other tracks, not on \(.t)"
+    elif .reason == "unreadable" and .need == "readable_document" then "we could not read the document you sent"
+    else error("refusal_uncoded") end;
+  def track_line: "\(.t) was not verified. Reason: \(reason_line). What would change this: \((.need | refusal_evidence) // error("refusal_uncoded")).";
+  "Reply to this conversation with it and the check runs again automatically. Without it, the result stands." as $close
+  # one set per (track, reason, need): two requests on one track for one reason are one set naming both roles
+  | (reduce $c[] as $x ([]; ($x | tkey) as $k
+       | if any(.[]; .k == $k and .reason == $x.reason and .need == $x.need)
+         then map(if .k == $k and .reason == $x.reason and .need == $x.need then .r = ((.r + ($x | roles)) | uniq) else . end)
+         else . + [{k: $k, t: $x.track_title, reason: $x.reason, need: $x.need, r: ($x | roles)}] end)) as $tracks
+  | (if ($tracks | length) == 0 then error("refusal_no_track") else . end)
+  | { subject: "About the document for your Muso credit request\(if ($c | length) > 1 then "s" else "" end)",
+      segs: (if ($tracks | length) == 1 then [ {p: (($tracks[0] | track_line) + " " + $close)} ]
+             else [ $tracks[] | {p: track_line} ] + [ {p: $close} ] end) };
 def gap_label: {split_sheet: "split sheet", contract: "contract", invoice: "invoice",
   letter_of_direction: "letter of direction", pro_portal: "PRO registration",
   distributor_portal: "distributor screenshot", dsp_for_artists: "streaming-dashboard screenshot",
@@ -2809,6 +2889,7 @@ def gap_ask($fn; $c; $maxl):
    elif $copy == "waitapol" then wait_apology($fn; .credits; $maxl; (.apology // {}))
    elif $copy == "proofneed" then proof_need_ask($fn; .credits; .need; $maxl)
    elif $copy == "apprelsewhere" then approved_elsewhere($fn; .credits; $maxl)
+   elif $copy == "refusal" then refusal_note(.credits)
    elif $copy == "takeback" then takeback_notice($fn; .credits; $maxl)
    elif $copy == "removal" then removal_notice($fn; .credits; $maxl)
    elif $copy == "past" then
@@ -2867,6 +2948,29 @@ decline_copy_guard() {
   [ -z "$hit" ] || refuse "decline_copy_reason_word: the rendered decline says '$hit'. A decline never states a reason and no copy teaches what we check (captain 2026-10-29 13:2xZ; decline-copy-ruling.md item 1). Nothing was sent or claimed."
   printf '%s' "$ps" | grep -qiE 'remov|deadline|by [0-9]|within [0-9]|days?\b' \
     && refuse "decline_copy_deadline: the rendered decline carries removal, deadline or day-count wording (the decline promises no date and threatens nothing). Nothing was sent or claimed."
+  return 0
+}
+
+# refusal_copy_guard <input-json>: the proof-refusal's send-time lint. The note is rendered a second time with every
+# title, role and artist replaced by a neutral token, so the assertion reads the note's own words and never the
+# customer's ("Dream Team", "Soon" and "Review" are song titles and the note still goes out about them). It refuses a
+# banned word, a missing or altered sentence of the approved body, and a body over REFUSAL_MAX_WORDS. A hit is a
+# build defect or a length nobody approved, never the customer's doing: it refuses and writes nothing.
+refusal_copy_guard() {
+  [ "$COPY" = "refusal" ] || return 0
+  local frame hit words
+  frame="$(render "$(printf '%s' "$1" | "$JQ_BIN" -c '.credits |= map(.track_title = "T" | .artist_name = "A" | .role = "R")')" \
+    | "$JQ_BIN" -r '.subject + "\n" + .text')" \
+    || refuse "refusal_copy_unrendered: the proof-refusal could not be rendered for its lint. Nothing was sent or claimed."
+  hit="$(printf '%s' "$frame" | grep -oiE "$REFUSAL_FORBIDDEN" | head -1 || true)"
+  [ -z "$hit" ] || refuse "refusal_copy_banned_word: the rendered proof-refusal says '$hit' outside a title or role. Nothing was sent or claimed."
+  printf '%s' "$frame" | grep -qF 'Reply to this conversation with it and the check runs again automatically. Without it, the result stands.' \
+    || refuse "refusal_copy_closing: the rendered proof-refusal does not end with the approved closing sentences. Nothing was sent or claimed."
+  [ "$(printf '%s' "$frame" | grep -c ' was not verified\. Reason: .*\. What would change this: ')" -ge 1 ] \
+    || refuse "refusal_copy_shape: the rendered proof-refusal is not the approved sentence set. Nothing was sent or claimed."
+  words="$(render "$1" | "$JQ_BIN" -r '.text' | wc -w | tr -d ' ')"
+  [ "$words" -le "$REFUSAL_MAX_WORDS" ] \
+    || refuse "refusal_too_long: the rendered proof-refusal is $words words (the most is $REFUSAL_MAX_WORDS). Nothing was sent or claimed."
   return 0
 }
 
@@ -3030,6 +3134,7 @@ RENDERED="$(render "$INPUT")"
 leak="$(leak_reason "$RENDERED")"
 [ -z "$leak" ] || record_refusal "the rendered note contains $leak (from a track title, artist or role). Customers never see internal surfaces; this note is not sent and the credits are recorded as refused for a human to look at."
 decline_copy_guard "$RENDERED"
+refusal_copy_guard "$INPUT"
 
 payload() { # <rendered-json> <contact-id>
   if [ -n "$THREAD" ]; then
@@ -3219,7 +3324,7 @@ for_each_account_contact() { # <fn>: the first non-empty answer of <fn> over thi
 # The clock G1 reads; the test copy pins it (INTERCOM_VERIFY_TEST_NOW, epoch) so the 24h rule is testable.
 g1_now() { if [ "$TESTABLE" = "1" ] && [ -n "${INTERCOM_VERIFY_TEST_NOW:-}" ]; then printf '%s' "$INTERCOM_VERIFY_TEST_NOW"; else date -u +%s; fi; }
 GOLIVE=0
-case "$CAMPAIGN:$COPY" in merge-pending:*|merge-claim-first:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*|uvn-new-rows:*|uvn-reminder-14:*|proof-need-ask:*|credit-approved-elsewhere:*) GOLIVE=1 ;; esac
+case "$CAMPAIGN:$COPY" in merge-pending:*|merge-claim-first:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*|uvn-new-rows:*|uvn-reminder-14:*|proof-need-ask:*|credit-approved-elsewhere:*|proof-refusal:*) GOLIVE=1 ;; esac
 # QA #1517: every reply_due answer, whatever its class, passes the go-live recipient gates (G1-G5; G2's opener rule is
 # replaced by the verified trigger for reply_due only)
 [ -z "$REPLY_DUE" ] || GOLIVE=1
@@ -3567,7 +3672,7 @@ recently_messaged() { # <contact-id> -> prints the reason when we wrote to them 
   done
   return 0
 }
-case "$CAMPAIGN" in uvn-status|uvn-new-rows|uvn-reminder-14|status-doc-received|status-team-review|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask|credit-approved-elsewhere) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
+case "$CAMPAIGN" in uvn-status|uvn-new-rows|uvn-reminder-14|status-doc-received|status-team-review|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask|credit-approved-elsewhere|proof-refusal) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
 # A claim ask never crosses a person: any admin or Caroline reply to this user in the last 7
 # days defers the note AND its reminder (nothing closed; the next run looks again; a reminder
 # deferred past the day before the close day is never sent).
@@ -4000,7 +4105,7 @@ if [ "$KIND" = "initial" ]; then
   REFS_FILE="$(mktemp)"
   trap 'rm -f "$REFS_FILE" "${GATE_FACTS_FILE:-}"' EXIT
   # ask_class (p1 178: core_proof_request is an audit class) + is_approved per request ride into refs_json (QA #1418)
-  printf '%s' "$INPUT" | "$JQ_BIN" -c '[.credits[] | {request_id, profile_id, track_id} + (if .ask_class != "" then {ask_class} else {} end) + (if .is_approved != "" then {is_approved} else {} end)]' > "$REFS_FILE"
+  printf '%s' "$INPUT" | "$JQ_BIN" -c '[.credits[] | {request_id, profile_id, track_id} + (if .ask_class != "" then {ask_class} else {} end) + (if .is_approved != "" then {is_approved} else {} end) + (if .review_family != "" then {review_family: (.review_family | tonumber), review_reason: .reason, review_need: .need} else {} end)]' > "$REFS_FILE"
   CLAIM="$(ledger claim --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" --request-ids "$ALL_IDS" \
     --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" \
     --approval-ref "$APPROVAL_REF$(if [ "$RD_PREFIX" = "1" ]; then printf '; correction %s' "$REPLY_DUE_CORRECTION_REF"; fi)${C2_SUFFIX:-}${APPROVAL_REF_SUFFIX_O:-}" \
@@ -4075,6 +4180,11 @@ if ! dg="$(decline_copy_guard "$RENDERED" 2>&1)"; then
   ledger finalize --message-row "$ROW_ID" --status refused --reason "${dg:0:200}" >/dev/null
   refuse "$dg"
 fi
+# The proof-refusal's lint again, on the CLAIMED credits (the render the customer would get).
+if ! rg="$(refusal_copy_guard "$CLAIMED_INPUT" 2>&1)"; then
+  ledger finalize --message-row "$ROW_ID" --status refused --reason "${rg:0:200}" >/dev/null
+  refuse "$rg"
+fi
 PAYLOAD="$(payload "$RENDERED" "$CONTACT_ID")"
 # ---------------------------------------------------------------------------------------
 # THE OUTBOUND COPY GATE. The exact bytes about to be POSTed (.body, and the subject when there is one) go to the gate,
@@ -4116,11 +4226,11 @@ elif [ "$cg_rc" = 4 ] && [ "$CG_RESULT" = "observed" ] && [ "$CG_MODE" = "observ
   [[ "$COPY_VERDICT_ID" =~ ^ocv-[0-9a-f]{16}$ ]] && [[ "$COPY_VERDICT_SHA" =~ ^[0-9a-f]{64}$ ]] || { COPY_VERDICT_ID=""; COPY_VERDICT_SHA=""; }
   COPY_REVIEW="observed:$CG_REVIEW"
 fi
-# uvn-reminder-14 and uvn-new-rows have no standing copy approval, so only a SIGNED approve of these bytes sends them.
-# The policy lists both under `enforce`; this is the belt for the day that file is edited or replaced: an `observed`
-# pass is a hold here.
+# uvn-reminder-14, uvn-new-rows and proof-refusal have no standing copy approval, so only a SIGNED approve of these
+# bytes sends them. The policy lists all three under `enforce`; this is the belt for the day that file is edited or
+# replaced: an `observed` pass is a hold here.
 SIGNED_ONLY_OBSERVED=0
-if { [ "$CAMPAIGN" = "uvn-reminder-14" ] || [ "$CAMPAIGN" = "uvn-new-rows" ]; } && [ "$COPY_REVIEW" != "approved" ]; then
+if { [ "$CAMPAIGN" = "uvn-reminder-14" ] || [ "$CAMPAIGN" = "uvn-new-rows" ] || [ "$CAMPAIGN" = "proof-refusal" ]; } && [ "$COPY_REVIEW" != "approved" ]; then
   [ -z "$COPY_REVIEW" ] || SIGNED_ONLY_OBSERVED=1
   COPY_REVIEW=""
 fi

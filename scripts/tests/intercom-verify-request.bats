@@ -1026,9 +1026,16 @@ rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
 # The retired after-rejection copy: the five reason words and the two sentences that named the failing
 # check. Prints every one found in FILE (empty = clean), so the caller fails on any hit - and the caller
 # also runs it against a mutated copy, because a detector that finds nothing is only good news if it works.
+# Scoped 2026-11-15 (captain: rule 3 is scoped, not dropped): the proof-refusal campaign selects an approved
+# sentence by the reviewer's code, so the two codes that have a body may stand where a code is COMPARED
+# (`.reason == "<code>"`) or paired with its need code, and nowhere else. A code in any other line, the two codes
+# with no approved wording, and every retired sentence are still a hit.
 forbidden_reason_words() {
   local f="$1" w
-  for w in doesnt_name_you other_track other_role not_a_document "we couldn't read it"; do
+  for w in doesnt_name_you other_track; do
+    if grep -- "$w" "$f" | grep -v -- "\.reason == \"$w\"" | grep -qv -- "counterparty_signed_or_registered"; then printf '%s ' "$w"; fi
+  done
+  for w in other_role not_a_document "we couldn't read it"; do
     if grep -q -- "$w" "$f"; then printf '%s ' "$w"; fi
   done
   if grep -q "thanks for sending your document" "$f"; then printf '%s ' "thanks for sending your document"; fi
@@ -1532,6 +1539,11 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
   control="$(forbidden_reason_words "$TEST_TMPDIR/mutated.sh")"
   case "$control" in *other_role*) ;; *)
     echo "CONTROL FAILED: the detector cannot see a forbidden word it was given ($control)"; false ;; esac
+  # the scoped codes too: one used in a sentence (not compared, not paired with its need) is seen
+  cp "$SCRIPT" "$TEST_TMPDIR/mutated2.sh"
+  printf '\n# your document was rejected as other_track\n' >> "$TEST_TMPDIR/mutated2.sh"
+  control="$(forbidden_reason_words "$TEST_TMPDIR/mutated2.sh")"
+  [ "$control" = "other_track " ] || { echo "CONTROL FAILED: a code outside a comparison was not seen ($control)"; false; }
   [ "$(posts)" -eq 1 ]
 }
 
@@ -6607,5 +6619,191 @@ else_dry() { # the dry run's rendered body, as the customer reads it
   credits "$TEST_TMPDIR/c.json" "Jane Doe" "$ELSE_R2:Producer:Song A:Big Star"
   INTERCOM_VERIFY_TEST_DAY=2026-12-20 run -3 "$GATE" send --campaign credit-approved-elsewhere --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == *"DEFERRED copy_review_pending"* ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+# --- proof-refusal: the one note that says why a document did not verify a credit, and what would ---
+# Captain 2026-11-15; the three rendered bodies approved corr=208a8463f735ff45. What these pin: a one-track note is
+# an approved body byte for byte; several tracks are one sentence set each, with that track's own reason, and the
+# closing once; a reason and need with no approved body refuse the whole note; the lint reads the note's words and
+# never a title; the ledger row names the review rows the note answers; nobody is sent the note twice.
+REF_R1="aaaaaaa1-1111-4111-8111-111111111111"
+REF_R2="aaaaaaa2-2222-4222-8222-222222222222"
+REF_R3="aaaaaaa3-3333-4333-8333-333333333333"
+REF_CP="counterparty_signed_or_registered"
+REF_RD="readable_document"
+REF_EV_CP="a split sheet or agreement signed by the artist or label, a PRO registration that lists you in your role, or a royalty statement that names the track"
+REF_EV_RD="the same document as a PDF or a clear photo of the whole page"
+REF_CLOSE="Reply to this conversation with it and the check runs again automatically. Without it, the result stands."
+refusal_credits() { # <file> then one "request|role|title|artist|reason|need|review_family" per credit
+  local f="$1"; shift
+  local items="[]" spec rid role title artist reason need fam
+  for spec in "$@"; do
+    IFS='|' read -r rid role title artist reason need fam <<<"$spec"
+    items="$(jq -c --arg r "$rid" --arg ro "$role" --arg t "$title" --arg a "$artist" --arg re "$reason" --arg n "$need" --arg fa "$fam" \
+      '. + [{request_id:$r, role:$ro, track_title:$t, artist_name:$a, reason:$re, need:$n, review_family:$fa}]' <<<"$items")"
+  done
+  jq -n --argjson c "$items" \
+    '{user:{email:"Jane.Doe@Example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:"Jane", filing_muso_ui:false}, credits:$c}' > "$f"
+}
+refusal_dry() { # the dry run's rendered body, as the customer reads it
+  run -0 "$LOCKED" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  body="$(printf '%s\n' "$output" | sed 1d | jq -r .body | plain)"
+}
+refusal_live() { # the go-live recipient guards apply: an aged Intercom USER contact, a pinned clock
+  GATE="$LOCKED"
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+}
+
+@test "proof-refusal: a one-track note is the approved body, byte for byte, for each of the three reasons" {
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mastering|Until The Wars Finish|Big Star|doesnt_name_you|$REF_CP|7"
+  refusal_dry
+  [ "$body" = "Until The Wars Finish was not verified. Reason: the document you sent does not name you as Mastering on Until The Wars Finish. What would change this: $REF_EV_CP. $REF_CLOSE" ]
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mastering|Until The Wars Finish|Big Star|other_track|$REF_CP|7"
+  refusal_dry
+  [ "$body" = "Until The Wars Finish was not verified. Reason: the document you sent credits you on other tracks, not on Until The Wars Finish. What would change this: $REF_EV_CP. $REF_CLOSE" ]
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mastering|Until The Wars Finish|Big Star|unreadable|$REF_RD|7"
+  refusal_dry
+  [ "$body" = "Until The Wars Finish was not verified. Reason: we could not read the document you sent. What would change this: $REF_EV_RD. $REF_CLOSE" ]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "proof-refusal: several tracks are one sentence set each, with that track's own reason, and the closing once" {
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|doesnt_name_you|$REF_CP|7" \
+    "$REF_R2|Producer|Song B|Big Star|unreadable|$REF_RD|8" "$REF_R3|Engineer|Song C|Big Star|other_track|$REF_CP|9"
+  refusal_dry
+  want="Song A was not verified. Reason: the document you sent does not name you as Mixing on Song A. What would change this: $REF_EV_CP.
+Song B was not verified. Reason: we could not read the document you sent. What would change this: $REF_EV_RD.
+Song C was not verified. Reason: the document you sent credits you on other tracks, not on Song C. What would change this: $REF_EV_CP.
+$REF_CLOSE"
+  [ "$body" = "$want" ]
+  [ "$(printf '%s' "$body" | grep -c 'Reply to this conversation')" -eq 1 ]
+  [[ "$body" != *"Hi "* ]]
+  [[ "$body" != *"Caroline"* ]]
+  [[ "$body" != *"Thank you"* ]]
+}
+
+@test "proof-refusal: two requests on one track for one reason are one sentence set naming both roles" {
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|doesnt_name_you|$REF_CP|7" \
+    "$REF_R2|Engineer, Mixing|Song A|Big Star|doesnt_name_you|$REF_CP|7"
+  refusal_dry
+  [ "$body" = "Song A was not verified. Reason: the document you sent does not name you as Mixing, Engineer on Song A. What would change this: $REF_EV_CP. $REF_CLOSE" ]
+}
+
+@test "proof-refusal: a reason and need with no approved body refuse the whole note" {
+  # the reader recorded the distributor dashboard: a split sheet is not what would change it, so nothing is said
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|doesnt_name_you|distributor_dashboard_with_code|7"
+  run -1 "$LOCKED" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"refusal_uncoded: 1 credit(s)"* ]]
+  # the reader recorded no need
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|other_track||7"
+  run -1 "$LOCKED" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"refusal_uncoded: 1 credit(s)"* ]]
+  # a reason with no body
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|not_a_document|$REF_CP|7"
+  run -1 "$LOCKED" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"refusal_uncoded: 1 credit(s)"* ]]
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|other_role|$REF_CP|7"
+  run -1 "$LOCKED" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"refusal_uncoded: 1 credit(s)"* ]]
+  # a reason paired with the other reason's evidence
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|unreadable|$REF_CP|7"
+  run -1 "$LOCKED" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"refusal_uncoded: 1 credit(s)"* ]]
+  # one uncoded track holds the coded one beside it: the caller splits, the gate never drops a track silently
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|unreadable|$REF_RD|7" \
+    "$REF_R2|Mixing|Song B|Big Star|doesnt_name_you|distributor_dashboard_with_code|8"
+  run -1 "$LOCKED" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"refusal_uncoded: 1 credit(s)"* ]]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "proof-refusal: an entry with no review row, no role, or no request id is refused" {
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|unreadable|$REF_RD|"
+  run -1 "$LOCKED" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"name no review row"* ]]
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1||Song A|Big Star|doesnt_name_you|$REF_CP|7"
+  run -1 "$LOCKED" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  refusal_credits "$TEST_TMPDIR/c.json" "claim-12|Mixing|Song A|Big Star|unreadable|$REF_RD|7"
+  run -1 "$LOCKED" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"not a credit request id"* ]]
+}
+
+@test "proof-refusal: the lint reads the note's words, never a title, a role or an artist" {
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Review Agent|We Will Be In Touch Soon|Dream Team|doesnt_name_you|$REF_CP|7"
+  refusal_dry
+  [[ "$body" == "We Will Be In Touch Soon was not verified. Reason: the document you sent does not name you as Review Agent on We Will Be In Touch Soon."* ]]
+}
+
+@test "proof-refusal: a banned word in the note's own words refuses it" {
+  sed 's/"we could not read the document you sent"/"our team could not read the document you sent"/' "$LOCKED" > "$TEST_TMPDIR/mut.sh"
+  chmod +x "$TEST_TMPDIR/mut.sh"
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|unreadable|$REF_RD|7"
+  run -1 "$TEST_TMPDIR/mut.sh" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"refusal_copy_banned_word"*"team"* ]]
+  # a mailbox as the upload instruction is refused too
+  sed 's/Reply to this conversation with it and the check/Reply to this conversation or verify@muso.ai with it and the check/' "$LOCKED" > "$TEST_TMPDIR/mut.sh"
+  run -1 "$TEST_TMPDIR/mut.sh" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"refusal_copy_"* ]]
+}
+
+@test "proof-refusal: a body over the word limit is refused, not cut" {
+  sed 's/^readonly REFUSAL_MAX_WORDS=1500$/readonly REFUSAL_MAX_WORDS=60/' "$LOCKED" > "$TEST_TMPDIR/mut.sh"
+  chmod +x "$TEST_TMPDIR/mut.sh"
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|unreadable|$REF_RD|7"
+  run -0 "$TEST_TMPDIR/mut.sh" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|unreadable|$REF_RD|7" "$REF_R2|Mixing|Song B|Big Star|unreadable|$REF_RD|8"
+  run -1 "$TEST_TMPDIR/mut.sh" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"refusal_too_long"* ]]
+}
+
+@test "proof-refusal: it has one copy and no follow-ups, and the kill file stops it before anything is read or claimed" {
+  refusal_live
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|unreadable|$REF_RD|7"
+  run -1 "$GATE" send --campaign proof-refusal --copy windowed --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  run -1 "$GATE" send --campaign proof-refusal --kind reminder-14 --parent-message-id 1 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  export INTERCOM_VERIFY_TEST_DISABLED_DIR="$TEST_TMPDIR/etc-hydra"; mkdir -p "$INTERCOM_VERIFY_TEST_DISABLED_DIR"
+  touch "$INTERCOM_VERIFY_TEST_DISABLED_DIR/proof-refusal.disabled"
+  run -3 "$GATE" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "STOPPED proof-refusal is disabled"* ]]
+  [ "$(calls)" -eq 0 ]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "proof-refusal (REAL gate.py, the SHIPPED rubric and mode table): only a signed approval of these exact bytes sends, once per request" {
+  refusal_live
+  real_copy_gate
+  cp "$HYDRA_REPO/policies/outbound-copy-enforce.json" "$TEST_TMPDIR/gate-tree/policies/outbound-copy-enforce.json"
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R1|Mixing|Song A|Big Star|doesnt_name_you|$REF_CP|7" "$REF_R2|Producer|Song B|Big Star|unreadable|$REF_RD|8"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-15 run -3 "$GATE" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"DEFERRED copy_review_pending credits=2"* ]]
+  [ "$(posts)" -eq 0 ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_requests")" = "0" ]
+  pending="$(ls "$INTERCOM_VERIFY_TEST_COPY_STORE/pending"/*.json)"
+  [ "$(jq -r .stage "$pending")" = "ask" ]
+  [ "$(jq -r .rubric "$pending")" = "default" ]
+  run copy_verdicts approve
+  [[ "$output" == *'"stored": 1'* ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-11-15 run -0 "$GATE" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message=1001 credits=2"* ]]
+  [ "$(posts)" -eq 1 ]
+  [ "$(sql "SELECT copy_review FROM verify_messages WHERE status='sent'")" = "approved" ]
+  [ "$(sql "SELECT account_id FROM verify_messages WHERE status='sent'")" = "42" ]
+  # the ledger row names the review rows this note answers
+  [ "$(sql "SELECT json_extract(refs_json, '\$[0].review_family') FROM verify_messages WHERE status='sent'")" = "7" ]
+  [ "$(sql "SELECT json_extract(refs_json, '\$[1].review_family') FROM verify_messages WHERE status='sent'")" = "8" ]
+  [ "$(sql "SELECT json_extract(refs_json, '\$[0].review_reason') FROM verify_messages WHERE status='sent'")" = "doesnt_name_you" ]
+  [ "$(sql "SELECT json_extract(refs_json, '\$[1].review_need') FROM verify_messages WHERE status='sent'")" = "$REF_RD" ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_requests WHERE campaign='proof-refusal' AND status='sent'")" = "2" ]
+  [[ "$(msg .body | plain)" == *"$REF_CLOSE" ]]
+  # one message per request, ever: the same list a month later posts nothing
+  INTERCOM_VERIFY_TEST_DAY=2026-12-20 run -0 "$GATE" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"SKIPPED"* ]]
+  [ "$(posts)" -eq 1 ]
+  # and a new rejected request for the same person inside 7 days waits: one note a week from this gate
+  refusal_credits "$TEST_TMPDIR/c.json" "$REF_R3|Engineer|Song C|Big Star|unreadable|$REF_RD|9"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-17 run -3 "$GATE" send --campaign proof-refusal --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED messaged_7d"* ]]
   [ "$(posts)" -eq 1 ]
 }

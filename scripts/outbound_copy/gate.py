@@ -116,6 +116,9 @@ CAMPAIGN_STAGE = {
     "gap-ask": "ask",
     "proof-need-ask": "ask",
     "credit-approved-elsewhere": "ask",
+    # proof-refusal says what would change the result and how to send it: one ask. It is NOT "denied": the request
+    # stays open, and the denied stage's lint (no reason, must say "resubmit") is the decline's ruling, not this one's.
+    "proof-refusal": "ask",
     "claim-proof-ask": "ask",
     "merge-claim-first": "ask",
     # the in-thread support notes (scripts/*-notify*.py, resolution-matcher, the duplicate pointer)

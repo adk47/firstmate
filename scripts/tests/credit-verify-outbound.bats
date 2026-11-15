@@ -248,6 +248,30 @@ if a and a[0] == "build":
 sys.exit(subprocess.run([sys.executable, os.environ["CVO_RUNNER"], *a]).returncode)
 PY
   export CVO_NEED_RUNNER="$TEST_TMPDIR/need.py" CVO_UNSIGNED_ALL=1
+  # proof-refusal: readback answers first, build writes the audience, send is the same stub runner. Nobody is listed
+  # unless the test says so (STUB_PR_USERS="<paid n> <free n>"), so every other test sees an empty audience.
+  cat > "$TEST_TMPDIR/refusal.py" <<'PY'
+import json, os, subprocess, sys
+a = sys.argv[1:]
+log = os.environ["CALLS"] + ".refusal"
+if a and a[0] == "readback":
+    open(log, "a").write("readback\n")
+    rc = int(os.environ.get("STUB_PR_READBACK_RC", "0"))
+    line = {0: '{"verdict": "ok", "claimed": 0, "sent": 0}', 3: '{"verdict": "stop", "why": "sent 1 != claimed 2"}'}.get(
+        rc, '{"verdict": "unmeasured", "why": "1 contact(s) unread"}')
+    open(a[a.index("--out") + 1], "w").write(line + "\n")
+    print(line); sys.exit(rc)
+if a and a[0] == "build":
+    open(log, "a").write("build\n")
+    if os.environ.get("STUB_PR_BUILD_FAIL"):
+        print("the ledger is unreadable; nothing listed"); sys.exit(2)
+    np, nf = (int(x) for x in (os.environ.get("STUB_PR_USERS") or "0 0").split())
+    users = [{"user_id": 500 + i, "paid": i < np, "rows": []} for i in range(np + nf)]
+    json.dump({"campaign": "proof-refusal", "users": users}, open(a[a.index("--out") + 1], "w"))
+    print('{"counts": {"listed_users": %d}}' % len(users)); sys.exit(0)
+sys.exit(subprocess.run([sys.executable, os.environ["CVO_RUNNER"], *a]).returncode)
+PY
+  export CVO_PR_RUNNER="$TEST_TMPDIR/refusal.py"
   # The shipped policy carries node-8's OPERATING values (which families are armed, the per-tick and daily caps): they
   # are data, changed by PR whenever operations change them. These tests are about the tick's logic, so they run on the
   # shipped file with those values set back to fixed ones - every other key, and every row a PR adds, comes through.
@@ -329,7 +353,8 @@ newest_tick() { printf '%s' "$(newest_out)tick.log"; }
         CVO_HEALTH="$E/h" CVO_ZERO_READ="$E/z" CVO_FRAUD="$E/f" CVO_MAIN_ENV="$E/env" CVO_LEDGER="$E/l.sqlite3" CVO_SCRIPTS="$E/s"
         CVO_RD_SCAN="$E/rd" CVO_RD_CAP=99999 CVO_POLICY="$E/p.json" CVO_CLAIM_LIST="$E/c.json" CVO_CAP=99999 CVO_R1_CAP=99999
         CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_CLAIM_GROUP_BUDGET_S=1 CVO_STARVED_PAGE_AT=99 CVO_STARVED_REPAGE_EVERY=1 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_CHECK_ENTRIES=99999 CVO_CHECK_ENTRIES_SEND=99999 CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_PER_SEGMENT_FROM_TEST=status-doc-received=2000-01-01T00:00Z CVO_PAID_FROM_TEST=proof-need-ask=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t"
-        CVO_CLAIM_PROOF_STATE="$E/cpc" CVO_CLAIM_PROOF_LIMIT_H=999 CVO_CLAIM_PROOF_UNREAD_H=999 CVO_CLAIM_PROOF_REPEAT_MIN=999 CVO_NR_CAP=99999 CVO_NR_ENTRIES=99999)
+        CVO_CLAIM_PROOF_STATE="$E/cpc" CVO_CLAIM_PROOF_LIMIT_H=999 CVO_CLAIM_PROOF_UNREAD_H=999 CVO_CLAIM_PROOF_REPEAT_MIN=999 CVO_NR_CAP=99999 CVO_NR_ENTRIES=99999
+        CVO_PR_RUNNER="$E/pr" CVO_PR_CAP=99999 CVO_PR_ENTRIES=99999)
   run -0 env -u BATS_TEST_TMPDIR "${evil[@]}" "$SCRIPT" --print-config
   [[ "$output" != *"$E"* ]]; [[ "$output" != *99999* ]]
   now_line="$(printf '%s\n' "$output" | grep '^NOW_EPOCH=')"; [ "${now_line#NOW_EPOCH=}" -gt 1700000000 ]   # the real clock, never CVO_NOW_EPOCH=1
@@ -368,6 +393,9 @@ R14_CAP=50
 R14_ENTRIES=100
 NR_CAP=5
 NR_ENTRIES=100
+PR_RUNNER=/opt/hydra/scripts/credit_review/proof_refusal.py
+PR_CAP=100
+PR_ENTRIES=100
 UNSIGNED_ALL=0
 JUDGE=/opt/hydra/scripts/credit-batch-judge.py
 DEPLOYED_SHA_FILE=/opt/hydra/.deployed-sha
@@ -2043,7 +2071,15 @@ assert p["daily_cap"]["proof-need-ask"] == {"paid": 400, "free": 400}
 assert p["shared_daily_cap"] == {"credit": 2500, "claim": 25}
 assert {k: v["unsigned_from"] for k, v in p["armed_families"].items() if k != r} == {
     "uvn-status": "2026-10-31T18:02Z", "status-doc-received": "2026-11-03T12:56Z",
-    "claim-proof-ask": "2026-11-03T18:58Z", "proof-need-ask": "2026-11-10T02:17Z", "uvn-new-rows": "2026-11-14T22:48Z"}
+    "claim-proof-ask": "2026-11-03T18:58Z", "proof-need-ask": "2026-11-10T02:17Z", "uvn-new-rows": "2026-11-14T22:48Z",
+    # node-8's live row of 2026-11-15T08:18Z, carried so a deploy of this file does not disarm it (the file is git-wins)
+    "uvn-status:c2": "2026-11-15T08:18Z", "proof-refusal": "2026-11-15T13:41Z"}
+# proof-refusal: its own row, in the credit group, at most 100 a run and 395 a day
+f = "proof-refusal"
+assert p["armed_families"][f] == {"live": True, "paid": True, "unsigned_from": "2026-11-15T13:41Z"}, p["armed_families"].get(f)
+assert f in p["groups"]["credit"] and f not in p["groups"]["claim"]
+assert p["tick_cap"][f] == {"paid": 100, "free": 100}, p["tick_cap"].get(f)
+assert p["daily_cap"][f] == {"paid": 395, "free": 395}, p["daily_cap"].get(f)
 # uvn-new-rows (ask-never-asked-r1): its own row, in the credit group, and LOW: 5 a tick, 24 ticks a day
 n = "uvn-new-rows"
 assert p["armed_families"][n] == {"live": True, "paid": True, "unsigned_from": "2026-11-14T22:48Z"}, p["armed_families"].get(n)
@@ -2165,6 +2201,131 @@ r14_cap() { # <segment> <dry-run|apply>: the --max-users the reminder's check / 
   CVO_POLICY="$TEST_TMPDIR/p.json" STUB_REMINDER_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
   [ -z "$(r14_cap paid apply)" ]
   [ "$(r14_cap free apply)" = 50 ]
+}
+
+pr_cap() { # <segment> <dry-run|apply>: the --max-users the refusal check / apply was handed (empty = not run)
+  grep -- "^send --list .*proof-refusal.json --segment $1 .*--mode $2" "$CALLS" | grep -o -- "--max-users [0-9]*" | head -1 | awk '{print $2}'
+}
+
+@test "outbound tick (proof-refusal): read back, then built, then its own family - paid before free, 100 a run, a 100-entry page, after the credit families and before the need ask" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  printf '501\n' > "$CVO_ETC/credit-verify-outbound.exclude"     # another lane messages user 501 today
+  STUB_PR_USERS="2 3" STUB_NEED_USERS=1 run -0 "$SCRIPT"
+  t="$(newest_tick)"
+  [ "$(cat "$CALLS.refusal")" = "$(printf 'readback\nbuild')" ]
+  grep -q "proof-refusal read-back: ok" "$t"
+  grep -q "^proof-refusal.json 500,502,503,504$" "$CALLS.lists"
+  grep -q "proof-refusal list: 5 users, 1 held out by the exclude file" "$t"
+  grep -q -- "^send --list .*proof-refusal.json --segment paid --max-entries 100 --start-entry 0 --mode dry-run --max-users 100 --check-recipients" "$CALLS"
+  grep -qE -- "^send --list .*proof-refusal.json --segment paid .*--mode apply .*--signed-accepted [^ ]*/proof-refusal-paid-check.json --page" "$CALLS"
+  grep -qE -- "^send --list .*proof-refusal.json --segment free .*--mode apply .*--signed-accepted [^ ]*/proof-refusal-free-check.json --page" "$CALLS"
+  [ "$(pr_cap paid apply)" = 100 ]
+  n() { grep -n -- "$1" "$CALLS" | head -1 | cut -d: -f1; }
+  [ "$(n "owing-uvn.json --segment free .*--mode apply")" -lt "$(n "proof-refusal.json --segment paid")" ]
+  [ "$(n "proof-refusal.json --segment paid .*--mode apply")" -lt "$(n "proof-refusal.json --segment free")" ]
+  [ "$(n "proof-refusal.json --segment free .*--mode apply")" -lt "$(n "need-asks.json --segment")" ]
+}
+
+@test "outbound tick (proof-refusal): 100 a run is ONE budget across paid and free, and a policy tick_cap row can only lower it" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # the paid apply writes 60 ledger rows: free may send 40
+  STUB_PR_USERS="2 3" STUB_ROWS=60 run -0 "$SCRIPT"
+  [ "$(pr_cap paid apply)" = 100 ]
+  [ "$(pr_cap free apply)" = 40 ]
+  # the paid apply writes 100: the free segment is not started at all
+  : > "$CALLS"
+  STUB_PR_USERS="2 3" STUB_ROWS=100 run -0 "$SCRIPT"
+  if grep -q -- "proof-refusal.json --segment free" "$CALLS"; then false; fi
+  grep -q "proof-refusal-free: the per-tick budget for proof-refusal (100/tick across all segments) was spent by an earlier segment (100 sent); this segment waits for the next tick" "$(newest_tick)"
+  # a policy row above the family's cap raises nothing; a lower one lowers it
+  : > "$CALLS"
+  jq '.tick_cap["proof-refusal"] = {"paid": 30, "free": 500}' "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
+  CVO_POLICY="$TEST_TMPDIR/p.json" STUB_PR_USERS="2 3" STUB_ROWS=1 run -0 "$SCRIPT"
+  [ "$(pr_cap paid apply)" = 30 ]
+  [ "$(pr_cap free apply)" = 99 ]
+}
+
+@test "outbound tick (proof-refusal): the day cannot exceed the policy's daily cap, counted on the campaign's own ledger rows across both segments" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  day="$(date -u +%F)"
+  python3 - "$CVO_LEDGER" "$day" <<'PY'
+import sqlite3, sys
+d = sqlite3.connect(sys.argv[1])
+d.executemany("INSERT INTO verify_messages (campaign, day, status, account_id) VALUES ('proof-refusal', ?, 'sent', ?)",
+              [(sys.argv[2], str(9000 + i)) for i in range(380)])
+d.commit()
+PY
+  # 380 of 395 are sent today: 15 are left for the day, whichever segment asks
+  STUB_PR_USERS="2 3" STUB_ROWS=0 run -0 "$SCRIPT"
+  [ "$(pr_cap paid apply)" = 15 ]
+  [ "$(pr_cap free apply)" = 15 ]
+}
+
+@test "outbound tick (proof-refusal): a read-back that stops or cannot be measured sends no refusal, pages once per finding, and the other groups still run" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  STUB_PR_USERS="2 3" STUB_NEED_USERS=1 STUB_PR_READBACK_RC=3 run -1 "$SCRIPT"
+  t="$(newest_tick)"
+  [ "$(cat "$CALLS.refusal")" = "readback" ]
+  if grep -q -- "proof-refusal.json" "$CALLS"; then false; fi
+  grep -q "proof-refusal read-back: STOP (sent != claimed, a hard bounce or a spam complaint); no refusal is sent this tick" "$t"
+  grep -q "refusal family: FAILED (rc=1)" "$t"
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  grep -q -- "^uvn-status .*--mode apply" "$CALLS"
+  grep -q -- "^send --list .*need-asks.json --segment free .*--mode apply" "$CALLS"
+  [ "$(cat "$CVO_STATE/proof-refusal-readback.paged")" != "" ]
+  first="$(cat "$CVO_STATE/proof-refusal-readback.paged")"
+  # the same finding on the next tick: still no send, the stamp is unchanged
+  : > "$CALLS"; STUB_PR_USERS="2 3" STUB_PR_READBACK_RC=3 run -1 "$SCRIPT"
+  if grep -q -- "proof-refusal.json" "$CALLS"; then false; fi
+  [ "$(cat "$CVO_STATE/proof-refusal-readback.paged")" = "$first" ]
+  # unmeasured is a hold too, and it is a different finding
+  : > "$CALLS"; STUB_PR_USERS="2 3" STUB_PR_READBACK_RC=2 run -1 "$SCRIPT"
+  if grep -q -- "proof-refusal.json" "$CALLS"; then false; fi
+  grep -q "proof-refusal read-back: UNMEASURED (rc=2: the ledger or a contact could not be read); no refusal is sent this tick" "$(newest_tick)"
+  [ "$(cat "$CVO_STATE/proof-refusal-readback.paged")" != "$first" ]
+  # a clean read-back clears the stamp and the family sends again
+  : > "$CALLS"; STUB_PR_USERS="2 3" run -0 "$SCRIPT"
+  [ ! -e "$CVO_STATE/proof-refusal-readback.paged" ]
+  grep -q -- "^send --list .*proof-refusal.json --segment paid .*--mode apply" "$CALLS"
+}
+
+@test "outbound tick (proof-refusal): nobody listed, no policy row or no deployed runner starts no family; a failed build fails the family only" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # nobody listed: read back and built, no runner call
+  run -0 "$SCRIPT"
+  if grep -q -- "proof-refusal.json" "$CALLS"; then false; fi
+  grep -q "proof-refusal-paid: empty audience; skipped" "$(newest_tick)"
+  # no policy row: not read back, not built
+  : > "$CALLS.refusal"
+  jq 'del(.daily_cap["proof-refusal"])' "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
+  CVO_POLICY="$TEST_TMPDIR/p.json" STUB_PR_USERS="2 3" run -0 "$SCRIPT"
+  [ ! -s "$CALLS.refusal" ]
+  grep -q "proof-refusal: the policy has no daily_cap row or no group for proof-refusal; skipped" "$(newest_tick)"
+  # a runner that is not deployed yet: skipped, and the tick goes on
+  CVO_PR_RUNNER="$TEST_TMPDIR/absent.py" STUB_PR_USERS="2 3" run -0 "$SCRIPT"
+  grep -q "is not deployed; skipped" "$(newest_tick)"
+  # a build that fails: the family fails, nothing is sent for it, the need group still runs
+  : > "$CALLS"
+  STUB_PR_USERS="2 3" STUB_NEED_USERS=1 STUB_PR_BUILD_FAIL=1 run -1 "$SCRIPT"
+  if grep -q -- "proof-refusal.json" "$CALLS"; then false; fi
+  grep -q "proof-refusal builder failed (rebuild before the refusal family): rc=2" "$(newest_tick)"
+  grep -q "refusal family: FAILED (rc=1)" "$(newest_tick)"
+  grep -q -- "^send --list .*need-asks.json --segment free .*--mode apply" "$CALLS"
+}
+
+@test "outbound tick (proof-refusal): only its OWN dated policy row arms it; without one it is checked and never applied" {
+  # production-equivalent: no harness override, the shipped rows except this family's
+  export CVO_UNSIGNED_ALL=0
+  jq 'del(.armed_families["proof-refusal"])' "$SHIPPED_POLICY" > "$TEST_TMPDIR/p.json"
+  CVO_POLICY="$TEST_TMPDIR/p.json" STUB_PR_USERS="2 3" run -0 "$SCRIPT"
+  grep -q -- "^send --list .*proof-refusal.json --segment paid .*--mode dry-run" "$CALLS"
+  if grep -q -- "^send --list .*proof-refusal.json .*--mode apply" "$CALLS"; then false; fi
+  # the shipped file arms it by its own row
+  : > "$CALLS"
+  CVO_POLICY="$SHIPPED_POLICY" STUB_PR_USERS="2 3" run -0 "$SCRIPT"
+  if grep -qiE "malformed|ARMING ROW IGNORED" "$(newest_tick)"; then false; fi
+  grep -q -- "^send --list .*proof-refusal.json --segment paid .*--mode apply" "$CALLS"
+  grep -q -- "^send --list .*proof-refusal.json --segment free .*--mode apply" "$CALLS"
 }
 
 nr_cap() { # <segment> <dry-run|apply>: the --max-users the new-rows check / apply was handed (empty = not run)
