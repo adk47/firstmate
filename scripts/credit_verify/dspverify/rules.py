@@ -459,7 +459,10 @@ def blockers_of(p: dict[str, Any]) -> list[str]:
     elif cc >= BIG_PROFILE_CREDITS:
         out.append(f"big_profile: {cc} credits >= {BIG_PROFILE_CREDITS} (two signals of different kinds)")
     if p.get("duplicate_unknown") is True or "duplicate_of" not in p:
-        out.append("duplicate_unknown: the approved-request duplicate check could not be read")
+        why = p.get("duplicate_unknown_reason")
+        out.append("duplicate_unknown: " + (f"{why}: the profile's approved list is past the page bound and was not "
+                                            "read to the end" if why == "evidence_unbounded" else
+                                            "the approved-request duplicate check could not be read"))
     nc = p.get("name_collisions")
     toks = fold(str(p.get("profile_name") or "")).split()
     if not isinstance(nc, int) or isinstance(nc, bool) or nc < 0:

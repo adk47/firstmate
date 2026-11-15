@@ -759,10 +759,14 @@ def cmd_verify_notify(args: argparse.Namespace) -> int:
         held_path = args.removal_due + ".held"
         _export(args.removal_due, rows)
         _export(held_path, held)
+        unbounded = [r for r in held if r.get("reason") == admin_api.EVIDENCE_UNBOUNDED]
         print(f"{len(rows)} new credit(s) past the reply-by date their note named, with no valid document, no document "
               f"on file and no human approval, written to {args.removal_due}. {len(held)} more held for a human (document "
               f"awaiting review, a user reply, or a rejection not yet explained to the user), written to {held_path} (never removed by this export). Nothing was "
-              "removed; the removal step re-checks each one.")
+              "removed; the removal step re-checks each one."
+              + (f" {len(unbounded)} of the held are HELD {admin_api.EVIDENCE_UNBOUNDED}: their profile's approved list "
+                 f"is past {admin_api.APPROVED_PROFILE_MAX_PAGES} pages of {admin_api.APPROVED_PROFILE_PAGE_SIZE} and was "
+                 "not read to the end, so whether a person approved them is unknown." if unbounded else ""))
         return 0
     if args.check_recipients and args.mode != "dry-run":
         print("--check-recipients is for --mode dry-run only.")

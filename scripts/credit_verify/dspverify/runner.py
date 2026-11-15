@@ -66,11 +66,14 @@ class Stats:
     verdicts: dict[str, int] = field(default_factory=dict)
     classes: dict[str, int] = field(default_factory=dict)
     late_receipts: int = 0                # closed captures re-verified because a late receipt changed a source
+    # profiles whose approved list is past admin's page bound: their duplicate check is unknown for THAT reason,
+    # so every request of theirs in this run waits (rules: duplicate_unknown: evidence_unbounded)
+    evidence_unbounded: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {"run_id": self.run_id, "kind": self.kind, "requests": self.requests, "groups": self.groups,
                 "verdicts": self.verdicts, "classes": self.classes, "errors": self.errors[:10],
-                "late_receipts": self.late_receipts}
+                "late_receipts": self.late_receipts, "evidence_unbounded": self.evidence_unbounded[:10]}
 
 
 def new_run_id(kind: str) -> str:
@@ -358,11 +361,14 @@ DUP_UNKNOWN = "unknown"
 
 class Duplicates:
     """Approved requests per profile, read in full (paginated) once per run. A failed or
-    truncated read is UNKNOWN, and an unknown duplicate check blocks approval (QA @274a979)."""
+    truncated read is UNKNOWN, and an unknown duplicate check blocks approval (QA @274a979).
+    A profile past admin's page bound (admin.EvidenceUnbounded) is unknown too, and `unbounded`
+    keeps its id so the packet and the run's stats say WHY (evidence_unbounded)."""
 
     def __init__(self, admin: admin_api.Admin):
         self.admin = admin
         self.seen: dict[str, list[dict[str, Any]] | None] = {}
+        self.unbounded: list[str] = []
 
     def _approved(self, pid: str) -> list[dict[str, Any]] | None:
         rows: list[dict[str, Any]] = []
@@ -373,6 +379,9 @@ class Duplicates:
                 rows += items
                 if len(items) < 500:
                     return rows
+        except admin_api.EvidenceUnbounded:
+            self.unbounded.append(pid)
+            return None
         except admin_api.AdminError:
             return None
         return None                       # still full after DUP_PAGES pages: not exhaustive
@@ -447,13 +456,16 @@ def build_packet(req: dict[str, Any], capture: dict[str, Any] | None, builder: E
                   "watchlist": None if deps.watch_user_ids is None else
                   (uid in deps.watch_user_ids or pid.lower() in (deps.watch_profile_ids or frozenset())),
                   "idp_hold": None if idp_hold_ids is None or uid is None else str(uid) in set(idp_hold_ids)},
-        **_dup_fields(dups.of(req)),
+        **_dup_fields(dups.of(req), admin_api.EVIDENCE_UNBOUNDED if pid and pid in dups.unbounded else None),
     }
 
 
-def _dup_fields(dup: str | None) -> dict[str, Any]:
+def _dup_fields(dup: str | None, why: str | None = None) -> dict[str, Any]:
     if dup == DUP_UNKNOWN:
-        return {"duplicate_of": None, "duplicate_unknown": True}
+        out: dict[str, Any] = {"duplicate_of": None, "duplicate_unknown": True}
+        if why:
+            out["duplicate_unknown_reason"] = why     # only when a reason is known: other packets are unchanged
+        return out
     return {"duplicate_of": dup, "duplicate_unknown": False}
 
 
@@ -516,6 +528,7 @@ def verify(store: Store, deps: Deps, *, max_groups: int = 200) -> tuple[Stats, l
         caps = caps + list(late.values())
         builder = EvidenceBuilder(deps.admin, now=deps.now())
         dups = Duplicates(deps.admin)
+        st.evidence_unbounded = dups.unbounded       # the same list: filled as profiles are read
         reads: dict[int, dict[str, Any]] = {}
 
         def one(batch: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any]]]:

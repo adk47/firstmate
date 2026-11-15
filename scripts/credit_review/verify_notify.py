@@ -74,6 +74,7 @@ DECISION_COLUMNS = ("run_id", "request_id", "profile_id", "track_id")
 OUTCOME_COLUMNS = ("id", "run_id", "at", "request_id", "action", "outcome")
 PAGE_LIMIT = 200
 MAX_PAGES = 10
+TRACK_LOOKUP_LIMIT = 50                # one (profile, track) page: short of this, the lookup is the whole answer
 
 
 class ContractError(RuntimeError):
@@ -184,6 +185,15 @@ class Report:
     # [key=note-step-budget] (Fable 753): deferred because ONE MORE worst-case note would not fit the share left. A
     # deferral, never a refusal: the user keeps no claim, stays owed, and the next tick starts them.
     budget_deferred_users: int = 0
+    # A profile whose approved list is past admin's page bound (admin.EvidenceUnbounded) was NOT read to the end. A
+    # credit of it that no complete read answered (see reread) is HELD with the reason `evidence_unbounded` - not
+    # asked, not reminded, not closed as "no longer approved", not exported as removal-due. One entry per profile
+    # and pass: {profile, request_ids, where}. A hold, never a failure: the run goes on for every other credit.
+    evidence_unbounded: list = field(default_factory=list)
+
+    @property
+    def evidence_unbounded_credits(self) -> int:
+        return sum(len(h["request_ids"]) for h in self.evidence_unbounded)
 
     @property
     def failed(self) -> bool:
@@ -229,11 +239,21 @@ class Report:
                 or self.proof_tagged or self.proof_failed or self.extension_requests
                 or self.claim_proof_tagged or self.claim_replies
                 or self.affiliation_held or self.documented_users or self.support_contact_users
-                or self.paying_hold or self.no_professional_id or self.read_failure_pages) and mode == "apply":
+                or self.paying_hold or self.no_professional_id or self.read_failure_pages
+                or self.evidence_unbounded) and mode == "apply":
             return "NO_REPLY"
         head = f"{title} (dry run, nothing sent)" if mode != "apply" else title
         parts = [f"{head}: {self.sent_notes} note(s) sent covering {self.sent_credits} provisionally approved credit(s)"
                  if mode == "apply" else f"{head}: {self.users} account(s) would get a note"]
+        if self.evidence_unbounded:
+            profiles = list(dict.fromkeys(h["profile"] for h in self.evidence_unbounded))
+            parts.append(f"{self.evidence_unbounded_credits} credit(s) on {len(profiles)} profile(s) HELD "
+                         f"{admin_api.EVIDENCE_UNBOUNDED}: the profile's approved list is past "
+                         f"{admin_api.APPROVED_PROFILE_MAX_PAGES} pages of {admin_api.APPROVED_PROFILE_PAGE_SIZE}, was "
+                         "not read to the end and no lookup by track answered for them, so nothing was asked, "
+                         "reminded or closed for them: "
+                         + "; ".join(f"profile {h['profile']} ({len(h['request_ids'])} credit(s), {h['where']})"
+                                     for h in self.evidence_unbounded[:5]))
         if self.no_professional_id:
             parts.append(f"{self.no_professional_id} account(s) held: no professional id on the account, so the "
                          "Intercom recipient cannot be matched to it")
@@ -443,11 +463,21 @@ def _take(items: list[dict[str, Any]], left: set[str], found: dict[str, dict[str
             left.discard(rid)
 
 
-def reread(admin: admin_api.Admin, wanted: list[tuple[str, str, str]]) -> tuple[dict[str, dict[str, Any]], set[str]]:
+def reread(admin: admin_api.Admin, wanted: list[tuple[str, str, str]]
+           ) -> tuple[dict[str, dict[str, Any]], set[str], dict[str, list[str]]]:
     """Server truth for each wanted id: (rows the server says are approved NOW, by id;
-    ids it does not). GET /admin/credit-requests has no id filter, so a profile's
-    approved rows are paged (newest first); a row still unseen after that is looked up
-    by its (profile, track) pair when the decider recorded the track."""
+    ids it says are not; ids it gave NO answer for, by profile). GET
+    /admin/credit-requests has no id filter, so a profile's approved rows are paged
+    (newest first); a row still unseen after that is looked up by its (profile, track)
+    pair when the decider recorded the track.
+
+    A profile whose approved list is past admin's page bound (admin.EvidenceUnbounded)
+    was not read to the end, so "not seen in it" is NOT "not approved now". A row of
+    such a profile is answered only by a read that is complete for that row: it was
+    seen approved on a page that was read, or its (profile, track) lookup came back
+    short of a full page. Every other row of that profile is in the THIRD value and in
+    neither of the first two, and the caller holds it (hold_unbounded): never asked,
+    never closed, never exported."""
     by_profile: dict[str, set[str]] = {}
     tracks: dict[str, tuple[str, str]] = {}
     for rid, pid, tid in wanted:
@@ -455,23 +485,45 @@ def reread(admin: admin_api.Admin, wanted: list[tuple[str, str, str]]) -> tuple[
         if tid:
             tracks[rid] = (pid, tid)
     found: dict[str, dict[str, Any]] = {}
+    unbounded: dict[str, list[str]] = {}
     for pid, ids in by_profile.items():
         left = set(ids)
-        for page in range(1, MAX_PAGES + 1):
-            items = admin_api.list_requests(admin, status="approved", limit=PAGE_LIMIT, page=page, profile_ids=[pid])
-            _take(items, left, found)
-            if not left or len(items) < PAGE_LIMIT:
-                break
+        capped = False
+        try:
+            for page in range(1, MAX_PAGES + 1):
+                items = admin_api.list_requests(admin, status="approved", limit=PAGE_LIMIT, page=page,
+                                                profile_ids=[pid])
+                _take(items, left, found)
+                if not left or len(items) < PAGE_LIMIT:
+                    break
+        except admin_api.EvidenceUnbounded:
+            capped = True
         for rid in sorted(left):
+            answered = False
             if rid in tracks:
-                data = admin.get("/admin/credit-requests", {"status": "approved", "limit": 50, "page": 1,
+                data = admin.get("/admin/credit-requests", {"status": "approved", "limit": TRACK_LOOKUP_LIMIT, "page": 1,
                                                             "profilesIds": pid, "trackId": tracks[rid][1]})
                 items = data.get("items") if isinstance(data, dict) else None
                 if not isinstance(items, list):
                     raise admin_api.AdminError("credit-requests list has no items[]")
                 _take(items, left, found)
-    missing = {rid for rid, _, _ in wanted if rid not in found}
-    return found, missing
+                answered = len(items) < TRACK_LOOKUP_LIMIT
+            if capped and rid in left and not answered:
+                unbounded.setdefault(pid, []).append(rid)
+    not_read = {rid for ids in unbounded.values() for rid in ids}
+    missing = {rid for rid, _, _ in wanted if rid not in found and rid not in not_read}
+    return found, missing, unbounded
+
+
+def hold_unbounded(report: Report | None, unbounded: dict[str, list[str]], where: str) -> set[str]:
+    """Record the credits reread() got no answer for as held `evidence_unbounded` on the report (the run's
+    status line names them, by profile) and return their request ids. `where` names the pass that held them."""
+    ids: set[str] = set()
+    for pid, rids in unbounded.items():
+        ids |= set(rids)
+        if report is not None:
+            report.evidence_unbounded.append({"profile": pid, "request_ids": list(rids), "where": where})
+    return ids
 
 
 class ProofFileError(RuntimeError):
@@ -656,7 +708,15 @@ def removal_due(db: sqlite3.Connection, admin: admin_api.Admin, documented: Proo
     due = undocumented_removal_due(db, documented, day=day, core_told=core_told)
     held = undocumented_removal_due(db, documented, day=day, held=True, core_told=core_told)
     wanted = [(r["request_id"], str(r["profile_id"]), str(r["track_id"] or "")) for r in due + held if r["profile_id"]]
-    live, _ = reread(admin, wanted) if wanted else ({}, set())
+    live, _, unbounded = reread(admin, wanted) if wanted else ({}, set(), {})
+    # Not read to the end: nobody knows whether a person approved these, so none of them is removal-due. A due
+    # row moves to the held export with the reason; a row already held keeps the reason it was held for.
+    not_read = hold_unbounded(None, unbounded, "removal-due")
+    for r in due:
+        if r["request_id"] in not_read:
+            r["reason"] = admin_api.EVIDENCE_UNBOUNDED
+    held += [r for r in due if r["request_id"] in not_read]
+    due = [r for r in due if r["request_id"] not in not_read]
     by_person = {rid for rid, req in live.items() if human_approved(req)}
     # Proof is matched by USER as well as by credit (firstmate 042): a user with a
     # whole-user document waiting for review (e.g. emailed to support@, no request id)
@@ -2361,7 +2421,11 @@ def send_followups(db: sqlite3.Connection, admin: admin_api.Admin, report: Repor
             break
         wanted = [(str(r.get("request_id")), str(r.get("profile_id") or ""), str(r.get("track_id") or ""))
                   for r in refs if r.get("profile_id")]
-        live, _ = reread(admin, wanted) if wanted else ({}, set())
+        live, _, unbounded = reread(admin, wanted) if wanted else ({}, set(), {})
+        if hold_unbounded(report, unbounded, f"{kind} reminder of message {mid}"):
+            # One of the note's credits got no answer: no reminder covering only the others, and the reminder
+            # is NOT closed as "nothing left to send". It stays due and is read again next run.
+            continue
         _, held = screen_live(live, documented, report)
         if held or hold_affiliated(live, verdicts, report):
             continue
@@ -2512,10 +2576,13 @@ def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "
         report.candidates = len(wanted)
         if wanted:
             was_held = {rid for rid, _, _ in verify_ledger.deferred(db, campaign="verify-live")}
-            rows, missing = reread(admin, wanted)
+            rows, missing, unbounded = reread(admin, wanted)
+            not_read = hold_unbounded(report, unbounded, "verify-live")
             report.not_approved_now = len(missing)
             by_id = dict(rows)
             dropped, held = screen_live(rows, documented, report)
+            # evidence_unbounded: kept in the ledger as deferred (offered again every run), never dropped
+            held += [w for w in wanted if w[0] in not_read]
             held += hold_affiliated(rows, verdicts, report)
             dropped += sorted(missing & was_held)
             payloads = plan(rows, report, dropped=dropped)
@@ -2695,7 +2762,10 @@ def run_wave(admin: admin_api.Admin, *, wave_path: str, ledger_path: str | None 
         pick = [w for w in rows if w.user_id in chosen]
         by_id = {w.request_id: w for w in pick}
         if pick:
-            live, missing = reread(admin, [(w.request_id, w.profile_id, w.track_id) for w in pick])
+            live, missing, unbounded = reread(admin, [(w.request_id, w.profile_id, w.track_id) for w in pick])
+            # evidence_unbounded rows are in neither `live` nor `missing`: no note, and NOT closed as "no longer
+            # approved" (a retro-past close is for good). They stay in the wave, so the next tick picks and reads them again.
+            hold_unbounded(report, unbounded, CAMPAIGN_RETRO)
             report.not_approved_now = len(missing)
             people = drop_human_approved(live, report) + drop_documented(live, documented, report)
             if mode == "apply" and people:

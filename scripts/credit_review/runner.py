@@ -722,6 +722,7 @@ def render_metrics(admin: admin_api.Admin | None, ledger: Ledger, now: datetime 
             by_profile.setdefault(r["profile_id"], set()).add(r["request_id"])
         still: set[str] = set()
         unknown: set[str] = set()
+        unbounded: list[str] = []  # profiles past admin's page bound: their flags are unknown for THAT reason
         profiles = list(by_profile.items())
         for i, (pid, ids) in enumerate(profiles):
             if i >= 200:
@@ -737,6 +738,9 @@ def render_metrics(admin: admin_api.Admin | None, ledger: Ledger, now: datetime 
                         break
                 if not complete:
                     unknown |= ids - still  # list not fully read: cannot call these removed
+            except admin_api.EvidenceUnbounded:
+                unknown |= ids
+                unbounded.append(pid)
             except admin_api.AdminError:
                 unknown |= ids
         flagged_all = {r["request_id"] for r in older}
@@ -750,6 +754,10 @@ def render_metrics(admin: admin_api.Admin | None, ledger: Ledger, now: datetime 
                 lines.append(f"{v} flagged {days}-{2 * days}d ago: {len(flagged)} ({len(flagged & unknown)} not checkable "
                              f"this run), since removed/reverted by a human: {n} of {len(known)} checked "
                              f"({pct}, lower-bound precision)")
+        if unbounded:
+            lines.append(f"{len(unbounded)} profile(s) held {admin_api.EVIDENCE_UNBOUNDED} (approved list past "
+                         f"{admin_api.APPROVED_PROFILE_MAX_PAGES} pages of {admin_api.APPROVED_PROFILE_PAGE_SIZE}, not "
+                         "read to the end; their flags are in 'not checkable'): " + ", ".join(unbounded[:5]))
     ev = ledger.get_state("eval_summary")
     if ev:
         lines.append("Labelled-set precision (last eval): " + ev)

@@ -1057,6 +1057,27 @@ class RunnerAndStore(unittest.TestCase):
         self.assertEqual(out[0]["verdict"], rules.WAIT)
         self.assertIn("duplicate_unknown", out[0]["reason"])
 
+    def test_a_profile_past_the_approved_page_bound_never_approves_and_says_why(self):
+        """admin.list_requests refuses a profile's approved list past its page bound (EvidenceUnbounded): the
+        duplicate check is unknown, so the request waits, and the reason and the run's stats name the cause."""
+        admin = FakeAdmin([req(1)])
+        d = self.deps(admin, FakePod())
+        runner.submit(self.store, d)
+        real = admin.get
+        asked = []
+
+        def unbounded(path, params=None):
+            if path == "/admin/credit-requests" and params.get("status") == "approved":
+                asked.append(str(params.get("profilesIds")))
+                raise runner.admin_api.EvidenceUnbounded(asked[-1], runner.admin_api.APPROVED_PROFILE_MAX_PAGES)
+            return real(path, params)
+        admin.get = unbounded
+        st, out = runner.verify(self.store, d)
+        self.assertEqual(out[0]["verdict"], rules.WAIT)
+        self.assertIn("duplicate_unknown: evidence_unbounded", out[0]["reason"])
+        self.assertEqual(st.evidence_unbounded, [asked[0]])
+        self.assertEqual(st.as_dict()["evidence_unbounded"], [asked[0]])
+
     def test_duplicate_found_by_runner(self):
         dup = req(1, status="approved")
         dup["id"] = "99999999-9999-9999-9999-999999999999"

@@ -1056,7 +1056,7 @@ class CandidateTests(unittest.TestCase):
 class RereadAndPlanTests(unittest.TestCase):
     def test_reread_announces_only_rows_the_server_says_are_approved_now(self):
         admin = FakeAdmin([req("r1"), req("r2", status="user_verification_needed"), req("r3", pid=PID2)])
-        found, missing = verify_notify.reread(admin, [("r1", PID, "t1"), ("r2", PID, "t1"), ("r3", PID2, "t1")])
+        found, missing, unbounded = verify_notify.reread(admin, [("r1", PID, "t1"), ("r2", PID, "t1"), ("r3", PID2, "t1")])
         self.assertEqual(set(found), {"r1", "r3"})
         self.assertEqual(missing, {"r2"})
         self.assertTrue(all(p == "/admin/credit-requests" for p, _ in admin.calls))
@@ -1065,7 +1065,7 @@ class RereadAndPlanTests(unittest.TestCase):
         rows = [req(f"x{i}", track=f"t{i}") for i in range(verify_notify.PAGE_LIMIT * verify_notify.MAX_PAGES)]
         rows.append(req("deep", track="tdeep"))
         admin = FakeAdmin(rows)
-        found, missing = verify_notify.reread(admin, [("deep", PID, "tdeep")])
+        found, missing, unbounded = verify_notify.reread(admin, [("deep", PID, "tdeep")])
         self.assertEqual(set(found), {"deep"})
         self.assertEqual(admin.calls[-1][1].get("trackId"), "tdeep")
 
@@ -4171,6 +4171,185 @@ class ReadOnlyOpenerTests(unittest.TestCase):
         with unittest.mock.patch.object(verify_notify.verify_ledger, "connect_ro", refuse):
             self.assertEqual(verify_notify.read_hold_until(
                 self.path, campaign="uvn-status", user_key="a@b.c"), "")
+
+
+def big_profile(n=1001, *, busy="tbusy", pid=PID):
+    """`n` approved rows of one profile, newest first: more than admin's page bound reads (1,000). The first 50
+    share the track `busy`, so a (profile, track) lookup on it comes back as a FULL page and answers nothing."""
+    return [req(f"x{i}", pid=pid, track=busy if i < 50 else f"f{i}") for i in range(n)]
+
+
+class ApprovedReadBoundTests(unittest.TestCase):
+    """2026-11-15 03:57:18Z: `status=approved&limit=500&profilesIds=<one id>` OOM-killed a core-backend-api pod.
+    admin.list_requests now pages that read by 50 and stops at 20 pages (EvidenceUnbounded); every reader holds a
+    credit the capped read did not answer as `evidence_unbounded` instead of reading "not seen" as an answer."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "ledger.sqlite3")
+        self.wave = os.path.join(self.tmp, "wave.csv")
+        self.admin_api = verify_notify.admin_api
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def approved_calls(self, admin):
+        return [p for path, p in admin.calls if path == "/admin/credit-requests" and p.get("status") == "approved"]
+
+    # -- the cap -------------------------------------------------------------------------------------------------
+    def test_a_per_profile_approved_read_is_paged_by_50_and_refused_past_20_pages(self):
+        api = self.admin_api
+        admin = FakeAdmin(big_profile(1200))
+        first = api.list_requests(admin, status="approved", limit=500, page=1, profile_ids=[PID])
+        self.assertEqual([r["id"] for r in first], [f"x{i}" for i in range(500)], "the caller's limit/page meaning is kept")
+        second = api.list_requests(admin, status="approved", limit=500, page=2, profile_ids=[PID])
+        self.assertEqual([r["id"] for r in second], [f"x{i}" for i in range(500, 1000)])
+        self.assertEqual({p["limit"] for p in self.approved_calls(admin)}, {api.APPROVED_PROFILE_PAGE_SIZE},
+                         "core is never asked for more than 50 rows of one profile's approved list at a time")
+        self.assertEqual(max(p["page"] for p in self.approved_calls(admin)), api.APPROVED_PROFILE_MAX_PAGES)
+        before = len(admin.calls)
+        with self.assertRaises(api.EvidenceUnbounded) as caught:
+            api.list_requests(admin, status="approved", limit=500, page=3, profile_ids=[PID])
+        self.assertEqual(len(admin.calls), before, "page 21 is refused before it is asked for")
+        self.assertEqual((caught.exception.reason, caught.exception.profile_id), (api.EVIDENCE_UNBOUNDED, PID))
+        self.assertIsInstance(caught.exception, api.AdminError, "a reader that catches AdminError never sees a short list")
+        self.assertIn(api.EVIDENCE_UNBOUNDED, str(caught.exception))
+
+    def test_a_normal_profile_is_read_to_the_end_and_other_reads_are_untouched(self):
+        api = self.admin_api
+        rows = [req(f"n{i}", track=f"f{i}") for i in range(120)] + [req("u1", status="unverified")]
+        admin = FakeAdmin(rows)
+        got = api.list_requests(admin, status="approved", limit=500, page=1, profile_ids=[PID])
+        self.assertEqual([r["id"] for r in got], [f"n{i}" for i in range(120)], "every row, in order")
+        self.assertEqual([(p["limit"], p["page"]) for p in self.approved_calls(admin)], [(50, 1), (50, 2), (50, 3)])
+        # Not a per-profile approved read: one request, with the caller's own limit.
+        admin = FakeAdmin(rows)
+        api.list_requests(admin, status="approved", limit=200, page=1)
+        api.list_requests(admin, status="unverified", limit=500, page=1, profile_ids=[PID])
+        self.assertEqual([(p["status"], p["limit"]) for _, p in admin.calls], [("approved", 200), ("unverified", 500)])
+
+    # -- the reader ----------------------------------------------------------------------------------------------
+    def test_reread_holds_only_the_credits_a_capped_read_did_not_answer(self):
+        rows = big_profile(1001) + [req("deep", track="tdeep"), req("busy", track="tbusy"), req("notrack"),
+                                    req("gone", track="tgone", status="rejected"),
+                                    req("r3", pid=PID2, track="t3"), req("r4", pid=PID2, track="t4", status="rejected")]
+        found, missing, unbounded = verify_notify.reread(FakeAdmin(rows), [
+            ("x7", PID, "tbusy"),      # on a page that was read: approved
+            ("deep", PID, "tdeep"),    # past the bound, but its track lookup shows it: approved
+            ("gone", PID, "tgone"),    # past the bound, its track lookup is short and empty: not approved, a real answer
+            ("busy", PID, "tbusy"),    # past the bound and its track lookup is a full page without it: NO answer
+            ("notrack", PID, ""),      # past the bound and no track to look up by: NO answer
+            ("r3", PID2, "t3"), ("r4", PID2, "t4")])
+        self.assertEqual(set(found), {"x7", "deep", "r3"})
+        self.assertEqual(missing, {"gone", "r4"}, "only what a complete read answered is 'not approved now'")
+        self.assertEqual(unbounded, {PID: ["busy", "notrack"]}, "the rest is held, in neither of the other two")
+
+    def test_reread_of_a_normal_profile_holds_nothing(self):
+        rows = [req(f"n{i}", track=f"f{i}") for i in range(450)] + [req("last", track="tl"),
+                                                                    req("no", track="tn", status="rejected")]
+        found, missing, unbounded = verify_notify.reread(FakeAdmin(rows), [("n3", PID, "f3"), ("last", PID, "tl"),
+                                                                           ("no", PID, "tn")])
+        self.assertEqual((set(found), missing, unbounded), ({"n3", "last"}, {"no"}, {}))
+
+    # -- the four callers: held with the reason, nothing queued --------------------------------------------------
+    def test_run_holds_the_credit_with_the_reason_and_sends_closes_and_counts_nothing_for_it(self):
+        decisions_db(self.path, [dec("held1", track="tbusy"), dec("ok", pid=PID2)])
+        admin = FakeAdmin(big_profile(1001) + [req("held1", track="tbusy"),
+                                               req("ok", pid=PID2, email="bob@example.com")])
+        fake = Fake()
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", runner=fake, wrapper="/w", sweep=False)
+        self.assertEqual([c["request_id"] for p in fake.payloads for c in p["credits"]], ["ok"],
+                         "the normal profile is unaffected; the held credit gets no note")
+        self.assertEqual(rep.evidence_unbounded, [{"profile": PID, "request_ids": ["held1"], "where": "verify-live"}])
+        self.assertEqual(rep.not_approved_now, 0, "not read to the end is not 'no longer approved'")
+        line = rep.render("apply")
+        self.assertIn(f"1 credit(s) on 1 profile(s) HELD {self.admin_api.EVIDENCE_UNBOUNDED}", line)
+        self.assertIn(f"profile {PID}", line)
+        db = verify_ledger.connect(self.path)
+        self.addCleanup(db.close)
+        self.assertEqual(verify_ledger.deferred(db), [("held1", PID, "tbusy")], "kept, so it is offered again")
+        # Offered again, and answered once the list can be read to the end. (The fake gate writes no ledger row,
+        # so "ok" is offered again too; only the held credit is asserted on.)
+        admin.rows = [req("held1", track="tbusy"), req("ok", pid=PID2, email="bob@example.com")]
+        again = Fake()
+        rep2 = verify_notify.run(admin, ledger_path=self.path, mode="apply", runner=again, wrapper="/w", sweep=False)
+        self.assertIn("held1", [c["request_id"] for p in again.payloads for c in p["credits"]])
+        self.assertEqual(rep2.evidence_unbounded, [])
+
+    def test_a_run_whose_only_news_is_the_hold_is_not_silent(self):
+        rep = Report()
+        self.assertEqual(rep.render("apply"), "NO_REPLY")
+        rep.evidence_unbounded.append({"profile": PID, "request_ids": ["a", "b"], "where": "verify-live"})
+        self.assertEqual(rep.evidence_unbounded_credits, 2)
+        self.assertIn(f"2 credit(s) on 1 profile(s) HELD {self.admin_api.EVIDENCE_UNBOUNDED}", rep.render("apply"))
+
+    def test_run_wave_neither_sends_nor_closes_the_held_credit(self):
+        wave_file(self.wave, [("HOLD", "r1", "1", PID, "tbusy", "Mixing", 10, 0, "2026-09-02"),
+                              ("HOLD", "r3", "2", PID2, "t3", "Mixing", 10, 1, "2026-09-09"),
+                              ("HOLD", "r4", "3", PID2, "t4", "Mixing", 10, 0, "2026-09-01")])
+        others = [req("r3", pid=PID2, email="paid@example.com", track="t3"),
+                  req("r4", pid=PID2, email="gone@example.com", track="t4", status="rejected")]
+        admin = FakeAdmin(big_profile(1001) + [req("r1", track="tbusy")] + others)
+        fake = Fake()
+        rep = verify_notify.run_wave(admin, wave_path=self.wave, ledger_path=self.path, mode="apply", max_users=10,
+                                     pace_seconds=0, runner=fake, wrapper="/w", today="2026-10-16")
+        self.assertEqual([p["user"]["email"] for p in fake.payloads], ["paid@example.com"])
+        self.assertEqual(rep.evidence_unbounded, [{"profile": PID, "request_ids": ["r1"], "where": "retro-past"}])
+        self.assertEqual(rep.not_approved_now, 1, "r4 only: the server answered for it")
+        db = verify_ledger.connect(self.path)
+        self.addCleanup(db.close)
+        self.assertEqual(verify_ledger.blocked_ids(db, ["r1", "r4"], "retro-past"), {"r4"},
+                         "a retro-past close is for good: the answered row is closed, the held one is not")
+        # Still in the wave: read again, and sent once the list can be read to the end.
+        admin.rows = [req("r1", track="tbusy")] + others
+        again = Fake()
+        verify_notify.run_wave(admin, wave_path=self.wave, ledger_path=self.path, mode="apply", max_users=10,
+                               pace_seconds=0, runner=again, wrapper="/w", today="2026-10-16")
+        self.assertIn(["r1"], [[c["request_id"] for c in p["credits"]] for p in again.payloads])
+
+    def test_send_followups_sends_no_reminder_and_does_not_close_it(self):
+        db = verify_ledger.connect(self.path)
+        self.addCleanup(db.close)
+        c = windowed_note(db)                                   # r1 on t1, r2 on t2, both on PID
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="500")
+        own = [req("r1", track="t1"), req("r2", track="t2")]
+
+        def followups(admin):
+            fake, rep = Fake(), Report()
+            verify_notify.send_followups(db, admin, rep, verdicts=verify_notify.affiliation.read(AFFILIATION_FILE),
+                                         campaign="verify-live", day="2026-10-15",
+                                         documented=verify_notify.load_proof_on_file(PROOF_FILE), limit=150,
+                                         pace_seconds=0, wrapper="/w", runner=fake)
+            return fake, rep
+
+        fake, rep = followups(FakeAdmin(big_profile(1001, busy="t1") + own))
+        self.assertEqual((fake.payloads, rep.reminders_sent), ([], 0), "no reminder for the part that was read either")
+        self.assertEqual([(h["profile"], h["request_ids"]) for h in rep.evidence_unbounded], [(PID, ["r1"])])
+        self.assertIn("message 500", rep.evidence_unbounded[0]["where"])
+        self.assertEqual([mid for mid, _, _ in verify_ledger.reminders_due(db, campaign="verify-live", day="2026-10-15")],
+                         ["500"], "not closed as 'nothing left to send': it is still due")
+        fake, rep = followups(FakeAdmin(own))
+        self.assertEqual([[c["request_id"] for c in p["credits"]] for p in fake.payloads], [["r1", "r2"]])
+        self.assertEqual(rep.evidence_unbounded, [])
+
+    def test_removal_due_never_exports_the_held_credit_as_removal_due(self):
+        db = verify_ledger.connect(self.path)
+        self.addCleanup(db.close)
+        c = verify_ledger.claim(db, user_key="jane@example.com", day="2026-10-01", request_ids=["r1", "r3"],
+                                message_type="email", approved_by=CAPTAIN_UID, approval_ref="ref", windowed=True,
+                                refs=[{"request_id": "r1", "profile_id": PID, "track_id": "tbusy"},
+                                      {"request_id": "r3", "profile_id": PID2, "track_id": "t3"}])
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="500")
+        proof = os.path.join(self.tmp, "proof.json")
+        write_proof(proof, [])
+        own = [req("r1", track="tbusy"), req("r3", pid=PID2, track="t3")]
+        rows, held = verify_notify.removal_due(db, FakeAdmin(big_profile(1001) + own),
+                                               verify_notify.load_proof_on_file(proof), day="2026-11-02")
+        self.assertEqual([r["request_id"] for r in rows], ["r3"], "the normal profile's credit is still removal-due")
+        self.assertEqual([(r["request_id"], r["reason"]) for r in held], [("r1", self.admin_api.EVIDENCE_UNBOUNDED)])
+        rows, held = verify_notify.removal_due(db, FakeAdmin(own), verify_notify.load_proof_on_file(proof),
+                                               day="2026-11-02")
+        self.assertEqual((sorted(r["request_id"] for r in rows), held), (["r1", "r3"], []))
 
 
 if __name__ == "__main__":
