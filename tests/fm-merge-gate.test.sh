@@ -559,6 +559,38 @@ test_gate_null_pending_qa_before_success_refuses() {
   pass "a null pending qa-review conclusion is not overwritten by a success"
 }
 
+# --- (u2) a cancelled duplicate is superseded by a later run ----------------
+
+test_gate_cancelled_duplicate_is_superseded() {
+  local case_dir rc
+  case_dir=$(make_case cancelled-dup)
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    body='Closes #7.' checks='qa-review:SUCCESS,pr-title:CANCELLED,pr-title:SUCCESS,unit-tests:SUCCESS'
+  printf '[]\n' > "$case_dir/fixtures/pr-list.json"
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a cancelled run superseded by a later run of the same check must not refuse"
+  pass "a cancelled duplicate check is superseded by its later run"
+}
+
+test_gate_only_cancelled_run_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case cancelled-only)
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    body='Closes #7.' checks='qa-review:SUCCESS,pr-title:CANCELLED,unit-tests:SUCCESS'
+  printf '[]\n' > "$case_dir/fixtures/pr-list.json"
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a check whose only run is cancelled is still red"
+  pass "a check with only a cancelled run still refuses"
+}
+
 # --- (v) prose around develop/beta is not a twin reference -----------------
 
 test_gate_ignores_develop_beta_prose() {
@@ -1028,6 +1060,8 @@ test_gate_refuses_unreadable_body_twin
 test_gate_duplicate_qa_reports_worst_conclusion
 test_gate_ignores_unrelated_issue_reference
 test_gate_null_pending_qa_before_success_refuses
+test_gate_cancelled_duplicate_is_superseded
+test_gate_only_cancelled_run_still_refuses
 test_gate_ignores_develop_beta_prose
 test_gate_skipped_or_neutral_qa_outranks_success
 test_gate_muso_ai_without_qa_check_refuses

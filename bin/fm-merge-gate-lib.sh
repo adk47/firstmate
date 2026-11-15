@@ -132,7 +132,11 @@ fm_merge_gate_read_pr() {
   else
     command -v gh >/dev/null 2>&1 || return 1
     # One read, so the head and the checks that authorize it come from the same
-    # snapshot. The body is folded onto one line because the payload is parsed as
+    # snapshot. A check name that ran more than once on this head keeps its
+    # worst-wins reading (a pending re-run still outranks an older success), but
+    # a CANCELLED run is dropped once any non-cancelled run of the same name
+    # exists: a concurrency group cancelling the older of two runs, or a re-run,
+    # supersedes it, as the forge's own merge box reads it. The body is folded onto one line because the payload is parsed as
     # key=value lines.
     if ! fields=$(gh pr view "$number" --repo "$repo" \
       --json headRefOid,author,baseRefName,headRefName,state,mergedAt,body,statusCheckRollup \
@@ -144,7 +148,12 @@ fm_merge_gate_read_pr() {
           ("state=" + (.state // "")),
           ("merged_at=" + ((.mergedAt // "") | tostring)),
           ("body=" + ((.body // "") | gsub("[\r\n]+"; " "))),
-          ((.statusCheckRollup // [])[] | ("check=" + ((.name // .context) // "") + "\u001f" + ((.conclusion // .state) // "")))
+          (((.statusCheckRollup // [])
+            | group_by((.name // .context) // "")
+            | map(if any(.[]; ((.conclusion // .state) // "") != "CANCELLED")
+                  then map(select(((.conclusion // .state) // "") != "CANCELLED")) else . end)
+            | add // [])[]
+            | ("check=" + ((.name // .context) // "") + "\u001f" + ((.conclusion // .state) // "")))
         )' 2>/dev/null) || [ -z "$fields" ]; then
       return 1
     fi
