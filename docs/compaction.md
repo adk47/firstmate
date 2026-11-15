@@ -54,7 +54,7 @@ it.
 
 ## Reading the effective values
 
-Every session start prints them, per model, in the `BOOTSTRAP` section:
+Every session start prints them, per model, immediately after the `BOOTSTRAP` section:
 
 ```
 compaction: enabled=true default reserveTokens=16384 keepRecentTokens=20000 (harness defaults; /home/aaron/.pi/agent/settings.json)
