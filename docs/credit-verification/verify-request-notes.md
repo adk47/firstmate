@@ -743,7 +743,7 @@ its 600-entry page, so whenever it starts more than 1,800 s into the tick it wal
 entries instead of 600 (329 at the 3,963 s above). A 200-entry family's estimate is 1,900 s (2,300 s at the full 250
 cap), so it is cut only when it starts past 5,000 s (4,600 s).
 
-## Three pages: 200 entries for every paged family, 600 for the one that sends, 100 for the reminder (`[key=walk-size]`, `[key=send-page-per-family]`, 2026-11-13)
+## Three pages: 200 entries for every paged family, 600 for the one that sends, 100 for the reminder and the new-rows follow-up (`[key=walk-size]`, `[key=send-page-per-family]`, 2026-11-13)
 
 A paged family (wait-apology, reply-due, uvn-status, r1, proof-need-ask, uvn-reminder-14) walks one page per tick,
 counted in list entries that still need a live-gate check. `scripts/credit-verify-outbound.sh` has three page sizes:
@@ -945,6 +945,36 @@ or shortens the lock, and `asked_within()` never counts it.
   PR touches it. The PR that added this family carried every value live on 2026-11-13 unchanged (sha256
   `4321089f...`, read 18:22Z and again 22:26Z); the file's `_doc` itemises each one old -> new. Diff the live file
   against the repo before deploying any change to it.
+
+## The new-rows follow-up (`--campaign uvn-new-rows`, firstmate 2026-11-14 22:48Z)
+
+The follow-up ask to a user we already asked, about owed requests that no ask named (the owing builder's
+`uvn_new_rows` class). Opener `fable-copy-1101-r5/n1` ("Since we last wrote about your credit requests, ..."), then
+the `uvn-status` body over the new rows only. Evidence and the measured audience:
+`data/ask-never-asked-r1/report.md`, `data/ask-never-asked-r1/uvn-new-rows-bodies.md`.
+
+- **Why the lock is open.** `UVN_NEW_ROWS_COPY_APPROVED` waited on a human sign-off of the family's first dry run on
+  the deployed head. That sign-off was replaced by the outbound copy gate's signed verdict: the six bodies of that dry
+  run were all approved by the reviewer round of 2026-11-14 22:40Z. Setting the constant back to 0 locks it again.
+- **Every body needs its own signed approve.** The campaign is `enforce` in `policies/outbound-copy-enforce.json`,
+  and the sender holds an `observed` pass for it as it does for the reminder. Bodies differ per user, so the first
+  tick that renders a body sends none of them: they wait for the reviewer round and go on a later tick.
+- **Who may get it is the ledger's rule**, `verify_ledger.new_rows_user_done`: only a user with a SENT `uvn-status`
+  ask. A user core's own notice told and we never asked is deferred (`no_prior_ask`), never closed. Measured
+  2026-11-14 22:45Z over the 1,404 listed users: 1,072 are `no_prior_ask`, 70 closed on a document, 107 inside the
+  7-day wait, 155 may be asked. The family therefore reaches at most 262 users, not the whole class.
+- **The tick family** (`new_rows_family` in `scripts/credit-verify-outbound.sh`): its own built list
+  (`owing-new-rows.json`), paid then free, after the reminder and before the free ask's walk, a 100-entry page,
+  always `--no-correction` (the `/c2` opener with this one is not approved copy).
+- **The cap is 5 users per tick across paid and free together** (`NR_CAP`, a constant; `tick_cap` in the policy can
+  only lower it) and 120 per segment per day. It is low on purpose: the family had never sent, and the first runs
+  must be read before it scales. Raising it is a PR that cites those runs.
+- **Arming** is its own `armed_families` row. No row, `live: false` or a row with no date checks and never applies.
+  A policy with no `daily_cap` row or no group for the campaign skips the family and does not end the tick.
+- **A build that writes no new-rows list is unmeasured, never "0 listed".** Every build of the tick asks for the
+  class and the file is removed before each build, so a file on disk is the one that build wrote. No file, or a file
+  that is not a JSON object with a `users` list, fails the family: the tick exits 1 and the other families still
+  run. Only an empty list is "nobody is listed". A skip there would leave the tick green with nobody asked.
 
 ## What bounds a tick's sends: order, the claim slice, the not-reached page, class C, the gate's reads (`[key=claims-never-starved]`, `[key=class-c-precheck]`, `[key=gate-reads-beside]`, 2026-11-12)
 

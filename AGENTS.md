@@ -1581,6 +1581,19 @@ measured audience: `docs/credit-verification/verify-request-notes.md` §"The day
   Diff the live file against the repo before merging a change to it and carry the live values, or the deploy
   changes caps and arming, a watchdog clamp included.
 
+## The new-rows follow-up: a low cap, a signed verdict per body, and a small audience
+
+`uvn-new-rows` (firstmate 2026-11-14) asks a user we already asked about owed requests no ask named. Doc:
+`docs/credit-verification/verify-request-notes.md` §"The new-rows follow-up"; evidence `data/ask-never-asked-r1/report.md`.
+
+- **Its sender lock opened on the copy gate's signed verdict, not a person's sign-off**, and the campaign is
+  `enforce`: every body needs its own signed approve, so a tick that renders a new body sends it on a later tick.
+- **The class is not the audience.** `verify_ledger.new_rows_user_done` defers every listed user with no SENT
+  `uvn-status` ask (1,072 of 1,404 on 2026-11-14): a user core's notice told and we never asked is reached by no
+  family. Do not count the builder's `uvn_new_rows` class as people this family will ask.
+- **5 users per tick across paid and free** (`NR_CAP` in `scripts/credit-verify-outbound.sh`). Raise it only by a PR
+  that cites the first runs' output; never by env, a state file or the policy (`tick_cap` only lowers).
+
 ## The notify tick tells every affirmed user and carries the others
 
 `scripts/credit-notify-tick.py` (node-8 `credit-notify-tick.timer`; in git since 2026-11-14, before that a

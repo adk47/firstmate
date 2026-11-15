@@ -203,10 +203,16 @@ users = [{"user_id": "1", "paid": True, "class": "uvn"}, {"user_id": "2", "paid"
 # uvn-reminder-14: nobody is due unless the test says so (STUB_REMINDER_USERS="<paid n> <free n>")
 _rp, _rf = (int(x) for x in (_o.environ.get("STUB_REMINDER_USERS") or "0 0").split())
 users += [{"user_id": str(300 + i), "paid": i < _rp, "class": "uvn_reminder_14"} for i in range(_rp + _rf)]
+# uvn-new-rows: nobody is listed unless the test says so (STUB_NEW_ROWS_USERS="<paid n> <free n>")
+_np, _nf = (int(x) for x in (_o.environ.get("STUB_NEW_ROWS_USERS") or "0 0").split())
+users += [{"user_id": str(400 + i), "paid": i < _np, "class": "uvn_new_rows"} for i in range(_np + _nf)]
 json.dump({"users": users}, open(sys.argv[sys.argv.index("--out") + 1], "w"))
 for i, a in enumerate(sys.argv):                        # the builder writes the one-class list itself (r5 776)
     if a == "--class-out" and not _o.environ.get("STUB_NO_CLASS_OUT"):
         cls, _, path = sys.argv[i + 1].partition("=")
+        if cls == "uvn_new_rows" and _o.environ.get("STUB_NO_NEW_ROWS_OUT"): continue   # asked for, never written
+        if cls == "uvn_new_rows" and _o.environ.get("STUB_NEW_ROWS_RAW") is not None:  # written, in the wrong shape
+            open(path, "w").write(_o.environ["STUB_NEW_ROWS_RAW"]); continue
         json.dump({"users": [u for u in users if u["class"] == cls], "split_of": {"class": cls}}, open(path, "w"))
 print(json.dumps({"counts": {"reminder_skip_not_due": 4, "reminder_skip_replied": 1} if _rp + _rf else {},
                   "classes": {"uvn": 2, "review_hold": 1, "account_hold": 1}}))
@@ -323,7 +329,7 @@ newest_tick() { printf '%s' "$(newest_out)tick.log"; }
         CVO_HEALTH="$E/h" CVO_ZERO_READ="$E/z" CVO_FRAUD="$E/f" CVO_MAIN_ENV="$E/env" CVO_LEDGER="$E/l.sqlite3" CVO_SCRIPTS="$E/s"
         CVO_RD_SCAN="$E/rd" CVO_RD_CAP=99999 CVO_POLICY="$E/p.json" CVO_CLAIM_LIST="$E/c.json" CVO_CAP=99999 CVO_R1_CAP=99999
         CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_CLAIM_GROUP_BUDGET_S=1 CVO_STARVED_PAGE_AT=99 CVO_STARVED_REPAGE_EVERY=1 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_CHECK_ENTRIES=99999 CVO_CHECK_ENTRIES_SEND=99999 CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_PER_SEGMENT_FROM_TEST=status-doc-received=2000-01-01T00:00Z CVO_PAID_FROM_TEST=proof-need-ask=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t"
-        CVO_CLAIM_PROOF_STATE="$E/cpc" CVO_CLAIM_PROOF_LIMIT_H=999 CVO_CLAIM_PROOF_UNREAD_H=999 CVO_CLAIM_PROOF_REPEAT_MIN=999)
+        CVO_CLAIM_PROOF_STATE="$E/cpc" CVO_CLAIM_PROOF_LIMIT_H=999 CVO_CLAIM_PROOF_UNREAD_H=999 CVO_CLAIM_PROOF_REPEAT_MIN=999 CVO_NR_CAP=99999 CVO_NR_ENTRIES=99999)
   run -0 env -u BATS_TEST_TMPDIR "${evil[@]}" "$SCRIPT" --print-config
   [[ "$output" != *"$E"* ]]; [[ "$output" != *99999* ]]
   now_line="$(printf '%s\n' "$output" | grep '^NOW_EPOCH=')"; [ "${now_line#NOW_EPOCH=}" -gt 1700000000 ]   # the real clock, never CVO_NOW_EPOCH=1
@@ -360,6 +366,8 @@ NEED_RUNNER=/opt/hydra/scripts/credit_review/need_asks.py
 FIRST_CAP=100
 R14_CAP=50
 R14_ENTRIES=100
+NR_CAP=5
+NR_ENTRIES=100
 UNSIGNED_ALL=0
 JUDGE=/opt/hydra/scripts/credit-batch-judge.py
 DEPLOYED_SHA_FILE=/opt/hydra/.deployed-sha
@@ -2028,14 +2036,20 @@ assert p["daily_cap"][r] == {"paid": 1200, "free": 1200}, p["daily_cap"].get(r) 
 assert all(0 < v <= 50 for v in p["tick_cap"][r].values()) and set(p["tick_cap"][r]) == {"paid", "free"}
 # the values that were live on node-8 when this file was reconciled ride along unchanged (nothing is raised by a deploy)
 assert p["tick_cap"]["uvn-status"] == {"free": 50, "paid": 50}
-assert p["tick_cap"]["proof-need-ask"] == {"free": 5, "paid": 50}
+assert p["tick_cap"]["proof-need-ask"] == {"free": 50, "paid": 50}   # free raised 5 -> 50 on purpose (ask-never-asked-r1, firstmate 2026-11-14 21:19Z): at 5 the free page moved 6 list entries a tick
 assert p["tick_cap"]["claim-proof-ask"] == {"paid": 25, "free": 25}
 assert p["daily_cap"]["uvn-status"] == {"paid": 2000, "free": 2000}
 assert p["daily_cap"]["proof-need-ask"] == {"paid": 400, "free": 400}
 assert p["shared_daily_cap"] == {"credit": 2500, "claim": 25}
 assert {k: v["unsigned_from"] for k, v in p["armed_families"].items() if k != r} == {
     "uvn-status": "2026-10-31T18:02Z", "status-doc-received": "2026-11-03T12:56Z",
-    "claim-proof-ask": "2026-11-03T18:58Z", "proof-need-ask": "2026-11-10T02:17Z"}
+    "claim-proof-ask": "2026-11-03T18:58Z", "proof-need-ask": "2026-11-10T02:17Z", "uvn-new-rows": "2026-11-14T22:48Z"}
+# uvn-new-rows (ask-never-asked-r1): its own row, in the credit group, and LOW: 5 a tick, 24 ticks a day
+n = "uvn-new-rows"
+assert p["armed_families"][n] == {"live": True, "paid": True, "unsigned_from": "2026-11-14T22:48Z"}, p["armed_families"].get(n)
+assert n in p["groups"]["credit"] and n not in p["groups"]["claim"]
+assert p["tick_cap"][n] == {"paid": 5, "free": 5}, p["tick_cap"].get(n)
+assert p["daily_cap"][n] == {"paid": 120, "free": 120}, p["daily_cap"].get(n)
 PY
   # the tick itself reads the shipped file as POLICY arming: no row is malformed or ignored, and the reminder's row is its own
   export CVO_POLICY="$SHIPPED_POLICY" CVO_UNSIGNED_ALL=0
@@ -2151,6 +2165,116 @@ r14_cap() { # <segment> <dry-run|apply>: the --max-users the reminder's check / 
   CVO_POLICY="$TEST_TMPDIR/p.json" STUB_REMINDER_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
   [ -z "$(r14_cap paid apply)" ]
   [ "$(r14_cap free apply)" = 50 ]
+}
+
+nr_cap() { # <segment> <dry-run|apply>: the --max-users the new-rows check / apply was handed (empty = not run)
+  grep -- "owing-new-rows.json --segment $1 --campaign uvn-new-rows .*--mode $2" "$CALLS" | grep -o -- "--max-users [0-9]*" | head -1 | awk '{print $2}'
+}
+
+@test "outbound tick (uvn-new-rows): its own family from its own built list - paid then free, 5 per tick, a 100-entry page, never the /c2 opener, before the free ask" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  STUB_NEW_ROWS_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  t="$(newest_tick)"
+  # the builder is asked for the class on every build, and the family reads only that file
+  grep -q -- "--class-out uvn_reminder_14=.*/owing-reminder-14.json --class-out uvn_new_rows=.*/owing-new-rows.json" "$CALLS.owing"
+  jq -e '.split_of.class == "uvn_new_rows" and (.users | length) == 5' "$(newest_out)owing-new-rows.json" >/dev/null
+  grep -q "uvn-new-rows paid: audience 5 listed (2 paid, 3 free)" "$t"
+  # checked like every family, then applied on the check's own accepted set; the cap is 5, not the tick's 250
+  [ "$(nr_cap paid dry-run)" = 5 ]
+  [ "$(nr_cap paid apply)" = 5 ]
+  grep -q -- "owing-new-rows.json --segment paid --campaign uvn-new-rows --no-correction .*--max-entries 100 --start-entry 0 --mode dry-run --max-users 5 --check-recipients" "$CALLS"
+  grep -qE -- "owing-new-rows.json --segment free --campaign uvn-new-rows .*--mode apply .*--signed-accepted [^ ]*/uvn-new-rows-free-check.json" "$CALLS"
+  # every call carries --no-correction: the /c2 opener with the n1 opener is not approved copy
+  [ "$(grep -c -- "--campaign uvn-new-rows" "$CALLS")" = "$(grep -- "--campaign uvn-new-rows" "$CALLS" | grep -c -- "--no-correction")" ]
+  # order: after the paid ask, before the free ask's walk; rebuilt right before it
+  n() { grep -n -- "$1" "$CALLS" | head -1 | cut -d: -f1; }
+  [ "$(n "owing-uvn.json --segment paid .*--mode apply")" -lt "$(n "owing-new-rows.json --segment paid")" ]
+  [ "$(n "owing-new-rows.json --segment paid .*--mode apply")" -lt "$(n "owing-new-rows.json --segment free")" ]
+  [ "$(n "owing-new-rows.json --segment free .*--mode apply")" -lt "$(n "owing-uvn.json --segment free")" ]
+  grep -q "owing list rebuilt immediately before uvn-new-rows" "$t"
+  # the ask's own family is untouched by it
+  grep -q "^uvn-status --list .*owing-uvn.json --segment free --campaign uvn-status .*--mode apply" "$CALLS"
+}
+
+@test "outbound tick (uvn-new-rows): 5 per tick is ONE budget across paid and free, and a policy tick_cap row can only lower it" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # the paid apply writes 3 ledger rows: free may send 2
+  STUB_NEW_ROWS_USERS="2 3" STUB_ROWS=3 CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(nr_cap paid apply)" = 5 ]
+  [ "$(nr_cap free dry-run)" = 2 ]
+  [ "$(nr_cap free apply)" = 2 ]
+  # the paid apply writes 5: the free segment is not started at all
+  : > "$CALLS"
+  STUB_NEW_ROWS_USERS="2 3" STUB_ROWS=5 CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(nr_cap paid apply)" = 5 ]
+  if grep -q -- "owing-new-rows.json --segment free" "$CALLS"; then false; fi
+  grep -q "uvn-new-rows-free: the per-tick budget for uvn-new-rows (5/tick across all segments) was spent by an earlier segment (5 sent); this segment waits for the next tick" "$(newest_tick)"
+  # a policy row above the family's cap raises nothing; a lower one lowers it
+  : > "$CALLS"
+  jq '.tick_cap["uvn-new-rows"] = {"paid": 2, "free": 500}' "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
+  CVO_POLICY="$TEST_TMPDIR/p.json" STUB_NEW_ROWS_USERS="2 3" STUB_ROWS=1 CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(nr_cap paid apply)" = 2 ]
+  [ "$(nr_cap free apply)" = 4 ]
+}
+
+@test "outbound tick (uvn-new-rows): nobody listed or no policy row starts no family; only its OWN dated row arms it" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # nobody listed: the family is not started, and the ask still runs
+  CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  if grep -q -- "--campaign uvn-new-rows" "$CALLS"; then false; fi
+  grep -q "uvn-new-rows paid: nobody is listed (0 users); skipped" "$(newest_tick)"
+  if grep -q "rebuilt immediately before uvn-new-rows" "$(newest_tick)"; then false; fi
+  grep -q "^uvn-status --list .*owing-uvn.json --segment free --campaign uvn-status .*--mode apply" "$CALLS"
+  # a build that exits 0 and wrote no new-rows list: the audience is UNMEASURED, never "0 listed". The family fails
+  # (the tick exits 1), it is rebuilt first, no runner is called for it, no kill file, and the ask after it still goes
+  : > "$CALLS"
+  STUB_NO_NEW_ROWS_OUT=1 STUB_NEW_ROWS_USERS="2 3" CVO_UNSIGNED_ALL=0 run -1 "$SCRIPT"
+  if grep -q -- "--campaign uvn-new-rows" "$CALLS"; then false; fi
+  grep -q "uvn-new-rows paid: UNMEASURED - the owing builder wrote no new-rows list" "$(newest_tick)"
+  grep -q "uvn-new-rows free: UNMEASURED - the owing builder wrote no new-rows list" "$(newest_tick)"
+  grep -q "rebuilt immediately before uvn-new-rows" "$(newest_tick)"
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  grep -q "^uvn-status --list .*owing-uvn.json --segment free --campaign uvn-status .*--mode apply" "$CALLS"
+  # a list in the wrong shape is unmeasured in the same way: an object with no users, users that is not a list,
+  # JSON that is not an object, and bytes that are not JSON. None of them is "nobody is listed"
+  for raw in '{}' '{"users": null}' '{"users": {"1": 2}}' '{"users": "none"}' '[]' '{"users": [' 'not json'; do
+    : > "$CALLS"
+    STUB_NEW_ROWS_RAW="$raw" STUB_NEW_ROWS_USERS="2 3" CVO_UNSIGNED_ALL=0 run -1 "$SCRIPT"
+    if grep -q -- "--campaign uvn-new-rows" "$CALLS"; then false; fi
+    grep -q "uvn-new-rows paid: UNMEASURED - the new-rows list .* is not a JSON object with a users list" "$(newest_tick)"
+    grep -q "uvn-new-rows free: UNMEASURED - the new-rows list .* is not a JSON object with a users list" "$(newest_tick)"
+    [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+    grep -q "^uvn-status --list .*owing-uvn.json --segment free --campaign uvn-status .*--mode apply" "$CALLS"
+  done
+  # an empty users list IS a measurement: nobody listed, skipped, exit 0
+  : > "$CALLS"
+  STUB_NEW_ROWS_RAW='{"users": []}' STUB_NEW_ROWS_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  if grep -q -- "--campaign uvn-new-rows" "$CALLS"; then false; fi
+  # a policy with no row for the campaign: skipped, and the tick does not end
+  : > "$CALLS"
+  jq 'del(.daily_cap["uvn-new-rows"]) | .groups.credit -= ["uvn-new-rows"]' "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
+  CVO_POLICY="$TEST_TMPDIR/p.json" STUB_NEW_ROWS_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  if grep -q -- "--campaign uvn-new-rows" "$CALLS"; then false; fi
+  grep -q "uvn-new-rows paid: the policy has no daily_cap row or no group for uvn-new-rows; skipped" "$(newest_tick)"
+  grep -q "^uvn-status --list .*owing-uvn.json --segment free --campaign uvn-status .*--mode apply" "$CALLS"
+  # no arming row for it: checked, never applied
+  : > "$CALLS"
+  jq '.armed_families = {"uvn-status": {"live": true, "paid": true, "unsigned_from": "2026-10-31T18:02Z"}}' "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
+  CVO_POLICY="$TEST_TMPDIR/p.json" STUB_NEW_ROWS_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(nr_cap paid dry-run)" = 5 ]
+  [ -z "$(nr_cap paid apply)" ] && [ -z "$(nr_cap free apply)" ]
+  # live:false, and a row with no date: the same
+  for row in '{"live": false, "paid": false, "unsigned_from": "2026-11-14T22:48Z"}' '{"live": true, "paid": true}'; do
+    : > "$CALLS"
+    jq --argjson r "$row" '.armed_families = {"uvn-new-rows": $r}' "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
+    CVO_POLICY="$TEST_TMPDIR/p.json" STUB_NEW_ROWS_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+    [ -z "$(nr_cap paid apply)" ] && [ -z "$(nr_cap free apply)" ]
+  done
+  # its own dated row applies it
+  : > "$CALLS"
+  jq '.armed_families = {"uvn-new-rows": {"live": true, "paid": true, "unsigned_from": "2026-11-14T22:48Z"}}' "$BASE_POLICY" > "$TEST_TMPDIR/p.json"
+  CVO_POLICY="$TEST_TMPDIR/p.json" STUB_NEW_ROWS_USERS="2 3" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(nr_cap paid apply)" = 5 ]
 }
 
 @test "outbound tick (Fable 10-30): the SHARED group cap - credit rows already sent today use up the credit room; claims have their own 500" {

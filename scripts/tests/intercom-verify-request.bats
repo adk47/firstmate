@@ -1982,10 +1982,12 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   [ "$(posts)" -eq 1 ]
 }
 
-@test "uvn-new-rows (fable-copy-1101-r5/n1): a told user's un-asked rows get the n1 opener + the uvn body; send-locked; only after a SENT uvn ask; one message per row ever; never with /c2" {
-  grep -qx "readonly UVN_NEW_ROWS_COPY_APPROVED=0" "$REAL_SCRIPT"
-  sed 's/^readonly UVN_NEW_ROWS_COPY_APPROVED=0$/readonly UVN_NEW_ROWS_COPY_APPROVED=1/' "$UVN" > "$TEST_TMPDIR/nr.sh"; chmod +x "$TEST_TMPDIR/nr.sh"
-  NR="$TEST_TMPDIR/nr.sh"
+@test "uvn-new-rows (fable-copy-1101-r5/n1): a told user's un-asked rows get the n1 opener + the uvn body; sent only on a signed approve; only after a SENT uvn ask; one message per row ever; never with /c2" {
+  # the lock is open on the copy gate's verdict (ask-never-asked-r1, 2026-11-14); the constant set back to 0 still locks
+  grep -qx "readonly UVN_NEW_ROWS_COPY_APPROVED=1" "$REAL_SCRIPT"
+  sed 's/^readonly UVN_NEW_ROWS_COPY_APPROVED=1$/readonly UVN_NEW_ROWS_COPY_APPROVED=0/' "$UVN" > "$TEST_TMPDIR/nr-locked.sh"; chmod +x "$TEST_TMPDIR/nr-locked.sh"
+  grep -qx "readonly UVN_NEW_ROWS_COPY_APPROVED=0" "$TEST_TMPDIR/nr-locked.sh"
+  NR="$UVN"
   # the render: n1 singular (one track), then the approved uvn body over the new rows only
   credits "$TEST_TMPDIR/n.json" Jane "u2:Mixing:Song B:Big Star"
   run -0 "$NR" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
@@ -2009,14 +2011,24 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
   INTERCOM_VERIFY_TEST_DAY=2026-10-01 run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1001 credits=1" ]]
-  # the COMMITTED gate is send-locked (a new class): the check runs, the post refuses
-  run -1 "$UVN" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
-  [[ "$output" == *"uvn-new-rows is a NEW class, send-locked"* ]]
-  # unlocked: the new row goes, its own campaign, the n1 ref on the row; comm_state reads it as the uvn ask
+  # the constant back at 0 is still a lock: the post refuses
+  run -1 "$TEST_TMPDIR/nr-locked.sh" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"uvn-new-rows is send-locked (UVN_NEW_ROWS_COPY_APPROVED=0)"* ]]
+  # no standing approval: pending, refused and an observe-mode pass all hold, and a hold is not a lock
+  STUB_COPY_GATE=pending INTERCOM_VERIFY_TEST_DAY=2026-10-20 run -3 "$NR" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED copy_review_pending credits=1"* ]]
+  STUB_COPY_GATE=refuse INTERCOM_VERIFY_TEST_DAY=2026-10-20 run -3 "$NR" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED copy_review_refuse credits=1"* ]]
+  STUB_COPY_GATE=observe INTERCOM_VERIFY_TEST_DAY=2026-10-20 run -3 "$NR" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED copy_review_required credits=1"* ]]
+  [ "$(posts)" -eq 1 ]
+  [ -z "$(sql "SELECT id FROM verify_messages WHERE campaign='uvn-new-rows' AND status IN ('sent','attempted')")" ]
+  # a signed approve: the new row goes, its own campaign, the n1 ref and the verdict on the row; comm_state reads it as the uvn ask
   INTERCOM_VERIFY_TEST_DAY=2026-10-20 run -0 "$NR" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1002 credits=1" ]]
   [[ "$(msg .body | plain)" == "Since we last wrote about your credit requests, another request of yours needs the same thing."* ]]
   [[ "$(sql "SELECT campaign || '|' || approval_ref FROM verify_messages WHERE message_id='1002'")" == "uvn-new-rows|"*"opener fable-copy-1101-r5/n1"* ]]
+  [[ "$(sql "SELECT copy_review || '|' || copy_verdict_id FROM verify_messages WHERE message_id='1002'")" == "approved|ocv-"* ]]
   grep -q -- "--campaign uvn-status" "$TEST_TMPDIR/comm-state-args"
   # one message per ROW ever; a row the first ask named is never followed up (any ask blocks it)
   INTERCOM_VERIFY_TEST_DAY=2026-10-30 run -0 "$NR" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
@@ -2157,7 +2169,7 @@ r14() { "$UVN" send --campaign uvn-reminder-14 --credits-file "$TEST_TMPDIR/c.js
 }
 
 @test "uvn-new-rows (n1): rows a status line of ours named would need /c2 AND n1 - that pair is not approved: refused n1_c2_uncoded" {
-  sed 's/^readonly UVN_NEW_ROWS_COPY_APPROVED=0$/readonly UVN_NEW_ROWS_COPY_APPROVED=1/' "$UVN" > "$TEST_TMPDIR/nr.sh"; chmod +x "$TEST_TMPDIR/nr.sh"
+  cp "$UVN" "$TEST_TMPDIR/nr.sh"; chmod +x "$TEST_TMPDIR/nr.sh"; grep -qx "readonly UVN_NEW_ROWS_COPY_APPROVED=1" "$TEST_TMPDIR/nr.sh"
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
   INTERCOM_VERIFY_TEST_DAY=2026-10-01 run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   credits "$TEST_TMPDIR/s.json" Jane "u2:Mixing:Song B:Big Star"

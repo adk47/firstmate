@@ -498,7 +498,13 @@ readonly CORRECTION_C2_MANY="A correction to our earlier note: these requests do
 readonly CORRECTION_C2_REF="fable-copy-1030-r5/c2"
 # fable-copy-1101-r5/n1 (byte-for-byte; uvn-new-rows): the first sentence of the follow-up ask to a TOLD user about owed
 # rows no ask named - singular / plural by DISTINCT TRACKS among the new rows (the body's own count decides, /l).
-# NEW CLASS: send-locked until p1 + r5 read and sign its first dry run on the deployed head.
+# The class was send-locked until p1 + r5 read and signed its first dry run on the deployed head. That sign-off is
+# replaced by the outbound copy gate's signed verdict (firstmate 2026-11-14 22:48Z, ask-never-asked-r1): the first dry
+# run on deployed head 96c5a2fb8 rendered six bodies and the reviewer round of 2026-11-14 22:40:50Z approved all six
+# (ocv-7e38f2c0b2724b96, ocv-762f8aeafb4fb30a, ocv-9cae0062eb0af9e1, ocv-fb3df8e1dad86c67, ocv-4dd67f16bbbe9db0,
+# ocv-bd26ab432dcbc4b6). The lock below is open on that basis and NO body has a standing approval: the campaign is
+# `enforce` in policies/outbound-copy-enforce.json and this script holds any answer but a signed `approved` for the
+# exact bytes (SIGNED_APPROVE_ONLY below), so every sent row carries its own verdict.
 readonly NEW_ROWS_N1_ONE="Since we last wrote about your credit requests, another request of yours needs the same thing."
 readonly NEW_ROWS_N1_MANY="Since we last wrote about your credit requests, other requests of yours need the same thing."
 readonly NEW_ROWS_N1_REF="fable-copy-1101-r5/n1"
@@ -508,7 +514,7 @@ readonly NEW_ROWS_N1_REF="fable-copy-1101-r5/n1"
 # for the exact bytes (an `observed` pass is a hold for this campaign), so every sent row carries its own verdict
 # (copy_verdict_id + copy_verdict_sha256 + body_sha256).
 readonly APPROVAL_REF_UVN_REMINDER="captain 2026-11-13 15:08Z order (re-ask verification non-responders after 14 days; one reminder per user per ask); copy uvn-reminder-14 v1, sent only on a signed outbound-copy verdict for these exact bytes (see copy_verdict_id on this row)"
-readonly UVN_NEW_ROWS_COPY_APPROVED=0
+readonly UVN_NEW_ROWS_COPY_APPROVED=1
 readonly APPROVAL_REF_WITHDRAWAL="$APPROVAL_REF_STANDING_ORDER; withdrawal-confirm copy approved by firstmate under it 2026-10-19 21:21Z (inbox 061, confirmed in 064), sent only for a request the requester withdrew (metadata.withdrawal.by = requester)"
 readonly APPROVAL_REF_STATUS="$APPROVAL_REF_STANDING_ORDER; status notes approved by firstmate under it 2026-10-20 (inbox 070: team-review verbatim; 071: doc-received as credit-trust-llm-t01 drafted it). Not asks."
 readonly APPROVAL_REF_STATUS_NEUTRAL="$APPROVAL_REF_STATUS Status A neutral (--copy queued-neutral) for an unread, unanswered filing: fable-copy-1030-r5/i (captain 21:3xZ wording)."
@@ -1957,7 +1963,7 @@ if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "claim-status" ] && [ "$CLAIM_STATUS_COP
   refuse "the claim-status copy is not approved for sending yet (CLAIM_STATUS_COPY_APPROVED=0). Fable approved the text; it waits for firstmate's GO after the 5-user dry run, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
 fi
 if [ "$LIVE" = "1" ] && [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "uvn-new-rows" ] && [ "$UVN_NEW_ROWS_COPY_APPROVED" != "1" ]; then
-  refuse "uvn-new-rows is a NEW class, send-locked (UVN_NEW_ROWS_COPY_APPROVED=0) until p1 + r5 sign its first dry run on the deployed head; --dry-run / --check-recipient only. Nothing was sent or claimed."
+  refuse "uvn-new-rows is send-locked (UVN_NEW_ROWS_COPY_APPROVED=0); --dry-run / --check-recipient only. Nothing was sent or claimed."
 fi
 if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "uvn-status" ] && [ "$UVN_STATUS_COPY_APPROVED" != "1" ]; then
   refuse "the uvn-status copy is not approved for sending (UVN_STATUS_COPY_APPROVED=0)."
@@ -4110,18 +4116,19 @@ elif [ "$cg_rc" = 4 ] && [ "$CG_RESULT" = "observed" ] && [ "$CG_MODE" = "observ
   [[ "$COPY_VERDICT_ID" =~ ^ocv-[0-9a-f]{16}$ ]] && [[ "$COPY_VERDICT_SHA" =~ ^[0-9a-f]{64}$ ]] || { COPY_VERDICT_ID=""; COPY_VERDICT_SHA=""; }
   COPY_REVIEW="observed:$CG_REVIEW"
 fi
-# uvn-reminder-14 has no standing copy approval, so only a SIGNED approve of these bytes sends it. The policy lists it
-# under `enforce`; this is the belt for the day that file is edited or replaced: an `observed` pass is a hold here.
-R14_OBSERVED=0
-if [ "$CAMPAIGN" = "uvn-reminder-14" ] && [ "$COPY_REVIEW" != "approved" ]; then
-  [ -z "$COPY_REVIEW" ] || R14_OBSERVED=1
+# uvn-reminder-14 and uvn-new-rows have no standing copy approval, so only a SIGNED approve of these bytes sends them.
+# The policy lists both under `enforce`; this is the belt for the day that file is edited or replaced: an `observed`
+# pass is a hold here.
+SIGNED_ONLY_OBSERVED=0
+if { [ "$CAMPAIGN" = "uvn-reminder-14" ] || [ "$CAMPAIGN" = "uvn-new-rows" ]; } && [ "$COPY_REVIEW" != "approved" ]; then
+  [ -z "$COPY_REVIEW" ] || SIGNED_ONLY_OBSERVED=1
   COPY_REVIEW=""
 fi
 if [ -z "$COPY_REVIEW" ]; then
   cg_why="$(printf '%s' "$CG" | "$JQ_BIN" -r '.reason // ""' 2>/dev/null || true)"
   [ -n "$cg_why" ] || cg_why="copy_gate_error:the gate gave no readable answer (rc=$cg_rc)"
   if { [ "$cg_rc" = 0 ] && [ "$CG_RESULT" = "approved" ]; } || [ "$cg_rc" = 4 ]; then cg_why="copy_gate_error:the gate's answer does not name this body or a verdict"; fi
-  [ "$R14_OBSERVED" != "1" ] || cg_why="copy_review_required:uvn-reminder-14 sends only on a signed approve, and the gate answered in observe mode"
+  [ "$SIGNED_ONLY_OBSERVED" != "1" ] || cg_why="copy_review_required:$CAMPAIGN sends only on a signed approve, and the gate answered in observe mode"
   ledger hold-copy-review --message-row "$ROW_ID" --reason "copy_review_hold: ${cg_why:0:300}" --body-sha256 "$COPY_SHA_LOCAL" >/dev/null \
     || die "the copy gate did not approve this message and the hold could not be ledgered; nothing was sent (row $ROW_ID stays claimed for a human)."
   printf 'DEFERRED %s credits=%s (the outbound copy gate has not approved this exact message; nothing was sent)\n' "${cg_why%%:*}" "$NC"

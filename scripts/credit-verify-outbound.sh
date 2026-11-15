@@ -100,6 +100,13 @@ R1_CAP="$(cfg CVO_R1_CAP 250)"
 # The cap rises only by PR, on evidence (three clean ticks): constants, never env or a state file.
 R14_CAP="$(cfg CVO_R14_CAP 50)"
 R14_ENTRIES="$(cfg CVO_R14_ENTRIES 100)"
+# uvn-new-rows (ask-never-asked-r1, firstmate 2026-11-14 22:48Z): the follow-up ask to a user we already asked, about
+# owed requests no ask named (the owing builder's uvn_new_rows class). NR_CAP is the family's cap per TICK across paid
+# + free together (SHARED_TICK_CAP below), paid first. It is LOW on purpose: the family has never sent, and the first
+# runs must be small enough to read and judge before it scales. NR_ENTRIES is the page it walks per segment.
+# The cap rises only by PR, on the evidence of those runs: constants, never env or a state file.
+NR_CAP="$(cfg CVO_NR_CAP 5)"
+NR_ENTRIES="$(cfg CVO_NR_ENTRIES 100)"
 CLAIM_CAP="$(cfg CVO_CLAIM_CAP 250)"
 REFUSAL_SPIKE="$(cfg CVO_REFUSAL_SPIKE 0.20)"
 FIRST_CAP=100                          # [key=scale-now]: a family's first unsigned ticks, until v1's 10-sample line
@@ -169,6 +176,8 @@ DEFERRED=0                             # 1 once any family deferred: the tick th
 # THREE knobs, because the families are not alike ([key=send-page-per-family], 2026-11-13, corrects #1928):
 #   CHECK_ENTRIES      (200) - every paged family.
 #   CHECK_ENTRIES_SEND (600) - the ONE family that sends the notes: uvn-status free (see page_entries()).
+#   NR_ENTRIES         (100) - uvn-new-rows paid and free (ask-never-asked-r1): two more 100-entry families ahead of
+#                              the sending family, each 1,100 s at its worst; they start no family when nobody is listed.
 #   R14_ENTRIES        (100) - uvn-reminder-14 paid and free (verif-reask-14d-r1): its list is already cut to the
 #                              people the ledger says are due, so a short page fills its 50-a-tick cap. It runs
 #                              BEFORE the sending family, i.e. ahead of it, like the four below.
@@ -208,6 +217,7 @@ CHECK_ENTRIES_SEND="$(cfg CVO_CHECK_ENTRIES_SEND 600)"
 page_entries() {
   if [ "$1" = uvn-status ] && [ "$2" = free ] && [ "$3" = uvn-status ]; then echo "$CHECK_ENTRIES_SEND"
   elif [ "$1" = uvn-reminder-14 ]; then echo "$R14_ENTRIES"
+  elif [ "$1" = uvn-new-rows ]; then echo "$NR_ENTRIES"
   else echo "$CHECK_ENTRIES"; fi
 }
 # [key=tick-budget-page-fit] (2026-11-11): the smallest page a paged family will still run with. A page that does not
@@ -266,6 +276,15 @@ declare -A UNSIGNED_FROM=(
   #   3. the audience is the ledger's rule (verify_ledger.reminder14_user_done), re-read at the peek and in the claim.
   # On node-8 the policy's armed_families row is what arms it (a row with no date clears this one).
   [uvn-reminder-14]="2026-11-13T15:08Z"
+  # uvn-new-rows: dated by firstmate's instruction (2026-11-14 22:48Z, ask-never-asked-r1), after the outbound copy
+  # gate approved all six bodies of the family's first dry run on the deployed head (the sign-off its sender lock
+  # waited on). Not a read-back batch either, so the same three rails are code:
+  #   1. no body is sent without a SIGNED approve of its exact bytes (the sender holds an `observed` pass for this
+  #      campaign too; policies/outbound-copy-enforce.json lists it under `enforce`);
+  #   2. NR_CAP (5) is ONE budget per tick across paid + free (SHARED_TICK_CAP), and policy tick_cap can only lower it;
+  #   3. the audience is the ledger's rule (verify_ledger.new_rows_user_done): only a user with a SENT uvn-status ask.
+  # On node-8 the policy's armed_families row is what arms it (a row with no date clears this one).
+  [uvn-new-rows]="2026-11-14T22:48Z"
   [uvn-status]="2026-10-31T18:02Z"     # AE-send-3: 3/3 = would-send 3, health + zero-read clean (h2 18:05Z, n1 465)
   [status-team-review]="2026-10-31T08:20Z"   # /k-ap 7: 7/7 = the signed set, health + zero-read clean (not a timer family yet)
   [claim-status]="2026-10-31T17:55Z"   # c2 batch 5 FREE 250: ledger 5763-6052 == the checked/signed 250, health + zero-read clean (p1 488)
@@ -355,7 +374,7 @@ declare -A FIRST_SPENT=()   # this tick's sends per shared-first family (the led
 # A family listed here has ONE budget per tick across all of its segments, for as long as it is listed (FIRST_CAP's
 # shape, with the family's own number and no ramp): charged by the ledger's count of each apply's sends (TICK_SPENT),
 # in the order credit_families() calls the segments - paid first, free takes what is left.
-declare -A SHARED_TICK_CAP=( [uvn-reminder-14]="$R14_CAP" )
+declare -A SHARED_TICK_CAP=( [uvn-reminder-14]="$R14_CAP" [uvn-new-rows]="$NR_CAP" )
 declare -A TICK_SPENT=()
 # the bats harness only (cfg's seam): every family unsigned at its full cap, so the family tests exercise the applies
 UNSIGNED_ALL="$(cfg CVO_UNSIGNED_ALL 0)"
@@ -389,7 +408,7 @@ PY
 }
 if [ "${1:-}" = "--print-config" ]; then
   for v in CVO_HARNESS HYDRA_ROOT KILL KILL2 LIVE_FLAG PAID_FLAG EXCLUDE STATE PY RUNNER OWING RECEIPTS HEALTH ZERO_READ \
-           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP RD_CHECKS RD_BUDGET POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP REFUSAL_SPIKE NEED_RUNNER FIRST_CAP R14_CAP R14_ENTRIES UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES CHECK_ENTRIES_SEND PAGE_FLOOR TICK_BUDGET_S TICK_HARD_S CLAIM_GROUP_BUDGET_S STARVED_PAGE_AT STARVED_REPAGE_EVERY CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER APPLY_USER_WORST_S APPLY_WORKERS TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
+           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP RD_CHECKS RD_BUDGET POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP REFUSAL_SPIKE NEED_RUNNER FIRST_CAP R14_CAP R14_ENTRIES NR_CAP NR_ENTRIES UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES CHECK_ENTRIES_SEND PAGE_FLOOR TICK_BUDGET_S TICK_HARD_S CLAIM_GROUP_BUDGET_S STARVED_PAGE_AT STARVED_REPAGE_EVERY CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER APPLY_USER_WORST_S APPLY_WORKERS TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
            CLAIM_PROOF_STATE CLAIM_PROOF_LIMIT_H CLAIM_PROOF_UNREAD_H CLAIM_PROOF_REPEAT_MIN; do
     printf '%s=%s\n' "$v" "${!v}"
   done
@@ -1458,7 +1477,10 @@ census_unmeasured() { # <why>: a census read that failed is UNMEASURED, never a 
   CENSUS_UNMEASURED=$((CENSUS_UNMEASURED + 1))
   log "census UNMEASURED ($CENSUS_UNMEASURED): $1; the tick continues into the families (a census read never cancels the run)"
 }
-py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" --class-out "uvn_reminder_14=$OUT/owing-reminder-14.json" > "$OUT/owing.out" 2>&1; rc=$?
+# the new-rows list on disk is always the one THIS build wrote: an older file (an earlier build of this tick, or a run in
+# the same minute) must never stand in for a build that wrote none - that would read as a measured audience
+rm -f "$OUT/owing-new-rows.json"
+py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" --class-out "uvn_reminder_14=$OUT/owing-reminder-14.json" --class-out "uvn_new_rows=$OUT/owing-new-rows.json" > "$OUT/owing.out" 2>&1; rc=$?
 if [ "$rc" = 0 ]; then
   [ -s "$OUT/owing-uvn.json" ] || census_unmeasured "owing builder wrote no uvn-class list"
 elif builder_deadline "$rc" "owing census builder"; then
@@ -1482,7 +1504,8 @@ log "audiences: owing $(head -c 300 "$OUT/owing.out"); receipts $(head -c 300 "$
 # the builder right before its own check, so the facts header the check signs is minutes old, not 25.
 rebuild_owing_uvn() { # <for>
   local t0 rc; t0=$(date +%s)
-  py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" --class-out "uvn_reminder_14=$OUT/owing-reminder-14.json" > "$OUT/owing.out" 2>&1; rc=$?
+  rm -f "$OUT/owing-new-rows.json"   # as at the census: a file here is the one this build wrote, or there is none
+  py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" --class-out "uvn_reminder_14=$OUT/owing-reminder-14.json" --class-out "uvn_new_rows=$OUT/owing-new-rows.json" > "$OUT/owing.out" 2>&1; rc=$?
   if [ "$rc" != 0 ]; then
     builder_deadline "$rc" "owing builder on the rebuild before $1" && return 1
     log "owing builder failed on the rebuild before $1 (rc=$rc): $(tail -c 300 "$OUT/owing.out")"; return 1
@@ -1527,7 +1550,7 @@ import datetime as _dt
 # "uvn-status:c2" is a SUB-class of uvn-status, not a family ([key=class-c-is-a-row]): its row arms the /c2 corrected
 # ask and nothing else, and the uvn-status row still decides whether the family applies at all
 KNOWN = {"r1", "status-doc-received", "uvn-status", "claim-status", "claim-proof-ask", "proof-need-ask", "reply-due",
-         "uvn-status:c2", "uvn-reminder-14"}
+         "uvn-status:c2", "uvn-reminder-14", "uvn-new-rows"}
 def _instant(v):
     for fmt in ("%Y-%m-%dT%H:%MZ", "%Y-%m-%dT%H:%M:%SZ"):
         try:
@@ -1580,8 +1603,8 @@ if [ "$ARMING" = "policy" ]; then
     _key="$_fam"; _datekey="$_fam"
     case "$_fam" in
       r1|status-doc-received) _key="r1"; _datekey="status-doc-received" ;;
-      uvn-status|claim-status|claim-proof-ask|proof-need-ask|reply-due|uvn-status:c2|uvn-reminder-14) ;;
-      *) log "ARMING ROW IGNORED: '$_fam' is not a family this tick runs (r1|status-doc-received, uvn-status, claim-status, claim-proof-ask, proof-need-ask, uvn-reminder-14); it arms nothing"
+      uvn-status|claim-status|claim-proof-ask|proof-need-ask|reply-due|uvn-status:c2|uvn-reminder-14|uvn-new-rows) ;;
+      *) log "ARMING ROW IGNORED: '$_fam' is not a family this tick runs (r1|status-doc-received, uvn-status, claim-status, claim-proof-ask, proof-need-ask, uvn-reminder-14, uvn-new-rows); it arms nothing"
          continue ;;   # read_arming() already fails such a row closed; this is the belt to its braces
     esac
     ARMED_LIVE["$_key"]="$_live"; ARMED_PAID["$_key"]="$_paid"
@@ -1884,6 +1907,12 @@ credit_families() {
   if [ "$(reminder_listed)" != 0 ]; then rebuild_owing_uvn "uvn-reminder-14" || return 1; fi
   fam reminder_family paid || return $?
   fam reminder_family free || return $?
+  # uvn-new-rows runs here for the reminder's reason: after every paid family and BEFORE the free ask's walk, which
+  # uses up the tick. Its list is rebuilt right before it (a stale list is how a user is told twice), and only when
+  # the last build listed somebody.
+  if [ "$(new_rows_listed)" != 0 ]; then rebuild_owing_uvn "uvn-new-rows" || return 1; fi
+  fam new_rows_family paid || return $?
+  fam new_rows_family free || return $?
   rebuild_owing_uvn "uvn-status free" || return 1
   mapfile -t c2 < <(c2_args free)
   fam family uvn-status free "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return $?
@@ -1940,6 +1969,61 @@ print("%d listed (%d paid, %d free); the ledger left out: %s" % (
     ", ".join("%s=%s" % (k[len("reminder_skip_"):], v) for k, v in sorted(c.items()) if k.startswith("reminder_skip_")) or "nobody"))' \
     "$list" "$OUT/owing.out" 2>/dev/null || echo "(not readable here; the runner reads the list itself)")"
   family uvn-reminder-14 "$seg" "$list" "$R14_CAP" uvn-status --campaign uvn-reminder-14
+}
+# uvn-new-rows (ask-never-asked-r1, 2026-11-14): the follow-up ask to a user who already got a SENT uvn-status ask, about
+# owed requests that no ask named. The audience is the owing builder's uvn_new_rows class; the ledger's own rule
+# (verify_ledger.new_rows_user_done, read by the runner and again by the gate) defers every listed user with no sent ask,
+# because the opener "Since we last wrote" would be false for them. It sends through the uvn-status runner under its
+# own campaign, so every gate of the ask applies, and no body goes without a signed approve. Always --no-correction:
+# the /c2 corrected opener together with this one is not approved copy (the gate refuses it as n1_c2_uncoded).
+# new_rows_listed: users on the newest build's list. "missing" and "unreadable" are never 0: a build that was asked for
+# the class and wrote no file, or wrote one that is not a JSON object with a "users" LIST, has measured nobody, and
+# "nobody is listed" would let the tick stay green with no ask. The builder always writes the list (owing_proof.class_list),
+# empty when nobody is in the class, so only [] is 0.
+new_rows_listed() {
+  [ -s "$OUT/owing-new-rows.json" ] || { echo missing; return 0; }
+  py -c 'import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+    u = d["users"] if isinstance(d, dict) else None
+    print(len(u) if isinstance(u, list) else "unreadable")
+except Exception:
+    print("unreadable")' "$OUT/owing-new-rows.json" 2>/dev/null || echo unreadable
+}
+
+new_rows_family() { # <segment>
+  local seg="$1" list="$OUT/owing-new-rows.json"
+  # As for the reminder: a policy with no row for this campaign means it never applies, and ONLY that. family() would
+  # read a missing row as an unreadable cap source and end the whole tick; a policy file restored to a copy older than
+  # this family must stop this family, not every verification send.
+  if [ "$(py -c 'import json,sys
+try:
+    p = json.load(open(sys.argv[1])); c = sys.argv[2]; s = sys.argv[3]
+except Exception:
+    print("unreadable"); raise SystemExit(0)
+row = (p.get("daily_cap") or {}).get(c) if isinstance(p, dict) else None
+grp = [g for g, cs in ((p.get("groups") or {}) if isinstance(p, dict) else {}).items() if isinstance(cs, list) and c in cs]
+print("row" if isinstance(row, dict) and s in row and grp else "norow")' "$POLICY" uvn-new-rows "$seg" 2>/dev/null)" = norow ]; then
+    log "uvn-new-rows $seg: the policy has no daily_cap row or no group for uvn-new-rows; skipped (a campaign with no row never applies)"; return 0
+  fi
+  # Every build of this tick asks for the class, so no file, or a file with no "users" list, is NOT "nobody is listed":
+  # the audience was never measured. The family fails (the tick exits 1, the other families still run) instead of
+  # skipping green with nobody asked.
+  local n; n="$(new_rows_listed)"
+  case "$n" in
+    0) log "uvn-new-rows $seg: nobody is listed (0 users); skipped"; return 0 ;;
+    missing)
+      log "uvn-new-rows $seg: UNMEASURED - the owing builder wrote no new-rows list ($list); nobody was asked and that is not '0 listed'. This family fails; the others continue"
+      return 1 ;;
+    ''|*[!0-9]*)
+      log "uvn-new-rows $seg: UNMEASURED - the new-rows list ($list) is not a JSON object with a users list; nobody was asked and that is not '0 listed'. This family fails; the others continue"
+      return 1 ;;
+  esac
+  log "uvn-new-rows $seg: audience $(py -c 'import json,sys
+u = json.load(open(sys.argv[1])).get("users") or []
+print("%d listed (%d paid, %d free)" % (len(u), sum(1 for x in u if x.get("paid")), sum(1 for x in u if not x.get("paid"))))' \
+    "$list" 2>/dev/null || echo "(not readable here; the runner reads the list itself)")"
+  family uvn-new-rows "$seg" "$list" "$NR_CAP" uvn-status --campaign uvn-new-rows --no-correction
 }
 claim_families() {
   if [ ! -s "$CLAIM_LIST" ]; then log "claim families: no claim list at $CLAIM_LIST (the claim lane drops it); skipped"; return 0; fi

@@ -43,6 +43,9 @@ rewrite work list. **Moving a campaign to enforce is a one-line PR** that adds i
 Shipped table: `decline` is enforced (the reviewer approved all 4 rendered denial bodies, and `DECLINE_CORE_ROUTE_OFF=0`
 means it carries no live traffic); `uvn-reminder-14` is enforced (new copy with no standing approval, so there was no
 `report` to cite; the sender also holds an `observed` pass as a belt, see `verify-request-notes.md` day-14 reminder);
+`uvn-new-rows` is enforced (its sender lock waited on a human sign-off of the first dry run; the reviewer approved all 6
+bodies of that dry run on 2026-11-14 and that verdict replaced the sign-off, so the lock is open and the sender holds an
+`observed` pass for it as it does for the reminder);
 `credit-approved-elsewhere` is enforced from its first byte (no reviewer has read the
 line, and the sender locks it with `APPROVED_ELSEWHERE_COPY_APPROVED=0`, so enforcing it stops no message that is sent
 today); `verify-live` / `windowed` is retired (it states a removal deadline; the reviewer
