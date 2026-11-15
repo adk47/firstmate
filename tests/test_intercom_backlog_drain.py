@@ -825,10 +825,12 @@ class SendTests(unittest.TestCase):
         self.assertEqual((deps.posts, stats["skipped"].get("no_ledger_key")), ([], 1))
 
     def test_each_row_is_keyed_to_the_utc_day_it_is_sent_on(self):
-        # a run that starts at 23:58Z must not let a second message through after midnight
+        # the day a row carries is the day it is SENT on, not the day the run started: the ledger records a confirmed
+        # send on the day it went out, so a POST accepted after midnight holds the next day (QA 2026-11-15).
         late = dt.datetime(2026, 11, 13, 23, 58, tzinfo=dt.timezone.utc).timestamp()
         after = dt.datetime(2026, 11, 14, 0, 0, 5, tzinfo=dt.timezone.utc).timestamp()
-        clock = [late, late, late, after, after, after]   # the pre-check day, the live-thread check, the claim day
+        # four reads of the clock per row: the pre-check day, the live-thread check, the claim day, the finalize day
+        clock = [late, late, late, late, after, after, after, after]
         deps = Deps({"1": conv("1"), "2": conv("2")})
         deps.now = lambda: clock.pop(0)
         plan = [plan_row("1", line="late-reply", uid="77", order=1),

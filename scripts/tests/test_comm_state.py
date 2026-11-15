@@ -827,7 +827,11 @@ class ReplyDueLedgerTest(unittest.TestCase):
                         campaign="uvn-status", user_id="298376", reply_due=part, conversation=conv, now=now)
 
     def sent(self, got):
-        vl.finalize(self.db, message_row=int(got["message_row"]), status="sent", message_id="1", conversation_id="215473681300330")
+        # Sent on the day it was claimed for: the cap holds the day a message was DELIVERED on (`sent_at`), so a
+        # note this class dates two days back must not be stamped as delivered today.
+        day = self.db.execute("SELECT day FROM verify_messages WHERE id=?", (int(got["message_row"]),)).fetchone()[0]
+        vl.finalize(self.db, message_row=int(got["message_row"]), status="sent", message_id="1",
+                    conversation_id="215473681300330", now=datetime.fromisoformat(day + "T12:00:00+00:00"))
 
     def test_one_answer_per_part_and_per_thread_per_48h(self):
         # a status note to this user 2 days ago: an unsolicited note would be 'recent'; the answer is not

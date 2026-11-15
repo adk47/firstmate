@@ -2635,6 +2635,12 @@ jobs:
           # that cannot answer is a no-send with a recorded reason. Real POST functions, faked
           # transport, stand-in gate run through the real subprocess path. Stdlib only.
           python3 scripts/tests/test_outbound_copy_sendgate.py
+          # The caller for an agent-composed reply (scripts/intercom-agent-reply.py): nothing posts
+          # without a signed verdict on those exact bytes, the shared one-message-per-person-per-day
+          # rule and the conversation key are claimed BEFORE the POST, a writer that posted nothing
+          # gives the claim back, and a maybe-posted reply holds the day. Faked gate and writer,
+          # real ledger. Stdlib only.
+          python3 scripts/tests/test_intercom_agent_reply.py
           # The list of every customer sender (policies/outbound-copy-senders.json): an unlisted
           # sender fails, a `gated` one must ask the gate above its POST (AST), each rule mutated.
           python3 scripts/tests/test_check_outbound_copy_gate.py

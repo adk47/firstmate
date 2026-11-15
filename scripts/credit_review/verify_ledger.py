@@ -120,6 +120,7 @@ CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "
              "claim-proof-ask", "claim-status", "gap-ask", "merge-pending", "credit-hold-status", "claim-proof-pending", "proof-need-ask",
              "merge-claim-first",
              "credit-approved-elsewhere",   # send-locked; see APPROVED_ELSEWHERE below
+             "agent-reply",   # a reply an agent composed, sent on the copy gate's signed verdict; see AGENT_REPLY
              "reply-ref",   # [key=product-dispute-refs]: r5's approved reply set, reply_due answers only
              "refund-confirm",   # fable-copy-1103-d2/refund-confirm: a refund that ALREADY happened, told once per refund id
              "uvn-new-rows",   # fable-copy-1101-r5/n1: a told user's owed rows no ask named (one message per row ever)
@@ -140,6 +141,13 @@ CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "
 # ever); it is a notice, not an ask, so only its own rows block it. It exists in THIS ledger so the
 # one-message-per-user-per-UTC-day cap (capped()) and the status campaigns' 7-day deferral see it.
 BACKLOG_REPLY = "backlog-reply"
+# agent-reply (caroline-coach-c1, after hydra#1998): ONE reply an agent composed for ONE Intercom conversation,
+# posted on the copy gate's SIGNED verdict (scripts/intercom-agent-reply.py -> intercom-ops-write.sh reply
+# --agent). Its "request id" is "conv-<conversation id>" - deliberately the SAME key backlog-reply uses, so the
+# two reply campaigns can see each other and one thread is never answered twice - and it exists in THIS ledger
+# for one reason: the one-message-per-user-per-UTC-day cap and that conversation key must see the reply, or the
+# next campaign messages the same person the same day. A NOTICE: it asks for nothing and closes no ask.
+AGENT_REPLY = "agent-reply"
 # decline (captain 2026-10-29 13:2xZ verbatim: "It feels like we are over-communicating when we deny a credit: we
 # could just say supporting information was not provided adequate enough to earn the credit, and if they want to
 # submit something they can submit something again to start the process again"; ruling decline-copy-ruling.md): the
@@ -204,7 +212,7 @@ STATUS_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", C
 NOTICE_CAMPAIGNS = ("takeback-notice", "withdrawal-confirm", "status-doc-received", "status-team-review",
                     "email-changed", "email-changed-dup", CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN, MERGE_PENDING, MERGE_CLAIM_FIRST,
                     CLAIM_PENDING_CAMPAIGN, CREDIT_HOLD_CAMPAIGN, "reply-ref", BACKLOG_REPLY, DECLINE_CAMPAIGN,
-                    APPROVED_ELSEWHERE)
+                    APPROVED_ELSEWHERE, AGENT_REPLY)
 # Campaigns whose gate refusals are re-checkable (firstmate 076, 082, 083): a refusal holds the
 # USER (campaign, user_key or user_id) in verify_refusal_holds for RECHECK_DAYS (the runner and the gate skip
 # them until next_recheck_at, whatever requests are listed); a later send clears it; after
@@ -297,7 +305,7 @@ CREATE TABLE IF NOT EXISTS verify_messages (
   last_reply_at TEXT,                -- this message: time of the latest user reply seen in its conversation
   copy_ref TEXT,                     -- p1 615: the gate's copy token this note rendered (uvn, docrecvr, refq, ...)
   variant TEXT,                      -- p1 615: the openers/prefixes it carried, comma-joined (c2, reply_due_correction, o)
-  approver_kind TEXT,                -- captain-slack | fable-ruling; NULL only on rows written before 2026-11-03
+  approver_kind TEXT,                -- captain-slack | fable-ruling | copy-gate; NULL only on rows written before 2026-11-03
   approval_id TEXT,                  -- the Slack UID, or the fable-ruling-YYYYMMDD-N id, that authorizes this send
   template_sha256 TEXT,              -- sha256 of the template identity it rendered (campaign|kind|copy|variant)
   copy_verdict_id TEXT,              -- outbound copy gate: the reviewer's signed verdict on body_sha256 (ocv-...)
@@ -634,7 +642,14 @@ def stamp_ts(value: Any) -> datetime | None:
         return None
     return parsed.replace(tzinfo=timezone.utc)
 APPROVER_RULING = "fable-ruling"
-APPROVER_KINDS = (APPROVER_CAPTAIN, APPROVER_RULING)
+# copy-gate (caroline-coach-c1, 2026-11-15): the authorization is the outbound copy gate's SIGNED verdict on the
+# exact bytes (approval id = the ocv-<16 hex> verdict id), not a person and not a ruling. It is a third kind
+# rather than an unstamped row because `audit_stamps` reads an unstamped send after the cutover as a finding, and
+# a finding is a page: a legitimate path must be able to say what authorized it. The verdict's own signature is
+# checked by gate.py before this id exists; the ledger checks only the SHAPE and that the row's bytes, campaign
+# and frame are the ones the caller named.
+APPROVER_COPY_GATE = "copy-gate"
+APPROVER_KINDS = (APPROVER_CAPTAIN, APPROVER_RULING, APPROVER_COPY_GATE)
 SLACK_UID_RE = re.compile(r"^U[A-Z0-9]{8,12}$")
 RULING_ID_RE = re.compile(r"^fable-ruling-[0-9]{4}-[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 TEMPLATE_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -656,6 +671,8 @@ def approval_stamp(kind: str = "", approval_id: str = "", template_sha256: str =
         raise ValueError(f"captain-slack approval id {approval_id!r} is not a human's Slack user id")
     if kind == APPROVER_RULING and not RULING_ID_RE.match(approval_id):
         raise ValueError(f"fable-ruling approval id {approval_id!r} is not a fable-ruling-YYYYMMDD-N id")
+    if kind == APPROVER_COPY_GATE and not COPY_VERDICT_ID_RE.match(approval_id):
+        raise ValueError(f"copy-gate approval id {approval_id!r} is not an ocv-<16 hex> verdict id")
     if template_sha256 and not TEMPLATE_SHA_RE.match(template_sha256):
         raise ValueError("the template hash must be 64 lowercase hex characters")
     if approved_by and approved_by != approval_id:
@@ -883,11 +900,37 @@ def _same_user(db: sqlite3.Connection, user_key: str, user_id: str = "") -> tupl
     return f"({cond})", tuple(params)
 
 
+# One message per person per UTC day is the rule, and the day is the day the customer GOT it. A row carries the day it
+# was CLAIMED on, and a POST accepted after midnight delivers on the next day, so the cap also holds a day on which
+# the row's `sent_at` falls (finalize records it). No fixed latency window: the writer has no bounded POST latency
+# (QA 2026-11-15).
+#
+# An `attempted` row is a message that MAY have been delivered and whose delivery day nobody knows, so it holds every
+# day until it is reconciled. Bounding it to the day after its claim let a claim still in flight on the 15th be
+# followed by another message on the 17th (QA 2026-11-15). The cost is that a stuck attempt blocks that person until
+# somebody reconciles it, which is the safe side and is visible: the row says `attempted`.
+#
+# What this changes for EVERY sender, since they all ask here (measured on node-8's ledger, 2026-11-15 15:00Z):
+#   - the delivered-day clause: 1 of 9,280 sent rows with a `sent_at` has it on another day than its claim (a claim at
+#     23:59:59, delivered 00:00:17). A row finalized `sent` long after its claim (a backfill, a late reconcile) holds
+#     the day it is FINALIZED on as well, because that is what `sent_at` then says;
+#   - the unresolved-attempt clause: 1 `attempted` row in the ledger (uvn-status, claimed 2026-11-04), so one person
+#     is held from every campaign until that row is settled. No job settles an `attempted` row today.
+
+
 def capped(db: sqlite3.Connection, *, user_key: str, day: str, user_id: str = "") -> bool:
-    """True when this user already has a message (attempted or sent) on this UTC day, any campaign."""
+    """True when this user already has a message (attempted or sent) claimed on this UTC day, any campaign, one
+    DELIVERED on it (a claim made before midnight whose POST landed after it), or an unresolved `attempted` one on
+    any day (a message that may have been delivered and whose delivery day nobody knows)."""
     cond, params = _same_user(db, user_key, user_id)
-    return db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day=? AND m.status IN ('attempted','sent') "
-                      "LIMIT 1", (*params, day)).fetchone() is not None
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day=? AND m.status IN ('attempted','sent') "
+                  "LIMIT 1", (*params, day)).fetchone() is not None:
+        return True
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.status='sent' AND substr(m.sent_at,1,10)=? "
+                  "LIMIT 1", (*params, day)).fetchone() is not None:
+        return True
+    return db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.status='attempted' "
+                      "LIMIT 1", params).fetchone() is not None
 
 
 REASK_LOCK_DAYS = 90
@@ -1233,7 +1276,7 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
           refs: list[dict[str, Any]] | None = None, windowed: bool = False, now: datetime | None = None,
           enforce_cap: bool = True, user_id: str = "", reply_due: str = "", conversation: str = "", copy_ref: str = "",
           variant: str = "", pick_id: str = "", approver_kind: str = "", approval_id: str = "",
-          template_sha256: str = "") -> dict[str, Any]:
+          template_sha256: str = "", min_interval_hours: float = 0) -> dict[str, Any]:
     """Atomically claim an initial note. One transaction (BEGIN IMMEDIATE) so two
     concurrent runs cannot both claim the same user-day or request id. A claim-proof-ask note
     records its close day (claim_close_day) as due_day."""
@@ -1365,6 +1408,17 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
         if enforce_cap and capped(db, user_key=user_key, day=day, user_id=user_id):
             db.execute("COMMIT")
             return {"result": "daily_cap", "request_ids": fresh}
+        if min_interval_hours and enforce_cap:
+            # A rolling interval, checked INSIDE this transaction: the per-day cap reads one day, so a reply claimed
+            # at 23:59:45 whose POST lands at 00:00:02 is recorded on yesterday and a second message today would pass
+            # it. A caller's own precheck cannot close this - two runs can both pass it before either claims (QA
+            # 2026-11-15). Measured from the row's created_at, so a late POST still holds the next day.
+            since = stamp((now or utcnow()) - timedelta(hours=float(min_interval_hours)))
+            cond, params = _same_user(db, user_key, user_id)
+            if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.status IN ('attempted','sent') "
+                          "AND m.created_at >= ? LIMIT 1", (*params, since)).fetchone():
+                db.execute("COMMIT")
+                return {"result": "recent", "reason": f"min_interval:{min_interval_hours}h", "request_ids": fresh}
         if campaign == "verify-live" and enforce_cap and asked_within(db, user_key=user_key, day=day, user_id=user_id):
             # One note per user per 90 days across the ask campaigns: the credits wait
             # (nothing is closed) until the lock lapses or a human acts.
@@ -2780,6 +2834,17 @@ def stamp_problem(row: Any, rulings: dict[str, Any]) -> str:
             return f"captain-slack approval id {approval_id!r} is not a Slack user id"
         if str(approved_by) != str(approval_id):
             return f"the stamp names {approval_id} but approved_by is {approved_by}"
+    elif kind == APPROVER_COPY_GATE:
+        # The verdict id IS the approval. Its signature is verified by the copy gate when it is created (and again
+        # by the writer, which asks the gate itself before its POST); checked here: the row names the verdict it
+        # was authorized by, and it is the campaign the copy gate approves at all. The template hash below is
+        # recomputed from campaign|kind|copy, so a row cannot claim one verdict and render another frame.
+        if not COPY_VERDICT_ID_RE.match(str(approval_id)):
+            return f"copy-gate approval id {approval_id!r} is not an ocv-<16 hex> verdict id"
+        if str(approved_by) != str(approval_id):
+            return f"the stamp names {approval_id} but approved_by is {approved_by}"
+        if str(campaign) != AGENT_REPLY:
+            return f"copy-gate authorized campaign {campaign!r}, which the copy gate does not approve"
     else:
         if not RULING_ID_RE.match(str(approval_id)):
             return f"fable-ruling approval id {approval_id!r} is not a ruling id"

@@ -227,6 +227,37 @@ per UTC day is the verify ledger's rule and the caller's to claim; the writer do
 waits for a review round (the reviewer host's timer runs every 15 minutes), so this class is for an answer that is
 owed, not for a live chat turn.
 
+**The caller that claims the day is `scripts/intercom-agent-reply.py`** (campaign `agent-reply` in the verify
+ledger). It asks `sendgate.require_verdict` about the exact body before it claims anything (a pending review is a
+hold that claims nothing), claims the ledger key `conv-<conversation id>` plus the person's day, posts through the
+writer above, and finalizes the row `sent` with the verdict id, the verdict sha256 and the campaign; the row's
+stamp is `approver_kind=copy-gate`, so it is an authorized send to `audit_stamps` rather than an unstamped finding.
+A writer that posted nothing gives the claim back as a `deferred` log, so the same day can try new copy; a writer
+whose POST may have landed (`exit 4`, or `exit 0` without its `POSTED` line) keeps the day, and `SKIPPED` names
+`daily_cap` or `conversation_already_answered:<campaign>` without reaching the writer at all. It is a dry run
+unless given `--apply`. A ledger a pre-check could not read is `REFUSED` with `ledger_unreadable:<error>` (exit 1;
+exit 2 on a dry run, and for a ledger that cannot be opened at all), never a skip: "could not read whether this
+person was messaged today" is not "they were", and a skip exits 0.
+
+The day is the day the reply lands on, not the day the run started: the claim is made immediately before the POST,
+and a claim within ten seconds of UTC midnight waits the boundary out, so a reply cannot be recorded on a day the
+customer did not receive it and leave the day it did arrive unclaimed. The writer has no latency bound, so a claim
+that crosses midnight anyway is still held: the caller refuses a second reply to the same person within 24 hours of
+the last one, whatever day that one is recorded on, and that interval is checked inside the claim's own transaction
+(`verify_ledger.claim(min_interval_hours=...)`) rather than in the caller's precheck, so two runs that both passed
+the precheck cannot both post. The shared per-day cap (`verify_ledger.capped`) holds the same way for every campaign,
+and it holds the day the customer GOT the message, not the day it was claimed: a row carries its claim day, `finalize`
+records when the POST landed, and a day on which either falls is held. So a reply claimed at 22:30 and accepted at
+00:01 blocks the whole of the next day, and a reply delivered at 23:30 does not block it. An `attempted` row (a writer
+that may have posted) holds EVERY day until it is reconciled, because nobody knows when it landed and the writer has no
+bounded POST latency. There is no latency window to tune.
+
+Both clauses apply to every sender that asks `capped`, not only this one. Measured on node-8's ledger on 2026-11-15:
+1 of 9,280 sent rows was delivered on another day than its claim, and 1 row is `attempted` (uvn-status, claimed
+2026-11-04), so one person is held from every campaign until that row is settled. No job settles an `attempted` row
+today; a second one appearing is a person to look at, and `SELECT user_key, campaign, day FROM verify_messages WHERE
+status='attempted'` lists them. A row finalized `sent` long after its claim also holds the day it is finalized on.
+
 ## Running the review
 
 ```

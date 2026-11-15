@@ -3512,7 +3512,9 @@ class EnableGateTests(unittest.TestCase):
         last_week = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
         c = verify_ledger.claim(db, user_key="old@example.com", day=last_week, request_ids=["m1"], message_type="email",
                                 approved_by=CAPTAIN_UID, approval_ref="ref", user_id="61")
-        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="900")
+        # delivered last week too: the cap holds the day `sent_at` falls on, and this test is about the 90-day lock
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="900",
+                               now=datetime.now(timezone.utc) - timedelta(days=7))
         self.assertTrue(verify_ledger.asked_within(db, user_key="new@example.com", day=today, user_id="61"))
         self.assertFalse(verify_ledger.asked_within(db, user_key="new@example.com", day=today, user_id="62"))
         again = verify_ledger.claim(db, user_key="new@example.com", day=today, request_ids=["m2"], message_type="email",

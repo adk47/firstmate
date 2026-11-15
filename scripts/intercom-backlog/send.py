@@ -376,23 +376,26 @@ def ledger_claim(db, conversation_id, user_key, user_id, day, contact_id="", app
         contact_id=contact_id, campaign=CAMPAIGN, user_id=user_id)
 
 
-def ledger_finalize(db, message_row, conversation_id, rc, stdout, stderr, body, part_type="comment"):
+def ledger_finalize(db, message_row, conversation_id, rc, stdout, stderr, body, part_type="comment", now=None):
     """POSTED <part_type> -> sent (with the part id). rc 4 means the post MAY have landed
     (intercom-ops-write.sh: logged, response unverified): it stays 'attempted', which still
-    holds the user's day, so nothing re-sends. Any other failure -> rejected (frees the day)."""
+    holds the user's day, so nothing re-sends. Any other failure -> rejected (frees the day).
+
+    `now` is the caller's clock: a confirmed send is recorded on the day it went out, so the
+    caller that owns a clock must pass it or the row lands on the wall clock's day instead."""
     m = re.match(rf"POSTED {part_type} conversation=\d+ part=(\S+)", stdout or "")
     sha = hashlib.sha256(body.encode()).hexdigest()
     if rc == 0 and m:
         verify_ledger.finalize(db, message_row=message_row, status="sent", message_id=m.group(1),
-                               conversation_id=str(conversation_id), body_sha256=sha)
+                               conversation_id=str(conversation_id), body_sha256=sha, now=now)
     elif rc == 4:
         verify_ledger.finalize(db, message_row=message_row, status="attempted",
                                conversation_id=str(conversation_id), body_sha256=sha,
-                               reason=f"post unverified: {(stderr or '').strip()[:300]}")
+                               reason=f"post unverified: {(stderr or '').strip()[:300]}", now=now)
     else:
         verify_ledger.finalize(db, message_row=message_row, status="rejected",
                                conversation_id=str(conversation_id), body_sha256=sha,
-                               reason=f"rc={rc}: {(stderr or '').strip()[:300]}")
+                               reason=f"rc={rc}: {(stderr or '').strip()[:300]}", now=now)
 
 
 def eligible(row):

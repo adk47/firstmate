@@ -230,6 +230,12 @@ def now_z():
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def clock_now(deps):
+    """The run's clock as a datetime. `deps.now()` is a POSIX timestamp (the tests drive it), and the ledger's
+    finalize takes a datetime: a confirmed send is recorded on the day it went out, so it must use this clock."""
+    return dt.datetime.fromtimestamp(deps.now(), dt.timezone.utc)
+
+
 def utc_day(ts):
     return dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%Y-%m-%d")
 
@@ -1039,7 +1045,7 @@ def run_send(plan, deps, *, apply=False, max_rows=MAX_PER_RUN, only=(), ledger_p
             p = deps.post_note(cid, note)
             posted = p["rc"] == 0 and p["stdout"].startswith("POSTED note")
             backlog.ledger_finalize(deps.ledger, claim["message_row"], cid, p["rc"], p["stdout"], p["stderr"], note,
-                                    part_type="note")
+                                    part_type="note", now=clock_now(deps))
             if not posted:
                 stats["failed"] += 1
                 append_ledger(ledger_path, {"phase": "error", "run_id": run_id, "ts": now_z(), "id": cid,
@@ -1141,7 +1147,8 @@ def run_send(plan, deps, *, apply=False, max_rows=MAX_PER_RUN, only=(), ledger_p
         except copy_gate.CopyHeld as e:
             p = {"rc": 1, "stdout": "", "stderr": "copy gate: " + str(e)[:200], "verdict_id": ""}
         posted = p["rc"] == 0 and p["stdout"].startswith("POSTED comment")
-        backlog.ledger_finalize(deps.ledger, claim["message_row"], cid, p["rc"], p["stdout"], p["stderr"], body)
+        backlog.ledger_finalize(deps.ledger, claim["message_row"], cid, p["rc"], p["stdout"], p["stderr"], body,
+                                now=clock_now(deps))
         if not posted:
             stats["failed"] += 1
             append_ledger(ledger_path, {"phase": "error", "run_id": run_id, "ts": now_z(), "id": cid,

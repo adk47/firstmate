@@ -12,7 +12,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -570,7 +570,11 @@ class GapLedgerTests(unittest.TestCase):
                                    now=NOW, user_id=uid)
 
     def sent(self, db, c, mid):
-        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=mid, conversation_id="c" + mid)
+        # Sent on the day it was claimed for: the cap holds the day a message was DELIVERED on (`sent_at`), so a
+        # note these tests date 20 days back must not be stamped as delivered today.
+        day = db.execute("SELECT day FROM verify_messages WHERE id=?", (c["message_row"],)).fetchone()[0]
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=mid, conversation_id="c" + mid,
+                               now=datetime.fromisoformat(day + "T12:00:00+00:00"))
 
     def test_an_earlier_ask_about_the_credit_does_not_block_the_gap_ask_but_its_own_note_does(self):
         db = verify_ledger.connect(":memory:")
