@@ -305,7 +305,14 @@ class ProofMarkerTest(unittest.TestCase):
         self.doc(requests=("r2",), at="2026-11-09T10:00:00Z")
         self.db.commit()
         twin = self.ledger + ".twin"
-        Path(twin).write_bytes(Path(self.ledger).read_bytes())
+        # A copy of the ledger as its readers see it. Not the main file's bytes: the production ledger is in WAL
+        # mode, so rows committed on the open self.db may still be in ledger.sqlite3-wal.
+        src, dst = sqlite3.connect(self.ledger), sqlite3.connect(twin)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
         self.assertEqual(self.run_op("apply")[1]["tagged"], 1)
         other = vl.connect(twin)
         vl.mark_tagged(other, message_id="mB", conversation_id="77", attachments=1)

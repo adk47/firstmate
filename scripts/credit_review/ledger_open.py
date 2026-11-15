@@ -30,6 +30,24 @@ So this module does three things and changes no file mode or owner itself:
   3. `open_ro()` returns a connection that knows it is a reader: a write on it raises `ReadOnlyConnectionWriteError`
      (reason `read_only_mode`) and is never reopened, never retried.
 
+Lock contention (2026-11-15: the intercom drain died mid-run on `database is locked` while four credit jobs wrote this
+ledger at once). Waiting for another writer was each caller's own business - a `timeout=` it had to remember, a
+journal mode nobody set (a ledger this module created was a rollback-journal file, where a writer shuts every reader
+out and the reverse), and no second try. The timeout and the retry now live here, so no caller has to bring its own:
+
+  4. `_connect()` gives EVERY connection, reader or writer, a busy timeout of at least BUSY_TIMEOUT_S, and states it
+     in `PRAGMA busy_timeout`. A caller may ask for longer; none gets shorter.
+  5. `open_rw()` NEVER changes the journal mode. It reads it with a zero busy timeout (so it never waits behind a
+     writer), records it on the connection as `ledger_journal_mode`, and reports a ledger that is not in `wal`
+     through EVENT_SINK. A non-WAL ledger still opens and still writes. The one-time conversion is
+     `migrate_to_wal()`, run by hand (`python3 ledger_open.py migrate-to-wal <ledger>`), never by an opener.
+     `open_ro()` never sets a journal mode either - a reader does not change the file.
+  6. A statement or commit on a WRITE connection that SQLite answers with SQLITE_BUSY / SQLITE_LOCKED is tried
+     LOCK_ATTEMPTS times in all (`retry_on_lock`), then raises `LedgerLockedError` - still a
+     `sqlite3.OperationalError`, still carrying SQLite's words, and naming the attempts made. Nothing else is ever
+     retried: not a constraint error, not `LedgerNotWritableError`, and not a statement SQLite may already have
+     half-applied (`executemany` / `executescript`, see `_many_unsafe` / `_script_unsafe`).
+
 Standard library only, and no sibling import: verify_ledger.py is also run as a file (`python3 -I verify_ledger.py`),
 where there is no package, so it loads this file by path (verify_ledger.ledger_open()). However it is reached - that
 loader, or `from credit_review import ledger_open` - a process holds ONE copy of it (the last statement of this file):
@@ -56,6 +74,17 @@ SQLITE_READONLY = 8
 # re-creates the files again in between.
 RW_OPEN_ATTEMPTS = 3
 RW_REOPEN_SLEEP_S = 0.2
+
+# Lock contention. The busy timeout is SQLite's own wait inside one attempt; the attempts are this module's.
+SQLITE_BUSY = 5
+SQLITE_LOCKED = 6
+SQLITE_BUSY_SNAPSHOT = 517          # SQLITE_BUSY | (2 << 8): this connection's read snapshot is stale
+BUSY_TIMEOUT_S = 30.0               # the floor for every connection; never lower it
+BUSY_TIMEOUT_MS = int(BUSY_TIMEOUT_S * 1000)
+LOCK_ATTEMPTS = 3                   # tries in all, the first included
+# The wait after the 1st, 2nd, 3rd failed try. With LOCK_ATTEMPTS = 3 the last try is followed by the raise, so only
+# the first two are slept; the third is there for whoever raises LOCK_ATTEMPTS.
+LOCK_BACKOFF_S = (0.2, 0.5, 1.0)
 
 # Where a reopen (or a ledger that stays read-only for a writer) is reported. credit-review.py points this at the run
 # log; a caller that sets nothing still gets EVENTS. Never stderr: the crons are command crons that post stderr.
@@ -93,6 +122,27 @@ class LedgerNotWritableError(sqlite3.OperationalError):
         self.why = why
         self.path = path
         self.facts = facts
+
+
+class LedgerLockedError(sqlite3.OperationalError):
+    """SQLite answered busy / locked and this module is done trying. `attempts` is how many tries were made (1 where a
+    second try could not be made safely, or could not succeed), `waited_s` the backoff slept between them."""
+
+    def __init__(self, message: str, *, path: str, attempts: int, waited_s: float, lock: str):
+        super().__init__(message)
+        self.path = path
+        self.attempts = attempts
+        self.waited_s = waited_s
+        self.lock = lock                # SQLite's own words: "database is locked", "database table is locked", ...
+
+
+class LedgerJournalModeError(sqlite3.OperationalError):
+    """The one-time WAL migration could not leave the ledger in WAL mode. `mode` is what SQLite answered."""
+
+    def __init__(self, message: str, *, path: str, mode: str):
+        super().__init__(message)
+        self.path = path
+        self.mode = mode
 
 
 class ReadOnlyConnectionWriteError(LedgerNotWritableError):
@@ -223,12 +273,29 @@ def classify(facts: Facts | None, *, read_only_mode: bool = False) -> tuple[str,
 
 def is_readonly_error(exc: BaseException) -> bool:
     """SQLITE_READONLY in any of its extended forms."""
-    if not isinstance(exc, sqlite3.Error) or isinstance(exc, LedgerNotWritableError):
+    if not isinstance(exc, sqlite3.Error):
+        return False
+    if isinstance(exc, (LedgerNotWritableError, LedgerLockedError, LedgerJournalModeError)):
         return False
     code = getattr(exc, "sqlite_errorcode", None)
     if isinstance(code, int):
         return code & 0xFF == SQLITE_READONLY
     return "readonly database" in str(exc)
+
+
+_LOCK_WORDS = ("database is locked", "database table is locked", "database schema is locked")
+
+
+def is_lock_error(exc: BaseException) -> bool:
+    """SQLITE_BUSY or SQLITE_LOCKED in any of their extended forms - and nothing this module already named."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    if isinstance(exc, (LedgerNotWritableError, LedgerLockedError, LedgerJournalModeError)):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return code & 0xFF in (SQLITE_BUSY, SQLITE_LOCKED)
+    return any(words in str(exc) for words in _LOCK_WORDS)
 
 
 def _event(line: str) -> None:
@@ -268,38 +335,159 @@ def explain(db: "LedgerConnection", exc: BaseException) -> LedgerNotWritableErro
                reason=reason, why=why, path=path, facts=facts)
 
 
+def _lock_words(exc: BaseException) -> str:
+    text = str(exc)
+    return next((words for words in _LOCK_WORDS if words in text), text or "database is locked")
+
+
+def _busy_timeout_ms(db: sqlite3.Connection) -> int | None:
+    try:
+        return int(sqlite3.Connection.execute(db, "PRAGMA busy_timeout").fetchall()[0][0])
+    except Exception:  # noqa: BLE001 - this only words an error message
+        return None
+
+
+def _locked(db: sqlite3.Connection, exc: BaseException, *, what: str, attempts: int, waited_s: float,
+            gave_up: str = "") -> LedgerLockedError:
+    path = getattr(db, "ledger_path", "") or "(no path)"
+    opener = getattr(db, "ledger_opener", "")
+    lock = _lock_words(exc)
+    name = getattr(exc, "sqlite_errorname", None)
+    if gave_up:
+        tail = f"not tried again after attempt {attempts}: {gave_up}"
+    else:
+        ms = _busy_timeout_ms(db)
+        inside = f", busy_timeout {ms} ms inside each" if ms is not None else ""
+        tail = f"still locked after {attempts} attempts ({waited_s:g}s of backoff between them{inside})"
+    return LedgerLockedError(
+        f"ledger {path}{', opened by ' + opener if opener else ''}{' on ' + what if what else ''}: {lock} - {tail} "
+        f"(sqlite: {exc}{' [' + name + ']' if name else ''})",
+        path=path, attempts=attempts, waited_s=waited_s, lock=lock)
+
+
+def retry_on_lock(db: sqlite3.Connection, call: Callable[[], Any], *, what: str = "",
+                  unsafe: Callable[[], str] | None = None) -> Any:
+    """Run `call`, and run it again when SQLite answers SQLITE_BUSY / SQLITE_LOCKED: LOCK_ATTEMPTS tries in all,
+    LOCK_BACKOFF_S between them, then LedgerLockedError naming the lock and the tries made.
+
+    Only a lock is retried. Any other error leaves on the first try, untouched - a constraint error (not an
+    OperationalError at all), LedgerNotWritableError (a second try of a write the file refuses is the same refusal),
+    and a lock this module already gave up on. Three locks are not retried either, and say why:
+
+      * SQLITE_BUSY_SNAPSHOT: this connection read, another writer committed, and now it wants to write on the stale
+        snapshot. No wait clears that - only the caller ending its transaction or its open SELECT does.
+      * `unsafe()` answering a reason: the statement may already have taken effect in part (executemany,
+        executescript), so a second run would apply that part twice.
+      * write_state()'s probe, which asks with a zero busy timeout precisely so that it never waits."""
+    waited = 0.0
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            result = call()
+        except sqlite3.OperationalError as exc:
+            if not is_lock_error(exc) or getattr(db, "ledger_lock_probe", False):
+                raise
+            gave_up = ""
+            if getattr(exc, "sqlite_errorcode", None) == SQLITE_BUSY_SNAPSHOT:
+                gave_up = ("this connection holds a read snapshot older than another writer's commit, which no wait "
+                           "clears - end the transaction or the open SELECT and start again")
+            elif unsafe is not None:
+                gave_up = unsafe()
+            if gave_up or attempt >= LOCK_ATTEMPTS:
+                err = _locked(db, exc, what=what, attempts=attempt, waited_s=waited, gave_up=gave_up)
+                _event(f"ledger-lock: {err}")
+                raise err from exc
+            pause = LOCK_BACKOFF_S[min(attempt, len(LOCK_BACKOFF_S)) - 1]
+            time.sleep(pause)
+            waited += pause
+            continue
+        if attempt > 1:
+            _event(f"ledger-lock: {getattr(db, 'ledger_path', '') or '(no path)'}{' on ' + what if what else ''} was "
+                   f"locked; attempt {attempt} of {LOCK_ATTEMPTS} went through after {waited:g}s of backoff")
+        return result
+
+
+def _what(args: tuple[Any, ...]) -> str:
+    """The start of the statement, for the error: SQL text only - the parameters, which hold the data, are never
+    part of it."""
+    return " ".join(str(args[0]).split())[:60] if args else ""
+
+
+def _many_unsafe(db: sqlite3.Connection, args: tuple[Any, ...], changes_before: int) -> str:
+    """Why an executemany that met a lock may NOT be run again ('' when it may). In autocommit each row is its own
+    transaction, so a lock met at row k leaves the rows before it written; and rows handed over as an iterator were
+    consumed by the first try."""
+    if len(args) < 2 or not isinstance(args[1], (list, tuple)):
+        return "its rows came from an iterator the first try consumed"
+    if db.total_changes != changes_before:
+        return "the first try had already written rows, and a second would write them twice"
+    return ""
+
+
+def _script_state(db: sqlite3.Connection) -> tuple[int, Any]:
+    try:
+        version = sqlite3.Connection.execute(db, "PRAGMA schema_version").fetchall()[0][0]
+    except sqlite3.Error:
+        version = None
+    return db.total_changes, version
+
+
+def _script_unsafe(db: sqlite3.Connection, before: tuple[int, Any]) -> str:
+    """Why an executescript that met a lock may NOT be run again ('' when it may): a script is many statements, each
+    committed on its own unless the script says otherwise, so a lock met at statement k leaves the ones before it
+    applied. It is run again only when nothing shows any of it took effect."""
+    if db.in_transaction:
+        return "the script left a transaction open"
+    changes, version = _script_state(db)
+    if changes != before[0]:
+        return "the script had already changed rows"
+    if version is None or before[1] is None or version != before[1]:
+        return "the script had already changed the schema, or the schema could not be read to tell"
+    return ""
+
+
+def _run(db: Any, call: Callable[[], Any], *, what: str, unsafe: Callable[[], str] | None = None) -> Any:
+    """What every statement and commit of a ledger connection goes through: a lock is retried on a WRITE connection
+    (a reader's is left exactly as it was), and a refused write is explained."""
+    try:
+        if getattr(db, "ledger_read_only", False):
+            return call()
+        return retry_on_lock(db, call, what=what, unsafe=unsafe)
+    except sqlite3.OperationalError as exc:
+        better = explain(db, exc)
+        if better is None:
+            raise
+        raise better from exc
+
+
+def _run_many(db: Any, call: Callable[[], Any], args: tuple[Any, ...]) -> Any:
+    before = db.total_changes
+    return _run(db, call, what=_what(args), unsafe=lambda: _many_unsafe(db, args, before))
+
+
+def _run_script(db: Any, call: Callable[[], Any]) -> Any:
+    if getattr(db, "ledger_read_only", False):
+        return _run(db, call, what="executescript")
+    before = _script_state(db)
+    return _run(db, call, what="executescript", unsafe=lambda: _script_unsafe(db, before))
+
+
 class LedgerCursor(sqlite3.Cursor):
     def execute(self, *args: Any, **kwargs: Any) -> "LedgerCursor":
-        try:
-            return super().execute(*args, **kwargs)
-        except sqlite3.OperationalError as exc:
-            better = explain(self.connection, exc)       # type: ignore[arg-type]
-            if better is None:
-                raise
-            raise better from exc
+        return _run(self.connection, lambda: sqlite3.Cursor.execute(self, *args, **kwargs), what=_what(args))
 
     def executemany(self, *args: Any, **kwargs: Any) -> "LedgerCursor":
-        try:
-            return super().executemany(*args, **kwargs)
-        except sqlite3.OperationalError as exc:
-            better = explain(self.connection, exc)       # type: ignore[arg-type]
-            if better is None:
-                raise
-            raise better from exc
+        return _run_many(self.connection, lambda: sqlite3.Cursor.executemany(self, *args, **kwargs), args)
 
     def executescript(self, *args: Any, **kwargs: Any) -> "LedgerCursor":
-        try:
-            return super().executescript(*args, **kwargs)
-        except sqlite3.OperationalError as exc:
-            better = explain(self.connection, exc)       # type: ignore[arg-type]
-            if better is None:
-                raise
-            raise better from exc
+        return _run_script(self.connection, lambda: sqlite3.Cursor.executescript(self, *args, **kwargs))
 
 
 class LedgerConnection(sqlite3.Connection):
     """A sqlite3.Connection that knows which ledger it is, whether it was opened to read or to write, and what the
-    files beside it looked like at open - so a refused write can say why. Nothing else about it differs."""
+    files beside it looked like at open - so a refused write can say why, and a write that meets another writer's
+    lock is tried again (retry_on_lock). Nothing else about it differs."""
 
     ledger_path: str = ""
     ledger_opener: str = ""
@@ -307,45 +495,23 @@ class LedgerConnection(sqlite3.Connection):
     ledger_facts: Facts | None = None
     ledger_unwritable: tuple[str, str] | None = None     # set by open_rw when the open-time check found no way to write
     ledger_opens: int = 1
+    ledger_journal_mode: str = ""                       # read at open, never set by an opener
+    ledger_lock_probe: bool = False                      # True only inside write_state(): its busy answer is the answer
 
     def cursor(self, factory: Any = None) -> Any:        # every cursor explains, db.cursor().execute(...) included
         return super().cursor(factory or LedgerCursor)
 
     def execute(self, *args: Any, **kwargs: Any) -> Any:
-        try:
-            return super().execute(*args, **kwargs)
-        except sqlite3.OperationalError as exc:
-            better = explain(self, exc)
-            if better is None:
-                raise
-            raise better from exc
+        return _run(self, lambda: sqlite3.Connection.execute(self, *args, **kwargs), what=_what(args))
 
     def executemany(self, *args: Any, **kwargs: Any) -> Any:
-        try:
-            return super().executemany(*args, **kwargs)
-        except sqlite3.OperationalError as exc:
-            better = explain(self, exc)
-            if better is None:
-                raise
-            raise better from exc
+        return _run_many(self, lambda: sqlite3.Connection.executemany(self, *args, **kwargs), args)
 
     def executescript(self, *args: Any, **kwargs: Any) -> Any:
-        try:
-            return super().executescript(*args, **kwargs)
-        except sqlite3.OperationalError as exc:
-            better = explain(self, exc)
-            if better is None:
-                raise
-            raise better from exc
+        return _run_script(self, lambda: sqlite3.Connection.executescript(self, *args, **kwargs))
 
     def commit(self) -> None:
-        try:
-            super().commit()
-        except sqlite3.OperationalError as exc:
-            better = explain(self, exc)
-            if better is None:
-                raise
-            raise better from exc
+        return _run(self, lambda: sqlite3.Connection.commit(self), what="COMMIT")
 
 
 class ReadOnlyLedgerConnection(LedgerConnection):
@@ -354,8 +520,21 @@ class ReadOnlyLedgerConnection(LedgerConnection):
 
 def _connect(target: str, **kwargs: Any) -> sqlite3.Connection:
     """The one place this module calls sqlite3.connect (a test stands in a connection that got the read-only
-    fallback here, which is the only way to produce one without two uids)."""
-    return sqlite3.connect(target, **kwargs)
+    fallback here, which is the only way to produce one without two uids).
+
+    Every connection - reader, writer, :memory: - leaves with a busy timeout of at least BUSY_TIMEOUT_S: a caller's
+    longer `timeout=` is kept, a shorter or missing one is raised to the floor."""
+    asked = kwargs.get("timeout")
+    kwargs["timeout"] = max(float(asked), BUSY_TIMEOUT_S) if asked is not None else BUSY_TIMEOUT_S
+    db = sqlite3.connect(target, **kwargs)
+    try:
+        # sqlite3.connect(timeout=) IS the busy timeout; it is said again as a PRAGMA so the value is one a test, or
+        # anyone with the connection in hand, can read back. It touches no file.
+        sqlite3.Connection.execute(db, f"PRAGMA busy_timeout={int(round(kwargs['timeout'] * 1000))}").close()
+    except BaseException:
+        db.close()
+        raise
+    return db
 
 
 def write_state(db: sqlite3.Connection) -> str:
@@ -370,6 +549,9 @@ def write_state(db: sqlite3.Connection) -> str:
     It does NOT see a read-only database FILE (mode 0444, mode=ro): there SQLite quietly turns BEGIN IMMEDIATE into a
     read transaction and answers OK (measured, 3.45.1). open_rw() reads the file's mode for that case."""
     raw = sqlite3.Connection.execute
+    probing = isinstance(db, LedgerConnection)
+    if probing:
+        db.ledger_lock_probe = True                 # the probe's busy answer is its answer: never retry_on_lock
     try:
         old = raw(db, "PRAGMA busy_timeout").fetchone()[0]
         raw(db, "PRAGMA busy_timeout=0")
@@ -377,9 +559,14 @@ def write_state(db: sqlite3.Connection) -> str:
             raw(db, "BEGIN IMMEDIATE")
             raw(db, "ROLLBACK")
         finally:
-            raw(db, f"PRAGMA busy_timeout={int(old)}")
+            # Back to what the connection had, and never below the floor: a zero left here is a writer that fails
+            # the instant another one holds the lock.
+            raw(db, f"PRAGMA busy_timeout={max(int(old), BUSY_TIMEOUT_MS)}")
     except sqlite3.Error as exc:
         return "read_only" if is_readonly_error(exc) else "inconclusive"
+    finally:
+        if probing:
+            db.ledger_lock_probe = False
     return "writable"
 
 
@@ -398,12 +585,81 @@ def _reopen_can_help(facts: Facts) -> bool:
     return facts.euid == 0 or any(f is not None and f.uid == facts.euid for f in (facts.wal, facts.shm))
 
 
+def read_journal_mode(db: sqlite3.Connection) -> str:
+    """The ledger's journal mode, read with a zero busy timeout so it never waits behind another writer, and with the
+    connection's timeout restored to at least the floor afterwards. 'unknown' when SQLite cannot answer."""
+    raw = sqlite3.Connection.execute
+    try:
+        old = int(raw(db, "PRAGMA busy_timeout").fetchone()[0])
+    except sqlite3.Error:
+        old = BUSY_TIMEOUT_MS
+    try:
+        raw(db, "PRAGMA busy_timeout=0")
+        try:
+            return str(raw(db, "PRAGMA journal_mode").fetchall()[0][0])
+        except sqlite3.Error:
+            return "unknown"
+    finally:
+        try:
+            raw(db, f"PRAGMA busy_timeout={max(old, BUSY_TIMEOUT_MS)}")
+        except sqlite3.Error:
+            pass
+
+
+def migrate_to_wal(path: str) -> tuple[str, str]:
+    """The one-time, operator-run conversion of a ledger to WAL: (mode before, mode after).
+
+    Nothing calls this automatically - no opener, no timer, no deploy step. It converts only when no other connection
+    holds a lock on the ledger: the busy timeout is zero, so a busy answer is raised at once rather than waited out,
+    and there is no retry. It reads the mode back, and anything but `wal` raises `LedgerJournalModeError` naming the
+    ACTUAL mode (a busy ledger, a read-only file or directory, `:memory:`). A path that does not exist is refused
+    before connecting, so a mistyped path cannot create an empty ledger and report it as converted. A ledger already
+    in WAL is left byte for byte as it was."""
+    path = str(path)
+    if path == ":memory:":
+        raise LedgerJournalModeError(
+            f"ledger {path} has no journal file: its journal mode is 'memory', not 'wal'", path=path, mode="memory")
+    if not os.path.exists(path):
+        raise LedgerJournalModeError(
+            f"ledger {path} does not exist: refusing to create an empty one and report it as converted",
+            path=path, mode="missing")
+    db: LedgerConnection = _connect(path, factory=LedgerConnection)  # type: ignore[assignment]
+    db.ledger_path = path
+    raw = sqlite3.Connection.execute
+    try:
+        raw(db, "PRAGMA busy_timeout=0")
+        before = read_journal_mode(db)
+        if before.lower() == "wal":
+            return before, before
+        raw(db, "PRAGMA busy_timeout=0")
+        try:
+            raw(db, "PRAGMA journal_mode=WAL").fetchall()
+        except sqlite3.Error as exc:
+            after = read_journal_mode(db)
+            raise LedgerJournalModeError(
+                f"ledger {path} could not be put in WAL mode: it is in journal mode {after!r} and "
+                f"PRAGMA journal_mode=WAL failed (sqlite: {exc})", path=path, mode=after) from exc
+        after = read_journal_mode(db)
+        if after.lower() != "wal":
+            raise LedgerJournalModeError(
+                f"ledger {path} is in journal mode {after!r}, not 'wal': PRAGMA journal_mode=WAL answered {after!r}. "
+                f"A ledger is not left on a rollback journal - that is the mode in which writers and readers lock "
+                f"each other out.", path=path, mode=after)
+        return before, after
+    finally:
+        db.close()
+
+
 def open_rw(path: str, *, opener: str = "", **connect_kwargs: Any) -> LedgerConnection:
     """The WRITE opener. Returns a connection that can write, reopening when the first one got SQLite's silent
     read-only fallback and a reopen can cure it.
 
     It never raises for an unwritable ledger: plenty of callers open the decider ledger and only read. The connection
-    carries the diagnosis instead, and its first refused write raises LedgerNotWritableError with it."""
+    carries the diagnosis instead, and its first refused write raises LedgerNotWritableError with it.
+
+    It never changes the journal mode. It reads it into `ledger_journal_mode` and reports a ledger that is not in
+    `wal` through EVENT_SINK; the conversion is `migrate_to_wal()`, run by hand. (`:memory:` has no journal file and
+    is passed through.)"""
     path = str(path)
     if path == ":memory:":
         return _connect(path, factory=LedgerConnection, **connect_kwargs)       # type: ignore[return-value]
@@ -414,7 +670,13 @@ def open_rw(path: str, *, opener: str = "", **connect_kwargs: Any) -> LedgerConn
         facts = snapshot(path)
         db: LedgerConnection = _connect(path, factory=LedgerConnection, **connect_kwargs)  # type: ignore[assignment]
         db.ledger_path, db.ledger_opener, db.ledger_facts, db.ledger_opens = path, opener, facts, attempt
-        if write_state(db) != "read_only" and not _db_file_unwritable(facts):
+        db.ledger_journal_mode = read_journal_mode(db)
+        if db.ledger_journal_mode.lower() != "wal":
+            _event(f"ledger-open: {path}{', opened by ' + opener if opener else ''} is in journal mode "
+                   f"{db.ledger_journal_mode!r}, not 'wal'; the one-time conversion is "
+                   f"`python3 ledger_open.py migrate-to-wal {path}`")
+        writable = write_state(db) != "read_only" and not _db_file_unwritable(facts)
+        if writable:
             if first is not None:
                 _event(f"ledger-open: {path} gave this writer a read-only connection ({first[0][0]}: {first[0][1]} "
                        f"[{first[1].render()}]); reopened writable on open {attempt} of {RW_OPEN_ATTEMPTS}")
@@ -439,6 +701,29 @@ def open_ro(path: str, *, opener: str = "", **connect_kwargs: Any) -> ReadOnlyLe
         f"file:{urllib.parse.quote(resolved)}?mode=ro", uri=True, factory=ReadOnlyLedgerConnection, **connect_kwargs)
     db.ledger_path, db.ledger_opener = str(path), opener
     return db
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`python3 ledger_open.py migrate-to-wal <ledger>`: the one-time conversion, run by hand."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) != 2 or args[0] != "migrate-to-wal":
+        sys.stderr.write("usage: ledger_open.py migrate-to-wal <ledger.sqlite3>\n")
+        return 2
+    path = args[1]
+    try:
+        before, after = migrate_to_wal(path)
+    except LedgerJournalModeError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    if before.lower() == "wal":
+        sys.stdout.write(f"{path}: already in WAL mode; nothing written\n")
+    else:
+        sys.stdout.write(f"{path}: journal mode {before} -> {after}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 # One copy per process, whichever way this file was reached first (see the module docstring). Keep this the LAST

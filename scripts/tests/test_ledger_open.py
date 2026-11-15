@@ -14,6 +14,11 @@ What must hold:
   * a writer handed the read-only fallback is reopened where a reopen can cure it, and the reopen is reported;
   * the read-only flag a kill-switch dry run sets does not outlive that run.
 
+Second incident, 2026-11-15: the intercom drain died mid-run on `database is locked` while four credit jobs wrote the
+ledger at once. LockContentionTests holds the three things the opener now does for every caller: a busy timeout of at
+least 30 s on every connection, a bounded retry of a write that meets a lock, and a journal mode it READS and reports
+but never sets (the one-time conversion is `migrate_to_wal`, run by hand).
+
 The two-uid layout itself cannot run here (CI is one non-root user); it is reproduced, with its no-sticky-bit control
 and with the fix, by data/verif-readonly-write-crash-r1/repro_sticky_shm.py in a container. Here a real read-only WAL
 handle is produced by taking the write bit off the -wal, and node-8's ownership is a fixture for the pure classifier.
@@ -30,6 +35,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -190,14 +196,23 @@ class WriteOpenerTests(Base):
         self.assertEqual(ledger_open.EVENTS, [])
 
     def test_the_open_time_check_writes_nothing(self):
-        for wal in (True, False):
-            with self.subTest(wal=wal):
-                self.make(wal=wal)
-                before = sha(self.path)
-                ledger_open.open_rw(self.path, timeout=30).close()
-                self.assertEqual(sha(self.path), before)
-                self.assertFalse(os.path.exists(self.path + "-wal") and os.path.getsize(self.path + "-wal"))
-                os.unlink(self.path)
+        # A ledger already in WAL mode - production's - is opened without a byte changing: the write probe rolls
+        # back, and reading the journal mode only reads it.
+        self.make(wal=True)
+        before = sha(self.path)
+        ledger_open.open_rw(self.path, timeout=30).close()
+        self.assertEqual(sha(self.path), before)
+        self.assertFalse(os.path.exists(self.path + "-wal") and os.path.getsize(self.path + "-wal"))
+
+    def test_the_write_opener_never_changes_the_journal_mode(self):
+        self.make(wal=False)
+        before = sha(self.path)
+        db = ledger_open.open_rw(self.path, timeout=30)
+        self.addCleanup(db.close)
+        self.assertEqual(db.execute("PRAGMA journal_mode").fetchone()[0], "delete")
+        db.close()
+        self.assertEqual(sha(self.path), before)
+        self.assertEqual(sqlite3.connect(self.path).execute("PRAGMA journal_mode").fetchone()[0], "delete")
 
     def test_another_writer_holding_the_lock_is_not_read_as_read_only_and_is_not_waited_for(self):
         self.make()
@@ -325,6 +340,533 @@ class WriteOpenerTests(Base):
             Ledger(self.path)                                         # its CREATE TABLE IF NOT EXISTS + commit
         self.assertIn("credit_review.ledger.Ledger", str(caught.exception))
         self.assertIn("decider.sqlite3-wal", str(caught.exception))
+
+
+def locked(words: str = "database is locked") -> sqlite3.OperationalError:
+    """The error as a caller sees it. It carries no sqlite_errorcode, so it is recognised by SQLite's words."""
+    return sqlite3.OperationalError(words)
+
+
+class LockContentionTests(Base):
+    """2026-11-15: the intercom drain died mid-run on `database is locked` while four credit jobs wrote the ledger.
+
+    What must hold, for every caller and with no caller changed:
+      * every connection waits at least 30 s for a lock, and says so in PRAGMA busy_timeout;
+      * an opener never changes the journal mode: it reads it and reports a non-WAL ledger;
+      * a write that meets a lock is tried 3 times in all, then raises naming the lock and the tries;
+      * nothing but a lock is tried again.
+
+    time.sleep is replaced throughout: no test waits out a backoff, and each one reads the waits that were asked."""
+
+    def no_sleep(self) -> mock.MagicMock:
+        patcher = mock.patch.object(ledger_open.time, "sleep")
+        slept = patcher.start()
+        self.addCleanup(patcher.stop)
+        return slept
+
+    def writer(self, **kwargs) -> ledger_open.LedgerConnection:
+        db = ledger_open.open_rw(self.path, opener="a test", **kwargs)
+        self.addCleanup(db.close)
+        return db
+
+    def other_writer(self) -> sqlite3.Connection:
+        other = sqlite3.connect(self.path, isolation_level=None)
+        self.addCleanup(other.close)
+        return other
+
+    @staticmethod
+    def impatient(db: sqlite3.Connection) -> None:
+        """This TEST's connection gives up a held lock in 20 ms, so a test of the retry does not sit through the
+        30 s every real connection waits. The module never does this."""
+        sqlite3.Connection.execute(db, "PRAGMA busy_timeout=20")
+
+    # ── 1. the busy timeout ──────────────────────────────────────────────────
+
+    def test_a_connection_from_connect_has_a_busy_timeout_of_at_least_thirty_seconds(self):
+        db = ledger_open._connect(self.path)
+        self.addCleanup(db.close)
+        self.assertGreaterEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+
+    def test_a_caller_asking_for_less_gets_the_floor(self):
+        db = ledger_open._connect(self.path, timeout=5)
+        self.addCleanup(db.close)
+        self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+
+    def test_a_caller_asking_for_longer_keeps_it(self):
+        db = ledger_open._connect(self.path, timeout=60)
+        self.addCleanup(db.close)
+        self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], 60000)
+
+    def test_the_write_opener_with_no_timeout_given_waits_thirty_seconds(self):
+        self.make()
+        self.assertEqual(self.writer().execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+
+    def test_the_read_opener_with_no_timeout_given_waits_thirty_seconds(self):
+        self.make()
+        db = ledger_open.open_ro(self.path)
+        self.addCleanup(db.close)
+        self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+
+    def test_a_memory_ledger_has_the_floor_too(self):
+        db = ledger_open.open_rw(":memory:")
+        self.addCleanup(db.close)
+        self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+
+    def test_write_state_restores_the_busy_timeout_to_thirty_seconds_not_zero(self):
+        self.make()
+        db = ledger_open._connect(self.path)
+        self.addCleanup(db.close)
+        self.assertEqual(ledger_open.write_state(db), "writable")
+        self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+
+    def test_write_state_never_puts_a_zero_back(self):
+        # A connection that reached the probe already at zero - the state a probe that restored "what it found"
+        # would keep for ever.
+        self.make()
+        db = ledger_open._connect(self.path)
+        self.addCleanup(db.close)
+        db.execute("PRAGMA busy_timeout=0")
+        ledger_open.write_state(db)
+        self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+
+    def test_write_state_keeps_a_longer_timeout(self):
+        self.make()
+        db = ledger_open._connect(self.path, timeout=60)
+        self.addCleanup(db.close)
+        ledger_open.write_state(db)
+        self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], 60000)
+
+    def test_write_state_restores_the_timeout_when_another_writer_holds_the_lock(self):
+        self.make()
+        other = self.other_writer()
+        other.execute("BEGIN IMMEDIATE")
+        db = ledger_open._connect(self.path)
+        self.addCleanup(db.close)
+        self.assertEqual(ledger_open.write_state(db), "inconclusive")
+        self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+
+    def test_the_probe_is_never_retried(self):
+        self.make()
+        slept = self.no_sleep()
+        other = self.other_writer()
+        other.execute("BEGIN IMMEDIATE")
+        db = self.writer()
+        self.assertEqual(ledger_open.write_state(db), "inconclusive")
+        slept.assert_not_called()
+
+    # ── 2. the journal mode is read, never set, by an opener ─────────────────
+
+    def test_a_writer_that_contends_waits_on_the_busy_timeout_instead_of_raising_at_once(self):
+        self.make()
+        db = self.writer(isolation_level=None)
+        holding = threading.Event()
+
+        def hold_briefly():
+            other = sqlite3.connect(self.path, isolation_level=None)
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                holding.set()
+                time.sleep(0.3)
+                other.execute("ROLLBACK")
+            finally:
+                other.close()
+
+        holder = threading.Thread(target=hold_briefly)
+        holder.start()
+        self.addCleanup(holder.join)
+        self.assertTrue(holding.wait(10))
+        db.execute("INSERT INTO t VALUES (2)")
+        self.assertEqual(db.execute("SELECT count(*) FROM t").fetchone()[0], 2)
+        self.assertEqual(ledger_open.EVENTS, [])          # the busy handler waited; no retry was needed
+
+    def test_the_write_opener_reports_a_non_wal_ledger_and_still_returns_a_writer(self):
+        self.make(wal=False)
+        db = self.writer()
+        self.assertEqual(db.ledger_journal_mode, "delete")
+        self.assertEqual(len(ledger_open.EVENTS), 1)
+        self.assertIn("journal mode 'delete'", ledger_open.EVENTS[0])
+        self.assertIn(self.path, ledger_open.EVENTS[0])
+        db.execute("INSERT INTO t VALUES (2)")
+        db.commit()
+        self.assertEqual(db.execute("SELECT count(*) FROM t").fetchone()[0], 2)
+
+    def test_the_read_opener_does_not_change_the_journal_mode(self):
+        self.make(wal=False)
+        before = sha(self.path)
+        db = ledger_open.open_ro(self.path)
+        self.assertEqual(db.execute("PRAGMA journal_mode").fetchone()[0], "delete")
+        db.close()
+        self.assertEqual(sha(self.path), before)
+
+    def test_the_read_opener_leaves_no_wal_file_beside_a_rollback_ledger(self):
+        self.make(wal=False)
+        db = ledger_open.open_ro(self.path)
+        db.execute("SELECT count(*) FROM t").fetchall()
+        db.close()
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["ledger.sqlite3"])
+
+    # ── 2b. the one-time migration, run by hand ──────────────────────────────
+
+    def test_the_migration_converts_a_free_rollback_ledger_to_wal_and_keeps_its_rows(self):
+        self.make(wal=False)
+        self.assertEqual(ledger_open.migrate_to_wal(self.path), ("delete", "wal"))
+        raw = sqlite3.connect(self.path)
+        self.addCleanup(raw.close)
+        self.assertEqual(raw.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        self.assertEqual(raw.execute("SELECT x FROM t").fetchall(), [(1,)])
+
+    def test_the_migration_on_an_already_wal_ledger_changes_no_byte(self):
+        self.make(wal=True)
+        before = sha(self.path)
+        self.assertEqual(ledger_open.migrate_to_wal(self.path), ("wal", "wal"))
+        self.assertEqual(sha(self.path), before)
+
+    def test_the_migration_reports_the_actual_mode_and_exits_non_zero_when_the_ledger_is_locked(self):
+        self.make(wal=False)
+        before = sha(self.path)
+        other = self.other_writer()
+        other.execute("BEGIN IMMEDIATE")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ledger_open.main(["migrate-to-wal", self.path])
+        self.assertEqual(rc, 1)
+        self.assertIn("'delete'", err.getvalue())
+        self.assertEqual(sha(self.path), before)
+        other.execute("ROLLBACK")
+        self.assertEqual(sqlite3.connect(self.path).execute("PRAGMA journal_mode").fetchone()[0], "delete")
+
+    def test_the_migration_refuses_a_memory_ledger_by_name(self):
+        with self.assertRaises(ledger_open.LedgerJournalModeError) as caught:
+            ledger_open.migrate_to_wal(":memory:")
+        self.assertEqual(caught.exception.mode, "memory")
+        self.assertIsInstance(caught.exception, sqlite3.OperationalError)
+
+    def test_the_migration_refuses_a_path_that_does_not_exist_and_creates_no_file(self):
+        missing = self.dir / "typo.sqlite3"
+        with self.assertRaises(ledger_open.LedgerJournalModeError) as caught:
+            ledger_open.migrate_to_wal(str(missing))
+        self.assertEqual(caught.exception.mode, "missing")
+        self.assertFalse(missing.exists())
+
+    def test_the_migration_command_exits_non_zero_for_a_path_that_does_not_exist(self):
+        missing = self.dir / "typo.sqlite3"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ledger_open.main(["migrate-to-wal", str(missing)])
+        self.assertEqual(rc, 1)
+        self.assertIn("does not exist", err.getvalue())
+        self.assertFalse(missing.exists())
+
+    def test_the_migration_says_so_when_the_ledger_is_already_in_wal(self):
+        self.make(wal=True)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = ledger_open.main(["migrate-to-wal", self.path])
+        self.assertEqual(rc, 0)
+        self.assertIn("already in WAL mode; nothing written", out.getvalue())
+
+    @unittest.skipIf(os.geteuid() == 0, NOT_ROOT)
+    def test_a_rollback_ledger_in_a_directory_this_uid_may_not_write_still_opens_to_read(self):
+        # It could never have written here, so it is the unwritable ledger - a diagnosis on the connection and a
+        # named refusal on the first write - and not a journal-mode failure at open.
+        self.make(wal=False)
+        os.chmod(self.dir, 0o555)
+        self.addCleanup(os.chmod, self.dir, 0o755)
+        db = self.writer()
+        self.assertEqual(db.execute("SELECT count(*) FROM t").fetchone()[0], 1)
+        with self.assertRaises(ledger_open.LedgerNotWritableError):
+            db.execute("INSERT INTO t VALUES (2)")
+
+    # ── 3. the retry ─────────────────────────────────────────────────────────
+
+    def test_a_locked_write_is_retried_and_succeeds_on_the_second_attempt(self):
+        self.make()
+        slept = self.no_sleep()
+        write = mock.Mock(side_effect=[locked(), "written"])
+        self.assertEqual(ledger_open.retry_on_lock(self.writer(), write), "written")
+        self.assertEqual(write.call_count, 2)
+        self.assertEqual(slept.call_args_list, [mock.call(0.2)])
+
+    def test_a_write_locked_three_times_raises_and_names_the_lock(self):
+        self.make()
+        slept = self.no_sleep()
+        write = mock.Mock(side_effect=locked())
+        with self.assertRaises(ledger_open.LedgerLockedError) as caught:
+            ledger_open.retry_on_lock(self.writer(), write, what="INSERT INTO t")
+        self.assertEqual(write.call_count, 3)
+        self.assertIn("database is locked", str(caught.exception))
+        self.assertIn("3 attempts", str(caught.exception))
+        self.assertEqual(caught.exception.attempts, 3)
+        self.assertEqual(caught.exception.lock, "database is locked")
+        self.assertEqual(slept.call_args_list, [mock.call(0.2), mock.call(0.5)])
+
+    def test_the_locked_error_names_the_ledger_the_opener_and_the_statement(self):
+        self.make()
+        self.no_sleep()
+        with self.assertRaises(ledger_open.LedgerLockedError) as caught:
+            ledger_open.retry_on_lock(self.writer(), mock.Mock(side_effect=locked()), what="INSERT INTO t")
+        self.assertIn(self.path, str(caught.exception))
+        self.assertIn("opened by a test", str(caught.exception))
+        self.assertIn("on INSERT INTO t", str(caught.exception))
+        self.assertIn("busy_timeout 30000 ms", str(caught.exception))
+
+    def test_the_locked_error_is_still_the_database_error_every_handler_catches(self):
+        self.make()
+        self.no_sleep()
+        with self.assertRaises(sqlite3.OperationalError) as caught:
+            ledger_open.retry_on_lock(self.writer(), mock.Mock(side_effect=locked()))
+        self.assertIsInstance(caught.exception.__cause__, sqlite3.OperationalError)
+
+    def test_a_locked_table_is_retried_too(self):
+        self.make()
+        self.no_sleep()
+        write = mock.Mock(side_effect=[locked("database table is locked: t"), "written"])
+        self.assertEqual(ledger_open.retry_on_lock(self.writer(), write), "written")
+        self.assertEqual(write.call_count, 2)
+
+    def test_a_constraint_error_is_not_retried(self):
+        self.make()
+        slept = self.no_sleep()
+        write = mock.Mock(side_effect=sqlite3.IntegrityError("UNIQUE constraint failed: t.x"))
+        with self.assertRaises(sqlite3.IntegrityError):
+            ledger_open.retry_on_lock(self.writer(), write)
+        self.assertEqual(write.call_count, 1)
+        slept.assert_not_called()
+
+    def test_a_ledger_not_writable_error_is_not_retried(self):
+        self.make()
+        slept = self.no_sleep()
+        refused = ledger_open.LedgerNotWritableError(
+            "cannot write ledger: permission (sqlite: attempt to write a readonly database)",
+            reason=ledger_open.PERMISSION, why="may not write", path=self.path)
+        write = mock.Mock(side_effect=refused)
+        with self.assertRaises(ledger_open.LedgerNotWritableError):
+            ledger_open.retry_on_lock(self.writer(), write)
+        self.assertEqual(write.call_count, 1)
+        slept.assert_not_called()
+
+    def test_any_other_database_error_is_not_retried(self):
+        self.make()
+        slept = self.no_sleep()
+        write = mock.Mock(side_effect=sqlite3.OperationalError("no such table: nope"))
+        with self.assertRaises(sqlite3.OperationalError) as caught:
+            ledger_open.retry_on_lock(self.writer(), write)
+        self.assertEqual(write.call_count, 1)
+        self.assertNotIsInstance(caught.exception, ledger_open.LedgerLockedError)
+        slept.assert_not_called()
+
+    def test_a_lock_already_given_up_on_is_not_retried_again(self):
+        # Where Connection.execute runs through the cursor's execute, the inner one has made every try already.
+        self.make()
+        self.no_sleep()
+        given_up = ledger_open.LedgerLockedError("ledger: database is locked - still locked after 3 attempts",
+                                                 path=self.path, attempts=3, waited_s=0.7, lock="database is locked")
+        write = mock.Mock(side_effect=given_up)
+        with self.assertRaises(ledger_open.LedgerLockedError):
+            ledger_open.retry_on_lock(self.writer(), write)
+        self.assertEqual(write.call_count, 1)
+
+    # ── the same, against a lock SQLite really holds ─────────────────────────
+
+    def test_a_real_lock_released_during_the_backoff_lets_the_write_through(self):
+        self.make()
+        db = self.writer(isolation_level=None)
+        self.impatient(db)
+        other = self.other_writer()
+        other.execute("BEGIN IMMEDIATE")
+        slept = self.no_sleep()
+        slept.side_effect = lambda _s: other.execute("ROLLBACK")
+        db.execute("INSERT INTO t VALUES (2)")
+        self.assertEqual(db.execute("SELECT count(*) FROM t").fetchone()[0], 2)
+        self.assertEqual(slept.call_args_list, [mock.call(0.2)])
+        self.assertEqual(len(ledger_open.EVENTS), 1)
+        self.assertIn("attempt 2 of 3 went through", ledger_open.EVENTS[0])
+
+    def test_a_real_lock_that_is_never_released_raises_after_three_tries_and_writes_nothing(self):
+        self.make()
+        db = self.writer(isolation_level=None)
+        self.impatient(db)
+        other = self.other_writer()
+        other.execute("BEGIN IMMEDIATE")
+        slept = self.no_sleep()
+        with self.assertRaises(ledger_open.LedgerLockedError) as caught:
+            db.execute("INSERT INTO t VALUES (2)")
+        self.assertEqual(caught.exception.attempts, 3)
+        self.assertIn("database is locked", str(caught.exception))
+        self.assertIn("on INSERT INTO t VALUES (2)", str(caught.exception))
+        self.assertEqual(slept.call_args_list, [mock.call(0.2), mock.call(0.5)])
+        other.execute("ROLLBACK")
+        self.assertEqual(db.execute("SELECT count(*) FROM t").fetchone()[0], 1)
+        self.assertIn("still locked after 3 attempts", ledger_open.EVENTS[-1])
+
+    def test_every_way_to_write_is_retried_on_a_real_lock(self):
+        ways = (
+            ("execute", lambda db: db.execute("INSERT INTO t VALUES (2)")),
+            ("cursor().execute", lambda db: db.cursor().execute("INSERT INTO t VALUES (2)")),
+            ("executemany", lambda db: db.executemany("INSERT INTO t VALUES (?)", [(2,)])),
+            ("cursor().executemany", lambda db: db.cursor().executemany("INSERT INTO t VALUES (?)", [(2,)])),
+            ("executescript", lambda db: db.executescript("INSERT INTO t VALUES (2);")),
+            ("cursor().executescript", lambda db: db.cursor().executescript("INSERT INTO t VALUES (2);")),
+            ("BEGIN IMMEDIATE", lambda db: (db.execute("BEGIN IMMEDIATE"), db.execute("INSERT INTO t VALUES (2)"),
+                                           db.execute("COMMIT"))),
+        )
+        self.make()
+        slept = self.no_sleep()
+        for name, write in ways:
+            with self.subTest(name):
+                db = ledger_open.open_rw(self.path, isolation_level=None)
+                self.impatient(db)
+                other = self.other_writer()
+                other.execute("BEGIN IMMEDIATE")
+                slept.reset_mock()
+                slept.side_effect = lambda _s, other=other: other.execute("ROLLBACK")
+                before = db.execute("SELECT count(*) FROM t").fetchone()[0]
+                write(db)
+                self.assertEqual(db.execute("SELECT count(*) FROM t").fetchone()[0], before + 1)
+                self.assertEqual(slept.call_count, 1)
+                db.close()
+                other.close()
+
+    def test_a_real_constraint_error_is_raised_once_and_untouched(self):
+        self.make()
+        db = self.writer(isolation_level=None)
+        db.execute("CREATE UNIQUE INDEX t_x ON t (x)")
+        slept = self.no_sleep()
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
+            db.execute("INSERT INTO t VALUES (1)")
+        self.assertNotIsInstance(caught.exception, sqlite3.OperationalError)
+        slept.assert_not_called()
+
+    @unittest.skipIf(os.geteuid() == 0, NOT_ROOT)
+    def test_a_real_refused_write_is_raised_once_and_never_waited_on(self):
+        self.wal_without_the_write_bit()
+        db = self.writer(isolation_level=None)
+        slept = self.no_sleep()
+        with self.assertRaises(ledger_open.LedgerNotWritableError):
+            db.execute("INSERT INTO t VALUES (2)")
+        slept.assert_not_called()
+
+    def test_a_stale_read_snapshot_is_not_retried_and_says_what_clears_it(self):
+        # This connection read, another writer committed, now it writes: SQLITE_BUSY_SNAPSHOT. No wait clears it.
+        self.make()
+        db = self.writer(isolation_level=None)
+        other = self.other_writer()
+        db.execute("BEGIN")
+        db.execute("SELECT count(*) FROM t").fetchall()
+        other.execute("INSERT INTO t VALUES (2)")
+        slept = self.no_sleep()
+        with self.assertRaises(ledger_open.LedgerLockedError) as caught:
+            db.execute("INSERT INTO t VALUES (3)")
+        self.assertEqual(caught.exception.attempts, 1)
+        self.assertIn("read snapshot", str(caught.exception))
+        slept.assert_not_called()
+
+    def test_a_reader_meeting_a_lock_is_left_exactly_as_it_was(self):
+        # A rollback-journal file with an exclusive lock on it is the one place a READ is refused.
+        self.make(wal=False)
+        db = ledger_open.open_ro(self.path)
+        self.addCleanup(db.close)
+        self.impatient(db)
+        other = self.other_writer()
+        other.execute("BEGIN EXCLUSIVE")
+        slept = self.no_sleep()
+        with self.assertRaises(sqlite3.OperationalError) as caught:
+            db.execute("SELECT count(*) FROM t").fetchall()
+        self.assertNotIsInstance(caught.exception, ledger_open.LedgerLockedError)
+        self.assertEqual(str(caught.exception), "database is locked")
+        slept.assert_not_called()
+
+    # ── what is NOT run a second time ────────────────────────────────────────
+
+    def test_rows_from_an_iterator_are_not_run_a_second_time(self):
+        self.make()
+        db = self.writer(isolation_level=None)
+        self.assertIn("iterator", ledger_open._many_unsafe(db, ("INSERT INTO t VALUES (?)", iter([(2,)])), 0))
+
+    def test_an_executemany_that_already_wrote_rows_is_not_run_a_second_time(self):
+        self.make()
+        db = self.writer(isolation_level=None)
+        before = db.total_changes
+        db.execute("INSERT INTO t VALUES (2)")
+        self.assertIn("written rows", ledger_open._many_unsafe(db, ("INSERT INTO t VALUES (?)", [(3,)]), before))
+
+    def test_an_executemany_that_wrote_nothing_may_be_run_again(self):
+        self.make()
+        db = self.writer(isolation_level=None)
+        self.assertEqual(ledger_open._many_unsafe(db, ("INSERT INTO t VALUES (?)", [(2,)]), db.total_changes), "")
+
+    def test_a_script_that_changed_the_schema_is_not_run_a_second_time(self):
+        self.make()
+        db = self.writer(isolation_level=None)
+        before = ledger_open._script_state(db)
+        db.execute("CREATE TABLE u (y)")
+        self.assertIn("schema", ledger_open._script_unsafe(db, before))
+
+    def test_a_script_that_changed_rows_is_not_run_a_second_time(self):
+        self.make()
+        db = self.writer(isolation_level=None)
+        before = ledger_open._script_state(db)
+        db.execute("INSERT INTO t VALUES (2)")
+        self.assertIn("rows", ledger_open._script_unsafe(db, before))
+
+    def test_a_script_that_left_a_transaction_open_is_not_run_a_second_time(self):
+        self.make()
+        db = self.writer(isolation_level=None)
+        before = ledger_open._script_state(db)
+        db.execute("BEGIN IMMEDIATE")
+        self.assertIn("transaction open", ledger_open._script_unsafe(db, before))
+
+    def test_a_script_that_did_nothing_may_be_run_again(self):
+        self.make()
+        db = self.writer(isolation_level=None)
+        self.assertEqual(ledger_open._script_unsafe(db, ledger_open._script_state(db)), "")
+
+    def test_a_locked_statement_that_may_not_be_run_again_raises_after_one_try(self):
+        self.make()
+        slept = self.no_sleep()
+        write = mock.Mock(side_effect=locked())
+        with self.assertRaises(ledger_open.LedgerLockedError) as caught:
+            ledger_open.retry_on_lock(self.writer(), write, unsafe=lambda: "the first try had already written rows")
+        self.assertEqual(write.call_count, 1)
+        self.assertEqual(caught.exception.attempts, 1)
+        self.assertIn("not tried again after attempt 1: the first try had already written rows", str(caught.exception))
+        slept.assert_not_called()
+
+    def test_the_error_carries_the_statement_and_never_its_parameters(self):
+        self.assertEqual(ledger_open._what(("INSERT INTO t\n   VALUES (?)", ("a customer's name",))),
+                         "INSERT INTO t VALUES (?)")
+
+    # ── the callers, unchanged ───────────────────────────────────────────────
+
+    def test_a_caller_that_asks_for_sixty_seconds_still_gets_sixty(self):
+        self.make()
+        self.assertEqual(self.writer(timeout=60).execute("PRAGMA busy_timeout").fetchone()[0], 60000)
+
+    def test_the_verify_ledger_writer_waits_thirty_seconds(self):
+        db = verify_ledger.connect(self.path)
+        self.addCleanup(db.close)
+        self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+
+    def test_the_verify_ledger_reader_waits_thirty_seconds_and_leaves_the_mode_alone(self):
+        verify_ledger.connect(self.path).close()
+        db = verify_ledger.connect_ro(self.path)
+        self.addCleanup(db.close)
+        self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+        self.assertEqual(db.execute("PRAGMA journal_mode").fetchone()[0], "delete")  # what the file was; not set here
+
+    def test_a_verify_ledger_write_that_meets_a_lock_is_retried_with_no_change_to_the_caller(self):
+        db = verify_ledger.connect(self.path)
+        self.addCleanup(db.close)
+        self.impatient(db)
+        table = verify_ledger.TABLES[0]
+        other = self.other_writer()
+        other.execute("BEGIN IMMEDIATE")
+        slept = self.no_sleep()
+        slept.side_effect = lambda _s: other.execute("ROLLBACK")
+        db.execute("BEGIN IMMEDIATE")                     # the statement every claim and finalize starts with
+        db.execute(f'DELETE FROM "{table}" WHERE 0')
+        db.execute("COMMIT")
+        self.assertEqual(slept.call_count, 1)
 
 
 def facts(*, euid=0, groups=(0,), directory=(0, 1000, 0o1770), db=(0, 1000, 0o640), wal=(1000, 1000, 0o640),

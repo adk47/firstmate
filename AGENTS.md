@@ -1601,6 +1601,18 @@ is fine and nothing is left to see. Repro (two uids, container only):
   `sqlite3.connect`, so they can still die with the bare `attempt to write a readonly database` — no reopen, no
   reason code, no run.log line. Routing them through `ledger_open` is separate follow-up work. **A new writer
   must use `ledger_open.open_rw`, never a bare `sqlite3.connect`.**
+- **The same opener owns lock contention** (2026-11-15: the intercom drain died on `database is locked` with four
+  credit jobs writing): every connection gets a busy timeout of at least 30 s, and a busy / locked statement or commit
+  on a write connection is tried 3 times, then raises `LedgerLockedError` naming the tries. `open_rw` never changes
+  the journal mode: it reads it into `ledger_journal_mode` and reports a non-WAL ledger. The one-time conversion is
+  `python3 scripts/credit_review/ledger_open.py migrate-to-wal <ledger>`, run by hand, never by an opener, a timer or
+  a deploy step. Never add a per-caller timeout, WAL pragma or retry loop. A write that never gets the lock takes
+  about 91 s to say so. Eight writers still open the ledger with a bare `sqlite3.connect` and get none of this; the
+  list, and what the retry does not cure (a read then a write in one deferred transaction: use `BEGIN IMMEDIATE`), is
+  `data/ledger-busy-timeout-wal-r1/report.md`.
+- **A ledger in WAL mode keeps its contents in the `-wal`, so its main file's bytes are not its contents.** A test or
+  tool that copies one copies with `sqlite3`'s backup, and a reader is never held behind a writer: only `connect_ro`'s
+  retry window carries a reader past a live migration.
 - **A write on `open_ro` / `connect_ro` raises `ReadOnlyConnectionWriteError`** and changes no byte.
 - **`READ_ONLY_PROCESS` is set only inside `verify_ledger.read_only_process()`**; never assign it.
 - The reopen is a workaround. The cause is the sticky bit plus a reader that creates the WAL files, and changing

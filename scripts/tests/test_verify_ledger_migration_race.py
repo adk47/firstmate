@@ -156,6 +156,14 @@ class ReaderToleranceTests(unittest.TestCase):
     def test_a_reader_that_lands_inside_a_live_migration_waits_it_out_instead_of_reporting_89_failed(self):
         # part 3: the 11:49:02Z shape. The writer migrates 0.1 s after the reader starts; the reader must return a
         # usable connection, never a partial-schema refusal.
+        #
+        # The window here is 2 x 1.0 s, not setUp's 2 x 0.1 s. The production ledger is in WAL mode, where a reader
+        # is never held behind a writer's lock: what carries the reader past a live migration is connect_ro's retry
+        # window and nothing else. On a rollback-journal ledger the reader's second look BLOCKED on the migrator's
+        # lock until it finished, which is the only reason a 0.2 s window ever covered a 0.2 s migration. The reader
+        # returns as soon as the schema is whole, so this costs one sleep, not the window.
+        verify_ledger.RO_RETRY_SLEEP_S = 1.0
+
         def migrate_soon():
             time.sleep(0.05)
             verify_ledger.connect(self.path).close()
