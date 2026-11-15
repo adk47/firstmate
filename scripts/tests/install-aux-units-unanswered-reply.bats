@@ -85,11 +85,13 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   # Without it the paid split is "unmeasured" on every tick.
   run _values "$SVC" Service.Environment
   [ "$output" = "HOME=/root" ]
-  # the first tick reads every open thread (READ_BUDGET_S in the script); the unit must outlast it
+  # the first tick reads every open thread (READ_BUDGET_S) and then re-reads what left the open
+  # set (CLOSED_BUDGET_S); the unit must outlast both plus the search, idmap, Slack and state work
   local budget
-  budget="$(awk -F' = ' '$1 == "READ_BUDGET_S" { print $2 }' "$HYDRA_REPO/$SCRIPT")"
+  budget="$(cd "$HYDRA_REPO" && WATCHDOG="$SCRIPT" python3 -c 'import importlib.util, os; s = importlib.util.spec_from_file_location("w", os.environ["WATCHDOG"]); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.READ_BUDGET_S + m.CLOSED_BUDGET_S)')"
   [ -n "$budget" ]
-  [ "$(_values "$SVC" Service.TimeoutStartSec)" -gt "$budget" ]
+  [ "$budget" -gt 0 ]
+  [ "$(_values "$SVC" Service.TimeoutStartSec)" -ge "$((budget + 600))" ]
 }
 
 @test "SECURITY: no secret literal appears in the rendered units" {

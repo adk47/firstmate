@@ -54,7 +54,9 @@ MAX_LINES per message; the rest are listed on the next tick. Threads waiting lon
 LIST_MAX_DAYS are the old backlog: always in the count, never listed. Every message ends with
 the whole class count (paid / free / unverified, each class). When nothing is listable but
 any thread is still owed, the count alone is posted once every COUNT_EVERY_H: the number
-is in front of a person at least daily while it is not zero, and never only in a file.
+is in front of a person at least daily while it is not zero, and never only in a file. A
+degraded paying split rides that same count page (at most once per COUNT_EVERY_H), because
+it is warned rather than failed: it never makes the tick exit non-zero.
 
 CLOSED IS NOT ANSWERED: a thread that was in the class last tick and is no longer open is
 re-read. Still unanswered => it is reported as "closed without an answer" in the same page.
@@ -127,6 +129,7 @@ MAX_READS = 12000
 MAX_CLOSED_READS = 60
 READ_WORKERS = 8
 READ_BUDGET_S = 1500
+CLOSED_BUDGET_S = 600  # the closed-without-answer pass gets its own budget, not what the open pass left
 IDMAP_CHUNK = 1000
 IDMAP_TTL_S = 24 * 3600  # re-read a paying account's identity keys at least daily
 PAGED_RETENTION_S = 60 * 86400
@@ -537,8 +540,11 @@ def run(args):
                          "Intercom identity this tick; an unmatched thread is 'paid status "
                          "unverified', never free")
     if paid_note:
+        # A degraded paying split is WARNED, never a failed unit. The tick still measured and
+        # paged, and a oneshot that exits non-zero freezes lastSuccessfulTime, so "the house
+        # list was stale" would be indistinguishable from "the check is dead". The warning
+        # rides the page (and latest.json's paid_split) instead of the exit code.
         print(f"WARN: {paid_note}", file=sys.stderr)
-        rc = 2
 
     # 2. every open / snoozed conversation; re-read only what changed since its cached verdict
     try:
@@ -548,7 +554,21 @@ def run(args):
         return 2
     want = [cid for cid, c in convs.items() if needs_read(c)
             and (threads.get(cid) or {}).get("u") != int(c.get("updated_at") or 0)]
-    want.sort(key=lambda cid: -int((convs[cid].get("statistics") or {}).get("last_contact_reply_at") or 0))
+    # Longest wait first, on the wait the page itself reports: a cached verdict's `s` is the
+    # first unkept promise for handoff_chased/promise_open and the customer's message for
+    # customer_last, so it can be far older than the customer's last reply. The read cap must
+    # drop the FRESHEST threads, never the ones that have been waiting longest: those are the
+    # whole reason this check exists, and sorting newest-first silently starved them on any tick
+    # where the cap or the budget bit. Only a thread with no cached verdict yet falls back to
+    # last_contact_reply_at, because its `s` is unknown before the read. A missing value sorts
+    # oldest, because an unknown wait is not a short one.
+    def wait_start(cid):
+        cached = threads.get(cid) or {}
+        if cached.get("s") is not None:
+            return int(cached["s"])
+        return int((convs[cid].get("statistics") or {}).get("last_contact_reply_at") or 0)
+
+    want.sort(key=wait_start)
     deadline = time.monotonic() + READ_BUDGET_S
     got = read_many(token, want[:MAX_READS], bot, deadline)
     unread = 0
@@ -569,8 +589,9 @@ def run(args):
     # 3. closed is not answered: re-read what left the open set while it was owed
     left = [cid for cid, t in threads.items()
             if cid not in convs and t.get("k") in OWED and not t.get("closed_at")]
+    left.sort(key=lambda cid: int(threads[cid].get("s") or 0))
     closed_rows, closed_all, unverified = [], [], 0
-    regot = read_many(token, left[:MAX_CLOSED_READS], bot, deadline)
+    regot = read_many(token, left[:MAX_CLOSED_READS], bot, time.monotonic() + CLOSED_BUDGET_S)
     for cid in left:
         v = regot.get(cid)
         if isinstance(v, dict) and v.get("k") in OWED and v["state"] not in OPEN_STATES:
@@ -623,7 +644,10 @@ def run(args):
                 "due_now": len(due_all), "closed_unanswered": len(closed_all), **summary}
 
     # nothing listable is not nothing owed: the count still reaches a person once a day
-    count_only = (not due and not closed_rows and summary["total"] > 0
+    # A degraded paying split reaches a person on the next count page, at most once per
+    # COUNT_EVERY_H: it is the one signal that no longer fails the unit, so it must not be
+    # able to go unseen either.
+    count_only = (not due and not closed_rows and (summary["total"] > 0 or paid_note)
                   and now - int(meta.get("last_post") or 0) >= COUNT_EVERY_H * 3600)
     text = (render(due, more, closed_rows, summary, paid_note, unread + len(unresolved), now,
                    mention_ids, workspace_id)

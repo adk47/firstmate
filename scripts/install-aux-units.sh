@@ -1031,6 +1031,10 @@ log "  $cc: $(systemctl is-active "$cc" 2>/dev/null || echo unknown)"
 # paying accounts' ids come from the replica through trino-query.sh (kubectl). The first
 # tick reads every open thread (about 10 min measured); later ticks only what changed.
 # See scripts/intercom-unanswered-reply-watchdog.py and docs/support/unanswered-reply-watchdog.md.
+# TimeoutStartSec must outlast READ_BUDGET_S + CLOSED_BUDGET_S (2100 s) with headroom for the
+# search, the idmap refresh, the Slack post and the state write; a kill before save means the
+# tick re-reads everything and records no page. Mismatch fails
+# scripts/tests/install-aux-units-unanswered-reply.bats.
 cat > /etc/systemd/system/intercom-unanswered-reply-watchdog.service << UNANSWEREDREPLYSVC
 [Unit]
 Description=Intercom unanswered-reply watchdog, paid first (alerts #cs_priority)
@@ -1041,7 +1045,7 @@ Type=oneshot
 Environment=HOME=/root
 EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/edge.env
-TimeoutStartSec=2400
+TimeoutStartSec=3600
 ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/intercom-unanswered-reply-watchdog.py
 UNANSWEREDREPLYSVC
 

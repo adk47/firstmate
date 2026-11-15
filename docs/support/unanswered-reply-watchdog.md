@@ -80,7 +80,13 @@ write on it. Staff-domain addresses (`STAFF_EMAIL_DOMAINS`) are never a paid key
 held as sha256 only.
 
 If the paying list is missing, malformed or older than 3 h, every thread is **unverified**,
-never free: it pages like paid, the page says the split is incomplete, and the tick exits 2.
+never free: it pages like paid, the page says the split is incomplete, and the tick still
+exits 0. A degraded split is a warning, not a failed unit: the tick measured and paged, and a
+oneshot that exits non-zero freezes `lastSuccessfulTime`, which would make "the house list was
+stale" indistinguishable from "the check is dead". Because the exit code no longer carries it,
+the warning rides the count page: a degraded tick posts it at most once per `COUNT_EVERY_H`
+(24 h), so a degrade inside that window is carried by the next count page rather than posting
+immediately, and `latest.json` records it in `paid_split`.
 The same holds when the list itself is usable but some paying accounts could not be mapped to
 an Intercom identity this tick: a thread that did not match is **unverified**, never free,
 and the page states how many accounts went unmapped. An account's identity keys are re-read
@@ -90,7 +96,6 @@ refresh fails is unmapped for that tick (unverified), never classified on keys i
 longer own.
 
 ## N = 24 hours
-
 Caroline answers in about a minute, so a thread still in the class after an hour is one she
 could not answer; what it waits for is a person. 24 h gives every timezone one working day,
 and it is the paid SLA the credit decider already uses (`decide.PAID_SLA`). Longer, and a
@@ -110,10 +115,31 @@ ahead of a repeat, oldest wait first; each line has the wait, the class, how pai
 decided, the subject and a link. Every message ends with the whole class count, paid, free
 and unverified. When nothing is listable but any thread is still owed, free included, the
 count alone is posted once a day (`COUNT_EVERY_H`), so the number is in front of a person
-daily while it is not zero.
+daily while it is not zero; a degraded paying split rides that same count page (see
+"Paid and free").
 
 A record of a page is written only after Slack confirms the post. A failed post records
 nothing and everything retries on the next tick.
+
+## Reading order and read budgets
+
+A tick reads at most `MAX_READS` conversations in the open pass and stops at `READ_BUDGET_S`.
+Both caps are applied **longest wait first**, on the wait the page itself reports: a thread
+with a cached verdict is ordered by its owed-since `s` (the first unkept promise for
+`handoff_chased` / `promise_open`, the customer's message for `customer_last`), and only a
+thread with no cached verdict yet falls back to `last_contact_reply_at`, because its `s` is
+unknown before the read.
+A missing value sorts oldest. The threads a cap drops must be the freshest ones, because the
+ones that have been waiting longest are the entire reason this check exists. Sorting
+newest-first silently starved them on any tick where a cap or the budget bit.
+
+The closed-without-answer pass is a second pass with its own caps: at most
+`MAX_CLOSED_READS` conversations and its own budget (`CLOSED_BUDGET_S`) rather than whatever
+the open pass left of `READ_BUDGET_S`. Sharing one deadline meant a busy open pass could
+leave the closed pass zero seconds, so a thread that left the open set while still owed was
+never re-read and sat in `unresolved_left` indefinitely. This pass is ordered the same way,
+by the cached owed-since `s`, so a bulk close cannot fill its cap with the freshest
+departures and starve a thread that has been waiting longest.
 
 ## Closed is not answered
 
@@ -162,8 +188,10 @@ cat /var/lib/intercom-unanswered-reply-watchdog/latest.json
 - The first tick reads every open thread (about ten minutes); later ticks re-read only
   threads whose `updated_at` changed.
 - Exit 0 clean; 1 no token, bad `--at` or a state file it does not recognise (left
-  untouched); 2 something could not be read, the paid split is incomplete, or the Slack post
-  failed. The service is in `AUX_ONFAILURE_UNITS`, so a non-zero tick pages `#clio_devops`.
+  untouched); 2 the Intercom search failed, a conversation stayed unreadable, the Slack post
+  failed, or the state could not be written. A degraded paying split is **not** exit 2: it is
+  warned on the page and in `latest.json`'s `paid_split`. The service is in
+  `AUX_ONFAILURE_UNITS`, so a non-zero tick pages `#clio_devops`.
 - "Could not read" is its own state: an unreadable thread (a 404 included) keeps its previous verdict, is
   counted in `unread` (or `unresolved_left` once it has left the open set), stays in the
   published total, and `latest.json` says `"complete": false`.

@@ -571,7 +571,9 @@ class Tick(unittest.TestCase):
         def broken(sql):
             raise OSError("no trino pod")
         with mock.patch.object(wd, "trino", broken):
-            self.assertEqual(self.tick(NOW + wd.IDMAP_TTL_S), 2)
+            # a paying split we could not fully re-verify is warned on the page, not a failed
+            # unit: the tick still measured and paged, and lastSuccessfulTime must keep moving
+            self.assertEqual(self.tick(NOW + wd.IDMAP_TTL_S), 0)
         latest = json.loads(pathlib.Path(self.tmp.name, "latest.json").read_text())
         # neither thread can be matched to a key we could re-verify, so neither is free
         self.assertEqual((latest["by_paid"]["paid"], latest["by_paid"]["unknown"], latest["by_paid"]["free"]),
@@ -662,10 +664,19 @@ class Tick(unittest.TestCase):
     def test_no_paying_list_means_unmeasured_never_free(self):
         self.paying = (None, "paying-users.json is 5.0 h old")
         self.chased_handoff()
-        self.assertEqual(self.tick(), 2)
+        self.assertEqual(self.tick(), 0)
         self.assertIn("paid status unverified", self.posts[0])
         self.assertIn("Paid split incomplete", self.posts[0])
         self.assertIn("1 paid-status unverified", self.posts[0])
+
+    def test_a_stale_paying_list_with_nothing_owed_still_reaches_a_person(self):
+        # the only signal that no longer fails the unit must not be able to go unseen either
+        self.paying = (None, "paying-users.json is 5.0 h old")
+        self.assertEqual(self.tick(), 0)
+        self.assertEqual(len(self.posts), 1)
+        self.assertIn("Paid split incomplete", self.posts[0])
+        latest = json.loads(pathlib.Path(self.tmp.name, "latest.json").read_text())
+        self.assertIn("paying-users.json is 5.0 h old", latest["paid_split"])
 
     def test_failed_slack_post_records_nothing_so_it_retries(self):
         self.chased_handoff()
@@ -746,7 +757,7 @@ class Tick(unittest.TestCase):
         self.paying = (frozenset({7, 8}), None)  # the replica only answers for 7
         self.ic.add("free1", [cust("p1", NOW - 40 * H)])
         self.chased_handoff()
-        self.assertEqual(self.tick(), 2)
+        self.assertEqual(self.tick(), 0)
         text = self.posts[0]
         self.assertIn("/conversation/free1", text)
         self.assertIn("paid status unverified", text)
@@ -762,6 +773,59 @@ class Tick(unittest.TestCase):
         self.chased_handoff()
         self.assertEqual(self.tick(), 1)
         self.assertEqual((p.read_text(), self.posts), ('{"watch": {}}', []))
+
+    def test_the_read_cap_drops_the_freshest_threads_not_the_longest_waiting(self):
+        # newest-first ordering starved the threads that waited longest: on any tick where the
+        # cap or the budget bit, the oldest pages were exactly the ones never read
+        self.ic.add("waiting_long", [cust("p1", NOW - 40 * H)], src_ts=NOW - 40 * H, ext="pro-7")
+        self.ic.add("waiting_less", [cust("p2", NOW - 30 * H)], src_ts=NOW - 30 * H, ext="pro-7")
+        with mock.patch.object(wd, "MAX_READS", 1):
+            self.assertEqual(self.tick(), 2)  # the capped thread is unread, and the tick says so
+        self.assertEqual(self.ic.reads, ["waiting_long"])
+        self.assertIn("/conversation/waiting_long", self.posts[0])
+
+    def test_the_read_cap_orders_by_the_wait_the_page_reports_not_the_last_reply(self):
+        # the hand-off has waited since the promise 10 days back but its last contact is 2 days
+        # old; one customer thread has an older last contact (5 days) and a shorter wait, the
+        # other a newer last contact (1 hour) and a shorter wait. Only the owed-since `s` key
+        # reads the hand-off first: ordering on last_contact_reply_at picks one of the others.
+        self.ic.add("handoff", [caroline("p1", NOW - 10 * D, "You'll hear back."),
+                                cust("p2", NOW - 2 * D),
+                                caroline("p3", NOW - 2 * D + 30, "You'll hear back.")],
+                    src_ts=NOW - 2 * D, ext="pro-7")
+        self.ic.add("older_contact", [cust("p1", NOW - 5 * D)], src_ts=NOW - 5 * D, ext="pro-7")
+        self.ic.add("newer_contact", [cust("p1", NOW - H)], src_ts=NOW - H, ext="pro-7")
+        self.assertEqual(self.tick(), 0)
+        self.ic.reads.clear()
+        for cid in ("handoff", "older_contact", "newer_contact"):
+            self.ic.details[cid]["updated_at"] = NOW + H
+        with mock.patch.object(wd, "MAX_READS", 1):
+            self.assertEqual(self.tick(NOW + H), 2)
+        self.assertEqual(self.ic.reads, ["handoff"])
+
+    def test_the_closed_pass_cap_also_drops_the_freshest_not_the_longest_waiting(self):
+        for cid, age in (("oldest", 40), ("middle", 30), ("newest", 20)):
+            self.ic.add(cid, [cust("p1", NOW - age * H)], src_ts=NOW - age * H, ext="pro-7")
+        self.assertEqual(self.tick(), 0)
+        state = self.state()
+        state["threads"] = {cid: state["threads"][cid] for cid in ("newest", "middle", "oldest")}
+        pathlib.Path(self.tmp.name, "state.json").write_text(json.dumps(state))
+        for cid in ("oldest", "middle", "newest"):
+            self.ic.details[cid]["state"] = "closed"
+        self.ic.reads.clear()
+        with mock.patch.object(wd, "MAX_CLOSED_READS", 1):
+            self.assertEqual(self.tick(NOW + H), 2)
+        self.assertEqual(self.ic.reads, ["oldest"])
+
+    def test_the_closed_pass_is_not_starved_by_the_open_pass(self):
+        self.ic.add("c1", [cust("p1", NOW - 40 * H)], src_ts=NOW - 40 * H, ext="pro-7")
+        self.assertEqual(self.tick(), 0)
+        self.ic.details["c1"]["state"] = "closed"  # still owed, now out of the open set
+        with mock.patch.object(wd, "READ_BUDGET_S", 0):  # the open pass may spend nothing
+            self.assertEqual(self.tick(NOW + H), 0)
+        latest = json.loads(pathlib.Path(self.tmp.name, "latest.json").read_text())
+        self.assertEqual((latest["closed_unanswered"], latest["unresolved_left"]), (1, 0))
+
 
 class ReadOnly(unittest.TestCase):
     def test_a_full_tick_only_reads_intercom(self):
