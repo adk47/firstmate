@@ -43,7 +43,10 @@
 #   after an Orca or host restart), the replacement launches in a NEW terminal
 #   created in the task's recorded Orca worktree, whose path must match the
 #   recorded worktree, and the record is republished with that terminal; a
-#   live or shell-only Orca terminal still refuses.
+#   live or shell-only Orca terminal still refuses. Every structural refusal in
+#   --relaunch exits 2, distinct from the 1 a retryable launch failure reports,
+#   so a supervisor such as bin/fm-watchdog-worker.sh can tell "cannot succeed"
+#   from "try again".
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile

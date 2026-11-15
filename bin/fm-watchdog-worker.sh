@@ -64,8 +64,12 @@
 # whose terminals an operator had closed were each "relaunched" three times an
 # hour, every attempt refused, and every lane then paged as out of budget. A
 # refused lane is re-attempted only after FM_WATCHDOG_REFUSAL_RETRY_SECS, long
-# enough for whatever refused it to be fixed. A timeout or a transient spawn
-# error is not a refusal and may simply be retried.
+# enough for whatever refused it to be fixed, and a different alive or dead read
+# of the endpoint drops the record at once, because the refusal was a fact about
+# the endpoint state that earned it and an unreadable read is not an answer. A
+# timeout or a transient spawn error is not a refusal: the attempt is charged to
+# the hourly relaunch budget and the rung is tried again, and a spent budget
+# wakes firstmate once with the lane named.
 #
 # THE STALL LADDER. A live worker whose pane keeps one SHAPE for
 # no_progress_secs while it reads busy is stalled. Shape means printable ASCII
