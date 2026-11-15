@@ -107,6 +107,14 @@ NEW_THREAD_CHANNELS = ("notices", "legal")   # the two mailboxes firstmate inbox
 # Nothing can ever be authed for one, so "auth it and the route opens" is false advice for them and must not be said:
 # an operator who reads it goes looking for a mailbox that does not exist instead of recovering the address.
 ALIAS_MAILBOXES = ("notices@muso.ai", "legal@muso.ai")
+# A request that reached us with NO thread at all (a support ticket with the requester's address on file and neither
+# an Intercom conversation nor a mail thread) may be written to in a new thread from support@, by a LADDER letter
+# only (ruling g2-walls-1115, firstmate inbox 019, 2026-11-15: "support rows that have an address on file and no
+# thread ... and that shape only, one opening letter from the approved ladder"). Undo: empty this tuple.
+# The older ask and the confirmation never take this route: their copy is approved under standing rulings that name
+# no such letter, and a request reached this way gets its ask from the ladder.
+LADDER_NEW_THREAD_CHANNELS = ("support",)
+LADDER_NEW_THREAD_BATCH = "g2-walls-1115"         # recorded on every send that takes this route
 
 
 def _why_not_the_old_thread(channel: str, thread: str, why: str) -> str:
@@ -161,8 +169,31 @@ def _new_thread(row: dict, why_not_the_old_thread: str) -> tuple[str, str]:
     return "mail_new_thread", requester_email
 
 
-def route(row: dict) -> tuple[str, str]:
-    """(kind, target) for this request, or Unknown with the reason a human needs to fix."""
+def _ladder_new_thread(row: dict) -> tuple[str, str]:
+    """A ladder letter's new thread from support@ to a requester who has no thread with us. Refuses, with the reason,
+    when there is no address to write to or the ladder copy holds no subject for the request's class."""
+    to = str(row.get("requester_email") or "").strip()
+    if not to:
+        raise Unknown("no conversation_id, no gmail_thread and no requester_email: there is nothing to reply to and "
+                      "nobody to write to")
+    try:
+        dsar.new_thread_subject(dsar.load_copy(), row.get("class") or "")
+    except dsar.CopyError as exc:
+        raise Unknown(f"no conversation_id and no gmail_thread, and a new thread cannot be opened: {exc}") from exc
+    return "mail_new_thread", to
+
+
+def takes_ladder_new_thread(row: dict) -> bool:
+    """Is this the one shape ruling g2-walls-1115 covers: no conversation, no mail thread, a listed channel?"""
+    return (row.get("channel") in LADDER_NEW_THREAD_CHANNELS
+            and not str(row.get("conversation_id") or "").strip() and not str(row.get("gmail_thread") or "").strip())
+
+
+def route(row: dict, ladder: bool = False) -> tuple[str, str]:
+    """(kind, target) for this request, or Unknown with the reason a human needs to fix.
+
+    `ladder` is True only for a DSAR ladder letter (`is_gated`): it opens the one extra route such a letter may take
+    (`LADDER_NEW_THREAD_CHANNELS`). Every other letter is routed exactly as before."""
     conv = str(row.get("conversation_id") or "").strip()
     if conv:
         if not conv.isdigit():
@@ -203,6 +234,9 @@ def route(row: dict) -> tuple[str, str]:
     # letter to a different relationship.
     if channel in NEW_THREAD_CHANNELS:
         return _new_thread(row, "the row has no gmail_thread to reply in")
+
+    if ladder and takes_ladder_new_thread(row):
+        return _ladder_new_thread(row)
 
     raise Unknown(f"no conversation_id and no gmail_thread (requester_email "
                   f"{row.get('requester_email') or '-'}): there is nothing to reply to, so a letter would have to "
@@ -472,7 +506,7 @@ def adapter(name: str):
     return {"intercom": _intercom_send, "mail": _mail_send, "mail_new_thread": _mail_send_new_thread}[name]
 
 
-def final_letter(row: dict, text: str) -> tuple[str, str, str]:
+def final_letter(row: dict, text: str, ladder: bool = False) -> tuple[str, str, str]:
     """(body, subject, to) EXACTLY as they will go on the wire - ONE source of truth for the approval digest and the
     send.
 
@@ -502,11 +536,16 @@ def final_letter(row: dict, text: str) -> tuple[str, str, str]:
     both standing rulings' `copy_sha` still matched (QA finding on #1779). `test_final_letter_adds_no_text_of_its_own`
     pins that."""
     try:
-        channel, target = route(row)
+        channel, target = route(row, ladder=ladder)
     except Unknown:
         return text, "", ""
     if channel != "mail_new_thread":
         return text, "", ""
+    if ladder and takes_ladder_new_thread(row):
+        # A requester with no thread never wrote to a mailbox, so the lead line ("You wrote to us at ...") would be
+        # false: the reviewed ladder body goes as it is, under the ladder's own subject for the class. Nothing is
+        # assembled here either: both are read from the reviewed copy file.
+        return text, dsar.new_thread_subject(dsar.load_copy(), row.get("class") or ""), target
     # The mailbox the PERSON wrote to, never the one we send from: the lead line exists to name the address they
     # chose, and under the 2026-11-06 ruling that is no longer the same address the letter leaves from.
     written_to = THREAD_MAILBOX_BY_CHANNEL.get(row.get("channel"), row.get("channel") or "")
@@ -523,7 +562,7 @@ def reviewed_form(row: dict, body: str) -> tuple[str, str]:
     its lead and subject were not what was reviewed: 42 requests written to notices@ / legal@ had an approved
     message and no way to receive it. The author step and the send step both ask about THIS pair, so the verdict
     is on what the person reads and one review round is enough."""
-    text, subject, _to = final_letter(row, body)
+    text, subject, _to = final_letter(row, body, ladder=True)
     return text, subject
 
 
@@ -540,7 +579,12 @@ def materialise(run, items: list[dict]) -> list[dict]:
 
 
 def day_hold(earlier: dict, what: str = "this one") -> str:
-    """Why a message is held by the one-message-per-person-per-UTC-day rule: the letter that holds the day."""
+    """Why a message is held: the letter that holds the day (one message per person per UTC day), or the letter the
+    same customer event's other open row already sent in this slot (`Store.event_twin_send`, `twin: True`)."""
+    if earlier.get("twin"):
+        return (f"one letter per customer event: register #{earlier['register_no']} is the same event on a second "
+                f"row and its {earlier['kind']} is {earlier['state']} at {earlier['at']}; {what} is not sent a second "
+                f"time (fold the pair: gdpr-pipeline.py dedupe)")
     return (f"one message per person per UTC day: #{earlier['register_no']} {earlier['kind']} is "
             f"{earlier['state']} at {earlier['at']}; {what} goes on a later day")
 
@@ -595,7 +639,7 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
 
     row = run.store.get(rid) or {}
     try:
-        channel, target = route(row)
+        channel, target = route(row, ladder=is_gated(kind, slot))
     except Unknown as exc:
         run.store.claim_send(rid, slot, "none", "", body_sha(item["text"]), approved_by, "refused", detail=str(exc),
                              idem=idem_key(rid, slot, item["text"]))
@@ -624,7 +668,8 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
         from datetime import datetime, timezone
         # This read is the EARLY hold (it saves a gate call); the guard is the claim below, which asks again
         # inside its own write transaction.
-        earlier = run.store.person_contacted_on(row, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        earlier = (run.store.person_contacted_on(row, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+                   or run.store.event_twin_send(rid, slot))
         if earlier:
             why = day_hold(earlier)
             run.log(f"{who} row {rid}: held ({why})")
@@ -653,7 +698,7 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
             run.log(f"{who} row {rid}: not sent ({why})")
             return {"state": "refused", "why": why}
     else:
-        body, subject, _to = final_letter(row, item["text"])
+        body, subject, _to = final_letter(row, item["text"], ladder=gated)
     if channel == "mail_new_thread":
         # route() already refused a class outside the approved vocabulary; an exception here would mean the two checks
         # disagree, so let it be a refusal, never a letter with a guessed request type in it.
@@ -707,8 +752,10 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
     # The claim is made only if this PERSON still has no letter today, in one write transaction
     # (`Store.claim_send_for_person`): the slot is unique per request, so without it two workers on two requests
     # from one requester could both pass the early read above and both send.
+    # A ladder letter that opens a thread for a requester who had none carries the ruling that allowed the route.
+    opened = gated and channel == "mail_new_thread" and takes_ladder_new_thread(row)
     earlier = run.store.claim_send_for_person(row, rid, slot, channel, target, body_sha(item["text"]), approved_by,
-                                              idem=key)
+                                              detail=f"batch {LADDER_NEW_THREAD_BATCH}" if opened else "", idem=key)
     if earlier:
         why = day_hold(earlier)
         run.log(f"{who} row {rid}: held ({why})")
@@ -727,7 +774,7 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
         run.fail(f"{kind} row {rid} via {channel}", Exception(detail))
         return {"state": "failed", "why": detail}
 
-    run.store.finish_send(rid, slot, "sent", ref=ref)
+    run.store.finish_send(rid, slot, "sent", ref=ref, detail=f"batch {LADDER_NEW_THREAD_BATCH}" if opened else "")
     # The row-level stamp lives in the store so a MANUAL resolution to `sent` writes the same one: the interim letter
     # records itself and nothing else, because `confirmed_at` is what takes the row out of the confirmation queue and
     # only the FINAL letter may do that.
@@ -738,6 +785,7 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
         from datetime import datetime, timezone
         run.store.update_message(rid, slot, "dsar_sent", state="sent", event_detail={
             "message": frozen["kind"], "variant": frozen["variant"], "channel": channel,
+            **({"batch": LADDER_NEW_THREAD_BATCH} if opened else {}),
             **dsar.send_dates(row, sends_before, datetime.now(timezone.utc))})
         if frozen.get("next_contact_at"):
             # The date this message promised the requester. The ladder times the next message from it.

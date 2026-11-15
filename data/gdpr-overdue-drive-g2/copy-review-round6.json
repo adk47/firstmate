@@ -1,0 +1,114 @@
+{
+ "_comment": "Round 6: the two final-answer variants added in v5 of policies/gdpr-dsar-copy.json (final_gone, final_gone_late; blocks final_open, final_late, final_gone, final_done, final_more) and the new-thread subjects (subjects.new_thread_privacy_erasure, subjects.new_thread_privacy_access), through the gate's own gate.py (check -> pending -> review -> signed statement) in a scratch mirror of this tree, under the gdpr rubric as amended in the same commit (rule 6 exception, rule 8 subjects, the gdpr-final duty). Bodies carry example dates: fixed wording, no personal data. The statements were signed with a THROWAWAY key that exists only in the scratch mirror, so none of these is a verdict the production gate accepts: the verdict a send needs is the one the reviewer host signs on the body node-8 authors after deploy. The mirror differs from the tree in one file, the allowed-signers list. One reviewer pass, 7 bodies, 7 approve.",
+ "round": 6,
+ "at": "2026-11-15T07:26Z",
+ "rulings": [
+  "gdpr-overdue-drive-g2 inbox 019 (2026-11-15T06:35Z), DECISION g2-walls-1115"
+ ],
+ "rubric_file_sha256": "4bdd7d8550b2044f1994c503c3520323a7b9d2884ed5caaf30b79997ab0897f5",
+ "counts": {
+  "approve": 7,
+  "rewrite": 0,
+  "refuse": 0
+ },
+ "items": [
+  {
+   "what": "final in time, in the conversation",
+   "variant": "final_gone",
+   "campaign": "gdpr-final",
+   "subject": "",
+   "body": "Hello,\n\nThis is our answer to the request you made on 1 November 2026.\n\nWe have checked every page your request names. None is on Muso.AI any more: the address of each one now shows a page-not-found message, so there is no page left for us to take down.\n\nThat completes this request.\n\nIf something about you still shows on Muso.AI, reply here with its link and we will look at it.\n\nMuso.AI Support",
+   "body_sha256": "91c109de8b66da90be30784c21d4c5cf1e994c2934b47e86d113948d05e54056",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "In-time final answer with no apology, pages stated as no longer on the site without saying what happened or who acted, only the request date, resubmit path given.",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "rubric_family": "",
+   "rubric_sha256": "4bdd7d8550b2044f1994c503c3520323a7b9d2884ed5caaf30b79997ab0897f5"
+  },
+  {
+   "what": "final late, in the conversation",
+   "variant": "final_gone_late",
+   "campaign": "gdpr-final",
+   "subject": "",
+   "body": "Hello,\n\nThis is our answer to the request you made on 11 September 2026.\n\nWe are late in giving you this answer, and we are sorry.\n\nWe have checked every page your request names. None is on Muso.AI any more: the address of each one now shows a page-not-found message, so there is no page left for us to take down.\n\nThat completes this request.\n\nIf something about you still shows on Muso.AI, reply here with its link and we will look at it.\n\nMuso.AI Support",
+   "body_sha256": "3afc313d94a1b4fc53f330502761874f3c80e897e5872d4cc3039a9e07c4d047",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "In-thread final answer: late apology once with no reason, pages gone stated as fact without saying who removed them or why, only the request date, no personal data, tells them how to report anything still showing.",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "rubric_family": "",
+   "rubric_sha256": "4bdd7d8550b2044f1994c503c3520323a7b9d2884ed5caaf30b79997ab0897f5"
+  },
+  {
+   "what": "final late, new thread to a notices@ requester (lead + subject)",
+   "variant": "final_gone_late",
+   "campaign": "gdpr-final",
+   "subject": "Your Muso.AI data deletion request",
+   "body": "You wrote to us at notices@muso.ai on 11 September 2026 about your deletion request.\n\nHello,\n\nThis is our answer to the request you made on 11 September 2026.\n\nWe are late in giving you this answer, and we are sorry.\n\nWe have checked every page your request names. None is on Muso.AI any more: the address of each one now shows a page-not-found message, so there is no page left for us to take down.\n\nThat completes this request.\n\nIf something about you still shows on Muso.AI, reply here with its link and we will look at it.\n\nMuso.AI Support",
+   "body_sha256": "20393c80bae6e3a076100de7cc6e565f20b924e70bc7bcc09229d88ece361f44",
+   "subject_sha256": "81cfa3ffe9a7aaa5082419094d85c52c815fb4cca3f0f159463ccbba99a75e2e",
+   "verdict": "approve",
+   "note": "Allowed deletion-request subject and notices@ opening line, one late apology with no reason, pages stated as gone as a site fact, only the request date, no article, resubmit path given.",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "rubric_family": "",
+   "rubric_sha256": "4bdd7d8550b2044f1994c503c3520323a7b9d2884ed5caaf30b79997ab0897f5"
+  },
+  {
+   "what": "final late, new thread to a requester with no thread (subject, no lead)",
+   "variant": "final_gone_late",
+   "campaign": "gdpr-final",
+   "subject": "Your Muso.AI data deletion request",
+   "body": "Hello,\n\nThis is our answer to the request you made on 11 September 2026.\n\nWe are late in giving you this answer, and we are sorry.\n\nWe have checked every page your request names. None is on Muso.AI any more: the address of each one now shows a page-not-found message, so there is no page left for us to take down.\n\nThat completes this request.\n\nIf something about you still shows on Muso.AI, reply here with its link and we will look at it.\n\nMuso.AI Support",
+   "body_sha256": "3afc313d94a1b4fc53f330502761874f3c80e897e5872d4cc3039a9e07c4d047",
+   "subject_sha256": "81cfa3ffe9a7aaa5082419094d85c52c815fb4cca3f0f159463ccbba99a75e2e",
+   "verdict": "approve",
+   "note": "Same body as message 1 with the permitted new-thread deletion-request subject and no opening line; every hard rule holds and the gdpr-final duty is served.",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "rubric_family": "",
+   "rubric_sha256": "4bdd7d8550b2044f1994c503c3520323a7b9d2884ed5caaf30b79997ab0897f5"
+  },
+  {
+   "what": "late link ask, new thread to a requester with no thread",
+   "variant": "late_link",
+   "campaign": "gdpr-status",
+   "subject": "Your Muso.AI data deletion request",
+   "body": "Hello,\n\nThe request you made on 11 September 2026 is still open. We are late in answering it, and we are sorry.\n\nWhat we are doing: your request is open, and we need something from you before we can act on it.\n\nWhat we need from you:\n\nSo we act on the right pages, please reply with the link(s) to the Muso page(s) your request is about.\n\nWe will also need to connect each page to you. You can do that now: sign in to the Muso app and claim the page, or reply here with a document from the artist's label or management that names you.\n\nYou do not need to send a passport or any other identity document.\n\nWhen you will hear from us next: by 29 November 2026 at the latest.\n\nMuso.AI Support",
+   "body_sha256": "b76595c539d813d5edc2385873a06445ef901fcb44337f5a35353d00f64797f2",
+   "subject_sha256": "81cfa3ffe9a7aaa5082419094d85c52c815fb4cca3f0f159463ccbba99a75e2e",
+   "verdict": "approve",
+   "note": "Late status update asking the page link plus permitted claim or label/management document, each asked once, no identity document, one apology with no reason, next date stated and deletion subject matches.",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "rubric_family": "",
+   "rubric_sha256": "4bdd7d8550b2044f1994c503c3520323a7b9d2884ed5caaf30b79997ab0897f5"
+  },
+  {
+   "what": "late account ask, access, new thread to a requester with no thread",
+   "variant": "late_account",
+   "campaign": "gdpr-status",
+   "subject": "Your Muso.AI data access request",
+   "body": "Hello,\n\nThe request you made on 11 September 2026 is still open. We are late in answering it, and we are sorry.\n\nWhat we are doing: your request is open, and we need something from you before we can act on it.\n\nWhat we need from you:\n\nTo link your request to the account it concerns, please reply from the email address on your Muso account, or sign in to the Muso app and message us from there.\n\nYou do not need to send a passport or any other identity document.\n\nWhen you will hear from us next: by 29 November 2026 at the latest.\n\nMuso.AI Support",
+   "body_sha256": "49bfae1fdd6d1818b09a9657c1ff3c021d7726da65268adff281fb3ab738fb68",
+   "subject_sha256": "4683f25b457adf6468777e7bf7453bf3ed28bb44144d90e928b5091cd93a3ae8",
+   "verdict": "approve",
+   "note": "Late status update: says open, late and sorry once with no reason, asks only the permitted account-email or in-app route and how to send it, states the next date, no article, no identity document requested.",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "rubric_family": "",
+   "rubric_sha256": "4bdd7d8550b2044f1994c503c3520323a7b9d2884ed5caaf30b79997ab0897f5"
+  },
+  {
+   "what": "late claim/authority ask, access, new thread to a requester with no thread",
+   "variant": "late_claim_or_authority",
+   "campaign": "gdpr-status",
+   "subject": "Your Muso.AI data access request",
+   "body": "Hello,\n\nThe request you made on 11 September 2026 is still open. We are late in answering it, and we are sorry.\n\nWhat we are doing: your request is open, and we need something from you before we can act on it.\n\nWhat we need from you:\n\nBefore we can act on a Muso page, we need to connect that page to you. Either of these is enough:\n\n1. Claim the page. Sign in to the Muso app (or create an account), open the page and claim it. When the claim has been processed, reply here and we will continue.\n\n2. Reply here with a document from the artist's label or management that names you as authorised to act for the page.\n\nYou do not need to send a passport or any other identity document.\n\nWhen you will hear from us next: by 29 November 2026 at the latest.\n\nMuso.AI Support",
+   "body_sha256": "96fc880d6b9760b98b07d8c63c466f52364844d1a17541983177ad74ad93a4fc",
+   "subject_sha256": "4683f25b457adf6468777e7bf7453bf3ed28bb44144d90e928b5091cd93a3ae8",
+   "verdict": "approve",
+   "note": "Late status update asking only the permitted claim or label/management document, no identity document, no accusation, one apology with no reason, request stays open and next date stated.",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "rubric_family": "",
+   "rubric_sha256": "4bdd7d8550b2044f1994c503c3520323a7b9d2884ed5caaf30b79997ab0897f5"
+  }
+ ]
+}

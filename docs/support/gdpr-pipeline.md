@@ -14,9 +14,9 @@ big-name / safety cases, and (with the captain) anything irreversible. Runs on n
 | hide | `hide-batch` plans identity-PASS profile pages, most overdue first, skips ids already in an open PR, and opens ONE H-DevOps PR (`HIDDEN_ENTITY_IDS`, prod + dev: 410 + noindex) and ONE platform-data-processing PR (`LEGAL_HIDDEN_ENTITY_IDS` + the strict-equality test's `ERASURE_PROFILES`, ref `gdpr-erasure-register-<n>`). A person merges. Only the anonymous 410 + noindex read-back (`mark-hidden`, every tick) sets `hidden_at`, per ELIGIBLE page (`hidden_pages`): a row that carries a PASS page next to an ASK / Jan page records its hide as soon as the PASS page is down, while a letter still waits for the whole row | `gdpr_pipeline/hide_batch.py`, `checks.public_gone` |
 | confirm | for rows due within 3 d (or hidden): the approved letter (`erasure-confirmation-template.md`), lines S/P/M only from THIS run's checks (S: public autocomplete exact/lower/prefix; a FULL results page without the id is "cannot verify here" → `Unknown`, never "absent" — the endpoint has no paging, so a name with more matches than its cap can hide the target; P: 410 + noindex on /profile and /credits; M: every sitemap file walked, one unreadable file = no M line), `[D-no]` always, G never | `gdpr_pipeline/copy.py`, `checks.py` |
 | asks | the approved lines only, verbatim: link line (no page), v2 step 1 (identity), authorisation line (representative). A row ALREADY past its statutory date carries the past-due opening line first ("the deletion request you made on {date} is in progress ...") because the ruling requires the letter to acknowledge the delay instead of reading as a fresh promise — and while `copy.PROGRESS_LINE_APPROVED` is False a past-due ask is **REFUSED** (ledgered, retryable), never sent missing that sentence and never sent with wording nobody reviewed | `copy.ASK`, `copy.progress_line` |
-| **send** | ONE ledgered letter per request through the approved writers: `intercom-ops-write.sh reply --customer-facing --purpose gdpr-erasure` for a conversation, `gog gmail send --thread-id … --reply-all` from `support@muso.ai` for a support@ thread. The body is the approved copy byte for byte; `erasure_sends` holds `body_sha` + the writer's receipt, `UNIQUE(request_id, kind)` is the double-send guard, and the row is written `sending` BEFORE the writer runs | `gdpr_pipeline/send.py`, `erasure_sends` |
+| **send** | ONE ledgered letter per request through the approved writers: `intercom-ops-write.sh reply --customer-facing --purpose gdpr-erasure` for a conversation, `gog gmail send --thread-id … --reply-all` from `support@muso.ai` for a support@ thread, or `gog gmail send` opening a new thread from `support@muso.ai` for a requester with an address and no thread at all (see "A requester with an address and no thread" below). The body is the approved copy byte for byte; `erasure_sends` holds `body_sha` + the writer's receipt, `UNIQUE(request_id, kind)` is the double-send guard, and the row is written `sending` BEFORE the writer runs | `gdpr_pipeline/send.py`, `erasure_sends` |
 | watchdog | hourly tick pages #cs_priority (no person is named since 2026-11-12; the statutory clock goes to firstmate, see the DSAR ladder below) every open request at or past `due_at - 3 d` without `confirmed_at`, and identity ASKs unanswered > 7 d. The page fires per REQUEST, not per day-count: it is suppressed only for register numbers already paged today, so a request that becomes due the hour another one is confirmed is still paged. Each line carries the SEND FACT as well as the date (`no letter sent`, `no letter sent, N d past the deadline`, `letter failed`, `letter sent <date>`): "overdue" and "a letter went out" are two different claims, and on 2026-11-03 the line made only the first while 97 decided requests had no letter at all. When a row has no route at all, or the pipeline TRIED and the writer refused, the line names that and its reason (`no route for a letter (…thread is in a mailbox gog cannot write…)` / `the ask letter is refused (…)`): on 2026-11-04, 24 of the 141 approved letters were unroutable, and without the reason they read exactly like a broken pipeline instead of a missing mailbox auth. The route check is a pure capability test (`send.route`), so it names the blocker before anything has been attempted — the ledger only knows about attempts that happened | `run.watchdog_rows`, `erasure_sends` |
-| gone pages | a page that answers 404 in the catalog AND publicly, with no merge record, was removed by something other than the hide process (the class of markdown register #36). `removed_outside_process` records those ids per row so the Jan item can cite the store instead of re-deriving it from the markdown; such a row is never hidden again and its letter waits for a person to say what was done | `run.decide_row`, `identity.GONE` |
+| gone pages | a page that answers 404 in the catalog AND publicly, with no merge record, was removed by something other than the hide process (the class of markdown register #36). `removed_outside_process` records those ids per row so the Jan item can cite the store instead of re-deriving it from the markdown; such a row is never hidden again, and its letter waits for a person to say what was done — unless EVERY page of the request is `GONE` and the request needs nothing else, which is the final answer below | `run.decide_row`, `identity.GONE` |
 | half-hidden pages | a hide needs BOTH lists — `HIDDEN_ENTITY_IDS` in H-DevOps drives the app-side hide, the PDP sitemap `legal_hidden` drives the 410 — and the two halves ship in **separate PRs**, so there is a window where the page answers 404 to the catalog and the public read while only one list holds it. `HIDDEN_PENDING` records that window and names which list is missing. Reading it as `GONE` files our own half-finished work as somebody else's deletion and sends it to Jan to explain; reading it as `ALREADY_HIDDEN` claims a hide that has not happened. It owes no letter either way. Measured live 2026-11-04: 9 open rows, all PDP-only, all waiting on the H-DevOps counterpart PR | `identity.HIDDEN_PENDING`, `sources.half_hidden`, `page_facts(..., half=)` |
 
 ## Hard rules
@@ -484,7 +484,7 @@ Scope: `privacy_erasure` and `privacy_access` only. A `legal_threat` or `dmca_ta
 
 | piece | what it is | where |
 |---|---|---|
-| state | `received -> identity_check -> in_progress -> responded -> closed`, DERIVED from recorded facts on every run and written to `dsar_state` with a `dsar_state` event on each change. Nothing sets it by hand, so it cannot drift from the record. `responded`/`closed` exist only once the final response is recorded: the row's `confirmed_at`, or a `sent` final letter (`confirm`, `access`) in the send ledger (`dsar.final_response_at`; 7 open requests on the live register had the ledger row and no stamp, and each would have been told "we are late" for an answer it already had). A request cannot close without one. A register row closed by hand with no response is listed by the clock as an anomaly | `dsar.state_of`, `Run.dsar_states` |
+| state | `received -> identity_check -> in_progress -> responded -> closed`, DERIVED from recorded facts on every run and written to `dsar_state` with a `dsar_state` event on each change. Nothing sets it by hand, so it cannot drift from the record. `responded`/`closed` exist only once the final response is recorded: the row's `confirmed_at`, or a `sent` final letter (`confirm`, `access`, `final`) in the send ledger (`dsar.final_response_at`; 7 open requests on the live register had the ledger row and no stamp, and each would have been told "we are late" for an answer it already had). A request cannot close without one. A register row closed by hand with no response is listed by the clock as an anomaly | `dsar.state_of`, `Run.dsar_states` |
 | the date | the EARLIER of one calendar month (clamped to the month's end) and receipt + 30 days, so the stated date is never later than either reading of "one month". `extended_until` moves it, bounded at three calendar months from receipt; only a SENT extension notice writes it (`Store.apply_effects`; see "The three decisions" below). The register's `due_at` column is unchanged | `dsar.statutory_due`, `dsar.due` |
 | identity chain | captain's ruling 2026-11-12, recorded per row in `gates`: (1) account control: signed in, or controls the account's email; (2) a tie to the page: the page is claimed by that account **with evidence** (a processed claim carrying verification links, processed after it was made; see "A claim is a tie only with evidence" above), or the verified sender's host is the page's own catalog website; (3) an authority document only where 1 and 2 leave a real doubt. **A name match is not a tie** (paths B and C no longer pass; they answer `ASK_IDENTITY`), and **no message asks for a passport or any identity document** (GDPR Art. 12(6) allows asking for more only on reasonable doubt). A page that is already hidden or gone ties nobody: it is recorded as `hidden` / `gone`, never as a gate-2 pass (the first live dry run counted 40 passes of which 12 were claims). An 8-char id prefix that no page carries is a link to ask for only when the catalog lookup ANSWERED; a lookup that failed is `unknown` and is re-read. The chain yields ONE `need`: `none`, `claim_or_authority`, `claim_evidence` (the requester's own claim, with no evidence on it: the ownership ask, not "claim the page"), `link`, `authority`, `account`, `unknown`. A request not yet through the chain (`gates.v` absent) is owed no message: nothing claims to know what it needs, and the clock still names it | `dsar.gates`, `run.decide_row`, `identity.decide_page` |
 | acknowledgement | one per request, while the date is at least 3 days ahead (`ACK_MIN_RUNWAY_DAYS`: live request #52 would have been promised an answer "by 12 November" one hour before that date; nearer than that it gets NOTHING until the date itself, because "we are late" is not true yet; the clock names it throughout and the late update is owed the moment the date passes): the date we received it, the date we answer by, and the one thing needed. Claim-then-request is stated here: "claim the page, or send a document from the artist's label or management" (a requester whose own claim has no evidence gets `ack_claim_evidence` instead: a matching link or a label/management document, never "claim the page"). It replaces the older identity ask for a statutory request (`Run.asks` stands down once the ladder has authored a message for the row), so nobody is asked twice for two different things. Whether a first message already went is read from the send ledger as well as the row's stamp (23 live rows carry a `sent` ask and no `ask_sent_at`), and a letter that may be out (`sending`/`unknown`) counts | `dsar.owed`, `dsar.first_contact_made`, `policies/gdpr-dsar-copy.json` |
@@ -577,7 +577,9 @@ notices@ or legal@ can only be answered in a new thread from support@, so its le
 and `send.deliver` put that same pair to the gate, and `dsar_messages` keeps the body alone. Until 2026-11-13 the
 gate saw the body alone and `deliver` refused every such letter, so 42 requests had an approved message that
 could not leave. Rule 8 of the `gdpr` rubric names that line and subject as allowed; the subject's GO is for the
-deletion class only, so an access request on that route is still refused by `route()`. A rubric change needs
+deletion class only, so an access request on that route is still refused by `route()`. A ladder letter to a support
+request with an address and no thread is reviewed the same way, body and subject together, with no opening line
+(see "A requester with an address and no thread" below). A rubric change needs
 `scripts/outbound_copy/install-reviewer-host.sh` run again on the reviewer host, and every unsent `gdpr` body is
 reviewed again under the new rubric.
 
@@ -604,6 +606,55 @@ The day is reserved WITH the send claim (`Store.claim_send_for_person`, used by 
 `Run.access_deliver`): the read and the claim are one write transaction under SQLite's write lock. The send
 ledger is unique per request and slot, so a read made before the claim would let two workers on two requests
 from one person both send. The read in `send.deliver` before the gate call is an early hold only.
+
+### The final answer for a page already off the site (ruling g2-walls-1115, 2026-11-15)
+
+Measured 2026-11-15: 49 open erasure requests need nothing from the requester and name only pages decided `GONE`
+(43 past their date). The ladder had no answer for them, so each was told "still open" every week and none could close.
+
+| | |
+|---|---|
+| who is owed it | an erasure request that needs nothing from the requester and whose EVERY page verdict is `GONE` (`dsar.gone_candidate`). One page that is hidden, undecided or waiting on the requester makes it a different request, and it stays on the ladder |
+| the read | the stored verdict is not enough. In the run that authors or sends the letter, `Run.gone_now` reads each page again: the admin record says the profile is deleted and carries no merge (`sources.profiles_deleted`, one call per 20 ids), and the public address answers 404. Both, for every page |
+| a page that reads otherwise | live again, merged, or not returned: the request stays on the ladder (`gone=False`) |
+| a read that cannot be made | a run error, and the request is owed NOTHING that run (`gone=None`): not the answer, and not "still open" either |
+| the letter | kind and slot `final`, variant `final_gone`, or `final_gone_late` past the date (late and sorry, once, no reason). It says the pages are no longer on Muso.AI and that no page is left to take down. It does not say what happened to a page, who removed it, or that Muso holds nothing about the person. One date: the day the request was received |
+| the gate | campaign `gdpr-final` under the `gdpr` rubric (enforced); rule 6 of the rubric carries the one exception that lets this letter state the fact |
+| what it does | `stamp_sent` writes `confirmed_at`, so it is the request's final response: the request leaves the clock and the ladder |
+| when | at once. It waits for no halfway point, quiet window or promised next contact; it stands down only for a letter that may be out, and it is held to one message per person per UTC day like every other letter |
+
+Not covered: a request with a hidden page AND a gone page (9 on 2026-11-15) and any request with a page still to be
+decided. Rehearsal of the wording under the amended rubric: `data/gdpr-overdue-drive-g2/copy-review-round6.json`.
+
+### A requester with an address and no thread (ruling g2-walls-1115)
+
+A support request that has the requester's address on file and neither an Intercom conversation nor a mail thread
+(#213 #214 #215 #236 #237 on 2026-11-15) is written to in a new thread from support@, by a ladder letter only
+(`send.route(row, ladder=True)`, `send.LADDER_NEW_THREAD_CHANNELS = ("support",)`). The body is the reviewed ladder
+body with no opening line (this person did not write to a mailbox), under the subject the copy file holds for the
+class (`subjects.new_thread_<class>`); the reviewer is asked about the body and the subject together. Each send
+records `batch g2-walls-1115` on its ledger row and its `dsar_sent` event. The route is taken by a GATED letter
+(`is_gated`: acknowledgement, status, extension, denial, access and `final`); the confirmation is not one, and it
+still refuses a row with no thread (`route(row)`, no `ladder`). A row with no address is still refused: there is
+nobody to write to. Undo: empty
+`LADDER_NEW_THREAD_CHANNELS`. The address on such a row comes from the ticket; a ladder body carries dates only, so
+what reaches a wrong address is a dated notice with no name, page or link in it.
+
+### One letter per customer event
+
+`dedupe` will not fold a pair of rows once both hold a letter, so one customer event can sit on two open rows
+(measured 2026-11-15: #62/#360, #63/#325, #82/#13, #186/#49, and four people who got the same letter twice a day
+apart). The send claim now reads the twin as well as the person's day (`Store.event_twin_send`, inside
+`claim_send_for_person`): a slot that is `sent`, `sending` or `unknown` on the other row of the pair holds the same
+slot on this one, with the twin's register number in the reason. A `refused` or `failed` twin holds nothing. The
+held row stays open until a person folds the pair. The twin read narrows the candidates to the rows reachable from
+this one by the two pairing links (a shared `:again:` source, a shared sender address) and then asks
+`Store._duplicate_pairs` — the SAME rule `duplicate_events` runs over the whole register, so the two can never
+disagree about what a pair is.
+
+The Art. 15 answer reads the twin the same way (`Run.access_deliver`): the twin's `access` answer already IS this
+row's answer, so a twin hold records no `access_owed_at` debt — there is nothing to offer on a later day. A DAY
+hold is still a debt and is recorded, so that answer is offered again tomorrow.
 
 **Not built here.** (1) A store and a coded check for an authority
 document (gate 3): one that arrives is read by nobody in code, and the request stays named by the clock. (2) A track or album page that

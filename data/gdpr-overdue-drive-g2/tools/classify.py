@@ -48,7 +48,10 @@ def owed(r: dict, need: str, written: bool) -> str:
         return "access: the copy of their data (cannot be built: the Art. 15 manifest has standing gaps)"
     if need == "none":
         if verdict == "GONE":
-            return "erasure: the page is already off the site; the final letter for that case has no approved wording"
+            if all(d.get("verdict") == "GONE" for d in r.get("verdict_detail") or [{}]):
+                return ("erasure: every page is already off the site; the final answer is owed (it goes once the "
+                        "pages read gone in the run and the reviewer has approved it)")
+            return "erasure: a page is already off the site and another is not; no final answer covers that mix"
         return "erasure: hidden or in the hide batch; the final confirmation is owed once the checks read hidden"
     if need == "unknown":
         return "erasure: identity not decided (the thread has to be read, or a person's review)"

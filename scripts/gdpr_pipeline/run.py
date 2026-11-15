@@ -1052,6 +1052,48 @@ class Run:
                 moved += 1
         return moved
 
+    def gone_now(self, rows: list[dict]) -> dict[int, bool | None]:
+        """{row id: is every page this request names off the site RIGHT NOW} for the rows that could be owed the
+        page-already-off-the-site answer (`dsar.gone_candidate`). Reads only.
+
+        The stored `GONE` verdict is hours or days old and was decided for another purpose (it sends the row to a
+        person). The final letter states the fact to the requester, so the fact is read again in the run that
+        authors or sends it, per page:
+
+          * the admin record says the profile is DELETED and carries no merge (`sources.profiles_deleted`): a merged
+            profile's content lives on under the survivor, so "no page is left" would be false;
+          * the public address answers 404.
+
+        True needs both for every page. False is a page that reads otherwise (live again, merged, not a profile, an
+        id the read does not return): the request stays on the ladder. None is a read that could not be made: it is
+        recorded as a run error and the request is owed nothing this run (`dsar.owed`), never an answer nobody
+        measured. One admin read covers all candidates (20 ids a call)."""
+        cands = [r for r in rows if dsar.gone_candidate(r)]
+        if not cands:
+            return {}
+        pages = {r["id"]: [str(d["id"]).lower() for d in r["verdict_detail"]] for r in cands}
+        try:
+            deleted = sources.profiles_deleted(sorted({i for ids in pages.values() for i in ids}))
+        except sources.Unknown as exc:
+            self.fail(f"final answer: the deleted-page read for {len(cands)} request(s)", exc)
+            return {rid: None for rid in pages}
+        out: dict[int, bool | None] = {}
+        status: dict[str, int] = {}
+        for r in cands:
+            ids = pages[r["id"]]
+            if not all(deleted.get(i) for i in ids):
+                out[r["id"]] = False
+                continue
+            try:
+                for i in ids:
+                    if i not in status:
+                        status[i] = sources.public_status("profile", i)
+                out[r["id"]] = all(status[i] == 404 for i in ids)
+            except sources.Unknown as exc:
+                self.fail(f"final answer #{r['register_no']}: the public page read", exc)
+                out[r["id"]] = None
+        return out
+
     def dsar_owed(self, now: datetime, copy_doc: dict | None = None) -> list[dict]:
         """The ladder message each open statutory request is owed right now, oldest due date first, with its exact
         body rendered and linted. Reads only; nothing is authored, queued or sent.
@@ -1073,12 +1115,16 @@ class Run:
             access_ok = not access.standing_gaps(access.load_manifest())
         except access.ManifestError:
             access_ok = False
+        # The page-already-off-the-site answer is owed only on a read made in THIS run (`gone_now`). A request that
+        # already has its final response is not read: it is owed nothing either way.
+        gone = self.gone_now([r for r in self.store.all("open")
+                              if not dsar.final_response_at(r, self.store.sends(r["id"]))])
         for r in self.store.all("open"):
             if r["class"] not in dsar.STATUTORY:
                 continue
             sends = self.store.sends(r["id"])
             want = dsar.owed(r, sends, now, open_from_requester=per_requester.get(who(r), 1),
-                             answerable=answerable_now(r, access_ok))
+                             answerable=answerable_now(r, access_ok), gone=gone.get(r["id"], False))
             if not want:
                 continue
             prior = self.store.send_record(r["id"], want["slot"])
@@ -1090,7 +1136,7 @@ class Run:
             try:
                 body = dsar.render(copy_doc, want["variant"], want["facts"])
                 item["problem"] = dsar.lint(body, want["kind"], want["facts"], r,
-                                            late=want["variant"].startswith("late_"))
+                                            late=dsar.says_late(want["variant"]))
                 if not item["problem"]:
                     item["text"] = body
             except dsar.CopyError as exc:
@@ -1311,10 +1357,12 @@ class Run:
             return {"state": "held", "register_no": register_no, "why": [f"copy gate {ans.result}: {ans.reason}"]}
         email = email_now       # equal to the address in the copy, or `undeliverable` held it above
         if not dry_run:
-            earlier = self.store.person_contacted_on({**row, "requester_email": email},
-                                                     datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+            earlier = (self.store.person_contacted_on({**row, "requester_email": email},
+                                                      datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+                       or self.store.event_twin_send(rid, dsar.KIND_ACCESS))
             if earlier:         # the early hold; the guard is the claim below
-                self._access_owed(row, now)
+                if not earlier.get("twin"):     # a day hold defers this answer; a twin's answer already IS the answer
+                    self._access_owed(row, now)
                 return {"state": "held", "register_no": register_no,
                         "why": [letter_send.day_hold(earlier, "this answer")]}
         out = {"state": "would_send", "register_no": register_no, "sha256": answer["sha256"],
@@ -1328,7 +1376,8 @@ class Run:
             {**row, "requester_email": email}, rid, dsar.KIND_ACCESS, "mail_attach", email, copy_gate.body_sha(body),
             f"gate:{ans.verdict_id}", detail=f"copy sha256 {answer['sha256']}", idem=key)
         if earlier:
-            self._access_owed(row, now)
+            if not earlier.get("twin"):
+                self._access_owed(row, now)
             return {"state": "held", "register_no": register_no,
                     "why": [letter_send.day_hold(earlier, "this answer")]}
         try:
@@ -1383,8 +1432,9 @@ def answerable_now(r: dict, access_ok: bool) -> bool:
       * access: only while a COMPLETE copy can be built (`access.standing_gaps` is empty).
       * erasure: only when every page named is already hidden (`ALREADY_HIDDEN`), which is the one case where the
         final confirmation needs nothing but this pipeline's own read-backs. A page that still needs its hide merged
-        waits on a person, and a page that is already off the site (`GONE`) has no approved final wording, so
-        neither gets a date from us: the update gives the next-contact date instead.
+        waits on a person, so it gets no date from us: the update gives the next-contact date instead. A request
+        whose every page is already off the site (`GONE`) is not answered by a date at all: it is owed the final
+        answer itself, on a read made in the same run (`Run.gone_now`, `dsar.owed`).
     """
     if r["class"] == "privacy_access":
         return access_ok

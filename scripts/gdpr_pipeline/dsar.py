@@ -76,8 +76,13 @@ KIND_ACK, KIND_STATUS, KIND_EXTENSION = "ack", "status", "extension"
 KIND_ACCESS = "access"          # the cover message of an Art. 15 answer (gdpr_pipeline/access.py holds the copy)
 ACCESS_VARIANT = "access_answer"
 LATE_NO_DATE_VARIANT = "late_none_no_date"       # late, nothing needed, and no answer date we could keep
+# The final answer to an erasure request whose every page is already off the site (ruling g2-walls-1115, 2026-11-15:
+# "it states a fact"). Owed only on a read made in the same run (`Run.gone_now`), never on the stored verdict alone.
+KIND_FINAL = "final"
+FINAL_GONE_VARIANT = "final_gone"
+FINAL_GONE_LATE_VARIANT = "final_gone_late"      # the same answer, given after the date: it also says we are late
 # Every kind this module can author. `send.deliver` refuses to send any of them without a reviewer verdict.
-GATED_KINDS = (KIND_ACK, KIND_STATUS, KIND_EXTENSION, "denial", KIND_ACCESS)
+GATED_KINDS = (KIND_ACK, KIND_STATUS, KIND_EXTENSION, "denial", KIND_ACCESS, KIND_FINAL)
 
 COPY_PATH = Path(__file__).resolve().parents[2] / "policies" / "gdpr-dsar-copy.json"
 SLOTS = ("received", "due", "next")
@@ -235,7 +240,7 @@ def need_of(row: dict) -> str:
 
 
 # ------------------------------------------------------------------------------------------------------ state
-FINAL_SLOTS = ("confirm", "access")      # the ledger slots whose `sent` row IS the final response
+FINAL_SLOTS = ("confirm", "access", KIND_FINAL)      # the ledger slots whose `sent` row IS the final response
 
 
 def final_response_at(row: dict, sends: list[dict] = ()) -> str:
@@ -497,6 +502,8 @@ def lint(body: str, kind: str, facts: dict, row: dict | None = None, late: bool 
         return "an apology outside an update to a request past its date"
     if late and not APOLOGY_RE.search(body):
         return "an update to a request past its date must say we are late and sorry"
+    if kind == KIND_FINAL and (not facts.get("received") or facts["received"] not in body):
+        return "a final answer must name the request it answers by the date it was received"
     if kind == KIND_STATUS and (not facts.get("next") or facts["next"] not in body):
         return "a status update must say when the requester hears next"
     low = body.lower()
@@ -505,6 +512,33 @@ def lint(body: str, kind: str, facts: dict, row: dict | None = None, late: bool 
         if len(val) >= 4 and val in low:
             return f"the body contains the requester's {field.split('_')[1]}"
     return ""
+
+
+def says_late(variant: str) -> bool:
+    """Does this variant tell the requester we are late (and so owe the one apology the lint allows and requires)?"""
+    return variant.startswith("late_") or variant == FINAL_GONE_LATE_VARIANT
+
+
+def gone_candidate(row: dict) -> bool:
+    """Is this an erasure request that needs nothing from the requester and whose EVERY page was decided `GONE`?
+
+    Only such a request can be owed the page-already-off-the-site answer. One page that is hidden, undecided or
+    waiting on the requester makes it a different request with a different answer, and it stays on the ladder."""
+    verdicts = [d.get("verdict") for d in row.get("verdict_detail") or []]
+    return (row.get("class") == "privacy_erasure" and need_of(row) == NEED_NONE
+            and bool(verdicts) and all(v == identity.GONE for v in verdicts))
+
+
+def new_thread_subject(copy_doc: dict, cls: str) -> str:
+    """The subject of a ladder letter that opens a new mail thread to a requester who has no thread with us.
+
+    It is ladder copy: it lives in the copy file (`subjects`, key `new_thread_<class>`) and goes to the reviewer
+    with the body, so the verdict is on both. A class with no subject on file raises: no letter leaves under a
+    subject nobody wrote."""
+    subject = str((copy_doc.get("subjects") or {}).get(f"new_thread_{cls}") or "").strip()
+    if not subject:
+        raise CopyError(f"no new-thread subject on file for class {cls!r} (subjects.new_thread_{cls})")
+    return subject
 
 
 def variant_ids(copy_doc: dict) -> list[str]:
@@ -522,7 +556,7 @@ def next_status_slot(sends: list[dict]) -> str:
 
 
 def owed(row: dict, sends: list[dict], now: datetime, open_from_requester: int = 1,
-         answerable: bool = True) -> dict | None:
+         answerable: bool = True, gone: bool | None = False) -> dict | None:
     """The ONE ladder message this request is owed right now, or None.
 
     Returns {"kind", "slot", "variant", "facts", "next_contact_at", "effects"} with no body: `render` makes the
@@ -531,6 +565,12 @@ def owed(row: dict, sends: list[dict], now: datetime, open_from_requester: int =
     requests the same requester has, this one included. `answerable` is whether code can produce this request's
     answer today (False for an access request while no complete copy can be built): a message never states an
     answer date for an answer nothing here can produce, and the date is never moved for one it can.
+
+    `gone` is the same-run read of a `gone_candidate`'s pages (`Run.gone_now`): True when every page named reads
+    deleted, not merged and not found on the public site NOW; None when that read could not be made; False
+    otherwise. True owes the final answer at once. None owes nothing this run: a request whose answer is one read
+    away is not told "still open" because an API was down, and it is never told the page is gone on a read nobody
+    made. False leaves the request on the ladder below.
     """
     if row.get("class") not in STATUTORY or row.get("status") != "open" or final_response_at(row, sends):
         return None
@@ -541,6 +581,16 @@ def owed(row: dict, sends: list[dict], now: datetime, open_from_requester: int =
     need = need_of(row)
     d = due(row)
     received = human_date(_parse(row["received_at"]))
+    if gone_candidate(row) and gone is not False:
+        # The answer itself, so it waits for no halfway point, quiet window or promised next contact. It stands down
+        # only for a letter that may be out, and `send.deliver` still holds it to one message per person per UTC day.
+        may_be_out = any(s.get("state") in ("sending", "unknown") and s.get("at")
+                         and now - _parse(s["at"]) < timedelta(days=QUIET_DAYS) for s in sends)
+        if gone is None or may_be_out:
+            return None
+        return {"kind": KIND_FINAL, "slot": KIND_FINAL, "effects": {}, "next_contact_at": "",
+                "variant": FINAL_GONE_LATE_VARIANT if now >= d else FINAL_GONE_VARIANT,
+                "facts": {"received": received}}
     # A letter that MAY be out (`sending` / `unknown`) keeps the request quiet like one that did go: a status update
     # an hour after an ask nobody can confirm is the double contact the ledger exists to prevent.
     last = max([contacted_at(row, sends)] + [s.get("at") or "" for s in sends

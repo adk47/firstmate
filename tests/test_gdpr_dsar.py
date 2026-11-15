@@ -53,6 +53,26 @@ def _linked(ids):
                 "identity": sources.ProfileIdentity(social=frozenset({("instagram", "the.artist")}))} for i in ids}
 
 
+REAL_PROFILES_DELETED = sources.profiles_deleted
+
+
+def detail_of(event):
+    """An event's detail as a dict, whichever way the store hands it back."""
+    d = event.get("detail")
+    return json.loads(d) if isinstance(d, str) else (d or {})
+_NO_PAGE_READS_DELETED = mock.patch.object(sources, "profiles_deleted", lambda ids: {i: False for i in ids})
+
+
+def setUpModule():
+    """Hermetic: `Run.gone_now` asks the admin API which pages read deleted. Here none does unless a test says so, so
+    a request whose stored verdict is GONE stays on the ladder exactly as a page that reads live again would."""
+    _NO_PAGE_READS_DELETED.start()
+
+
+def tearDownModule():
+    _NO_PAGE_READS_DELETED.stop()
+
+
 def utc(*a):
     return datetime(*a, tzinfo=timezone.utc)
 
@@ -361,15 +381,15 @@ class Copy(unittest.TestCase):
             if v.get("enabled") is not True:
                 continue
             body = dsar.render(self.doc, vid, self.FACTS)
-            self.assertEqual(dsar.lint(body, v["kind"], self.FACTS, late=vid.startswith("late_")), "", vid)
+            self.assertEqual(dsar.lint(body, v["kind"], self.FACTS, late=dsar.says_late(vid)), "", vid)
             self.assertNotIn("http", body.lower(), vid)
             self.assertNotIn("@", body, vid)
             if v["kind"] in ("ack", "extension"):
                 self.assertIn("11 December 2026", body, f"{vid}: states the date the answer is owed by")
-            elif v["kind"] == "access":
+            elif v["kind"] in ("access", "final"):
                 self.assertIn(self.FACTS["received"], body, f"{vid}: names the request it answers")
                 for date in (self.FACTS["due"], self.FACTS["next"]):
-                    self.assertNotIn(date, body, f"{vid}: the cover of an answer promises no further date")
+                    self.assertNotIn(date, body, f"{vid}: an answer promises no further date")
             else:
                 self.assertIn(self.FACTS["next"], body, f"{vid}: a status update says when they hear next")
 
@@ -431,7 +451,7 @@ class Copy(unittest.TestCase):
 
     def test_nothing_apologises_except_an_update_to_a_request_past_its_date(self):
         for vid, v in self.doc["variants"].items():
-            if v["enabled"] is True and not vid.startswith("late_"):
+            if v["enabled"] is True and not dsar.says_late(vid):
                 self.assertIsNone(dsar.APOLOGY_RE.search(dsar.render(self.doc, vid, self.FACTS)), vid)
         self.assertIn("apology", dsar.lint("Hello,\n\nSorry. By 11 December 2026.", "ack", self.FACTS))
         for word in ("unlawful", "breach", "backlog", "high volume", "technical issues"):
@@ -1363,10 +1383,10 @@ class Wiring(unittest.TestCase):
         good = self.request(2)
         real = send.route
 
-        def route(row):
+        def route(row, ladder=False):
             if row.get("id") == bad:
                 return "mail_new_thread", row.get("requester_email")
-            return real(row)
+            return real(row, ladder=ladder)
         with mock.patch.object(send, "route", route):
             out = self.run.dsar_author(NOW, checker=approve)
         self.assertEqual([x["row"] for x in out], [good], "the ordinary row is authored and put up for review")
@@ -1390,6 +1410,28 @@ class Wiring(unittest.TestCase):
         with self.writer(), mock.patch.object(copy_gate, "check", approve):
             again = {x["row"]: x for x in self.run.dsar_send(NOW, checker=approve)}
         self.assertEqual((again[second]["state"], len(self.posted)), ("sent", 3))
+
+    def test_one_event_on_two_open_rows_gets_each_ladder_letter_once(self):
+        """Live 2026-11-13/14: a notices@ request and the Intercom conversation about the same page stood on two
+        open rows, each row sent its own letter a day apart, and four people got one statutory letter twice."""
+        conv, mail = self.request(1, need="link"), self.mail_request(1)
+        self.s.update(conv, "test", pages=[{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}])
+        self.s.update(mail, "test", pages=[{"entity": "profile", "id": "fc31a861"}])
+        self.assertEqual(len(self.s.duplicate_events()), 1, "precondition: the scanner pairs them")
+        post, accounts = self.mailer()
+        with self.writer(), post, accounts, mock.patch.object(copy_gate, "check", approve):
+            out = {x["row"]: x for x in self.run.dsar_send(NOW, checker=approve)}
+        self.assertEqual(sorted(x["state"] for x in out.values()), ["held", "sent"])     # day one: the day rule
+        sent = next(r for r, x in out.items() if x["state"] == "sent")
+        held = mail if sent == conv else conv
+        self.s.db.execute("UPDATE erasure_sends SET at='2026-11-10T09:00:00Z'")           # day two
+        self.s.db.commit()
+        with self.writer(), post, accounts, mock.patch.object(copy_gate, "check", approve):
+            again = {x["row"]: x for x in self.run.dsar_send(NOW, checker=approve)}
+        self.assertEqual((again[held]["state"], len(self.posted)), ("held", 1), "the same letter must not go twice")
+        self.assertIn("one letter per customer event", again[held]["why"])
+        self.assertIn(f"#{self.s.get(sent)['register_no']}", again[held]["why"])
+        self.assertIsNone(self.s.send_record(held, "ack"), "nothing was refused: the slot stays free")
 
     def test_a_letter_that_may_be_out_counts_as_the_days_message(self):
         first, second = self.request(1), self.request(2)
@@ -2754,6 +2796,21 @@ class AccessAnswer(unittest.TestCase):
         self.assertEqual(len(self.sent), 1)
         self.assertTrue(self.store.send_record(self.row["id"], dsar.KIND_ACCESS) is not None)
 
+    def test_the_answer_is_not_sent_again_from_the_second_row_of_one_customer_event(self):
+        """One access request on two open rows (an unfolded pair): the copy that went from one row IS the answer, so
+        the other row does not send it again, and it is not queued for tomorrow either (a day hold defers; this does
+        not)."""
+        self.build()
+        twin = {"kind": dsar.KIND_ACCESS, "state": "sent", "at": "2026-11-13T03:33:00Z", "register_no": 77, "twin": True}
+        with mock.patch.object(self.store, "event_twin_send", lambda rid, kind: twin if kind == dsar.KIND_ACCESS else None):
+            held = self.deliver()
+        self.assertEqual((held["state"], self.sent), ("held", []))
+        self.assertIn("one letter per customer event: register #77", held["why"][0])
+        self.assertIsNone(self.store.send_record(self.row["id"], dsar.KIND_ACCESS), "the slot stays free")
+        self.assertFalse(self.store.get(self.row["id"]).get("access_owed_at"),
+                         "nothing is owed tomorrow: the twin's answer is the answer")
+        self.assertEqual(self.deliver()["state"], "sent", "with no twin letter out, the answer goes")
+
     def test_the_answer_is_held_when_another_worker_claimed_the_person_after_the_early_read(self):
         self.build()
         other, _ = self.store.upsert({"keys": ["intercom:901"], "channel": "intercom", "class": "privacy_erasure",
@@ -2814,6 +2871,306 @@ class Rubric(unittest.TestCase):
         for ruling in (letter_copy.NEW_THREAD_LEAD_RULING, letter_copy.NEW_THREAD_SUBJECT_RULING):
             self.assertIn(ruling, text)
         self.assertEqual(letter_copy.NEW_THREAD_SUBJECT_APPROVED_CLASSES, ("privacy_erasure",))
+
+
+class FinalAnswer(unittest.TestCase):
+    """The final answer to an erasure request whose every page is already off the site (ruling g2-walls-1115).
+
+    Measured on the live register 2026-11-15: 49 open erasure requests need nothing from the requester and name only
+    pages decided GONE, 43 of them past their date. The ladder had no answer for them, so each was told "still open"
+    every week. The answer states a fact about the site, so it is owed only on a read made in the same run."""
+
+    GONE = "0d1c2b3a-0000-4000-8000-00000000000"
+
+    def setUp(self):
+        self.s = Store(":memory:")
+        self.run = Run(self.s, log=lambda *_: None)
+        self.posted = []
+        self.read = []
+
+    def request(self, n=1, received="2026-09-01T00:00:00Z", verdicts=("GONE",), need="none", cls="privacy_erasure"):
+        rid, _ = self.s.upsert({"keys": [f"intercom:{n}"], "channel": "intercom", "class": cls,
+                                "received_at": received, "pages": []})
+        detail = [{"id": f"{self.GONE}{n}" if v == "GONE" else f"aaaa{n}{i}", "verdict": v}
+                  for i, v in enumerate(verdicts)]
+        self.s.update(rid, "decide", conversation_id=f"2154766503954{n:02d}", gates={"v": 1, "need": need},
+                      requester_email=f"p{n}@example.com", verdict_detail=detail)
+        return rid
+
+    def site(self, deleted=True, public=404):
+        """The two reads `Run.gone_now` makes. `deleted` / `public` are a value for every page, or an exception."""
+        def profiles_deleted(ids):
+            self.read.append(sorted(ids))
+            if isinstance(deleted, Exception):
+                raise deleted
+            return {i: deleted for i in ids}
+
+        def public_status(entity, pid):
+            if isinstance(public, Exception):
+                raise public
+            return public
+        return (mock.patch.object(sources, "profiles_deleted", profiles_deleted),
+                mock.patch.object(sources, "public_status", public_status))
+
+    def owed(self, now=NOW, **site):
+        a, b = self.site(**site)
+        with a, b:
+            return {x["row"]: x for x in self.run.dsar_owed(now)}
+
+    def writer(self):
+        return mock.patch.object(send, "_intercom_send",
+                                 lambda c, t, a, dry_run=False, key="": self.posted.append((c, t, a)) or "api-log posted")
+
+    def test_every_page_gone_now_is_owed_the_answer_and_it_says_so_once(self):
+        late, in_time = self.request(1), self.request(2, received="2026-11-01T00:00:00Z")
+        owed = self.owed()
+        self.assertEqual({k: (v["kind"], v["slot"], v["variant"], v["problem"]) for k, v in owed.items()},
+                         {late: ("final", "final", "final_gone_late", ""),
+                          in_time: ("final", "final", "final_gone", "")})
+        self.assertIn("This is our answer to the request you made on 1 September 2026.", owed[late]["text"])
+        self.assertIn("there is no page left for us to take down", owed[late]["text"])
+        self.assertIn("We are late in giving you this answer, and we are sorry.", owed[late]["text"])
+        self.assertNotIn("sorry", owed[in_time]["text"], "an answer given in time does not apologise")
+        for item in owed.values():
+            self.assertEqual((item["effects"], item["next_contact_at"]), ({}, ""), "an answer promises nothing more")
+            for barred in ("deleted", "removed", "we hold", "http", "@"):
+                self.assertNotIn(barred, item["text"].lower())
+        self.assertEqual(self.read, [[f"{self.GONE}1", f"{self.GONE}2"]], "one admin read covers every candidate")
+
+    def test_a_page_that_does_not_read_gone_now_keeps_the_request_on_the_ladder(self):
+        """The stored verdict is hours or days old. A page that is live again, merged into another, or answering
+        anything but 404 in public is not "no page left", whatever the verdict says."""
+        rid = self.request(1)
+        for name, site in (("not deleted, or merged", {"deleted": False}), ("the public page answers", {"public": 200}),
+                           ("the public page is the hidden one", {"public": 410})):
+            self.assertEqual(self.owed(**site)[rid]["variant"], dsar.LATE_NO_DATE_VARIANT, name)
+        self.assertEqual(self.run.errors, [], "a read that answered is not an error")
+
+    def test_a_read_that_cannot_be_made_owes_nothing_and_is_a_run_error(self):
+        """"Could not read" is not "gone", and it is not "still open" either: the request's answer is one read away,
+        so this run sends it neither."""
+        rid = self.request(1)
+        self.assertNotIn(rid, self.owed(deleted=sources.Unknown("admin HTTP 502")))
+        self.assertIn("deleted-page read", self.run.errors[0])
+        self.run.errors.clear()
+        self.assertNotIn(rid, self.owed(public=sources.Unknown("public page HTTP 503")))
+        self.assertIn("public page read", self.run.errors[0])
+
+    def test_one_unreadable_public_page_does_not_stop_the_other_requests(self):
+        ok, bad = self.request(1), self.request(2)
+
+        def public_status(entity, pid):
+            if pid.endswith("2"):
+                raise sources.Unknown("HTTP 503")
+            return 404
+        with self.site()[0], mock.patch.object(sources, "public_status", public_status):
+            owed = {x["row"]: x for x in self.run.dsar_owed(NOW)}
+        self.assertEqual((owed[ok]["variant"], bad in owed), ("final_gone_late", False))
+
+    def test_only_a_request_with_nothing_but_gone_pages_and_nothing_needed_is_read_at_all(self):
+        mixed = self.request(1, verdicts=("ALREADY_HIDDEN", "GONE"))
+        review = self.request(2, verdicts=("GONE", "JAN_REVIEW"), need="unknown")
+        asked = self.request(3, need="link")
+        access_req = self.request(4, cls="privacy_access")
+        no_page = self.request(5, verdicts=())
+        owed = self.owed()
+        self.assertEqual(self.read, [], "none of these can be owed the answer, so no page of theirs is read")
+        self.assertTrue(all(owed[r]["kind"] == "status" for r in (mixed, review, asked, access_req, no_page)))
+        for row in (mixed, review, asked, access_req, no_page):
+            self.assertFalse(dsar.gone_candidate(self.s.get(row)))
+
+    def test_a_request_that_has_its_final_response_is_not_read_or_owed_again(self):
+        rid = self.request(1)
+        a, b = self.site()
+        with a, b, self.writer(), mock.patch.object(copy_gate, "check", approve):
+            out = self.run.dsar_send(NOW, checker=approve)
+            self.assertEqual([(x["state"], x["variant"]) for x in out], [("sent", "final_gone_late")])
+            row, sends = self.s.get(rid), self.s.sends(rid)
+            self.assertTrue(row["confirmed_at"], "the answer is the final response: it stamps the row")
+            self.assertTrue(dsar.final_response_at(row, sends))
+            self.assertEqual(dsar.state_of(row, sends), dsar.CLOSED, "a recorded final response closes it")
+            self.read.clear()
+            self.assertEqual(self.run.dsar_send(NOW + timedelta(days=30), checker=approve), [])
+        self.assertEqual((len(self.posted), self.read), (1, []))
+        self.assertEqual(self.posted[0][0], "215476650395401")
+        sent = [e for e in self.s.events(rid) if e["kind"] == "dsar_sent"]
+        self.assertEqual(detail_of(sent[0])["variant"], "final_gone_late")
+
+    def test_no_verdict_no_answer_and_the_gate_is_asked_under_its_own_campaign(self):
+        rid = self.request(1)
+        a, b = self.site()
+        with a, b, self.writer():
+            for checker in (pending, refuse, gate_error):
+                with mock.patch.object(copy_gate, "check", checker):
+                    out = self.run.dsar_send(NOW, checker=checker)
+                self.assertEqual(([x["state"] for x in out], self.posted), (["held"], []), checker.__name__)
+        self.assertEqual(self.s.get(rid)["confirmed_at"], "", "a held answer answers nobody")
+        self.assertEqual(copy_gate.CAMPAIGN["final"], "gdpr-final")
+        self.assertIn("final", dsar.GATED_KINDS)
+        self.assertTrue(send.is_gated("final", "final"))
+        sys.path.insert(0, str(ROOT / "scripts" / "outbound_copy"))
+        import gate
+        self.assertEqual(gate.RUBRIC_FAMILY["gdpr-final"], "gdpr")
+        self.assertEqual(gate.mode_of("gdpr-final", {"default": "observe"}), "enforce",
+                         "a campaign with its own rubric is enforced whatever the table's default says")
+
+    def test_a_letter_that_may_be_out_holds_the_answer_and_a_page_that_comes_back_withdraws_it(self):
+        rid = self.request(1)
+        a, b = self.site()
+        with a, b:
+            self.run.dsar_author(NOW, checker=pending)
+        self.assertEqual(self.s.message(rid, "final")["variant"], "final_gone_late")
+        self.s.begin_send(rid, "status", "intercom", "c", "ab" * 32, "gate:v", "unknown")
+        self.assertNotIn(rid, self.owed(), "a status letter may be out: nothing more is sent on the request")
+        self.s.db.execute("DELETE FROM erasure_sends WHERE request_id=?", (rid,))
+        self.s.db.commit()
+        with self.writer(), mock.patch.object(copy_gate, "check", approve):
+            a, b = self.site(deleted=False)                 # the page is back before the verdict landed
+            with a, b:
+                out = self.run.dsar_send(NOW + timedelta(hours=1), checker=approve)
+        self.assertEqual([x["variant"] for x in out], [dsar.LATE_NO_DATE_VARIANT],
+                         "the approved answer is not sent: this run did not read the page gone")
+        self.assertNotIn("no page left", self.posted[0][1])
+        self.assertEqual(self.s.get(rid)["confirmed_at"], "")
+
+    def test_the_deleted_read_counts_only_a_record_that_says_deleted_and_not_merged(self):
+        from credit_review import admin
+        ids = [f"{self.GONE}{n}" for n in range(1, 5)]
+        calls = []
+
+        class Client:
+            def get(self, path, params=None):
+                calls.append(path)
+                return {"items": [
+                    {"id": ids[0].upper(), "deleted": {"date": "2026-10-26T21:50:37", "deletedBy": "operations"}, "merged": None},
+                    {"id": ids[1], "deleted": {"date": "2026-10-26T21:50:37"}, "merged": {"into": "x"}},
+                    {"id": ids[2], "deleted": None, "merged": None},
+                ]}
+        with mock.patch.object(admin, "AdminClient", Client):
+            got = REAL_PROFILES_DELETED(ids)
+        self.assertEqual(got, {ids[0]: True, ids[1]: False, ids[2]: False, ids[3]: False},
+                         "merged, live and not-returned are each not gone")
+        self.assertIn("includeDeleted=true", calls[0])
+
+        class Many(Client):
+            def get(self, path, params=None):
+                calls.append(path)
+                return {"items": []}
+        calls.clear()
+        with mock.patch.object(admin, "AdminClient", Many):
+            REAL_PROFILES_DELETED([f"0d1c2b3a-0000-4000-8000-{n:012d}" for n in range(45)])
+        self.assertEqual([c.count("ids=") for c in calls], [20, 20, 5])
+
+        for answer in (admin.AdminError("HTTP 502"), {"totalCount": 0}, []):
+            class Broken:
+                def get(self, path, params=None):
+                    if isinstance(answer, Exception):
+                        raise answer
+                    return answer
+            with mock.patch.object(admin, "AdminClient", Broken), self.assertRaises(sources.Unknown):
+                REAL_PROFILES_DELETED(ids)
+
+
+class NoThread(unittest.TestCase):
+    """A support request with an address on file and no thread gets its ladder letter in a new thread from support@
+    (ruling g2-walls-1115). Measured 2026-11-15: #214 #215 #236 #237, one of them past its date and never reached."""
+
+    def setUp(self):
+        self.s = Store(":memory:")
+        self.run = Run(self.s, log=lambda *_: None)
+        self.posted = []
+
+    def request(self, n=1, channel="support", cls="privacy_erasure", email="arpad@example.com", **kw):
+        rid, _ = self.s.upsert({"keys": [f"clickup:869dp8bx{n}"], "channel": channel, "class": cls,
+                                "received_at": "2026-11-11T00:00:00Z", "pages": []})
+        self.s.update(rid, "decide", gates={"v": 1, "need": "link"}, requester_email=email, **kw)
+        return rid
+
+    def mailer(self):
+        def post(email, text, approved_by, dry_run=False, key="", mailbox="", subject=""):
+            self.posted.append((email, text, subject, mailbox, approved_by))
+            return "thread_id 1a1d5c0696b7b61a"
+        return (mock.patch.object(send, "_mail_send_new_thread", post),
+                mock.patch.object(send, "gog_accounts", lambda: {"support@muso.ai": {"gmail"}}))
+
+    def test_only_a_ladder_letter_takes_the_route_and_only_for_that_shape(self):
+        rid = self.request()
+        row = self.s.get(rid)
+        with self.assertRaises(send.Unknown):
+            send.route(row)                                 # the older ask and the confirmation: as before
+        self.assertEqual(send.route(row, ladder=True), ("mail_new_thread", "arpad@example.com"))
+        _post, accounts = self.mailer()
+        with accounts:
+            for name, change in (("no address", {"requester_email": ""}),
+                                 ("a channel the ruling does not name", {"channel": "register"}),
+                                 ("a class with no subject on file", {"class": "dmca_takedown"})):
+                with self.assertRaises(send.Unknown, msg=name):
+                    send.route({**row, **change}, ladder=True)
+            self.assertEqual(send.route({**row, "conversation_id": "215476650395401"}, ladder=True)[0], "intercom",
+                             "a request with a conversation is answered there")
+            self.assertEqual(send.route({**row, "gmail_thread": "1a15058a85f5f601"}, ladder=True)[0], "mail",
+                             "a request with a thread in support@ is answered in it")
+        self.assertEqual(send.LADDER_NEW_THREAD_CHANNELS, ("support",))
+        with mock.patch.object(send, "LADDER_NEW_THREAD_CHANNELS", ()), self.assertRaises(send.Unknown):
+            send.route(row, ladder=True)                    # the undo: empty the tuple
+
+    def test_the_letter_is_the_reviewed_body_under_the_ladders_subject_with_no_opening_line(self):
+        rid, acc = self.request(1), self.request(2, cls="privacy_access", email="b@example.com")
+        asked = []
+
+        def recording(kind, body, variant="", slot="", subject="", runner=None):
+            asked.append((body, subject))
+            return approve(kind, body, variant, slot, subject)
+        post, accounts = self.mailer()
+        with post, accounts, mock.patch.object(copy_gate, "check", recording):
+            out = {x["row"]: x for x in self.run.dsar_send(NOW, checker=recording)}
+        self.assertEqual({k: v["state"] for k, v in out.items()}, {rid: "sent", acc: "sent"})
+        body = self.s.message(rid, "ack")["body"]
+        got = {p[0]: p for p in self.posted}
+        self.assertEqual(got["arpad@example.com"][:4],
+                         ("arpad@example.com", body, "Your Muso.AI data deletion request", "support@muso.ai"))
+        self.assertEqual(got["b@example.com"][2], "Your Muso.AI data access request")
+        for p in self.posted:
+            self.assertFalse(p[1].startswith("You wrote"), "this person did not write to a mailbox")
+            self.assertTrue(p[4].startswith("gate:v-"))
+        self.assertEqual(asked.count((body, "Your Muso.AI data deletion request")), 2,
+                         "the author step and the send step ask about the same body and subject")
+        send_row = [x for x in self.s.sends(rid) if x["kind"] == "ack"][0]
+        self.assertEqual((send_row["state"], send_row["channel"], send_row["detail"]),
+                         ("sent", "mail_new_thread", "batch g2-walls-1115"))
+        sent = [e for e in self.s.events(rid) if e["kind"] == "dsar_sent"][0]
+        self.assertEqual(detail_of(sent)["batch"], "g2-walls-1115")
+
+    def test_a_verdict_on_the_body_without_the_subject_does_not_send_it(self):
+        rid = self.request()
+
+        def body_only(kind, body, variant="", slot="", subject="", runner=None):
+            return pending(kind, body) if subject else approve(kind, body)
+        post, accounts = self.mailer()
+        with post, accounts, mock.patch.object(copy_gate, "check", body_only):
+            out = self.run.dsar_send(NOW, checker=body_only)
+        self.assertEqual(([x["state"] for x in out], self.posted), (["held"], []))
+        self.assertEqual(self.s.message(rid, "ack")["gate_result"], "pending")
+
+    def test_a_request_to_notices_keeps_its_own_opening_line_and_subject(self):
+        rid, _ = self.s.upsert({"keys": ["gmail:notices@:1"], "channel": "notices", "class": "privacy_erasure",
+                                "received_at": "2026-11-11T00:00:00Z", "pages": []})
+        self.s.update(rid, "decide", gates={"v": 1, "need": "link"}, requester_email="n@example.com")
+        post, accounts = self.mailer()
+        with post, accounts, mock.patch.object(copy_gate, "check", approve):
+            self.run.dsar_send(NOW, checker=approve)
+        self.assertTrue(self.posted[0][1].startswith("You wrote to us at notices@muso.ai on 11 November 2026"))
+        self.assertEqual([x for x in self.s.sends(rid) if x["kind"] == "ack"][0]["detail"], "")
+
+    def test_every_subject_the_code_sends_is_named_in_the_rubric(self):
+        doc = dsar.load_copy()
+        text = " ".join((ROOT / "policies" / "outbound-copy-rubric-gdpr.md").read_text(encoding="utf-8").split())
+        for cls in ("privacy_erasure", "privacy_access"):
+            self.assertIn(dsar.new_thread_subject(doc, cls), text)
+        self.assertEqual(dsar.new_thread_subject(doc, "privacy_erasure"), copy.new_thread_subject("privacy_erasure"),
+                         "one subject for a deletion request, whichever route opens the thread")
+        with self.assertRaises(dsar.CopyError):
+            dsar.new_thread_subject(doc, "dmca_takedown")
 
 
 class ClockCheck(unittest.TestCase):

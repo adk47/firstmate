@@ -70,6 +70,8 @@ RUBRIC_FAMILY: dict[str, str] = {
     "gdpr-denial": "gdpr",
     # the cover message of an Art. 15 answer (fixed wording, one date slot; the attached file is data, not copy)
     "gdpr-access": "gdpr",
+    # the final answer to an erasure request whose pages are already off the site (ruling g2-walls-1115)
+    "gdpr-final": "gdpr",
     # request_comms' erasure lines are the same notices on the same statutory clock
     **{f"request-erasure-{s}": "gdpr" for s in ("received", "verifying", "need_you", "decided", "waiting")},
     # One reply an agent composed for one support conversation (scripts/intercom-ops-write.sh, the copy-gate

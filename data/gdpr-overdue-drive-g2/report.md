@@ -136,7 +136,10 @@ Seven of them (#3 #6 #137 #140 #164 #204 #346) had their confirmation sent on 11
 Each of these needs words nobody has approved, or a person:
 
 1. **Final letter for a page already off the site** (51 past rows). The largest group. Needs approved
-   wording.
+   wording. **DECIDED 2026-11-15** (ruling g2-walls-1115): the wording is `final_gone` / `final_gone_late` in
+   `policies/gdpr-dsar-copy.json`, owed only on a same-run read of every page (`Run.gone_now`). How many of the 51
+   it closes is measured after deploy, not here: `docs/support/gdpr-pipeline.md` §"The final answer for a page
+   already off the site".
 2. **Art. 15 answer** (11 past, more inside the window). Needs the 11 manifest gaps closed, including the
    Art. 15(1) text.
 3. **Closing a request the requester never completed** (37 past rows, wait on the requester). Needs an
@@ -144,7 +147,9 @@ Each of these needs words nobody has approved, or a person:
 4. **Search check unmeasurable** (6 rows). Whether the final confirmation may go on the page and sitemap
    lines alone when the search cannot be measured.
 5. **support@ rows with an address and no thread** (6 rows). Whether a new thread may be opened for them;
-   the lead ruling names notices@ and legal@ only.
+   the lead ruling names notices@ and legal@ only. **DECIDED 2026-11-15** (ruling g2-walls-1115): a ladder letter
+   may open one, for that shape only (`send.LADDER_NEW_THREAD_CHANNELS`); #214 #215 #236 #237 are the four it
+   reaches. The count of letters actually sent is measured after deploy.
 6. **14 rows with nowhere to write** (#10 #11 #24 #138 #151-#160; 12 of them past date). The address has
    to be recovered from the original message; the support@ ledger stores a truncated hash of the sender.
 7. **#468** (1,014 days). A person reads the conversation and resolves the `unknown` send

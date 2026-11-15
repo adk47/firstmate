@@ -25,7 +25,8 @@ GATE = Path(__file__).resolve().parents[1] / "outbound_copy" / "gate.py"
 RUBRIC_FAMILY = "gdpr"
 # The gate's campaign name per ladder kind. The gate maps each of these to the `gdpr` rubric family in its own
 # table; until it does, its answer names another rubric and `check` holds.
-CAMPAIGN = {"ack": "gdpr-ack", "status": "gdpr-status", "extension": "gdpr-extension", "denial": "gdpr-denial", "access": "gdpr-access"}
+CAMPAIGN = {"ack": "gdpr-ack", "status": "gdpr-status", "extension": "gdpr-extension", "denial": "gdpr-denial", "access": "gdpr-access",
+            "final": "gdpr-final"}
 TIMEOUT_S = 60
 APPROVED, PENDING, REFUSED, ERROR = "approved", "pending", "refused", "error"
 

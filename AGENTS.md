@@ -1175,6 +1175,11 @@ A row stamp is not the record of a send: 23 open rows had a `sent` ask and 7 a `
 `erasure_sends` with no stamp on the row, so "was contacted" and "was answered" read the ledger too
 (`dsar.contacted_at`, `dsar.final_response_at`). No message states an answer date code cannot keep
 (`run.answerable_now`).
+An erasure request whose every page is already off the site gets the `final` letter, and only on a read of each
+page made in the same run (`Run.gone_now`: deleted, not merged, public 404); an unread page owes nothing that run.
+A ladder letter may open a new thread to a support requester with an address and no thread
+(`send.LADDER_NEW_THREAD_CHANNELS`), and one customer event on two open rows gets each letter from one row only
+(`Store.event_twin_send`). Details: `docs/support/gdpr-pipeline.md` §"The final answer for a page already off the site".
 The Art. 15 copy (`gdpr_pipeline/access.py`, manifest `policies/gdpr-access-sources.json`) is built for the account
 the requester controls and sent only when COMPLETE, to the address on the account; an incomplete copy names its gaps
 and is never the answer. Only counts and hashes of a copy may reach a log, the trail or stdout.

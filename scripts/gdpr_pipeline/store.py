@@ -656,6 +656,32 @@ class Store:
             (day, row.get("id") or 0, email, email, email, contact, contact, conv, conv)).fetchone()
         return dict(r) if r else None
 
+    def event_twin_send(self, rid: int, kind: str) -> dict | None:
+        """The `kind` letter that left, or may have left, on the OTHER open row of the same customer event, or None.
+
+        One customer event sometimes stands on two open rows (`duplicate_events`: a notice to notices@ / legal@ and
+        the Intercom conversation about the same page, seconds apart). `erasure_sends` is unique per request+kind,
+        so each row has a slot of its own, and the day rule only stops two letters on ONE day: on 2026-11-13/14 four
+        people got the same statutory letter twice, a day apart, once in Intercom and once by mail. `dedupe` cannot
+        close such a pair once both rows hold a letter (`MergeRefused`: that fold is a person's call), so until a
+        person folds it the pair is open and every later ladder step would go twice.
+
+        The rule here picks no letter and folds nothing: a slot the twin has already used is not sent again from
+        this row. `sending` and `unknown` count, because a letter may be out. The returned row carries `twin: True`
+        and the twin's register number, the shape `person_contacted_on` returns."""
+        row = self.get(rid)
+        if row is None or row["status"] != "open":
+            return None
+        for keep, drop in self._duplicate_pairs(self._twin_candidates(row)):
+            if rid not in (keep["id"], drop["id"]):
+                continue
+            twin = drop if keep["id"] == rid else keep
+            rec = self.send_record(twin["id"], kind)
+            if rec and rec["state"] in ("sent", "sending", "unknown"):
+                return {"kind": rec["kind"], "state": rec["state"], "at": rec["at"],
+                        "register_no": twin["register_no"], "twin": True}
+        return None
+
     # ---- the DSAR ladder's authored messages (`dsar_messages`)
     # ---- Art. 15 answers (gdpr_pipeline/access.py). Append-only: every build is a row, the newest is current.
     def put_access_answer(self, rid: int, account_id: int, raw: bytes, sha: str, summary: dict) -> dict:
@@ -773,9 +799,10 @@ class Store:
 
     def claim_send_for_person(self, row: dict, rid: int, kind: str, channel: str, target: str, body_sha: str,
                               approved_by: str, detail: str = "", idem: str = "") -> dict | None:
-        """Claim the `sending` slot ONLY IF this person has no letter today: the read and the claim are one write
-        transaction. None when the slot is claimed; otherwise the letter that already holds the day
-        (`person_contacted_on`'s row), and nothing is written.
+        """Claim the `sending` slot ONLY IF this person has no letter today AND the same customer event's other open
+        row has not used this slot (`event_twin_send`): the reads and the claim are one write transaction. None when
+        the slot is claimed; otherwise the letter that holds it (`person_contacted_on`'s row, or the twin's with
+        `twin: True`), and nothing is written.
 
         `erasure_sends` is unique per request+kind, which says nothing about the PERSON: two workers on two
         requests from one requester could each read "no letter today", claim their own slot and both send.
@@ -786,7 +813,7 @@ class Store:
             self.db.commit()
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            earlier = self.person_contacted_on(row, now_iso()[:10])
+            earlier = self.person_contacted_on(row, now_iso()[:10]) or self.event_twin_send(rid, kind)
             if earlier:
                 self.db.rollback()
                 return earlier
@@ -837,9 +864,10 @@ class Store:
             # ladder times the next one from this stamp. Without this branch a status update fell through to the
             # interim-confirmation stamp below and the register recorded a letter that was never sent.
             self.update(rid, "status", commit=commit, status_sent_at=stamp, status_ref=ref)
-        elif slot == "confirm" or kind == "access":
+        elif slot in ("confirm", "final") or kind == "access":
             # The copy of the data IS the final response to an access request, exactly as the confirmation is to an
-            # erasure request: nothing else can take the request to `responded`.
+            # erasure request: nothing else can take the request to `responded`. The ladder's `final` letter (the
+            # page is already off the site) is the same thing for an erasure request with nothing left to hide.
             self.update(rid, "confirmed", commit=commit, confirmed_at=stamp, confirm_ref=ref)
         elif kind == "extension" or slot == "extension":
             pass        # no stamp of its own: what an extension notice changes is the date, written just below
@@ -1003,6 +1031,44 @@ class Store:
             "SELECT request_id FROM erasure_sends WHERE kind=? AND state='sent'", (kind,))}
         return [r["id"] for r in self.all("open") if r["id"] not in done]
 
+    def _twin_candidates(self, row: dict) -> list[dict]:
+        """Every row the pairing rules could tie to `row`, directly or through another row, in `all()`'s order.
+
+        Both rules pair only rows that share an event source (`:again:` keys on one conversation or mail thread) or a
+        sender address (the cross-channel rule), so the rows reachable from `row` by those two links are the only
+        ones that can change its answer. All of them are read, not only the direct ones, and closed rows too: the
+        rules are greedy (a row paired once is not paired again) and positional (the `:again:` rule pairs NEIGHBOURS
+        in a group), so leaving out a third row, or a closed one that stands between two open ones, pairs rows the
+        whole-register scan keeps apart. Only the candidates are narrowed; which of them is a pair stays
+        `_duplicate_pairs`' call."""
+        ids, emails, sources, frontier = {row["id"]}, set(), set(), [row]
+        while frontier:
+            new_emails = {str(r.get("requester_email") or "").strip().lower() for r in frontier} - emails - {""}
+            new_sources = {str(r.get(c) or "").strip() for r in frontier
+                           for c in ("conversation_id", "gmail_thread")} - sources - {""}
+            emails |= new_emails
+            sources |= new_sources
+            found = []
+            for e in sorted(new_emails):
+                found += self.db.execute(
+                    "SELECT * FROM erasure_requests WHERE lower(trim(COALESCE(requester_email, '')))=?", (e,))
+            for src in sorted(new_sources):
+                found += self.db.execute(
+                    "SELECT * FROM erasure_requests WHERE trim(COALESCE(conversation_id, ''))=? "
+                    "OR trim(COALESCE(gmail_thread, ''))=?", (src, src))
+            frontier = []
+            for r in found:
+                if r["id"] not in ids:
+                    ids.add(r["id"])
+                    frontier.append(dict(r))
+        out = []
+        todo = sorted(ids)
+        for i in range(0, len(todo), 500):
+            part = todo[i:i + 500]
+            out += [self._row(r) for r in self.db.execute(
+                f"SELECT * FROM erasure_requests WHERE id IN ({','.join('?' * len(part))})", part)]
+        return sorted(out, key=lambda r: (r["due_at"] or "", r["id"]))
+
     def duplicate_events(self) -> list[tuple[dict, dict]]:
         """[(keep, drop)] for post-confirmation rows that are the SAME customer event opened twice.
 
@@ -1011,8 +1077,13 @@ class Store:
         a tick that predated the canonical-key + source-reuse rule minted both spellings of the same key
         (`register:19:again:<at>` and `gmail:legal@…:again:<at>`), which is two deadlines, two watchdogs and two
         confirmation letters for one customer message. Reported, never repaired silently: the caller decides."""
+        return self._duplicate_pairs(self.all())
+
+    def _duplicate_pairs(self, rows: list[dict]) -> list[tuple[dict, dict]]:
+        """The pairing rules, over `rows`. `duplicate_events` reads the whole register; `event_twin_send` reads the
+        candidates of ONE row, and both get the same answer because the rule lives here and nowhere else."""
         by_stamp: dict[tuple[str, str, str], list[dict]] = {}
-        for r in self.all():
+        for r in rows:
             if ":again:" not in r["row_key"]:
                 continue
             stamp = ":again:" + r["row_key"].split(":again:", 1)[1]
@@ -1032,7 +1103,7 @@ class Store:
         # Request IDS, not `id()` of the dicts: `_cross_channel_duplicates` calls `self.all()` again and gets FRESH
         # dicts, so an object-identity exclusion never matched and one row could appear in two pairs - applying both
         # left a key pointing at a row the first fold had just closed (QA on #1735).
-        out += self._cross_channel_duplicates({k["id"] for kd in out for k in kd})
+        out += self._cross_channel_duplicates(rows, {k["id"] for kd in out for k in kd})
         return sorted(out, key=lambda kd: kd[1]["id"])
 
     # ONE bound for both paths (QA on #1735). The repair scanner used to allow 300 s while `_match` allowed 120, so a
@@ -1041,7 +1112,7 @@ class Store:
     # watchdog. A repair may only undo what intake would have merged, never more, so it reads the same constant.
     CROSS_CHANNEL_SECONDS = SAME_EVENT_SECONDS
 
-    def _cross_channel_duplicates(self, taken: set[int]) -> list[tuple[dict, dict]]:
+    def _cross_channel_duplicates(self, all_rows: list[dict], taken: set[int]) -> list[tuple[dict, dict]]:
         """`taken` holds REQUEST IDS already paired by the caller, never `id()` of a dict."""
         """[(keep, drop)] for ONE customer event that arrived on two CHANNELS: a notice to notices@/legal@ (8-char
         ids) and the Intercom conversation about the same pages (full uuids), seconds apart, with no shared key. Same
@@ -1050,7 +1121,7 @@ class Store:
         def full(row) -> int:
             return sum(1 for p in row["pages"] if len(p["id"]) > 8)
 
-        rows = [r for r in self.all() if r["status"] == "open" and r["requester_email"]]
+        rows = [r for r in all_rows if r["status"] == "open" and r["requester_email"]]
         out = []
         for i, a in enumerate(rows):
             for b in rows[i + 1:]:

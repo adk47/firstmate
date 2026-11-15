@@ -3504,6 +3504,118 @@ class CrossChannelDuplicates(unittest.TestCase):
         self.assertEqual(self.s.get(drop["id"])["status"], "open",
                          "a refused fold must leave BOTH rows untouched, not half-merged")
 
+    def pair_a_day_apart(self, state="sent"):
+        """One event on two open rows, and the Intercom row's `status` letter went on an earlier day."""
+        thread = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:39:31Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}],
+                        conv="215476692845876")
+        self.unify(thread, conv)
+        self.s.begin_send(conv, "status", "intercom", "215476692845876", "sha", "gate:v-1", state=state)
+        self.s.db.execute("UPDATE erasure_sends SET at='2026-11-13T03:33:00Z'")
+        self.s.db.commit()
+        return thread, conv
+
+    def claim(self, rid, slot="status"):
+        return self.s.claim_send_for_person(self.s.get(rid), rid, slot, "mail_new_thread", "x@else.example",
+                                            "0" * 64, "gate:v-2")
+
+    def test_an_unfolded_pair_gets_each_letter_from_one_row_only(self):
+        """2026-11-13/14, live: four people got the same statutory letter twice, a day apart - one row of the pair
+        wrote in Intercom, the other by a new mail thread the next day. The day rule stops two letters on one day and
+        the slot is unique per ROW, so nothing stopped it, and `dedupe` refuses to fold a pair once both rows hold a
+        letter. Until a person folds it, a slot the other row has used is not sent again."""
+        thread, conv = self.pair_a_day_apart()
+        held = self.claim(thread)
+        self.assertEqual((held["twin"], held["register_no"], held["kind"], held["state"]),
+                         (True, self.s.get(conv)["register_no"], "status", "sent"))
+        self.assertIsNone(self.s.send_record(thread, "status"), "nothing is claimed: the slot stays free")
+        self.assertEqual(self.s.event_twin_send(conv, "status"), None, "the row that sent it is not held by itself")
+        # the next ladder step is a slot neither row has used: the first row to claim it sends it, the other is held
+        self.assertIsNone(self.claim(thread, "status-2"))
+        self.s.finish_send(thread, "status-2", "sent")
+        self.s.db.execute("UPDATE erasure_sends SET at='2026-11-13T03:40:00Z' WHERE kind='status-2'")
+        self.s.db.commit()
+        self.assertEqual(self.claim(conv, "status-2")["register_no"], self.s.get(thread)["register_no"])
+
+    def test_a_twin_letter_that_may_be_out_holds_and_one_that_never_left_does_not(self):
+        for state, holds in (("sending", True), ("unknown", True), ("refused", False), ("failed", False)):
+            with self.subTest(state=state):
+                self.s = Store(":memory:")
+                thread, _ = self.pair_a_day_apart(state)
+                self.assertEqual(bool(self.claim(thread)), holds)
+
+    def test_only_the_same_event_holds_a_slot_never_another_request_from_that_person(self):
+        """A second request from the same person, hours later or about another page, is its own request with its own
+        letters (`duplicate_events` pairs neither), and a folded pair has no twin left."""
+        thread, conv = self.pair_a_day_apart()
+        later = self.row("intercom:215476692849999", "intercom", "2026-11-04T09:00:00Z",
+                         [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}],
+                         conv="215476692849999")
+        other = self.row("intercom:215476692848888", "intercom", "2026-11-04T01:39:40Z",
+                         [{"entity": "profile", "id": "0b0b0b0b-0297-410d-914b-60e8a02ced76"}],
+                         conv="215476692848888")
+        self.unify(later, other)
+        self.assertEqual((self.claim(later), self.s.send_record(later, "status")["state"]), (None, "sending"))
+        self.s.db.execute("UPDATE erasure_sends SET at='2026-11-13T04:00:00Z' WHERE request_id=?", (later,))
+        self.s.db.commit()
+        self.assertIsNone(self.claim(other))
+        self.s.update(conv, "test", status="closed")
+        self.s.db.execute("UPDATE erasure_sends SET at='2026-11-13T04:00:00Z' WHERE request_id=?", (other,))
+        self.s.db.commit()
+        self.assertIsNone(self.claim(thread), "the other row is closed: this row is the request now")
+
+    def twins(self, rid, rows=None):
+        """The rows the pairing rule ties to `rid`, read over `rows` (the whole register when None)."""
+        pairs = self.s._duplicate_pairs(self.s.all() if rows is None else rows)
+        return sorted(k["id"] if d["id"] == rid else d["id"] for k, d in pairs if rid in (k["id"], d["id"]))
+
+    def test_the_twin_lookup_reads_a_few_rows_and_answers_what_the_whole_register_answers(self):
+        """The lookup runs inside the send's write transaction, so it reads the rows that can change one row's answer
+        instead of the register. The pairing rule is greedy and positional, so "the rows that can change the answer"
+        is more than the rows that share an address or a thread with it: three shapes where a narrower read pairs
+        rows the whole-register scan keeps apart, each of which would hold a letter that is owed."""
+        full = [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}]
+        short = [{"entity": "profile", "id": "fc31a861"}]
+        # 1. three rows of one sender at one moment: the rule pairs two and the third stands alone
+        first = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z", short, thread="t1")
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:39:31Z", full, conv="215476692845876")
+        third = self.row("gmail:legal@muso.ai:t2", "legal", "2026-11-04T01:39:25Z", short, thread="t2")
+        self.unify(first, conv, third)
+        # 2. an `:again:` group in which a closed row stands between two open ones: neighbours pair, these do not
+        again = [self.row(f"gmail:legal@muso.ai:g{n}", "legal", "2026-11-06T10:00:00Z", short, thread=f"g{n}")
+                 for n in range(3)]
+        for n, rid in enumerate(again):
+            self.s.db.execute("UPDATE erasure_requests SET row_key=?, gmail_thread='g' WHERE id=?",
+                              (f"k{n}:again:2026-11-06T10:00:00Z", rid))
+        self.s.db.execute("UPDATE erasure_requests SET status='closed' WHERE id=?", (again[1],))
+        # 3. a row already paired through its thread with a row of ANOTHER sender is not paired again by address
+        asker = self.row("intercom:215476692847777", "intercom", "2026-11-07T08:00:05Z", full, conv="215476692847777")
+        mail = self.row("gmail:notices@muso.ai:m1", "notices", "2026-11-07T08:00:00Z", short, thread="m1")
+        other = self.row("gmail:notices@muso.ai:m2", "notices", "2026-11-07T08:00:00Z", short, thread="m2")
+        self.unify(asker, mail, email="second@pm.me")
+        for n, rid in enumerate((mail, other)):
+            self.s.db.execute("UPDATE erasure_requests SET row_key=?, gmail_thread='m' WHERE id=?",
+                              (f"m{n}:again:2026-11-07T08:00:00Z", rid))
+        alone = self.row("intercom:215476692846666", "intercom", "2026-11-08T08:00:00Z", full, conv="215476692846666")
+        self.s.db.commit()
+
+        whole = {r["id"]: self.twins(r["id"]) for r in self.s.all()}
+        self.assertEqual((whole[third], whole[again[0]], whole[again[2]], whole[asker], whole[mail]),
+                         ([], [], [], [], [other]), "what the whole-register scan answers for the three shapes")
+        self.assertEqual(sorted(whole[first] + whole[conv]), sorted([first, conv]))
+        for r in self.s.all():
+            near = self.s._twin_candidates(r)
+            self.assertEqual(self.twins(r["id"], near), whole[r["id"]], f"row {r['id']}: {len(near)} row(s) read")
+        self.assertEqual([x["id"] for x in self.s._twin_candidates(self.s.get(alone))], [alone],
+                         "an unrelated request reads its own row and nothing else")
+        self.assertLess(len(self.s._twin_candidates(self.s.get(asker))), len(self.s.all()))
+        for rid in (third, again[0], asker):
+            self.s.begin_send(rid, "ack", "intercom", "1", "sha", "gate:v-1", state="sent")
+        self.assertIsNone(self.s.event_twin_send(again[2], "ack"))
+        self.assertIsNone(self.s.event_twin_send(mail, "ack"), "the address shares a letter with no request of its own")
+
     def test_the_sent_stamps_move_with_the_ledger_they_belong_to(self):
         """QA finding on #1735: `send.deliver` writes `confirmed_at` / `ask_sent_at` / `interim_confirm_at` NEXT TO
         the ledger row, so a fold that moved the ledger and not the stamp left the surviving row with a `sent`

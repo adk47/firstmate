@@ -461,6 +461,39 @@ def profile_doc(pid: str) -> dict | None:
         raise Unknown(f"admin profile {pid}: {exc}") from exc
 
 
+DELETED_READ_CHUNK = 20
+
+
+def profiles_deleted(ids: list[str]) -> dict[str, bool]:
+    """{profile id: is it DELETED and not merged} for every id asked, read now from the admin API (GET only).
+
+    True needs the record itself to say so: the profile is returned by the include-deleted read, carries a `deleted`
+    stamp and has no `merged` record. A merged profile is not gone (its content lives on under the survivor), a live
+    one is not gone, and an id the read does not return at all proves nothing, so each of those is False. A read
+    that fails raises: "could not read" is never "deleted" (the final letter for a page already off the site states
+    this as a fact, `Run.gone_now`). Measured 2026-11-15 on the 48 pages of the 49 open all-GONE erasure requests:
+    48 returned, 48 deleted, 0 merged."""
+    from credit_review import admin
+    want = sorted({str(i).lower() for i in ids if i})
+    out = {i: False for i in want}
+    client = admin.AdminClient()
+    for at in range(0, len(want), DELETED_READ_CHUNK):
+        chunk = want[at:at + DELETED_READ_CHUNK]
+        qs = "&".join(["includeDeleted=true", f"limit={len(chunk)}"] + [f"ids={i}" for i in chunk])
+        try:
+            body = client.get(f"/admin/profile?{qs}")
+        except admin.AdminError as exc:
+            raise Unknown(f"admin profile list (deleted read, {len(chunk)} ids): {exc}") from exc
+        items = body.get("items") if isinstance(body, dict) else None
+        if not isinstance(items, list):
+            raise Unknown("admin profile list (deleted read): the answer carries no item list")
+        for item in items:
+            pid = str((item or {}).get("id") or "").lower()
+            if pid in out:
+                out[pid] = bool(item.get("deleted")) and not item.get("merged")
+    return out
+
+
 def public_status(entity: str, pid: str) -> int:
     """The public status code. 404 is an ANSWER; 5xx (and 429) are NOT: a page we could not read must never read
     as "not found" and settle as gone/UNKNOWN, so they raise and the run exits 2."""

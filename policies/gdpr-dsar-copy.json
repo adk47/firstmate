@@ -1,6 +1,6 @@
 {
-  "_comment": "Customer copy for the GDPR / DSAR ladder (scripts/gdpr_pipeline/dsar.py). A message is the variant's blocks joined by a blank line, with only the date slots {received}, {due} and {next} filled by code. No name, no link, no free text: the body carries no personal data, so the exact bytes can be reviewed off the sending host. Nothing here sends on its own: every body needs a reviewer verdict bound to its sha256 (scripts/gdpr_pipeline/copy_gate.py). A variant with \"enabled\": false is never selected by code; turning one on is a decision recorded in the PR that does it. Decisions of 2026-11-12 (firstmate inbox 004; data/gdpr-ai-handling-v1/report.md finding 5): an update to a request past its date says we are late and that we are sorry, gives no reason, and where we need nothing from the requester states the date they get the answer; an Art. 12(3) extension notice is sent only on a recorded need for the extra time and on a ground the rule names that is a fact (the number of requests), states that ground and the new date; no refusal is sent.",
-  "v": 4,
+  "_comment": "Customer copy for the GDPR / DSAR ladder (scripts/gdpr_pipeline/dsar.py). A message is the variant's blocks joined by a blank line, with only the date slots {received}, {due} and {next} filled by code. No name, no link, no free text: the body carries no personal data, so the exact bytes can be reviewed off the sending host. Nothing here sends on its own: every body needs a reviewer verdict bound to its sha256 (scripts/gdpr_pipeline/copy_gate.py). A variant with \"enabled\": false is never selected by code; turning one on is a decision recorded in the PR that does it. Decisions of 2026-11-12 (firstmate inbox 004; data/gdpr-ai-handling-v1/report.md finding 5): an update to a request past its date says we are late and that we are sorry, gives no reason, and where we need nothing from the requester states the date they get the answer; an Art. 12(3) extension notice is sent only on a recorded need for the extra time and on a ground the rule names that is a fact (the number of requests), states that ground and the new date; no refusal is sent. Decision of 2026-11-15 (firstmate inbox 019, g2-walls-1115): an erasure request whose every page is already off the site gets one final answer that states that fact (final_gone, final_gone_late), owed only on a read of each page made in the same run; and a ladder letter may open a new mail thread to a requester with an address on file and no thread, under the subject in subjects.new_thread_<class> and with no opening line.",
+  "v": 5,
   "authored_by": "claude-fable-5-2 (crewmate gdpr-ai-handling-v1)",
   "authored_at": "2026-11-12",
   "review_rounds": [
@@ -38,6 +38,13 @@
       "rubric": "policies/outbound-copy-rubric-gdpr.md",
       "result": "3 approve of 3: the ownership ask added in v4 (ack_claim_evidence, status_claim_evidence, late_claim_evidence), authored by claude-fable-5-2 (crewmate gdpr-overdue-drive-g2, PI_MODEL of that session) on rulings 2026-11-13 (inbox 002, 003), under rule 2 as amended in the same commit.",
       "evidence": "data/gdpr-overdue-drive-g2/copy-review-round5.json"
+    },
+    {
+      "at": "2026-11-15T07:26Z",
+      "reviewer_model": "mac-pool/claude-fable-5-1",
+      "rubric": "policies/outbound-copy-rubric-gdpr.md",
+      "result": "7 approve of 7: the v5 final-answer variants and the new-thread subjects, as rendered with example dates (a rehearsal under a throwaway key; the verdict a send needs is signed by the reviewer host on the body node-8 authors)",
+      "evidence": "data/gdpr-overdue-drive-g2/copy-review-round6.json"
     }
   ],
   "blocks": {
@@ -78,7 +85,12 @@
     "access_open": "On {received} you asked for a copy of the personal data we hold about you. This message is our answer to that request.",
     "access_file": "The copy is attached to this message as one file.",
     "access_withheld": "Some fields are left out. The file lists each one and gives the reason.",
-    "access_close": "If something you expected is missing from the file, reply here and tell us what."
+    "access_close": "If something you expected is missing from the file, reply here and tell us what.",
+    "final_open": "This is our answer to the request you made on {received}.",
+    "final_late": "We are late in giving you this answer, and we are sorry.",
+    "final_gone": "We have checked every page your request names. None is on Muso.AI any more: the address of each one now shows a page-not-found message, so there is no page left for us to take down.",
+    "final_done": "That completes this request.",
+    "final_more": "If something about you still shows on Muso.AI, reply here with its link and we will look at it."
   },
   "variants": {
     "ack_none": {
@@ -354,6 +366,33 @@
         "sign"
       ]
     },
+    "final_gone": {
+      "kind": "final",
+      "enabled": true,
+      "note": "The final answer to an erasure request whose every page reads deleted, not merged and not found on the public site in the run that sends it (Run.gone_now). It says no page is left to take down; it does not say what happened to the page and does not say Muso holds nothing about the person.",
+      "blocks": [
+        "greeting",
+        "final_open",
+        "final_gone",
+        "final_done",
+        "final_more",
+        "sign"
+      ]
+    },
+    "final_gone_late": {
+      "kind": "final",
+      "enabled": true,
+      "note": "final_gone for a request past its date: it also says we are late and sorry, once, with no reason.",
+      "blocks": [
+        "greeting",
+        "final_open",
+        "final_late",
+        "final_gone",
+        "final_done",
+        "final_more",
+        "sign"
+      ]
+    },
     "extension_number": {
       "kind": "extension",
       "enabled": true,
@@ -413,6 +452,8 @@
     }
   },
   "subjects": {
-    "access_answer": "The copy of your personal data you asked Muso for"
+    "access_answer": "The copy of your personal data you asked Muso for",
+    "new_thread_privacy_erasure": "Your Muso.AI data deletion request",
+    "new_thread_privacy_access": "Your Muso.AI data access request"
   }
 }
