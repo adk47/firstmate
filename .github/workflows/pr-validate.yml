@@ -2764,6 +2764,10 @@ jobs:
           # credit-trust-decide (trust-yet-verify decider): server-mirror conflict
           # predicate, big tracks never approved, never re-ask, ledger before PUT.
           python3 scripts/tests/test_credit_trust_decide.py
+          # score-approve: the candidate read is a walk of bounded page statements (the JSON rule is a
+          # projected column, never the WHERE that drives the read; same rows and order as the one
+          # statement). This file ran in no job before 2026-11-15.
+          python3 scripts/tests/test_credit_score_approve.py
           # doc-verified T0/T1 (Fable [key=doc-approval-doctrine] 2026-11-03, caps in USERS 2026-11-04):
           # one CAN-FAIL test per gate, the provisional 7-day row and its revert, the atomic slot.
           python3 scripts/tests/test_doc_approve.py

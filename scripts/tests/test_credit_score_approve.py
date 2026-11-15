@@ -2,6 +2,8 @@
 """score-approve (captain 2026-10-20 "approve low risk credits", firstmate 110)."""
 import json
 import os
+import random
+import re
 import sqlite3
 import sys
 import tempfile
@@ -880,7 +882,9 @@ class ScoreApprove(unittest.TestCase):
         with mock.patch.object(sa.subprocess, "run", side_effect=sa.subprocess.TimeoutExpired("trino", 240)) as run:
             with self.assertRaises(sa.admin_api.AdminError):
                 sa.replica_candidates(30, 10, timeout_s=sa.CANDIDATES_BUDGET_S)
-        self.assertEqual(run.call_args.kwargs["timeout"], sa.CANDIDATES_BUDGET_S)
+        # The budget is the whole walk's: a page gets what is left of it, never a fresh budget of its own.
+        self.assertGreater(run.call_args.kwargs["timeout"], sa.CANDIDATES_BUDGET_S - 5)
+        self.assertLessEqual(run.call_args.kwargs["timeout"], sa.CANDIDATES_BUDGET_S)
         self.assertLess(sa.CANDIDATES_BUDGET_S, sa.READ_BUDGET_S)
         self.assertLess(sa.READ_BUDGET_S, sa.ANCHOR_BUDGET_S)
         self.assertLess(sa.ANCHOR_BUDGET_S, sa.FANOUT_BUDGET_S)
@@ -1268,6 +1272,249 @@ class UnreadableProfile(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("NOT READ", out)
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "absent.sqlite3")), "a read never creates a ledger")
+
+
+class FakeReplica:
+    """credit_requests as the replica holds it, answering the page statement the way Trino does.
+
+    It reads the statement's own text: the status, the createdAt bound and the LIMIT come from the inner
+    SELECT, and the candidate rule's parameters from the projected column. Rows that share a createdAt
+    come back in a different order on every call, as an ORDER BY createdat alone allows."""
+
+    INNER = re.compile(r"FROM \(SELECT id, profileid, userid, status, createdat, verificationdata, metadata "
+                       r"FROM postgresql_core\.public\.credit_requests WHERE status = '(?P<status>[a-z_]+)' "
+                       r"AND deletedat IS NULL (?:AND createdat >= TIMESTAMP '(?P<since>[^']+)' )?"
+                       r"ORDER BY createdat ASC LIMIT (?P<rows>\d+)\)$")
+
+    HEADER = ("id", "profileid", "total_risk_percent", "status", "userid", "createdat", "keep")
+
+    def __init__(self, rows, fail_on_call=None, clock=None, cost_s=0.0, header=False):
+        self.rows, self.calls, self.fail_on_call, self.clock, self.cost_s = rows, [], fail_on_call, clock, cost_s
+        self.header = header
+
+    @staticmethod
+    def kept(r, max_risk, bands, stamp_ok):
+        """The candidate rule, row by row (SQL three-valued logic collapsed: NULL is not kept)."""
+        if r["approved"] != "true" or r["risk"] is None or not float(r["risk"]) < max_risk or r["band"] not in bands:
+            return False
+        return r["proof"] is None or (stamp_ok and r["proof"] == ["validator_band_hint"])
+
+    def single_statement(self, max_risk, limit, bands=("A",), stamp_ok=False):
+        """What the statement this read replaced returned: the rule in the WHERE, ORDER BY r, createdat LIMIT."""
+        hit = [r for r in self.rows if r["status"] in sa.HELD_STATUSES and not r["deleted"]
+               and self.kept(r, max_risk, bands, stamp_ok) and r["profile"]]
+        hit.sort(key=lambda r: (float(r["risk"]), r["created"]))
+        return [(r["id"], r["profile"], float(r["risk"]), r["status"], r["user"]) for r in hit[:limit]]
+
+    def __call__(self, cmd, *, input, timeout, **_kw):          # noqa: A002 (subprocess.run's own name)
+        self.calls.append({"cmd": cmd, "sql": input, "timeout": timeout})
+        if self.clock is not None:
+            self.clock[0] += self.cost_s
+        if self.fail_on_call == len(self.calls):
+            return _mock.Mock(returncode=1, stdout="", stderr="Query failed: replica went away")
+        m = self.INNER.search(input)
+        assert m, f"not the page statement: {input}"
+        max_risk = float(re.search(r"AS double\) < ([0-9.]+) ", input).group(1))
+        bands = tuple(re.findall(r"'([AB])'", re.search(r"'\$\.band_hint'\) IN \(([^)]*)\)", input).group(1)))
+        stamp_ok = "json_format(" in input
+        page = [r for r in self.rows if r["status"] == m["status"] and not r["deleted"]
+                and (m["since"] is None or r["created"] >= m["since"])]
+        random.Random(len(self.calls)).shuffle(page)
+        page.sort(key=lambda r: r["created"])
+        out = ["WARNING: Unable to create a system terminal, creating a dumb terminal"]
+        if self.header:
+            out.append(",".join(f'"{f}"' for f in self.HEADER))
+        for r in page[:int(m["rows"])]:
+            keep = "true" if self.kept(r, max_risk, bands, stamp_ok) else "false"
+            fields = (r["id"], r["profile"], "" if r["risk"] is None else repr(float(r["risk"])), r["status"],
+                      "" if r["user"] is None else str(r["user"]), r["created"], keep)
+            out.append(",".join(f'"{f}"' for f in fields))
+        return _mock.Mock(returncode=0, stdout="\n".join(out) + "\n", stderr="")
+
+
+def _held(n, *, status=decide.UVN, created, risk=5.0, approved="true", band="A", proof=None, deleted=False,
+          profile=None, user=1):
+    return {"id": f"id-{n:04d}", "profile": f"prof-{n:04d}" if profile is None else profile, "user": user,
+            "status": status, "created": created, "risk": risk, "approved": approved, "band": band,
+            "proof": proof, "deleted": deleted}
+
+
+def _ts(day, sec=0, micro=0):
+    return f"2026-10-{day:02d} 00:00:{sec:02d}.{micro:06d} UTC"
+
+
+def held_population():
+    """Both held statuses, every way a row misses the rule, and createdAt groups larger than a small page.
+    Rows the rule keeps are unique on (risk, createdAt): the single statement's order was defined only there."""
+    rows, n = [], 0
+    for day in range(1, 21):                       # one row a day, alternating status, risk falling with age
+        n += 1
+        rows.append(_held(n, status=sa.HELD_STATUSES[day % 2], created=_ts(day), risk=29.0 - day))
+    for k in range(9):                             # nine rows on ONE createdAt, every one kept, risks distinct
+        n += 1
+        rows.append(_held(n, created=_ts(7, 30), risk=0.5 + k / 10))
+    for k in range(6):                             # six on another, in the other status, only two kept
+        n += 1
+        rows.append(_held(n, status=decide.UNVERIFIED, created=_ts(12, 30), risk=40.0 + k if k % 3 else 1.5 + k))
+    n += 1; rows.append(_held(n, created=_ts(3, 1), approved="false"))                        # noqa: E702
+    n += 1; rows.append(_held(n, created=_ts(3, 2), risk=30.0))                               # noqa: E702
+    n += 1; rows.append(_held(n, created=_ts(3, 3), risk=None))                               # noqa: E702
+    n += 1; rows.append(_held(n, created=_ts(3, 4), band="B", risk=3.25))                     # noqa: E702
+    n += 1; rows.append(_held(n, created=_ts(3, 5), band=None))                               # noqa: E702
+    n += 1; rows.append(_held(n, created=_ts(3, 6), proof=["validator_band_hint"], risk=2.25))  # noqa: E702
+    n += 1; rows.append(_held(n, created=_ts(3, 7), proof=["validator_band_hint", "other"]))  # noqa: E702
+    n += 1; rows.append(_held(n, created=_ts(3, 8), deleted=True, risk=0.25))                 # noqa: E702
+    n += 1; rows.append(_held(n, created=_ts(3, 9), status="approved", risk=0.125))           # noqa: E702
+    n += 1; rows.append(_held(n, created=_ts(3, 10), status="rejected", risk=0.0625))         # noqa: E702
+    n += 1; rows.append(_held(n, created=_ts(3, 11), user=None, risk=4.5))                    # noqa: E702
+    n += 1; rows.append(_held(n, created=_ts(3, 12), profile="", risk=4.75))                  # noqa: E702
+    return rows
+
+
+class BoundedCandidateRead(unittest.TestCase):
+    """The candidate read is a walk of bounded statements, and it selects what the one statement did."""
+
+    INPUTS = ((30.0, ("A",), False), (30.0, ("A", "B"), True), (100.0, ("A", "B"), True), (10.0, ("A",), False))
+
+    def walk(self, replica, max_risk=30.0, limit=None, bands=("A",), stamp_ok=False, page_rows=4, page_rows_max=64,
+             timeout_s=600):
+        with _mock.patch.object(sa.subprocess, "run", side_effect=replica), \
+                _mock.patch.object(sa, "PAGE_ROWS", page_rows), _mock.patch.object(sa, "PAGE_ROWS_MAX", page_rows_max):
+            return sa.replica_candidates(max_risk, sa.SCAN_CAP if limit is None else limit, bands,
+                                         band_hint_stamp_ok=stamp_ok, timeout_s=timeout_s)
+
+    def test_the_json_predicates_are_a_per_page_filter_and_never_the_scan_driving_where(self):
+        for max_risk, bands, stamp_ok in self.INPUTS:
+            keep = sa.candidate_keep_sql(max_risk, bands, stamp_ok)
+            for since in (None, _ts(4)):
+                sql = sa.candidate_page_sql(decide.UVN, since, 5000, keep)
+                outer, _, inner = sql.partition(" FROM (")
+                self.assertTrue(inner.endswith(")"), sql)
+                scan = inner[inner.index(" WHERE "):]
+                self.assertNotIn("json", scan)
+                self.assertNotIn("verificationdata", scan)
+                self.assertNotIn("metadata", scan)
+                bound = f"AND createdat >= TIMESTAMP '{since}' " if since else ""
+                self.assertEqual(scan, " WHERE status = 'user_verification_needed' AND deletedat IS NULL "
+                                       f"{bound}ORDER BY createdat ASC LIMIT 5000)")
+                self.assertEqual(sql.count(" WHERE "), 1)       # the outer SELECT filters nothing: no pushdown below the LIMIT
+                self.assertIn(f"({keep})", outer)
+                self.assertEqual(sql.count(keep), 1)
+
+    def test_the_rule_the_pages_apply_is_the_four_predicates_the_single_statement_carried(self):
+        self.assertEqual(
+            sa.candidate_keep_sql(30.0, ("A",), False),
+            "json_extract_scalar(verificationdata, '$.is_approved') = 'true' "
+            "AND CAST(json_extract_scalar(verificationdata, '$.total_risk_percent') AS double) < 30.0 "
+            "AND json_extract_scalar(verificationdata, '$.band_hint') IN ('A') "
+            "AND json_extract(metadata, '$.proofRequest') IS NULL")
+        self.assertEqual(
+            sa.candidate_keep_sql(30.0, ("A", "B"), True),
+            "json_extract_scalar(verificationdata, '$.is_approved') = 'true' "
+            "AND CAST(json_extract_scalar(verificationdata, '$.total_risk_percent') AS double) < 30.0 "
+            "AND json_extract_scalar(verificationdata, '$.band_hint') IN ('A','B') "
+            "AND (json_extract(metadata, '$.proofRequest') IS NULL OR json_format(json_extract(metadata, "
+            "'$.proofRequest.reasons')) = '[\"validator_band_hint\"]')")
+
+    def test_every_statement_a_walk_sends_is_one_bounded_page(self):
+        replica = FakeReplica(held_population())
+        self.walk(replica, page_rows=4)
+        self.assertGreater(len(replica.calls), 5)
+        for call in replica.calls:
+            self.assertEqual(call["cmd"], [sa.TRINO])
+            self.assertNotIn(";", call["sql"])
+            self.assertRegex(call["sql"], FakeReplica.INNER)
+            self.assertLessEqual(int(FakeReplica.INNER.search(call["sql"])["rows"]), 64)
+            self.assertNotIn("json", call["sql"][call["sql"].index(" FROM ("):])
+
+    def test_the_page_size_is_bounded_and_the_ceiling_is_a_ceiling(self):
+        self.assertLess(sa.PAGE_ROWS_MAX, sa.SCAN_CAP)
+        replica = FakeReplica([_held(1, created=_ts(1))])
+        self.walk(replica, page_rows=sa.PAGE_ROWS, page_rows_max=sa.PAGE_ROWS_MAX)
+        self.assertEqual([int(FakeReplica.INNER.search(c["sql"])["rows"]) for c in replica.calls], [5000, 5000])
+
+    def test_the_walk_selects_the_rows_and_the_order_the_single_statement_did(self):
+        rows = held_population()
+        for max_risk, bands, stamp_ok in self.INPUTS:
+            want = FakeReplica(rows).single_statement(max_risk, sa.SCAN_CAP, bands, stamp_ok)
+            self.assertGreater(len(want), 3)
+            for page_rows in (1, 2, 3, 4, 5, 7, 11, 5000):
+                got = self.walk(FakeReplica(rows), max_risk, None, bands, stamp_ok, page_rows=page_rows)
+                self.assertEqual(got, want, f"risk<{max_risk} bands={bands} stamp={stamp_ok} page={page_rows}")
+
+    def test_a_csv_header_row_is_dropped_and_selects_the_same_rows(self):
+        rows = held_population()
+        for max_risk, bands, stamp_ok in self.INPUTS:
+            want = self.walk(FakeReplica(rows), max_risk, None, bands, stamp_ok, page_rows=4)
+            got = self.walk(FakeReplica(rows, header=True), max_risk, None, bands, stamp_ok, page_rows=4)
+            self.assertEqual(got, want)
+            self.assertGreater(len(want), 3)
+
+    def test_a_first_row_that_is_not_the_header_still_fails_the_read(self):
+        replica = FakeReplica([_held(1, created=_ts(1))])
+        real = replica.__call__
+
+        def with_bad_first_row(cmd, *, input, timeout, **kw):     # noqa: A002
+            answer = real(cmd, input=input, timeout=timeout, **kw)
+            answer.stdout = '"id","profileid","total_risk_percent","status","userid","not_a_createdat","keep"\n' \
+                            + answer.stdout
+            return answer
+        with self.assertRaisesRegex(sa.admin_api.AdminError, "cannot place"):
+            self.walk(with_bad_first_row)
+
+    def test_the_limit_cuts_the_sorted_output_and_not_the_read(self):
+        rows = held_population()
+        for limit in (0, 1, 5, 12):
+            want = FakeReplica(rows).single_statement(30.0, limit)
+            replica = FakeReplica(rows)
+            self.assertEqual(self.walk(replica, limit=limit, page_rows=4), want)
+            self.assertEqual(len(want), limit)
+            self.assertGreater(len(replica.calls), 5)       # every page was still read: the lowest risk may be the newest row
+
+    def test_a_createdat_group_larger_than_a_page_is_read_whole(self):
+        rows = [_held(n, created=_ts(5), risk=n / 10) for n in range(1, 10)] + [_held(20, created=_ts(6), risk=0.05)]
+        replica = FakeReplica(rows)
+        got = self.walk(replica, page_rows=2, page_rows_max=64)
+        self.assertEqual(got, FakeReplica(rows).single_statement(30.0, sa.SCAN_CAP))
+        self.assertEqual(len(got), 10)
+        self.assertEqual(len({g[0] for g in got}), 10)
+        asked = [int(FakeReplica.INNER.search(c["sql"])["rows"]) for c in replica.calls
+                 if "'user_verification_needed'" in c["sql"]]
+        self.assertEqual(asked[:4], [2, 2, 4, 8])       # widened only while one createdAt filled the page
+        self.assertEqual(max(asked), 16)
+
+    def test_a_group_past_the_ceiling_fails_the_read_instead_of_an_unbounded_statement(self):
+        rows = [_held(n, created=_ts(5)) for n in range(1, 40)]
+        replica = FakeReplica(rows)
+        with self.assertRaisesRegex(sa.admin_api.AdminError, "share createdAt"):
+            self.walk(replica, page_rows=2, page_rows_max=8)
+        self.assertLessEqual(max(int(FakeReplica.INNER.search(c["sql"])["rows"]) for c in replica.calls), 8)
+
+    def test_a_page_that_fails_fails_the_read_with_no_partial_list(self):
+        for nth in (1, 2, 5):
+            replica = FakeReplica(held_population(), fail_on_call=nth)
+            with self.assertRaisesRegex(sa.admin_api.AdminError, "rc=1"):
+                self.walk(replica, page_rows=4)
+            self.assertEqual(len(replica.calls), nth)
+
+    def test_a_row_the_walk_cannot_place_fails_the_read(self):
+        for created in ("2026-10-05 00:00:00.000 UTC", "2026-10-05 02:00:00.000000 Europe/Rome", ""):
+            replica = FakeReplica([_held(1, created=created)])
+            with self.assertRaisesRegex(sa.admin_api.AdminError, "cannot place"):
+                self.walk(replica)
+        with self.assertRaises(ValueError):
+            sa.candidate_page_sql(decide.UVN, "2026-10-05' OR 1=1 --", 10, "true")
+        with self.assertRaises(ValueError):
+            sa.candidate_page_sql("approved", None, 10, "true")
+
+    def test_the_budget_is_the_whole_walks_and_no_page_starts_past_it(self):
+        clock = [1000.0]
+        replica = FakeReplica(held_population(), clock=clock, cost_s=30.0)
+        with _mock.patch.object(sa.time, "monotonic", side_effect=lambda: clock[0]):
+            with self.assertRaisesRegex(sa.admin_api.AdminError, "exceeded its 100s budget"):
+                self.walk(replica, page_rows=4, timeout_s=100)
+        self.assertEqual(len(replica.calls), 4)
+        self.assertEqual([c["timeout"] for c in replica.calls], [100.0, 70.0, 40.0, 10.0])
 
 
 if __name__ == "__main__":

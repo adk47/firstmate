@@ -1579,6 +1579,16 @@ timeout, and the timeouts tripped the unmeasured bar (`UNMEASURED STOP`). Doc an
 - **A new or changed replica statement in `core_notice.py` or `comm_state.py` goes in `gate_facts.py` too**, or it
   is read live (one more round trip per person). `scripts/tests/test_gate_facts.py` fails on the gap.
 - A measurement run on node-8 is load on the same replica path the tick uses: run it between ticks.
+- **What the replica is asked is what Trino pushes down, not what the SQL says.** A JSON predicate, and a
+  `status NOT IN (...)`, stay in Trino: node-19 then sends every row the pushed-down part admits through one
+  cursor in one transaction. `EXPLAIN` the statement and read `constraint on [...]`. A read of the held
+  `credit_requests` population pages the way `score_approve.candidate_page_sql` does: equality on `status`,
+  `ORDER BY createdat LIMIT n` inside a subquery (the table has no `updatedAt` index), the JSON rule as a
+  projected column, one statement per page. Still unbounded (2026-11-15): the hourly :07 read at
+  `scripts/verification-queue-report.py:579` and its twin in `/opt/muso-sync/ops-completeness` on node-8.
+- **Rows read from core or the replica are never committed as evidence**: request, profile and user ids are
+  customer data and a later commit does not take them out of history. Commit counts and timings; keep the raw
+  files outside the repository and name the path in the PR.
 
 ## A writer told "readonly database" was handed SQLite's read-only WAL fallback, not a read-only opener
 

@@ -45,7 +45,9 @@ import csv
 import io
 import json
 import os
+import re
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -150,6 +152,88 @@ def registry_approved(path: Path | None = None) -> tuple[bool, str]:
 Candidates = Callable[[float, int], list[tuple]]   # (request id, profile id, risk[, status[, user id]])
 
 
+#: Rows ONE candidate statement asks the replica for. The read is a walk of the existing
+#: ``(status, "createdAt")`` index, one closed statement per page: the old read was a single statement
+#: over every held row (~102k rows with two jsonb columns each, 2026-11-15), one transaction held open
+#: for the whole transfer. Measured on node-19: a page of this size is an index range scan of well
+#: under a second. Raising it lengthens each statement on the customer replica; it is not a tuning knob
+#: for run time (the run-time cost of a page is the ~2 s fixed cost of a trino-query.sh call).
+PAGE_ROWS = 5000
+#: The only reason a statement asks for more than PAGE_ROWS: more than a page of rows share ONE
+#: createdAt, so a page cannot tell whether it has read all of them (largest group measured: 363).
+#: The ask doubles up to this ceiling and then the read FAILS; a statement is never unbounded.
+PAGE_ROWS_MAX = 40000
+#: ``CAST(createdat AS varchar)`` of a ``timestamp(6) with time zone`` the replica holds in UTC. The
+#: text is the walk's cursor AND the sort key, so a value in any other shape fails the read: fixed
+#: width in one zone is what makes comparing the strings the same as comparing the instants.
+_CREATED_AT = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6} UTC$")
+
+
+def candidate_keep_sql(max_risk: float, bands: tuple[str, ...] = ("A",), band_hint_stamp_ok: bool = False) -> str:
+    """The candidate rule: the SAME four predicates, in the same order, the single statement carried in
+    its WHERE. No index serves a JSON extraction, so they never select what a statement reads; each
+    page evaluates them over the rows the index already bounded (``candidate_page_sql``)."""
+    stamp = ("(json_extract(metadata, '$.proofRequest') IS NULL OR json_format(json_extract(metadata, "
+             "'$.proofRequest.reasons')) = '[\"validator_band_hint\"]')" if band_hint_stamp_ok
+             else "json_extract(metadata, '$.proofRequest') IS NULL")
+    return ("json_extract_scalar(verificationdata, '$.is_approved') = 'true' "
+            f"AND CAST(json_extract_scalar(verificationdata, '$.total_risk_percent') AS double) < {float(max_risk)} "
+            # Core's agent guard refuses an IDP band hint other than A and any row with a proof
+            # request (policy.server_proof_reasons); reading those rows only spends the shared
+            # 120/min list budget. The live re-read re-checks everything anyway.
+            f"AND json_extract_scalar(verificationdata, '$.band_hint') IN ({','.join(repr(b) for b in bands)}) "
+            "AND " + stamp)
+
+
+def candidate_page_sql(status: str, since: str | None, rows: int, keep: str) -> str:
+    """One page of one held status, oldest first, as ONE statement.
+
+    The inner SELECT is the whole of what the replica is asked: an equality on ``status``, ``deletedat
+    IS NULL``, a lower bound on ``createdat``, ``ORDER BY createdat LIMIT rows``. Trino pushes all of it
+    down (EXPLAIN: ``constraint on [createdAt, deletedAt, status] sortOrder=[createdAt ASC] limit=N``)
+    and PostgreSQL answers it from ``credit_requests_status_created_at``. A filter cannot move below a
+    LIMIT, so the candidate rule (``keep``) is a projected column over those rows and can never become
+    the predicate that drives the read. ``since`` is inclusive: the page before it may have stopped
+    inside a group of rows sharing that createdAt, and the caller drops the ids it already holds.
+
+    The projected risk is TRY_CAST because it is now computed for rows the rule does not keep; for a
+    kept row the rule's own strict CAST has already succeeded on the same text."""
+    if status not in HELD_STATUSES:
+        raise ValueError(f"not a held status: {status!r}")
+    if since is not None and not _CREATED_AT.match(since):
+        raise ValueError(f"not a createdAt cursor: {since!r}")
+    bound = f"AND createdat >= TIMESTAMP '{since}' " if since is not None else ""
+    return ("SELECT CAST(id AS varchar), CAST(profileid AS varchar), "
+            "TRY_CAST(json_extract_scalar(verificationdata, '$.total_risk_percent') AS double), status, "
+            f"CAST(userid AS varchar), CAST(createdat AS varchar), ({keep}) "
+            "FROM (SELECT id, profileid, userid, status, createdat, verificationdata, metadata "
+            f"FROM postgresql_core.public.credit_requests WHERE status = '{status}' AND deletedat IS NULL "
+            f"{bound}ORDER BY createdat ASC LIMIT {int(rows)})")
+
+
+def _candidate_page(sql: str, deadline: float, timeout_s: int) -> list[list[str]]:
+    """Run one page statement to completion and return its rows. One process, one statement, closed
+    before the next is built: nothing is held open on the replica between pages. A row this cannot
+    read fails the whole read (the walk's cursor is a row's createdAt, so a skipped row could skip
+    every row after it)."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise admin_api.AdminError(f"replica candidate query exceeded its {timeout_s}s budget")
+    try:
+        p = subprocess.run([TRINO], input=sql, capture_output=True, text=True, timeout=left, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise admin_api.AdminError(f"replica candidate query exceeded its {timeout_s}s budget") from exc
+    if p.returncode != 0:
+        raise admin_api.AdminError(f"replica candidate query failed rc={p.returncode}: {p.stderr.strip()[-200:]}")
+    page = list(csv.reader(io.StringIO("\n".join(ln for ln in p.stdout.splitlines() if ln.startswith('"')))))
+    if page and len(page[0]) == 7 and [page[0][i] for i in (0, 1, 3, 4, 5)] == ["id", "profileid", "status", "userid", "createdat"]:
+        page = page[1:]
+    for row in page:
+        if len(row) != 7 or not row[0] or not _CREATED_AT.match(row[5]):
+            raise admin_api.AdminError(f"replica candidate page has a row it cannot place: {row[:7]!r}"[:240])
+    return page
+
+
 def replica_candidates(max_risk: float, limit: int, bands: tuple[str, ...] = ("A",),
                        band_hint_stamp_ok: bool = False,
                        timeout_s: int = 600) -> list[tuple[str, str, float, str, int | None]]:
@@ -157,36 +241,49 @@ def replica_candidates(max_risk: float, limit: int, bands: tuple[str, ...] = ("A
     (unverified or user_verification_needed), from the core replica (Trino; never admin
     paging). Risk ascending, oldest first. With ``band_hint_stamp_ok`` (phase 1, Fable 15:40Z
     ruling 1) a proofRequest whose reasons are exactly ["validator_band_hint"] is read too; the
-    live re-read decides whether it is still an open ask (engaged users)."""
-    stamp = ("(json_extract(metadata, '$.proofRequest') IS NULL OR json_format(json_extract(metadata, "
-             "'$.proofRequest.reasons')) = '[\"validator_band_hint\"]') " if band_hint_stamp_ok
-             else "json_extract(metadata, '$.proofRequest') IS NULL ")
-    sql = ("SELECT CAST(id AS varchar), CAST(profileid AS varchar), "
-           "CAST(json_extract_scalar(verificationdata, '$.total_risk_percent') AS double) r, status, "
-           "CAST(userid AS varchar) "
-           "FROM postgresql_core.public.credit_requests WHERE status IN ('unverified', 'user_verification_needed') "
-           "AND deletedat IS NULL AND json_extract_scalar(verificationdata, '$.is_approved') = 'true' "
-           f"AND CAST(json_extract_scalar(verificationdata, '$.total_risk_percent') AS double) < {float(max_risk)} "
-           # Core's agent guard refuses an IDP band hint other than A and any row with a proof
-           # request (policy.server_proof_reasons); reading those rows only spends the shared
-           # 120/min list budget. The live re-read re-checks everything anyway.
-           f"AND json_extract_scalar(verificationdata, '$.band_hint') IN ({','.join(repr(b) for b in bands)}) "
-           "AND " + stamp +
-           f"ORDER BY r ASC, createdat ASC LIMIT {int(limit)}")
-    try:
-        p = subprocess.run([TRINO], input=sql, capture_output=True, text=True, timeout=timeout_s, check=False)
-    except subprocess.TimeoutExpired as exc:
-        raise admin_api.AdminError(f"replica candidate query exceeded its {timeout_s}s budget") from exc
-    if p.returncode != 0:
-        raise admin_api.AdminError(f"replica candidate query failed rc={p.returncode}: {p.stderr.strip()[-200:]}")
-    out = []
-    for row in csv.reader(io.StringIO("\n".join(ln for ln in p.stdout.splitlines() if ln.startswith('"')))):
-        if len(row) == 5 and row[0] and row[1] and row[3] in HELD_STATUSES:
-            try:
-                out.append((row[0], row[1], float(row[2]), row[3], int(row[4]) if row[4].isdigit() else None))
-            except ValueError:
+    live re-read decides whether it is still an open ask (engaged users).
+
+    The read is bounded per statement (``PAGE_ROWS``): each held status is walked oldest first along
+    the ``(status, createdAt)`` index, the candidate rule is applied to each page, and the rows it
+    keeps are sorted and cut to ``limit`` here, which is what ``ORDER BY r, createdat LIMIT`` did in
+    the single statement. ``timeout_s`` is the budget of the WHOLE walk. Any page that fails, fails
+    the read: a partial list would read as "these are all the candidates"."""
+    keep = candidate_keep_sql(max_risk, bands, band_hint_stamp_ok)
+    deadline = time.monotonic() + timeout_s
+    seen: set[str] = set()
+    kept: list[tuple[float, str, tuple[str, str, float, str, int | None]]] = []
+    for status in HELD_STATUSES:
+        since: str | None = None
+        rows = PAGE_ROWS
+        while True:
+            page = _candidate_page(candidate_page_sql(status, since, rows, keep), deadline, timeout_s)
+            full = len(page) >= rows
+            last = max((row[5] for row in page), default=since)
+            if full and since is not None and last == since:
+                # Every row of a full page shares the cursor's createdAt: the group is larger than the
+                # page, and which of its rows came back is not ours to assume. Ask again, wider.
+                if rows >= PAGE_ROWS_MAX:
+                    raise admin_api.AdminError(
+                        f"replica candidate read: {PAGE_ROWS_MAX} or more {status} rows share createdAt {since}")
+                rows = min(rows * 2, PAGE_ROWS_MAX)
                 continue
-    return out
+            for row in page:
+                if row[0] in seen:      # the inclusive bound re-reads the rows at ``since``
+                    continue
+                seen.add(row[0])
+                if row[6] != "true" or not row[1] or row[3] not in HELD_STATUSES:
+                    continue
+                try:
+                    kept.append((float(row[2]), row[5],
+                                 (row[0], row[1], float(row[2]), row[3], int(row[4]) if row[4].isdigit() else None)))
+                except ValueError:
+                    continue
+            if not full:
+                break
+            # A full page that ended on a later createdAt holds every row of the earlier ones.
+            since, rows = last, PAGE_ROWS
+    kept.sort(key=lambda k: (k[0], k[1]))
+    return [k[2] for k in kept[:max(0, int(limit))]]
 
 
 REREAD_COOLDOWN_H = 6
@@ -294,7 +391,7 @@ def unreadable_report(db, now: datetime, days: int = 7) -> list[dict[str, Any]] 
 # and wrote nothing. Every live phase now has a wall-clock budget; work past it waits for the next
 # run (a transient hold, never cooled), so a run always finishes and writes what it decided.
 # All measured from the RUN START (QA @1347: candidate selection counts too), against the cron's 900 s.
-CANDIDATES_BUDGET_S = 240  # the replica candidate query (Trino timeout)
+CANDIDATES_BUDGET_S = 240  # the whole replica candidate walk (each page statement gets what is left)
 READ_BUDGET_S = 420        # reread: the profile-filtered list reads
 ANCHOR_BUDGET_S = 540      # live anchors
 EDITORIAL_BUDGET_S = 600   # editorial velocity: runs right after anchors, BEFORE fan-out (QA @1347: run after
