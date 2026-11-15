@@ -2560,11 +2560,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # id rather than letting display-message fall back to the active client.
   if [ "$BACKEND" = tmux ] && [ "$RELAUNCH_STATE" = missing ]; then
     if ! tmux_occupants=$(fm_backend_tmux_worktree_occupants "$SES" "$WT"); then
-      echo "error: task $ID's recorded window $T is absent, but its worktree $WT could not be proven free of a live copy; refusing to create a second endpoint (inspect it with tmux list-windows and ps, then stop any agent with bin/fm-control.sh $ID exit)" >&2
+      echo "error: task $ID's recorded window $T is absent, but its worktree $WT could not be proven free of a live copy; refusing to create a second endpoint (inspect it with tmux list-windows and ps -a -o pid=,args= before retrying)" >&2
       exit 2
     fi
     if [ -n "$tmux_occupants" ]; then
-      echo "error: task $ID's recorded window $T is absent, but its worktree $WT is not free: $tmux_occupants; refusing to create a second endpoint beside a live copy" >&2
+      echo "error: task $ID's recorded window $T is absent, but its worktree $WT is not free: $tmux_occupants; refusing to create a second endpoint beside a live copy - stop the listed process(es) before retrying" >&2
       exit 2
     fi
     WT_TARGET=$(fm_backend_tmux_ensure_task "$SES" "$W" "$WT") || exit 1

@@ -134,11 +134,15 @@ fm_backend_tmux_ensure_task() {  # <session> <window-name> <cwd> -> prints windo
 # that the recorded window NAME is gone - `tmux rename-window` hides a running
 # agent from it - so a relaunch that would recreate a window must first prove
 # the worktree itself is free: no window of the session sits in <cwd>, and no
-# agent-classified process has its working directory at or under <cwd>. Prints
+# process with its working directory at or under <cwd> is anything but a plain
+# shell. The process side fails closed: identity is resolved through the shared
+# harness matcher and the gemini argument rule first, and every other
+# non-shell process - including a bare `node` that may be cursor-agent or gemini
+# - is an occupant, because a false "free" launches a duplicate agent. Prints
 # one line per occupant; empty output with status 0 means provably free, and
 # status 1 means the process scan could not be read, so absence is unproven.
 fm_backend_tmux_worktree_occupants() {  # <session> <cwd> -> occupants on stdout
-  local ses=$1 cwd=$2 real rows id name path pid out line comm
+  local ses=$1 cwd=$2 real rows id name path pid out line comm args argv0
   [ -n "$ses" ] && [ -n "$cwd" ] || return 1
   [ -d "$cwd" ] || return 1
   real=$(cd "$cwd" && pwd -P) || return 1
@@ -173,11 +177,15 @@ EOF
           *) continue ;;
         esac
         [ "$pid" != "$$" ] || continue
-        comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || continue
-        [ -n "$comm" ] || continue
-        if [ "$(fm_backend_tmux_classify_process_name "$comm")" = agent ]; then
-          printf 'pid %s (%s) is working in %s\n' "$pid" "$comm" "$path"
+        comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || comm=
+        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
+        argv0=${args%% *}
+        if ! fm_harness_process_matches "$comm" "$args" \
+          && ! fm_gemini_args_are_gemini "$args" \
+          && [ "$(fm_backend_tmux_classify_process_name "$comm" "$argv0")" = shell ]; then
+          continue
         fi
+        printf 'pid %s (%s) is working in %s\n' "$pid" "$comm" "$path"
         ;;
       '') ;;
       *) return 1 ;;

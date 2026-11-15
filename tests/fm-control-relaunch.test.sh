@@ -1547,6 +1547,33 @@ test_spawn_relaunch_refuses_an_agent_process_in_the_worktree() {
   pass "fm-spawn --relaunch: a live agent process in the recorded worktree is refused"
 }
 
+test_spawn_relaunch_refuses_an_unidentified_process_in_the_worktree() {
+  local dir out rc spid
+  dir=$(new_case window-orphan-node rl44)
+  add_ship_task "$dir" rl44 claude
+  : > "$dir/fake/windows"
+  # cursor-agent and gemini run as a bare `node` and carry their identity in
+  # their script path, so a process name alone never proves them absent: any
+  # non-shell process in the worktree has to count as an occupant.
+  mkdir -p "$dir/agentbin"
+  ln -sf "$(command -v sleep)" "$dir/agentbin/node" 2>/dev/null \
+    || cp "$(command -v sleep)" "$dir/agentbin/node"
+  ( cd "$dir/wt" && exec "$dir/agentbin/node" 300 ) &
+  spid=$!
+  sleep 0.3
+  out=$(run_spawn "$dir" rl44 --relaunch --harness claude); rc=$?
+  kill "$spid" 2>/dev/null || true
+  wait "$spid" 2>/dev/null || true
+  expect_code 2 "$rc" "relaunching beside an unidentified process in the worktree must refuse"$'\n'"$out"
+  assert_contains "$out" "is not free" "the refusal should say the worktree is occupied"
+  [ ! -s "$dir/fake/window-ids" ] \
+    || fail "a refused relaunch must not create a window, got '$(cat "$dir/fake/window-ids")'"
+  if command -v lsof >/dev/null 2>&1; then
+    assert_contains "$out" "node" "the refusal should name the process it could not clear"
+  fi
+  pass "fm-spawn --relaunch: a non-shell process the scan cannot clear is refused"
+}
+
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
   local dir meta target out rc
   dir=$(new_case symlink-meta rl37)
@@ -1753,6 +1780,7 @@ test_spawn_relaunch_does_not_create_a_window_that_still_exists
 test_spawn_relaunch_recreates_a_gone_session_for_its_window
 test_spawn_relaunch_refuses_a_renamed_window_still_in_the_worktree
 test_spawn_relaunch_refuses_an_agent_process_in_the_worktree
+test_spawn_relaunch_refuses_an_unidentified_process_in_the_worktree
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous
