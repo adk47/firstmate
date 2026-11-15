@@ -1,0 +1,26 @@
+=== before-fix: pass 1, parked-lane is held, ghost-lane is not ===
+watchdog: 2 in-flight backlog item(s) with no task record:
+  ghost-lane
+  parked-lane
+--- wakes queued ---
+watchdog-backlog check: watchdog found 2 in-flight backlog item(s) with no task record (fm-send cannot resolve them) plus any live lane with no record; adopt or close each: ghost-lane parked-lane 
+
+=== before-fix: pass 2, captain releases parked-lane ===
+
+--- wakes queued ---
+watchdog-backlog check: watchdog found 2 in-flight backlog item(s) with no task record (fm-send cannot resolve them) plus any live lane with no record; adopt or close each: ghost-lane parked-lane 
+
+=== after-fix: pass 1, parked-lane is held, ghost-lane is not ===
+watchdog: 1 in-flight backlog item(s) with no task record:
+  ghost-lane
+--- wakes queued ---
+watchdog-backlog check: watchdog found 1 in-flight backlog item(s) with no task record (fm-send cannot resolve them) plus any live lane with no record; adopt or close each: ghost-lane 
+
+=== after-fix: pass 2, captain releases parked-lane ===
+watchdog: 2 in-flight backlog item(s) with no task record:
+  ghost-lane
+  parked-lane
+--- wakes queued ---
+watchdog-backlog check: watchdog found 1 in-flight backlog item(s) with no task record (fm-send cannot resolve them) plus any live lane with no record; adopt or close each: ghost-lane 
+watchdog-backlog check: watchdog found 2 in-flight backlog item(s) with no task record (fm-send cannot resolve them) plus any live lane with no record; adopt or close each: ghost-lane parked-lane 
+
