@@ -131,6 +131,7 @@ python3 -I scripts/outbound_copy/gate.py verify --statement <store>/verdicts/<na
 | `scripts/intercom-verify-request.sh` (every verify / status / ask / decline / claim campaign) | directly, after the ledger claim and before its one customer POST |
 | `scripts/resolution-matcher.py`, `close-duplicate-conversations.py`, `dedup/sweeps/notify-merged-customers.py` | `scripts/lib/copy_gate.py` `require()`, first statement of the one function that POSTs |
 | `scripts/request_comms/channels.py` (Intercom message and the email status line) | `copy_hold()`; a hold is a `rejected` send, retried next tick |
+| `scripts/intercom-ops-write.sh reply --agent <id> --gate-campaign <campaign>` (a reply an agent wrote, with no person approving it) | the writer runs `check` itself on the bytes it is about to post; see "A reply an agent wrote" below |
 
 | `scripts/resolve-notify.py`, `overdue-verification-notifier.py`, `merge-outcome-notify.py` | `scripts/outbound_copy/sendgate.py` `require_verdict()`, above the POST in the function that holds it (wiring from hydra #1891, landed in the same tree as the gate) |
 
@@ -146,9 +147,9 @@ appears that is on neither list):
 
 - Caroline's live replies (`plugins/intercom/src/outbound.ts`, `scripts/intercom-webhook.js`): a conversation cannot
   wait a review round. They stay under the code output guard and the answer bank.
-- `scripts/intercom-ops-write.sh` and what leaves through it: staff replies, the GDPR pipeline's letters
-  (`scripts/gdpr_pipeline/send.py`, until that lane wires its `gdpr-*` campaigns), `intercom-backlog/send.py`, the
-  rights-holder watchdog.
+- The other two classes of `scripts/intercom-ops-write.sh` and what leaves through them: a staff reply a named
+  person approved (`--approved-by`), the GDPR pipeline's letters (`scripts/gdpr_pipeline/send.py`, until that lane
+  wires its `gdpr-*` campaigns), `intercom-backlog/send.py`, the rights-holder watchdog.
 - Mail that is not ours to word here: core's own status emails (`credits_accepted`, `credits_rejected`, the claim
   pair), `legal-intake.py`, `paid-status/email_route.py`, and the notify-gateway bell catalog.
 
@@ -181,7 +182,50 @@ the one denial a person gets while core's route is on, and its wording is core's
 `policies/outbound-copy-rubric.md` is the default. A message family with different duties gets its own file
 (`policies/outbound-copy-rubric-<family>.md`) and one row per campaign in `RUBRIC_FAMILY` in `gate.py`. The family is
 chosen by that table, never by the caller. A listed family whose file is missing makes the gate fail (exit 2, held);
-it is never reviewed under the default rubric instead.
+it is never reviewed under the default rubric instead. A campaign with its own family is enforced whatever the mode
+table says. Two families exist: `gdpr` (the statutory letters) and `support` (the campaign `agent-reply`).
+
+## A reply an agent wrote
+
+Until 2026-11-14 a customer-facing reply through `scripts/intercom-ops-write.sh` needed `--approved-by` with the
+Slack id of one of three people, unless it was an erasure letter. An agent that had the answer for a customer could
+not send it, and the scheduled senders that did send passed one person's id on every call, so the audit record said
+that person approved a reply nobody had read.
+
+The writer now has a third class. The caller names itself and a campaign, and the writer asks the gate:
+
+```bash
+/opt/hydra/scripts/intercom-ops-write.sh reply --conversation <id> \
+  --agent <agent-or-job-name> --gate-campaign agent-reply --customer-facing --body-file reply.txt
+```
+
+| the gate's answer on these exact bytes | the writer |
+|---|---|
+| a signed `approve` | posts, and records the agent, the campaign, the verdict id and sha256 and the body sha256 |
+| no verdict yet | `HELD`, exit 3: the body is queued for the reviewer, nothing is logged or posted; run the same command again after the next round |
+| `rewrite`, `refuse`, a lint hit, a retired frame | `REFUSED`, exit 1: change the copy and submit the new text |
+| the gate cannot run or gives no answer | `ERROR`, exit 2 |
+
+- `--validate` asks the gate too and posts nothing, so it is how a caller submits a body and reads its state.
+- An `observed` answer is not an approval in this class, in any mode. The verdict is the only approval the reply has.
+- The campaigns are a closed list in the writer (`VERDICT_CAMPAIGNS`: `agent-reply`, `backlog-drain`). A verdict
+  signed for another sender's copy cannot be posted to an arbitrary conversation through it.
+- `agent-reply` is reviewed under `policies/outbound-copy-rubric-support.md`: no promise of a person, no open-ended
+  wait, no priority claim, and the reply must end in an answer, a decision, one ask or "we cannot confirm this".
+- The same text is never posted twice to one conversation: if a part of ours on file already carries it, the writer
+  refuses before the audit record and the POST.
+- No request data is declared in this class, and the writer has no flag for it. Elsewhere the sender's code takes
+  the declared values from the request row; here the caller writes the body, so a declaration would excuse its own
+  words from the lint on its own say-so. A reply that quotes a title or name the lint reads as an accusation is
+  refused, and the caller words it another way.
+- `--agent` is the caller's own statement of who it is. It is a record, not a control.
+- With `--agent`, `--requested-by` and `--approved-by` are refused: the record never names a person.
+
+What the verdict does not cover: the reviewer sees the reply only, so whether a fact in it is true for this customer,
+and whether this is the conversation it was written for, are the caller's to answer. One customer message per person
+per UTC day is the verify ledger's rule and the caller's to claim; the writer does not read that ledger. A reply
+waits for a review round (the reviewer host's timer runs every 15 minutes), so this class is for an answer that is
+owed, not for a live chat turn.
 
 ## Running the review
 

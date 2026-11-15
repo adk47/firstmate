@@ -37,6 +37,11 @@ set -euo pipefail
 #       --audience <team|self|Name> (--body TEXT | --body-file FILE) [--dry-run|--validate]
 #   intercom-ops-write.sh reply --conversation <id> --requested-by <SlackUID> \
 #       --customer-facing --approved-by <SlackUID> (--body TEXT | --body-file FILE) [--dry-run|--validate]
+#   intercom-ops-write.sh reply --conversation <id> --agent <agent-id> --gate-campaign <campaign> \
+#       [--gate-copy <frame>] --customer-facing (--body TEXT | --body-file FILE) \
+#       [--dry-run|--validate]
+#       The copy gate's SIGNED approve of these exact bytes is the approval; no person is named.
+#       Exit 3 (HELD) = no signed approve yet: the body is queued for review, nothing was posted, run it again.
 #   intercom-ops-write.sh reply --conversation <id> --purpose gdpr-erasure \
 #       --customer-facing (--body TEXT | --body-file FILE) [--dry-run|--validate]
 #
@@ -72,7 +77,8 @@ readonly SANITIZER_WORDS="profile_status|profile_lookup|credits_search|create_ti
 readonly ALLOWLIST_TEXT="Aaron U7RP6HKUZ, Jan U038BM16T7W, Nick U0AL36NADEY"
 
 # ---------------------------------------------------------------------------------------
-# PURPOSES: the machine-authorization class, and the ONLY one.
+# PURPOSES: the machine-authorization class for a letter a REGISTER owns. (The other machine class,
+# a reply approved by the copy gate's signed verdict, is below: THE COPY-GATE VERDICT.)
 #
 # A purpose is not a fourth human and it is not a way around the allowlist. It is the third
 # identity class for a write that no human asked for and that the repo has already ruled on:
@@ -96,8 +102,53 @@ readonly GDPR_REGISTER_PROD="/var/lib/hydra-gdpr/erasure.sqlite"
 # a human can be mistaken for one in the log, and allowlisted_name() can never resolve it.
 readonly PURPOSE_IDENTITY="system:gdpr-pipeline"
 
+# ---------------------------------------------------------------------------------------
+# THE COPY-GATE VERDICT: a customer-facing reply whose approval is the reviewer's SIGNED approve.
+#
+# Why it exists (captain, 2026-11-14): support is humanless, and nothing waits on a person. Until
+# this class existed, every customer-facing reply outside the erasure register needed --approved-by
+# with the Slack id of Aaron, Jan or Nick. An agent that had the answer for a customer who had waited
+# weeks could not send it, and the cron senders that did send passed the captain's id on every call,
+# so the audit record said "Aaron explicitly approved a customer-facing reply in Slack" for a reply
+# no person had read.
+#
+# What approves the reply: scripts/outbound_copy/gate.py `check`, run HERE on the exact bytes about
+# to be posted, answering `approved` with a verdict signed by the pinned reviewer key. Nothing a
+# caller passes is the approval: the caller names a campaign and itself, and this script asks the
+# gate. An `observed` answer is not an approval here, whatever mode the campaign is in.
+#
+# What is recorded: the agent that sent it (--agent), the verdict id and sha256, the body sha256 and
+# the campaign. The record never names a person.
+#
+# What it does NOT prove, stated plainly:
+#   - --agent is the caller's own statement of who it is. It is a record, not a control.
+#   - A verdict approves WORDS. It does not say the words are true for this customer, or that this
+#     conversation is the one they were written for. The caller answers for both.
+#   - One customer message per person per UTC day is the shared verify ledger's rule and is the
+#     caller's to claim; this script does not read that ledger.
+#
+# No caller declares "the customer's own values" here. The gate excuses a declared value from its
+# word lint (a song really can be called "Fraud"), and the senders that use that take the values
+# from the request row in code. In this class the caller writes the body, so a value it declared
+# would be its own words excused by its own say-so: "We flagged your account for fraud." passed the
+# lint when the whole sentence was declared (QA review of hydra#1998). So the question this script
+# asks carries no declared data and there is no flag for it. The cost, stated: a reply that quotes
+# a title or name the lint reads as an accusation is refused, and the caller words it another way.
+# What it does refuse besides an unapproved body: the same text already on this conversation from us
+# (see ALREADY SAID), so a signed verdict cannot deliver one reply twice to one thread.
+#
+# The campaigns this class may ask the gate about. A campaign outside the table is refused, so a
+# verdict signed for another sender's bulk copy (a denial, a document ask) cannot be replayed onto an
+# arbitrary conversation through this script.
+#   agent-reply    one reply an agent composed for one conversation
+#   backlog-drain  the fixed lines of scripts/intercom-backlog/drain.py
+readonly VERDICT_CAMPAIGNS="agent-reply backlog-drain"
+readonly PROD_COPY_GATE="/opt/hydra/scripts/outbound_copy/gate.py"
+
 die()    { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
+# Nothing was posted and nothing is wrong: the copy gate has not ruled on these bytes yet.
+held()   { printf 'HELD: %s\n' "$*" >&2; exit 3; }
 
 # The write allowlist is ONE table: the three humans whose Slack request IS the
 # authorization for an Intercom write (muso-intercom skill, Write Access Control), keyed by
@@ -232,6 +283,9 @@ if [ "$TESTABLE" != "1" ]; then
   [ -z "${INTERCOM_OPS_TEST_TIMEOUT_BIN:-}" ] || die "INTERCOM_OPS_TEST_TIMEOUT_BIN is not settable on a deployed copy of this script."
   [ -z "${INTERCOM_OPS_TEST_LOCK_DIR:-}" ] || die "INTERCOM_OPS_TEST_LOCK_DIR is not settable on a deployed copy of this script. A caller-selectable lock dir is a lock nobody else holds."
   [ -z "${INTERCOM_OPS_TEST_LOCK_WAIT_S:-}" ] || die "INTERCOM_OPS_TEST_LOCK_WAIT_S is not settable on a deployed copy of this script."
+  [ -z "${INTERCOM_OPS_TEST_COPY_GATE:-}" ] || die "INTERCOM_OPS_TEST_COPY_GATE is not settable on a deployed copy of this script. The copy gate is $PROD_COPY_GATE; a caller-selectable gate is a caller-selectable approval."
+  [ -z "${INTERCOM_OPS_TEST_COPY_STORE:-}" ] || die "INTERCOM_OPS_TEST_COPY_STORE is not settable on a deployed copy of this script. A caller-selectable verdict store is a caller-selectable approval."
+  [ -z "${INTERCOM_OPS_TEST_PY_BIN:-}" ] || die "INTERCOM_OPS_TEST_PY_BIN is not settable on a deployed copy of this script."
   LOG_DIR="$PROD_LOG_DIR"
   CURL_BIN="/usr/bin/curl"
   JQ_BIN="/usr/bin/jq"
@@ -242,6 +296,10 @@ if [ "$TESTABLE" != "1" ]; then
   SQLITE_BIN="/usr/bin/sqlite3"
   SHA256_BIN="/usr/bin/sha256sum"
   GDPR_REGISTER="$GDPR_REGISTER_PROD"
+  COPY_GATE="$PROD_COPY_GATE"
+  # Empty = the gate's own default store (/var/lib/hydra/outbound-copy), the one every other sender reads.
+  COPY_STORE=""
+  PY_BIN="/usr/bin/python3"
 else
   LOG_DIR="${INTERCOM_OPS_TEST_LOG_DIR:-$PROD_LOG_DIR}"
   # The suite's curl stub is reachable only through an explicit seam: PATH was replaced
@@ -257,8 +315,12 @@ else
   SQLITE_BIN="${INTERCOM_OPS_TEST_SQLITE_BIN:-$(command -v sqlite3 || echo /usr/bin/sqlite3)}"
   SHA256_BIN="${INTERCOM_OPS_TEST_SHA256_BIN:-$(command -v sha256sum || echo /usr/bin/sha256sum)}"
   GDPR_REGISTER="${INTERCOM_OPS_TEST_GDPR_REGISTER:-$GDPR_REGISTER_PROD}"
+  COPY_GATE="${INTERCOM_OPS_TEST_COPY_GATE:-$PROD_COPY_GATE}"
+  COPY_STORE="${INTERCOM_OPS_TEST_COPY_STORE:-}"
+  PY_BIN="${INTERCOM_OPS_TEST_PY_BIN:-$(command -v python3 || echo /usr/bin/python3)}"
 fi
 readonly LOG_DIR CURL_BIN JQ_BIN TIMEOUT_BIN SQLITE_BIN SHA256_BIN GDPR_REGISTER FLOCK_BIN LOCK_DIR LOCK_WAIT_S
+readonly COPY_GATE COPY_STORE PY_BIN
 
 # ---------------------------------------------------------------------------------------
 # Arguments
@@ -275,9 +337,10 @@ case "$MODE" in
 esac
 
 CONVERSATION="" REQUESTED_BY="" AUDIENCE="" APPROVED_BY="" BODY="" BODY_FILE="" CUSTOMER_FACING=0 ACTION="post" PURPOSE=""
+AGENT="" GATE_CAMPAIGN="" GATE_COPY=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --conversation|--requested-by|--audience|--approved-by|--body|--body-file|--purpose)
+    --conversation|--requested-by|--audience|--approved-by|--body|--body-file|--purpose|--agent|--gate-campaign|--gate-copy)
       # A dangling flag must be a usage error with a message: a bare `shift 2` past the end
       # of argv exits 1 under set -e with no output, which reads as a silent refusal.
       [ $# -ge 2 ] || { usage; die "$1 needs a value"; }
@@ -289,6 +352,9 @@ while [ $# -gt 0 ]; do
         --body)         BODY="$2" ;;
         --body-file)    BODY_FILE="$2" ;;
         --purpose)      PURPOSE="$2" ;;
+        --agent)          AGENT="$2" ;;
+        --gate-campaign)  GATE_CAMPAIGN="$2" ;;
+        --gate-copy)      GATE_COPY="$2" ;;
       esac
       shift 2 ;;
     --customer-facing) CUSTOMER_FACING=1; shift ;;
@@ -324,6 +390,8 @@ fi
 # no human to name. It is mutually exclusive with the human flags on purpose - the audit trail
 # must say what actually happened, and "a human approved this" would be a lie in the trail.
 if [ -n "$PURPOSE" ]; then
+  [ -z "$AGENT$GATE_CAMPAIGN$GATE_COPY" ] \
+    || refuse "--purpose and the copy-gate flags (--agent, --gate-campaign, --gate-copy) are mutually exclusive: a reply has ONE authorization, and the record names that one."
   case " $PURPOSE_TABLE " in
     *" $PURPOSE "*) ;;
     *) refuse "--purpose '$PURPOSE' is not a purpose this writer knows ($PURPOSE_TABLE). A purpose is a machine authorization the repo has already ruled on; anything else needs a human's --approved-by." ;;
@@ -351,6 +419,31 @@ if [ -n "$PURPOSE" ]; then
   # system, and it is set here rather than left empty so the record never reads as "nobody".
   REQUESTED_BY="$PURPOSE_IDENTITY"
   REQUESTER_NAME="$PURPOSE_IDENTITY"
+elif [ -n "$AGENT$GATE_CAMPAIGN$GATE_COPY" ]; then
+  # THE COPY-GATE VERDICT class. The flags are validated here; the gate itself is asked below, after
+  # the leak check, so a body this script would refuse anyway is never queued for the reviewer.
+  [ "$MODE" = "reply" ] \
+    || refuse "the copy-gate flags apply to 'reply' only; a note is internal and needs a human requester."
+  [ -z "$REQUESTED_BY" ] \
+    || refuse "--agent/--gate-campaign and --requested-by are mutually exclusive: a reply approved by the copy gate has no human requester, and recording one would be a false audit trail."
+  [ -z "$APPROVED_BY" ] \
+    || refuse "--agent/--gate-campaign and --approved-by are mutually exclusive: the copy gate's signed verdict is the approval. Recording a person's id beside it would say a person approved a reply no person read."
+  [ -n "$AGENT" ] \
+    || refuse "--agent <agent-id> is required with --gate-campaign: the record names the agent that sent the reply (for example caroline, operations, or the name of the job)."
+  [[ "$AGENT" =~ ^[a-z][a-z0-9-]{1,39}$ ]] \
+    || refuse "--agent must be an agent or job name in lower case (letters, digits, -; 2 to 40 characters); got '$AGENT'. A person's Slack id is not an agent: a person approves with --approved-by."
+  [ -n "$GATE_CAMPAIGN" ] \
+    || refuse "--gate-campaign <campaign> is required with --agent: it names the campaign the copy gate reviews these bytes under ($VERDICT_CAMPAIGNS)."
+  case " $VERDICT_CAMPAIGNS " in
+    *" $GATE_CAMPAIGN "*) ;;
+    *) refuse "--gate-campaign '$GATE_CAMPAIGN' is not a campaign this writer sends on a verdict for ($VERDICT_CAMPAIGNS). A verdict signed for another sender's copy is not an approval to post it here." ;;
+  esac
+  [[ "$GATE_COPY" =~ ^[A-Za-z0-9._:@-]{0,120}$ ]] \
+    || refuse "--gate-copy must be a frame or line key (letters, digits, . _ : @ -; 120 characters at most); got '$GATE_COPY'."
+  # The log's `requester` is the identity that asked. Here that is the agent, in a shape no Slack id
+  # has, so it can never be read as a person and allowlisted_name() can never resolve it.
+  REQUESTED_BY="agent:$AGENT"
+  REQUESTER_NAME="agent:$AGENT"
 else
 printf '%s' "$REQUESTED_BY" | grep -qE '^U[A-Z0-9]{8,12}$' \
   || refuse "--requested-by must be the Slack USER ID of the human who asked (from message metadata, never a display name); got '${REQUESTED_BY:-<empty>}'."
@@ -378,15 +471,19 @@ case "$MODE" in
   reply)
     [ -z "$AUDIENCE" ] || refuse "--audience applies to notes only; a reply's audience is the customer."
     [ "$CUSTOMER_FACING" -eq 1 ] \
-      || refuse "a reply reaches the CUSTOMER. Pass --customer-facing to state that on purpose, and --approved-by <SlackUID> of the human who told you to reply to the customer. If nobody did, post a note instead."
+      || refuse "a reply reaches the CUSTOMER. Pass --customer-facing to state that on purpose, and either --approved-by <SlackUID> of the human who told you to reply to the customer, or --agent <agent-id> --gate-campaign <campaign> to send on the copy gate's signed verdict. If neither applies, post a note instead."
     if [ -n "$PURPOSE" ]; then
       # The purpose IS the authorization; there is no human to name and none is invented.
       APPROVER_NAME="$PURPOSE_IDENTITY"
+    elif [ -n "$GATE_CAMPAIGN" ]; then
+      # The signed verdict is the authorization. It is read from the gate below; until then nothing
+      # stands in for it, and no person is named.
+      APPROVER_NAME="copy-gate"
     else
     [ -n "$APPROVED_BY" ] \
-      || refuse "--approved-by <SlackUID> is required for a customer-facing reply: the human (Aaron, Jan or Nick) who explicitly asked for the CUSTOMER to be answered. A request to 'resolve' or 'give a summary' is a note, not a reply."
+      || refuse "--approved-by <SlackUID> is required for a customer-facing reply a person asked for: the human (Aaron, Jan or Nick) who explicitly asked for the CUSTOMER to be answered. A request to 'resolve' or 'give a summary' is a note, not a reply. A reply nobody asked for is sent on the copy gate's signed verdict instead: --agent <agent-id> --gate-campaign <campaign>."
     printf '%s' "$APPROVED_BY" | grep -qE '^U[A-Z0-9]{8,12}$' \
-      || refuse "--approved-by must be a human's Slack USER ID; '$APPROVED_BY' is not one. Self-approval, god_mode and agent identities never authorize a customer-facing reply (2026-08-31: a god_mode_self_approve reply reached customers under a human's name)."
+      || refuse "--approved-by must be a human's Slack USER ID; '$APPROVED_BY' is not one. Self-approval, god_mode and agent identities never authorize a customer-facing reply (2026-08-31: a god_mode_self_approve reply reached customers under a human's name). An agent's reply is approved by the copy gate's signed verdict, never by the agent: --agent <agent-id> --gate-campaign <campaign>."
     APPROVER_NAME="$(allowlisted_name "$APPROVED_BY")" \
       || refuse "$APPROVED_BY is not a human on the Intercom write allowlist ($ALLOWLIST_TEXT); a customer-facing reply needs one of them."
     fi
@@ -408,6 +505,60 @@ case "$MODE" in
     EXPECT_PART="comment"
     ;;
 esac
+
+# ---------------------------------------------------------------------------------------
+# ASK THE COPY GATE (the verdict class only). It runs after every flag and leak refusal, so a body
+# this script would refuse anyway is never queued for the reviewer, and BEFORE the --validate and
+# --dry-run exits, so `--validate` is how a caller submits a body for review and learns its state
+# without posting. The gate is asked about the exact bytes that are posted: for a reply the payload's
+# body is "$BODY", unchanged.
+#
+# The answer is read the way scripts/intercom-verify-request.sh reads it, with one difference: here
+# only a SIGNED approve sends. An `observed` answer (a campaign the mode table does not enforce yet)
+# is a hold, because in this class the verdict is the only approval there is.
+#   exit 0 approved, naming this body's sha256 and a verdict   -> go on
+#   no verdict yet (pending, or observed with review pending) -> HELD, exit 3: queued, run it again
+#   a rewrite or refuse verdict, a lint hit, a retired frame   -> REFUSED, exit 1: change the copy
+#   anything else (the gate cannot run or gave no answer)      -> ERROR, exit 2
+# All four are above the lock, the audit record and the POST: nothing was logged or posted.
+COPY_VERDICT_ID="" COPY_VERDICT_SHA="" COPY_BODY_SHA=""
+if [ -n "$GATE_CAMPAIGN" ]; then
+  for b in "$PY_BIN" "$SHA256_BIN"; do
+    [ -x "$b" ] || die "$b is missing or not executable; it is required to ask the copy gate."
+  done
+  [ -r "$COPY_GATE" ] || die "the copy gate ($COPY_GATE) is not readable, so no verdict on this reply can be checked. Nothing was posted."
+  COPY_BODY_SHA="$(printf '%s' "$BODY" | "$SHA256_BIN" 2>/dev/null)" || die "could not hash the body; nothing was posted."
+  COPY_BODY_SHA="${COPY_BODY_SHA%% *}"
+  [[ "$COPY_BODY_SHA" =~ ^[0-9a-f]{64}$ ]] || die "could not hash the body; nothing was posted."
+  # `data` is always empty: no value is excused from the gate's lint on this caller's word (header).
+  GATE_IN="$(printf '%s' "$BODY" | "$JQ_BIN" -Rsc '{subject: "", body: ., data: []}' 2>/dev/null)" \
+    || die "could not build the copy gate's question; nothing was posted."
+  gate_store=()
+  [ -z "$COPY_STORE" ] || gate_store=(--store "$COPY_STORE")
+  set +e
+  # pipefail is on, so the status read here is the gate's own (printf does not fail: the gate reads all of stdin).
+  CG_RAW="$(printf '%s' "$GATE_IN" | "$TIMEOUT_BIN" 60 "$PY_BIN" -I "$COPY_GATE" check --campaign "$GATE_CAMPAIGN" \
+        --copy "$GATE_COPY" --message-type comment ${gate_store[@]+"${gate_store[@]}"} 2>/dev/null)"
+  cg_rc=$?
+  set -e
+  # The gate's answer is its last line of output.
+  CG="${CG_RAW##*$'\n'}"
+  cg() { printf '%s' "$CG" | "$JQ_BIN" -r --arg k "$1" '.[$k] // "" | tostring' 2>/dev/null || true; }
+  CG_RESULT="$(cg result)"; CG_BODY="$(cg body_sha256)"; CG_REVIEW="$(cg review)"; CG_WHY="$(cg reason)"
+  COPY_VERDICT_ID="$(cg verdict_id)"; COPY_VERDICT_SHA="$(cg verdict_sha256)"
+  if [ "$cg_rc" = 0 ] && [ "$CG_RESULT" = "approved" ] && [ "$CG_BODY" = "$COPY_BODY_SHA" ] \
+     && [[ "$COPY_VERDICT_ID" =~ ^ocv-[0-9a-f]{16}$ ]] && [[ "$COPY_VERDICT_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+    :
+  elif [ "$CG_BODY" = "$COPY_BODY_SHA" ] \
+       && { { [ "$cg_rc" = 3 ] && [ "$CG_RESULT" = "pending" ]; } \
+            || { [ "$cg_rc" = 4 ] && [ "$CG_RESULT" = "observed" ] && [ "$CG_REVIEW" = "pending" ]; }; }; then
+    held "the copy gate has no signed verdict on these exact bytes yet (campaign $GATE_CAMPAIGN, body sha256 $COPY_BODY_SHA). The body is queued for the reviewer. Nothing was logged or posted; run the same command again after the next review round."
+  elif [ "$CG_BODY" = "$COPY_BODY_SHA" ] && { [ "$cg_rc" = 1 ] || { [ "$cg_rc" = 4 ] && [ "$CG_RESULT" = "observed" ]; }; }; then
+    refuse "the copy gate did not approve these exact bytes (campaign $GATE_CAMPAIGN, body sha256 $COPY_BODY_SHA): ${CG_WHY:-${CG_REVIEW:-not approved}}. A rewrite or refuse verdict, or a lint hit, never becomes an approve: change the copy and submit the new text. Nothing was posted."
+  else
+    die "the copy gate gave no usable answer about these bytes (rc=$cg_rc, result='${CG_RESULT:-<none>}'${CG_WHY:+, $CG_WHY}), so no approval can be read. Nothing was logged or posted."
+  fi
+fi
 
 # ---------------------------------------------------------------------------------------
 # Render
@@ -440,6 +591,27 @@ case "$ACTION" in
     printf '%s\n' "$PAYLOAD" | "$JQ_BIN" .
     exit 0 ;;
 esac
+
+# ---------------------------------------------------------------------------------------
+# How a stored part's text is compared with the text this call sends. The rules, and what was measured
+# for them, are written out at the delivery read-back below, which is their first user; they are defined
+# here because the ALREADY SAID check runs before the POST and must read a part the same way.
+readonly NORM_JQ='
+def unent:
+  gsub("&#(?<n>[0-9]+);"; [(.n | tonumber)] | implode)
+  | gsub("&#[xX](?<h>[0-9a-fA-F]+);";
+      [(.h | ascii_downcase | explode
+        | reduce .[] as $c (0; . * 16 + (if $c >= 97 then $c - 87 else $c - 48 end)))] | implode)
+  | gsub("&nbsp;"; " ") | gsub("&quot;"; "\"") | gsub("&apos;"; [39] | implode)
+  | gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("&amp;"; "&");
+def squeeze: gsub("[[:space:]]+"; " ") | sub("^ "; "") | sub(" $"; "");
+def stored_text:
+  (. // "")
+  | gsub("</?(?i:p|div|br|li|ul|ol|h[1-6]|blockquote|pre|table|tr|td|th)(?:[[:space:]/][^>]*)?>"; " ")
+  | gsub("<[^>]*>"; "") | unent | squeeze;
+def sent_forms: [squeeze, (gsub("(^|\n)[ \t]*[0-9]+\\.[ \t]+"; "\n") | squeeze)] | unique;
+'
+SENT_FORMS="$(printf '%s' "$FULL_BODY" | "$JQ_BIN" -Rsc "$NORM_JQ"' sent_forms' 2>/dev/null || printf '[]')"
 
 # ---------------------------------------------------------------------------------------
 # CONVERSATION LOCK: one write per conversation at a time, for every caller of this script on this host
@@ -489,6 +661,36 @@ if [ "$pre_rc" -ne 0 ] || [ "$pre_jq" -ne 0 ] || [ -z "$PRE_IDS" ]; then
 fi
 
 # ---------------------------------------------------------------------------------------
+# ALREADY SAID (the verdict class only). A signed verdict approves words, and it stays on file: without
+# this check the same approved body could be posted to one conversation any number of times, by a retry,
+# by two jobs that both hold the thread, or by a caller that lost track of a send it could not verify.
+# A person approving each call was the bound on that before; here the bound is the conversation itself.
+# The pre-read above is the record: if a part of ours on file already carries exactly this text (compared
+# as the read-back compares it), this call does not post it again. It is a refusal above the audit record
+# and the POST. What it reads is the pre-read's parts, the 500 most recent ones of a long conversation.
+if [ -n "$GATE_CAMPAIGN" ]; then
+  [ "$SENT_FORMS" != "[]" ] \
+    || die "the text of this reply could not be normalised, so it could not be compared with what conversation $CONVERSATION already holds. Nothing was logged or posted."
+  set +e
+  SAID="$(printf '%s' "$PRE_READ" | "$JQ_BIN" -r --arg admin "$INTERCOM_ADMIN_ID" \
+    --slurpfile sent <(printf '%s' "$SENT_FORMS") \
+    "$NORM_JQ"'
+     [(.conversation_parts.conversation_parts // [])[]
+      | select((.author.id // "" | tostring) == $admin)
+      | select(.part_type == "comment" or .part_type == "open")
+      | (.body | stored_text) as $text
+      | select(($text | length) > 0)
+      | select((($sent[0] // []) | index($text)) != null)
+      | (.id // "" | tostring)] | join(",")' 2>/dev/null)"
+  said_rc=$?
+  set -e
+  [ "$said_rc" -eq 0 ] \
+    || die "conversation $CONVERSATION could not be compared with the text of this reply, so a second delivery of the same words could not be ruled out. Nothing was logged or posted."
+  [ -z "$SAID" ] \
+    || refuse "conversation $CONVERSATION already holds this exact text from us (part $SAID). A signed verdict approves the words once per conversation, not a second delivery of them. Nothing was posted."
+fi
+
+# ---------------------------------------------------------------------------------------
 # Log BEFORE the write (operations/SOUL.md, Write Activity Logging), then consume, then POST, then
 # verify.
 #
@@ -514,6 +716,11 @@ elif [ -n "$PURPOSE" ]; then
   # ownership check that bounded it. It never claims a human asked.
   LOG_ACTION="intercom_customer_reply"; LOG_APPROVED="$PURPOSE_IDENTITY"; LOG_AUDIENCE="customer"
   LOG_AUTH="purpose $PURPOSE: the erasure register owns conversation $CONVERSATION; no human asked for this letter - it is a statutory obligation with its own clock"
+elif [ -n "$GATE_CAMPAIGN" ]; then
+  # The record says what actually happened: the reviewer's signed verdict approved these bytes and an
+  # agent sent them. `approved_by` names the verdict, in a shape no Slack id has; no person is named.
+  LOG_ACTION="intercom_customer_reply"; LOG_APPROVED="copy-gate:$COPY_VERDICT_ID"; LOG_AUDIENCE="customer"
+  LOG_AUTH="copy gate verdict $COPY_VERDICT_ID is a signed approve of these exact bytes for campaign $GATE_CAMPAIGN; sent by agent $AGENT; no person asked for or approved this reply"
 else
   LOG_ACTION="intercom_customer_reply"; LOG_APPROVED="$APPROVED_BY"; LOG_AUDIENCE="customer"
   LOG_AUTH="$APPROVER_NAME ($APPROVED_BY) explicitly approved a customer-facing reply in Slack"
@@ -521,7 +728,9 @@ fi
 "$JQ_BIN" -nc --arg action "$LOG_ACTION" --arg target "conversation:$CONVERSATION" \
   --arg req "$REQUESTED_BY" --arg appr "$LOG_APPROVED" --arg aud "$LOG_AUDIENCE" \
   --arg ts "$NOW" --arg auth "$LOG_AUTH" --arg purpose "$PURPOSE" \
-  '{agent:"operations", action:$action, target:$target, requester:$req, approved_by:(if $appr == "" then null else $appr end), audience:$aud, timestamp:$ts, authorization:$auth} + (if $purpose == "" then {} else {purpose:$purpose} end)' \
+  --arg agent "${AGENT:-operations}" --arg campaign "$GATE_CAMPAIGN" --arg copy "$GATE_COPY" \
+  --arg vid "$COPY_VERDICT_ID" --arg vsha "$COPY_VERDICT_SHA" --arg bsha "$COPY_BODY_SHA" \
+  '{agent:$agent, action:$action, target:$target, requester:$req, approved_by:(if $appr == "" then null else $appr end), audience:$aud, timestamp:$ts, authorization:$auth} + (if $purpose == "" then {} else {purpose:$purpose} end) + (if $campaign == "" then {} else {copy_gate:{campaign:$campaign, copy:$copy, verdict_id:$vid, verdict_sha256:$vsha, body_sha256:$bsha}} end)' \
   > "$LOG_FILE" \
   || die "cannot write the audit record $LOG_FILE; refusing to write unlogged. Nothing was posted."
 # The `|| die` is not decoration: without it a redirection failure here is a BARE exit 1 through `set -e`, and a
@@ -615,22 +824,7 @@ fi
 # script puts at the head of a note came back as sent in 150 of 150 notes. A delivered write whose stored
 # text differs in some way not seen here ends "POST NOT VERIFIED" (exit 4) - fail closed, as any unverified
 # write does: the caller records it as unknown, never as sent, and a person reads the conversation.
-readonly NORM_JQ='
-def unent:
-  gsub("&#(?<n>[0-9]+);"; [(.n | tonumber)] | implode)
-  | gsub("&#[xX](?<h>[0-9a-fA-F]+);";
-      [(.h | ascii_downcase | explode
-        | reduce .[] as $c (0; . * 16 + (if $c >= 97 then $c - 87 else $c - 48 end)))] | implode)
-  | gsub("&nbsp;"; " ") | gsub("&quot;"; "\"") | gsub("&apos;"; [39] | implode)
-  | gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("&amp;"; "&");
-def squeeze: gsub("[[:space:]]+"; " ") | sub("^ "; "") | sub(" $"; "");
-def stored_text:
-  (. // "")
-  | gsub("</?(?i:p|div|br|li|ul|ol|h[1-6]|blockquote|pre|table|tr|td|th)(?:[[:space:]/][^>]*)?>"; " ")
-  | gsub("<[^>]*>"; "") | unent | squeeze;
-def sent_forms: [squeeze, (gsub("(^|\n)[ \t]*[0-9]+\\.[ \t]+"; "\n") | squeeze)] | unique;
-'
-SENT_FORMS="$(printf '%s' "$FULL_BODY" | "$JQ_BIN" -Rsc "$NORM_JQ"' sent_forms' 2>/dev/null || printf '[]')"
+# (NORM_JQ and SENT_FORMS are defined above the conversation lock: the ALREADY SAID check reads them too.)
 # $1 = a conversation (JSON text): the POST's own response, or the re-read.
 _part_filter() {
   printf '%s' "$1" | "$JQ_BIN" -c --arg admin "$INTERCOM_ADMIN_ID" --arg exp "$EXPECT_PART" \

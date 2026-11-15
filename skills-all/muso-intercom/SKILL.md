@@ -35,7 +35,7 @@ Query and manage Muso.AI customer messaging and support data from Intercom.
 - Everyone else → READ ONLY. Politely decline write requests: "Intercom writes
   need Jan, Nick or Aaron. Want me to ask Jan?"
 
-**The one machine class, and it is not yours to use.** `intercom-ops-write.sh reply
+**The register's machine class, and it is not yours to use.** `intercom-ops-write.sh reply
 --purpose gdpr-erasure` posts a statutory erasure letter as `system:gdpr-pipeline`
 with no human id. The writer refuses any conversation the erasure register does not
 own **and any body the pipeline has not already claimed** (a `sending` ledger row
@@ -43,8 +43,36 @@ carrying that conversation and the sha256 of those exact bytes), so it can only 
 copy the pipeline composed under its own gates. It exists because a GDPR letter is an
 obligation with its own clock, not a request. It is called by
 `scripts/gdpr-pipeline.py` and by nothing else: an agent reaching for `--purpose` to
-skip the allowlist is exactly the 2026-08-31 failure with a new flag. If you are not
-the GDPR pipeline, you need a human.
+skip the allowlist is exactly the 2026-08-31 failure with a new flag.
+
+**A reply no person asked for is approved by the copy gate, not by a person.** This is
+the class for a job, or an agent whose own doctrine has it answer a customer who is
+owed an answer, with nobody in Slack asking. It does not change the rule below: a
+resolution, summary or status a human asked for in Slack is still a note. In this
+class nobody's Slack id is passed and nobody is asked to approve. The caller names
+itself and the writer asks the reviewer:
+
+```bash
+/opt/hydra/scripts/intercom-ops-write.sh reply \
+  --conversation CONVERSATION_ID --agent YOUR_AGENT_ID --gate-campaign agent-reply \
+  --customer-facing --body-file /path/to/reply.txt
+```
+
+- `HELD` (exit 3) means the reviewer has not read these exact bytes yet. Nothing was
+  posted. Run the same command again later with the same file; changing one character
+  is a new body and a new wait. `--validate` submits the body and reports its state
+  without posting.
+- `REFUSED` (exit 1) with a copy-gate reason means the words were not approved. Rewrite
+  the reply and submit the new text. Never route the same words through `--approved-by`.
+- The reviewer reads the reply only. Whether each fact in it is true for this customer,
+  and whether this is the right conversation, are yours to get right before you send.
+- The reply must give the customer an answer, a decision, one thing we need from them,
+  or "we cannot confirm this". It never promises a person, a date or priority.
+- The writer refuses to post text this conversation already holds from us.
+- Nothing in the reply is excused as "the customer's own words". If a track title or a
+  name trips the word check (a song called "Fraud"), say it another way.
+- `--agent` cannot be combined with `--requested-by` or `--approved-by`: the record
+  names you and the verdict, never a person.
 
 Authorization is not a path. A note or reply goes through the wrapper in "Writing to
 a conversation" below; a bulk stale close through `cs-stale-drain`; an abuse tag or
@@ -80,7 +108,7 @@ happens, and verifies what Intercom actually created.
   --conversation CONVERSATION_ID --requested-by SLACK_USER_ID \
   --audience Jan --body-file /path/to/note.txt
 
-# Customer-facing reply. ONLY when the human explicitly said to answer the CUSTOMER.
+# Customer-facing reply a human asked for. ONLY when the human explicitly said to answer the CUSTOMER.
 /opt/hydra/scripts/intercom-ops-write.sh reply \
   --conversation CONVERSATION_ID --requested-by SLACK_USER_ID \
   --customer-facing --approved-by SLACK_USER_ID --body-file /path/to/reply.txt
@@ -96,7 +124,9 @@ happens, and verifies what Intercom actually created.
   answer, not a reason to post another way.
 - `--approved-by` is a HUMAN's Slack user id. Self-approval, god-mode and agent
   identities never authorize a customer-facing reply (2026-08-31: a self-approved reply
-  reached customers under a human's name).
+  reached customers under a human's name). An agent's own reply goes out on the copy
+  gate's signed verdict (`--agent`, above), which is not self-approval: the reviewer
+  signs, the agent does not.
 - The customer never sees internal surfaces. The wrapper refuses a customer-facing body
   that carries an issue link, "Ops resolution", "ticket", an admin id, a Slack mention,
   or any pattern Caroline's outbound sanitizer redacts

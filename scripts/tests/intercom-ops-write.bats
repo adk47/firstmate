@@ -1181,3 +1181,394 @@ _wait_locked() {  # $1 lock file: returns once somebody holds it (5 s at most)
   [ "$log_file_line" -lt "$consume_line" ]
   [ "$consume_line" -lt "$post_line" ]
 }
+
+# --- the copy-gate verdict class ---------------------------------------------------
+# Captain 2026-11-14: "there are CS lanes aging with caroline and questions not responding well". Support is
+# humanless and nothing waits on a person, yet every customer-facing reply through this writer outside the erasure
+# register needed --approved-by with the Slack id of Aaron, Jan or Nick. The transcript these cases come from: a
+# mastering engineer who had written for weeks was told on 2026-11-14 15:37Z "I haven't received a human response
+# about your request, and I can't tell you when one will come." An agent holding an answer for that thread had no
+# way to send it without naming a person. In this class the reviewer's SIGNED approve of the exact bytes is the
+# approval, the record names the agent and the verdict, and no person is named anywhere.
+#
+# The gate is the REAL scripts/outbound_copy/gate.py in a mirror tree whose allowed-signers file names a throwaway
+# key (the gate pins its trust to its own location, so a mirror is the only way to hold a key that signs). gate.py,
+# every rubric and the SHIPPED mode table are copied unmodified, so these cases read the tables that deploy.
+REPLY_X="Hi Joel, thanks for writing again. To finish checking your mastering credit we need one thing from you: a link to the release page that lists you as mastering engineer."
+
+verdict_gate() {  # [key-name]; the first call (key "reviewer") is the pinned reviewer
+  mkdir -p "$TEST_TMPDIR/gate-tree/scripts/outbound_copy" "$TEST_TMPDIR/gate-tree/policies"
+  cp "$HYDRA_REPO/scripts/outbound_copy/gate.py" "$TEST_TMPDIR/gate-tree/scripts/outbound_copy/gate.py"
+  cp "$HYDRA_REPO"/policies/outbound-copy-rubric*.md "$HYDRA_REPO/policies/outbound-copy-enforce.json" \
+    "$TEST_TMPDIR/gate-tree/policies/"
+  ssh-keygen -q -t ed25519 -N "" -C test -f "$TEST_TMPDIR/${1:-reviewer}-key"
+  if [ "${1:-reviewer}" = reviewer ]; then
+    printf 'outbound-copy-reviewer namespaces="muso-outbound-copy-v1" %s\n' "$(cut -d' ' -f1,2 "$TEST_TMPDIR/reviewer-key.pub")" \
+      > "$TEST_TMPDIR/gate-tree/policies/outbound-copy-reviewer.allowed_signers"
+  fi
+  export INTERCOM_OPS_TEST_COPY_GATE="$TEST_TMPDIR/gate-tree/scripts/outbound_copy/gate.py"
+  export INTERCOM_OPS_TEST_COPY_STORE="$TEST_TMPDIR/copy-store"
+}
+# Sign every queued body the way the reviewer host does (as the reviewer MODEL) with KEY, and import the verdicts.
+sign_pending() {  # <verdict> [key-name]
+  python3 - "$TEST_TMPDIR/gate-tree/scripts/outbound_copy/gate.py" "$INTERCOM_OPS_TEST_COPY_STORE" "$1" "$TEST_TMPDIR/${2:-reviewer}-key" <<'PY'
+import importlib.util, json, pathlib, subprocess, sys
+gate, store, verdict, key = sys.argv[1:5]
+spec = importlib.util.spec_from_file_location("gate", gate); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+rows = []
+for f in sorted(pathlib.Path(store, "pending").glob("*.json")):
+    it = json.loads(f.read_text())
+    it["rubric"], _, it["rubric_sha256"] = g.rubric_read(it["campaign"])
+    st = g.make_statement(it, verdict, "test", "Other words." if verdict == "rewrite" else "", "0" * 64, g.REVIEWER_MODEL)
+    rows.append(json.dumps({"statement": st.decode(), "signature": g.sign(st, pathlib.Path(key)).decode()}))
+p = subprocess.run([sys.executable, "-I", gate, "import-verdicts", "--store", store], input="\n".join(rows) + "\n",
+                   capture_output=True, text=True)
+print(p.stdout.strip())
+PY
+}
+pending_count() { find "$INTERCOM_OPS_TEST_COPY_STORE/pending" -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' '; }
+agent_reply() {  # <conversation> <body> [more flags]
+  local conv="$1" body="$2"; shift 2
+  run "$SCRIPT" reply --conversation "$conv" --agent caroline --gate-campaign agent-reply --customer-facing --body "$body" "$@"
+}
+
+@test "verdict class: the deployed copy refuses a caller-selected gate, verdict store or interpreter" {
+  for v in INTERCOM_OPS_TEST_COPY_GATE INTERCOM_OPS_TEST_COPY_STORE INTERCOM_OPS_TEST_PY_BIN; do
+    run env "$v=/tmp/x" MUSOAI_INTERCOM_TOKEN=t INTERCOM_OPS_TEST_LOG_DIR= INTERCOM_OPS_TEST_CURL_BIN= \
+      INTERCOM_OPS_TEST_TIMEOUT_BIN= INTERCOM_OPS_TEST_LOCK_DIR= INTERCOM_OPS_TEST_LOCK_WAIT_S= \
+      INTERCOM_OPS_TEST_COPY_GATE= INTERCOM_OPS_TEST_COPY_STORE= INTERCOM_OPS_TEST_PY_BIN= "$v=/tmp/x" \
+      "$REAL_SCRIPT" reply --conversation 1 --agent caroline --gate-campaign agent-reply --customer-facing --body "Hi."
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"$v is not settable on a deployed copy"* ]]
+  done
+  grep -q '^  COPY_GATE="\$PROD_COPY_GATE"$' "$REAL_SCRIPT"
+  grep -q '^  COPY_STORE=""$' "$REAL_SCRIPT"
+}
+
+@test "verdict class: with no verdict the reply is HELD (exit 3), queued for review, and nothing is read, logged or posted" {
+  verdict_gate
+  agent_reply 215475719661301 "$REPLY_X"
+  [ "$status" -eq 3 ]
+  [[ "$output" == "HELD: "* ]]
+  [[ "$output" == *"$(printf '%s' "$REPLY_X" | sha256sum | cut -d' ' -f1)"* ]]
+  [ "$(pending_count)" -eq 1 ]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(get_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+}
+
+@test "verdict class: a signed approve of the exact bytes posts the reply as Caroline with no person named" {
+  verdict_gate
+  agent_reply 215475719661301 "$REPLY_X"
+  [ "$status" -eq 3 ]
+  sign_pending approve
+  agent_reply 215475719661301 "$REPLY_X"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "POSTED comment conversation=215475719661301 part=52987726093" ]]
+  [ "$(curl_calls)" -eq 1 ]
+  [ "$(payload | jq -r .message_type)" = "comment" ]
+  [ "$(payload | jq -r .admin_id)" = "5763097" ]
+  [ "$(payload | jq -r .body)" = "$REPLY_X" ]
+}
+
+@test "verdict class: the audit record names the agent and the verdict, and never a person or Slack" {
+  verdict_gate
+  agent_reply 215475719661301 "$REPLY_X"
+  sign_pending approve
+  agent_reply 215475719661301 "$REPLY_X"
+  [ "$status" -eq 0 ]
+  [ "$(log_count)" -eq 1 ]
+  f="$(find "$INTERCOM_OPS_TEST_LOG_DIR" -type f -name '*.json')"
+  [ "$(jq -r .action "$f")" = "intercom_customer_reply" ]
+  [ "$(jq -r .agent "$f")" = "caroline" ]
+  [ "$(jq -r .requester "$f")" = "agent:caroline" ]
+  [ "$(jq -r .audience "$f")" = "customer" ]
+  [[ "$(jq -r .approved_by "$f")" =~ ^copy-gate:ocv-[0-9a-f]{16}$ ]]
+  [ "$(jq -r .approved_by "$f")" = "copy-gate:$(jq -r .copy_gate.verdict_id "$f")" ]
+  [ "$(jq -r .copy_gate.campaign "$f")" = "agent-reply" ]
+  [[ "$(jq -r .copy_gate.verdict_sha256 "$f")" =~ ^[0-9a-f]{64}$ ]]
+  [ "$(jq -r .copy_gate.body_sha256 "$f")" = "$(printf '%s' "$REPLY_X" | sha256sum | cut -d' ' -f1)" ]
+  # The verdict the record names is one the store holds, signed.
+  [ -n "$(grep -rl "$(jq -r .copy_gate.verdict_id "$f")" "$INTERCOM_OPS_TEST_COPY_STORE")" ]
+  # The record names no person. Written as `if ...; then false; fi`: a bare `! grep` that is not the
+  # last line of a bats case does not fail it, so the first form of this line passed whatever the
+  # record said (QA review of hydra#1998).
+  if grep -qE 'U7RP6HKUZ|U038BM16T7W|U0AL36NADEY|Aaron|Jan|Nick|Slack' "$f"; then false; fi
+  # Written before the POST, like every other record of this writer.
+  [ ! "$f" -nt "$CURL_STUB_PAYLOAD" ]
+}
+
+@test "verdict class: --validate submits the body and reports its state without posting" {
+  verdict_gate
+  agent_reply 1 "$REPLY_X" --validate
+  [ "$status" -eq 3 ]
+  [ "$(pending_count)" -eq 1 ]
+  sign_pending approve
+  agent_reply 1 "$REPLY_X" --validate
+  [ "$status" -eq 0 ]
+  [[ "$output" == "VALID comment conversation=1" ]]
+  agent_reply 1 "$REPLY_X" --dry-run
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+}
+
+@test "verdict class: an approve covers those bytes only; one changed character is held again" {
+  verdict_gate
+  agent_reply 1 "$REPLY_X"
+  sign_pending approve
+  agent_reply 1 "${REPLY_X}!"
+  [ "$status" -eq 3 ]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+}
+
+@test "verdict class: a rewrite or a refuse verdict sends nothing, and the reviewer's replacement is never posted" {
+  for v in rewrite refuse; do
+    rm -rf "$TEST_TMPDIR/gate-tree" "$TEST_TMPDIR/copy-store" "$TEST_TMPDIR"/reviewer-key*
+    verdict_gate
+    agent_reply 1 "$REPLY_X"
+    [ "$status" -eq 3 ]
+    sign_pending "$v"
+    agent_reply 1 "$REPLY_X"
+    [ "$status" -eq 1 ]
+    [[ "$output" == "REFUSED: "* ]]
+    [[ "$output" == *"copy_review_$v:"* ]]
+  done
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+}
+
+@test "verdict class: an approve signed by any key but the pinned reviewer's is not an approval" {
+  verdict_gate
+  verdict_gate stranger
+  agent_reply 1 "$REPLY_X"
+  [ "$status" -eq 3 ]
+  sign_pending approve stranger
+  agent_reply 1 "$REPLY_X"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"POSTED"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+}
+
+@test "verdict class: an observed pass is never an approval (backlog-drain is observed in the shipped table)" {
+  verdict_gate
+  [ "$(python3 -I "$INTERCOM_OPS_TEST_COPY_GATE" mode --campaign backlog-drain)" = "observe" ]
+  [ "$(python3 -I "$INTERCOM_OPS_TEST_COPY_GATE" mode --campaign agent-reply)" = "enforce" ]
+  run "$SCRIPT" reply --conversation 1 --agent backlog-drain --gate-campaign backlog-drain --gate-copy line-a \
+    --customer-facing --body "$REPLY_X"
+  [ "$status" -eq 3 ]
+  [[ "$output" == "HELD: "* ]]
+  [ "$(curl_calls)" -eq 0 ]
+  sign_pending approve
+  run "$SCRIPT" reply --conversation 1 --agent backlog-drain --gate-campaign backlog-drain --gate-copy line-a \
+    --customer-facing --body "$REPLY_X"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "POSTED comment conversation=1 part="* ]]
+  f="$(find "$INTERCOM_OPS_TEST_LOG_DIR" -type f -name '*.json')"
+  [ "$(jq -r .agent "$f")" = "backlog-drain" ]
+  [ "$(jq -r .copy_gate.copy "$f")" = "line-a" ]
+}
+
+@test "verdict class: a verdict for one campaign or frame does not approve the same bytes under another" {
+  verdict_gate
+  agent_reply 1 "$REPLY_X"
+  sign_pending approve
+  run "$SCRIPT" reply --conversation 1 --agent caroline --gate-campaign backlog-drain --customer-facing --body "$REPLY_X"
+  [ "$status" -eq 3 ]
+  agent_reply 1 "$REPLY_X" --gate-copy other-frame
+  [ "$status" -eq 3 ]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "verdict class: a campaign outside the writer's table is refused before the gate is asked" {
+  verdict_gate
+  for c in decline uvn-status credit-approved-elsewhere gdpr-ack nonsense; do
+    run "$SCRIPT" reply --conversation 1 --agent caroline --gate-campaign "$c" --customer-facing --body "$REPLY_X"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"is not a campaign this writer sends on a verdict for"* ]]
+  done
+  [ "$(pending_count)" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "verdict class: it cannot be combined with a person's approval, a requester or a purpose" {
+  verdict_gate
+  agent_reply 1 "$REPLY_X" --approved-by U7RP6HKUZ
+  [ "$status" -eq 1 ]; [[ "$output" == *"mutually exclusive"* ]]
+  agent_reply 1 "$REPLY_X" --requested-by U038BM16T7W
+  [ "$status" -eq 1 ]; [[ "$output" == *"mutually exclusive"* ]]
+  agent_reply 215476650395415 "$REPLY_X" --purpose gdpr-erasure
+  [ "$status" -eq 1 ]; [[ "$output" == *"mutually exclusive"* ]]
+  [ "$(pending_count)" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+}
+
+@test "verdict class: the agent must be named, and a person's Slack id is not an agent" {
+  verdict_gate
+  run "$SCRIPT" reply --conversation 1 --gate-campaign agent-reply --customer-facing --body "$REPLY_X"
+  [ "$status" -eq 1 ]; [[ "$output" == *"--agent <agent-id> is required"* ]]
+  run "$SCRIPT" reply --conversation 1 --agent caroline --customer-facing --body "$REPLY_X"
+  [ "$status" -eq 1 ]; [[ "$output" == *"--gate-campaign <campaign> is required"* ]]
+  for a in U7RP6HKUZ "Aaron Kaufman" god_mode a "x y"; do
+    run "$SCRIPT" reply --conversation 1 --agent "$a" --gate-campaign agent-reply --customer-facing --body "$REPLY_X"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--agent must be an agent or job name"* ]]
+  done
+  [ "$(pending_count)" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "verdict class: it does not apply to a note, and a reply still has to say --customer-facing" {
+  verdict_gate
+  run "$SCRIPT" note --conversation 1 --agent caroline --gate-campaign agent-reply --audience team --body "x"
+  [ "$status" -eq 1 ]; [[ "$output" == *"apply to 'reply' only"* ]]
+  run "$SCRIPT" reply --conversation 1 --agent caroline --gate-campaign agent-reply --body "$REPLY_X"
+  [ "$status" -eq 1 ]; [[ "$output" == *"--customer-facing"* ]]
+  [ "$(pending_count)" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "verdict class: a body that leaks internals is refused by this writer and never reaches the reviewer" {
+  verdict_gate
+  agent_reply 1 "We opened a ticket for you in ClickUp."
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"customer-facing body contains"* ]]
+  [ "$(pending_count)" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "verdict class: the gate's own lint refuses an accusation before any reviewer reads it" {
+  verdict_gate
+  agent_reply 1 "Hi Joel, your request was flagged as fraud."
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"copy_lint:accusation_word"* ]]
+  [ "$(pending_count)" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+# QA review of hydra#1998, finding 1. The gate excuses a value the SENDER declared as the customer's
+# own data from its word lint. In this class the caller writes the body, so a declaration would be
+# its own sentence excused on its own word.
+@test "verdict class: the caller cannot declare its own words as the customer's data (no such flag, no such input)" {
+  verdict_gate
+  local bad="We flagged your account for fraud."
+  # The premise, on the real gate: declared whole, the sentence passes the lint; undeclared it does not.
+  run python3 -I - "$INTERCOM_OPS_TEST_COPY_GATE" "$bad" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("gate", sys.argv[1])
+g = importlib.util.module_from_spec(spec); sys.modules["gate"] = g; spec.loader.exec_module(g)
+bad = sys.argv[2]
+print("declared=%r undeclared=%r words=%r" % (g.lint("", bad, "other", [bad]), g.lint("", bad, "other", []),
+                                             g.lint("", bad, "other", ["flagged", "fraud"])))
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == "declared='' undeclared=\"accusation_word: the copy says 'flagged'\" words=''" ]]
+  # The writer has no way to pass a declaration: the flag is not an argument...
+  printf '%s' "[\"$bad\"]" > "$TEST_TMPDIR/data.json"
+  agent_reply 1 "$bad" --gate-data-file "$TEST_TMPDIR/data.json"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown argument '--gate-data-file'"* ]]
+  [ "$(pending_count)" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+  # ...and without it the sentence meets the lint, whole or word by word.
+  agent_reply 1 "$bad"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"copy_lint:accusation_word"* ]]
+  [ "$(pending_count)" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+  # What the gate is asked carries an empty declaration, and that is the only question in the file.
+  [ "$(grep -c 'data: \[\]' "$REAL_SCRIPT")" -eq 1 ]
+  [ "$(grep -c -- '--argjson data' "$REAL_SCRIPT")" -eq 0 ]
+  [ "$(grep -c '"\$PY_BIN" -I "\$COPY_GATE" check' "$REAL_SCRIPT")" -eq 1 ]
+}
+
+@test "verdict class: the stated cost - a title the lint reads as an accusation is refused, never excused" {
+  verdict_gate
+  agent_reply 1 "Hi Joel, we are checking your mastering credit on Fraud now."
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"copy_lint:accusation_word"* ]]
+  [ "$(pending_count)" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "verdict class: a gate that cannot run or gives no answer is an error, never an approval" {
+  verdict_gate
+  rm "$INTERCOM_OPS_TEST_COPY_GATE"
+  agent_reply 1 "$REPLY_X"
+  [ "$status" -eq 2 ]; [[ "$output" == "ERROR: "* ]]
+  # A gate that prints an approval for OTHER bytes, exit 0.
+  printf '#!/usr/bin/env python3\nimport json\nprint(json.dumps({"result":"approved","body_sha256":"%s","verdict_id":"ocv-0123456789abcdef","verdict_sha256":"%s"}))\n' \
+    "$(printf 'other' | sha256sum | cut -d' ' -f1)" "$(printf 'v' | sha256sum | cut -d' ' -f1)" > "$INTERCOM_OPS_TEST_COPY_GATE"
+  agent_reply 1 "$REPLY_X"
+  [ "$status" -eq 2 ]
+  # A gate that prints "approved" for these bytes but names no verdict.
+  printf '#!/usr/bin/env python3\nimport json\nprint(json.dumps({"result":"approved","body_sha256":"%s"}))\n' \
+    "$(printf '%s' "$REPLY_X" | sha256sum | cut -d' ' -f1)" > "$INTERCOM_OPS_TEST_COPY_GATE"
+  agent_reply 1 "$REPLY_X"
+  [ "$status" -eq 2 ]
+  # A gate that prints nothing and exits 0.
+  printf 'import sys\nsys.exit(0)\n' > "$INTERCOM_OPS_TEST_COPY_GATE"
+  agent_reply 1 "$REPLY_X"
+  [ "$status" -eq 2 ]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+}
+
+@test "verdict class: an approved reply this conversation already holds from us is not posted a second time" {
+  verdict_gate
+  agent_reply 1 "$REPLY_X"
+  sign_pending approve
+  # The conversation already carries exactly this text, from the pinned admin, an hour ago (stored as HTML).
+  INTERCOM_STUB_PREREAD="$(_conv_with_part comment 5763097 -3600 "<p>$REPLY_X</p>")"; export INTERCOM_STUB_PREREAD
+  agent_reply 1 "$REPLY_X"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"already holds this exact text from us (part 777)"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+  # The same words from the CUSTOMER (quoting us back) are not ours, and do not stop the reply.
+  INTERCOM_STUB_PREREAD="$(_conv_with_part comment 6001 -3600 "<p>$REPLY_X</p>")"; export INTERCOM_STUB_PREREAD
+  agent_reply 1 "$REPLY_X"
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 1 ]
+}
+
+@test "verdict class: a person's approval still posts the same text twice (the bound is this class's only)" {
+  INTERCOM_STUB_PREREAD="$(_conv_with_part comment 5763097 -3600 "<p>your letter</p>")"; export INTERCOM_STUB_PREREAD
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "your letter"
+  [ "$status" -eq 0 ]
+}
+
+@test "verdict class: a person's approval is recorded as before, with no copy_gate field" {
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U0AL36NADEY --body "Hi Johannes."
+  [ "$status" -eq 0 ]
+  f="$(find "$INTERCOM_OPS_TEST_LOG_DIR" -type f -name '*.json')"
+  [ "$(jq -r .agent "$f")" = "operations" ]
+  [ "$(jq -r .approved_by "$f")" = "U0AL36NADEY" ]
+  [ "$(jq -r 'has("copy_gate")' "$f")" = "false" ]
+}
+
+@test "verdict class: an agent still cannot approve itself through --approved-by, and the refusal names the way" {
+  run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by caroline --body "Hi."
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--agent <agent-id> --gate-campaign <campaign>"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "verdict class: the gate is asked above the lock, the pre-read, the audit record and the POST" {
+  gate_line="$(grep -n '"\$PY_BIN" -I "\$COPY_GATE" check' "$REAL_SCRIPT" | head -1 | cut -d: -f1)"
+  lock_line="$(grep -n '^LOCK_FILE=' "$REAL_SCRIPT" | head -1 | cut -d: -f1)"
+  said_line="$(grep -n 'already holds this exact text from us' "$REAL_SCRIPT" | head -1 | cut -d: -f1)"
+  log_file_line="$(grep -n '^  > "\$LOG_FILE"' "$REAL_SCRIPT" | head -1 | cut -d: -f1)"
+  post_line="$(grep -n -- '--data @-' "$REAL_SCRIPT" | head -1 | cut -d: -f1)"
+  [ -n "$gate_line" ] && [ -n "$lock_line" ] && [ -n "$said_line" ] && [ -n "$log_file_line" ] && [ -n "$post_line" ]
+  [ "$(grep -c '"\$PY_BIN" -I "\$COPY_GATE" check' "$REAL_SCRIPT")" -eq 1 ]
+  [ "$gate_line" -lt "$lock_line" ]
+  [ "$lock_line" -lt "$said_line" ]
+  [ "$said_line" -lt "$log_file_line" ]
+  [ "$log_file_line" -lt "$post_line" ]
+  # No `held` after the POST: exit 3 always means nothing was posted.
+  if tail -n +"$post_line" "$REAL_SCRIPT" | grep -qE '^[[:space:]]*held '; then false; fi
+}

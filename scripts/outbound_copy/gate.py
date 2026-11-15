@@ -72,6 +72,12 @@ RUBRIC_FAMILY: dict[str, str] = {
     "gdpr-access": "gdpr",
     # request_comms' erasure lines are the same notices on the same statutory clock
     **{f"request-erasure-{s}": "gdpr" for s in ("received", "verifying", "need_you", "decided", "waiting")},
+    # One reply an agent composed for one support conversation (scripts/intercom-ops-write.sh, the copy-gate
+    # verdict class). The default rubric is written for credit, claim and document notices; a support reply can be
+    # about anything, and its own rules are the ones the default does not carry: never promise a person, never
+    # leave the wait open-ended, end in an outcome or one ask. A family is always enforced (mode_of), which is the
+    # point: in that class the signed approve is the only approval there is.
+    "agent-reply": "support",
 }
 RUBRIC_FAMILY_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SIGNERS_PATH = ROOT / "policies" / "outbound-copy-reviewer.allowed_signers"

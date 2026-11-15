@@ -985,6 +985,11 @@ frame + rubric sha256). Full doc, the sender list and what is deliberately outsi
   again later.", sign-off. No reason, no accusation word; the code lint outranks the model on both.
 - A message family with other duties gets its own rubric file + `RUBRIC_FAMILY` row (chosen by code, never the
   caller); a listed family with no file is held, never reviewed under the default rubric.
+- **A reply no person asked for goes out on the gate's signed approve, never on a person's Slack id**:
+  `scripts/intercom-ops-write.sh reply --agent <id> --gate-campaign agent-reply` asks `check` itself and posts only
+  on `approved` (an `observed` pass is a hold there; exit 3 `HELD` = queued, run it again). The record names the agent
+  and the verdict. `agent-reply` has the `support` rubric. The verdict approves words only: the facts, the right
+  conversation and the one-message-a-day claim stay the caller's. Never pass `--approved-by` for a reply nobody read.
 
 ## Caroline is measured by one reader, and a promise closes only on a sent message
 

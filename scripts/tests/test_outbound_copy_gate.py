@@ -731,6 +731,12 @@ class ModeTests(unittest.TestCase):
         pol = g.mode_policy()
         self.assertEqual(pol["default"], "observe")
         self.assertEqual(g.mode_of("decline", pol), "enforce")
+        # a reply an agent wrote for one conversation has its own rubric family, so it is enforced whatever the
+        # table says: in scripts/intercom-ops-write.sh the signed approve is the only approval that reply has
+        self.assertNotIn("agent-reply", pol["enforce"])
+        self.assertEqual((g.RUBRIC_FAMILY["agent-reply"], g.mode_of("agent-reply", pol)), ("support", "enforce"))
+        self.assertEqual(g.mode_of("agent-reply", {"default": "observe", "enforce": [], "observe": ["agent-reply"]}),
+                         "enforce")
         for campaign in ("uvn-status", "status-team-review", "status-doc-received", "proof-need-ask", "claim-status",
                          "resolve-notify", "overdue-verification-notifier", "merge-outcome-notify"):
             self.assertEqual(g.mode_of(campaign, pol), "observe", campaign)
@@ -931,7 +937,9 @@ PY_SENDERS = (
 WIRED_BY_1891 = ("scripts/resolve-notify.py", "scripts/overdue-verification-notifier.py",
                  "scripts/merge-outcome-notify.py")
 NOT_BEHIND_THIS_GATE = {
-    "scripts/intercom-ops-write.sh": "the reviewed reply wrapper: pinned identity, leak refusal, a named approver per call",
+    "scripts/intercom-ops-write.sh": "the reply wrapper: pinned identity and leak refusal on every call; a reply names a "
+                                     "person who approved it, or asks this gate itself (--agent/--gate-campaign) and "
+                                     "posts only on a signed approve, which its own bats suite proves",
     "scripts/intercom-webhook.js": "Caroline's live reply path (the code output guard + answer bank rule it)",
     "plugins/intercom/src/outbound.ts": "Caroline's live reply path (the code output guard + answer bank rule it)",
     "scripts/intercom-queue-reassign.py": "no customer text: its /reply is message_type note (internal) beside an "
