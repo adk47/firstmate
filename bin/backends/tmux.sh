@@ -26,6 +26,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-agent-proc-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-agent-proc-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -135,14 +137,15 @@ fm_backend_tmux_ensure_task() {  # <session> <window-name> <cwd> -> prints windo
 # agent from it - so a relaunch that would recreate a window must first prove
 # the worktree itself is free: no window of the session sits in <cwd>, and no
 # process with its working directory at or under <cwd> is anything but a plain
-# shell. The process side fails closed: identity is resolved through the shared
+# shell. The process side is bin/fm-agent-proc-lib.sh's table - /proc on Linux,
+# lsof elsewhere - and fails closed: identity is resolved through the shared
 # harness matcher and the gemini argument rule first, and every other
 # non-shell process - including a bare `node` that may be cursor-agent or gemini
 # - is an occupant, because a false "free" launches a duplicate agent. Prints
 # one line per occupant; empty output with status 0 means provably free, and
 # status 1 means the process scan could not be read, so absence is unproven.
 fm_backend_tmux_worktree_occupants() {  # <session> <cwd> -> occupants on stdout
-  local ses=$1 cwd=$2 real rows id name path pid out line comm args argv0
+  local ses=$1 cwd=$2 real rows id name path pid comm args argv0
   [ -n "$ses" ] && [ -n "$cwd" ] || return 1
   [ -d "$cwd" ] || return 1
   real=$(cd "$cwd" && pwd -P) || return 1
@@ -159,39 +162,18 @@ fm_backend_tmux_worktree_occupants() {  # <session> <cwd> -> occupants on stdout
   done <<EOF
 $rows
 EOF
-  command -v lsof >/dev/null 2>&1 || return 1
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
-  pid=
-  while IFS= read -r line; do
-    case "$line" in
-      p*)
-        pid=${line#p}
-        case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-        ;;
-      fcwd) [ -n "$pid" ] || return 1 ;;
-      n*)
-        [ -n "$pid" ] || return 1
-        path=${line#n}
-        case "$path" in
-          "$real"|"$real"/*) ;;
-          *) continue ;;
-        esac
-        [ "$pid" != "$$" ] || continue
-        comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || comm=
-        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
-        argv0=${args%% *}
-        if ! fm_harness_process_matches "$comm" "$args" \
-          && ! fm_gemini_args_are_gemini "$args" \
-          && [ "$(fm_backend_tmux_classify_process_name "$comm" "$argv0")" = shell ]; then
-          continue
-        fi
-        printf 'pid %s (%s) is working in %s\n' "$pid" "$comm" "$path"
-        ;;
-      '') ;;
-      *) return 1 ;;
-    esac
+  rows=$(fm_agent_proc_worktree_rows "$real") || return 1
+  while IFS=$'\t' read -r pid comm argv0 args; do
+    [ -n "$pid" ] || continue
+    [ "$pid" != "$$" ] || continue
+    if ! fm_harness_process_matches "${comm:-$argv0}" "${args:-}" \
+      && ! fm_gemini_args_are_gemini "${args:-}" \
+      && [ "$(fm_backend_tmux_classify_process_name "${comm:-$argv0}" "$argv0")" = shell ]; then
+      continue
+    fi
+    printf 'pid %s (%s) is working in %s\n' "$pid" "${comm:-$argv0}" "$real"
   done <<EOF
-$out
+$rows
 EOF
 }
 

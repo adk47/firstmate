@@ -348,6 +348,19 @@ test_a_tmux_lane_reading_dead_still_relaunches_through_control() {
   pass "a tmux lane reading dead still relaunches through fm-control"
 }
 
+test_a_herdr_lane_whose_pane_is_gone_keeps_its_control_path() {
+  local home now
+  home=$(make_home herdr-pane-gone); fake_tools "$home"
+  worker "$home" w1 missing ship pi herdr
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  assert_eq "$(counter "$home" '^spawn w1 --relaunch')" "0" \
+    "a herdr lane whose pane is gone was routed to fm-spawn, which refuses that backend by construction"
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "1" \
+    "a herdr lane whose pane is gone stopped taking its ordinary control relaunch"
+  pass "a herdr lane reading missing keeps its ordinary control relaunch"
+}
+
 test_a_spawn_preflight_refusal_spends_no_budget_and_retries_once() {
   local home now
   home=$(make_home orca-spawn-refuses); fake_tools "$home"
@@ -1241,6 +1254,7 @@ test_lifecycle_lock_contention_is_retried_not_recorded
 test_an_orca_replacement_names_a_note_it_could_not_deliver
 test_a_tmux_lane_whose_window_is_gone_relaunches_through_spawn
 test_a_tmux_lane_reading_dead_still_relaunches_through_control
+test_a_herdr_lane_whose_pane_is_gone_keeps_its_control_path
 test_a_spawn_preflight_refusal_spends_no_budget_and_retries_once
 test_a_transient_spawn_failure_is_not_a_refusal
 test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn
