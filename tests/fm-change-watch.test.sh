@@ -2363,7 +2363,7 @@ pass "a mapped path prefix scopes its own services and keeps their shared paths 
 # of documentation, tests, and non-deploy CI deploys nothing and says so, while a
 # build or script path still measures the rollout.
 HOME_SS=$(new_world ss)
-mkdir -p "$HOME_SS/config"
+mkdir -p "$HOME_SS/config" "$HOME_SS/sentry"
 printf 'demo-service image:demo-service sentry:demo\n' > "$HOME_SS/config/change-watch-repos"
 printf '[]\n' > "$HOME_SS/sentry/issues-demo.json"
 seed_files "$HOME_SS" 'README.md' 'docs/setup.md' 'tests/smoke.ts' '.github/workflows/lint.yml'

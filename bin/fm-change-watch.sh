@@ -44,17 +44,19 @@
 #           by the segment under the map's path: prefix, and a deployable path
 #           no service owns is shared build input that keeps every Deployment in
 #           scope. A diff whose every touched path is documentation, a test, a
-#           monorepo's script, or non-deploy CI deploys nothing: the watch says
-#           so and completes clean. A repository that also has a Sentry project,
-#           and any workflow the map names, become additional targets of their
-#           own whatever the diff touches, since those reads never touch the
-#           cluster; a Sentry project this home has no token for is not a
-#           target. A PR that touches no deployable service registers nothing
-#           and says so, as does one that only deletes a manifest, one whose
-#           only target could not be read, one whose manifests could not be
-#           read, and one whose cluster image inventory could not be read; each
-#           says which of those it was. Every one of those still writes the merge's durable
-#           row, and one whose surface could not be read records it as
+#           monorepo's script, or non-deploy CI deploys nothing: the watch
+#           completes clean, saying so when the kept targets hold no deploy
+#           workflow run, because a run is still measured for that diff. A
+#           repository that also has a Sentry project, and any workflow the map
+#           names, become additional targets of their own whatever the diff
+#           touches, since those reads never touch the cluster; a Sentry project
+#           this home has no token for is not a target. A PR that touches no
+#           deployable service registers nothing and says so, as does one that
+#           only deletes a manifest, one whose only target could not be read,
+#           one whose manifests could not be read, and one whose cluster image
+#           inventory could not be read; each says which of those it was. Every
+#           one of those still writes the merge's durable row, and one whose
+#           surface could not be read records it as
 #           unmeasurable-with-reason and queues the unmeasurable wake.
 #           Every Kubernetes target records a rollout FINGERPRINT at
 #           registration - its pod images plus its pods' pod-template-hash
