@@ -358,8 +358,9 @@ test_a_transient_spawn_failure_is_not_a_refusal() {
     "a transient spawn failure was treated as a structural refusal"
   assert_eq "$(jq -r '.tasks.w1.strikes | length' "$home/state/.watchdog-worker.json")" "1" \
     "a transient spawn failure was recorded as a completed relaunch"
-  [ -z "$(wakes "$home" | grep 'cannot relaunch w1')" ] \
-    || fail "a transient spawn failure escalated as a refusal: $(wakes "$home")"
+  if wakes "$home" | grep -q 'cannot relaunch w1'; then
+    fail "a transient spawn failure escalated as a refusal: $(wakes "$home")"
+  fi
   pass "a transient spawn failure is retried on the ordinary budget"
 }
 
@@ -374,8 +375,9 @@ test_lifecycle_lock_contention_is_retried_not_recorded() {
   tick "$home" "$((now + 600))" >/dev/null
   assert_eq "$(counter "$home" '^control w1 relaunch')" "2" \
     "a lifecycle lock hold was not retried on the next pass"
-  [ -z "$(wakes "$home" | grep 'cannot relaunch w1')" ] \
-    || fail "a lifecycle lock hold was recorded as a permanent refusal: $(wakes "$home")"
+  if wakes "$home" | grep -q 'cannot relaunch w1'; then
+    fail "a lifecycle lock hold was recorded as a permanent refusal: $(wakes "$home")"
+  fi
   pass "lifecycle lock contention stays retryable instead of becoming a 6h refusal"
 }
 
