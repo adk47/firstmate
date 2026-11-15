@@ -80,7 +80,8 @@ class NeedAsksTest(unittest.TestCase):
         out = []
         for u, rids in self.pending.items():
             for r in rids:
-                out.append([r, str(u), "p1", "t1", f"Song {r}", '[{"name": "Big Star"}]', "{Mixing}", "40", "{}", "{}"])
+                out.append([r, str(u), "p1", "t1", f"Song {r}", '[{"name": "Big Star"}]', "{Mixing}", "40",
+                            json.dumps(getattr(self, "verdicts", {}).get(r, {})), "{}"])
         return out
 
     def build(self):
@@ -960,6 +961,69 @@ class NeedAsksTest(unittest.TestCase):
         self.assertEqual([na.doc_kind(m) for m in ("image/heic", "application/pdf", "text/plain", "")],
                          ["image", "PDF", "document", "document"])
 
+    # --- never asked (owner 2026-11-14) ---
+    # A request held for a cause no document clears is not in this sender's audience (owner 2026-11-14).
+    #
+    # The reading is policy.never_ask, the one every sender uses; these tests pin that THIS sender obeys it where it
+    # builds the list, again on the fresh read at send time, and in the drain's wait list. Measured 2026-11-14: 3,266
+    # requests of this audience carried such a cause (936 fraud, 509 impersonation, 1,821 another band C cause).
+    #
+
+    def asked(self, res):
+        return sorted(a["request_id"] for u in res["users"] for a in u["asks"])
+
+    def test_fraud_impersonation_and_any_other_band_c_cause_are_left_out_of_the_list(self):
+        before = self.asked(self.build())
+        self.assertEqual(before, ["r1", "r2", "r3", "r5", "r9"])            # the fixture's own audience
+        self.verdicts = {"r1": FRAUD, "r3": IMPERSONATION, "r5": HELD_SUBMITTER, "r9": BAND_C}
+        res = self.build()
+        self.assertEqual(self.asked(res), ["r2"])                           # user 1 is still asked about r2 only
+        self.assertEqual([u["user_id"] for u in res["users"]], ["1"])
+        c = res["counts"]
+        self.assertEqual((c["skip_never_asked"], c["skip_never_asked_fraud"], c["skip_never_asked_impersonation"],
+                          c["skip_never_asked_band_c"]), (4, 2, 1, 1))
+        self.assertEqual([w for w in res["waits"] if w["request_id"].lower() in ("r1", "r3", "r5", "r9")], [])
+
+    def test_a_hold_a_document_can_answer_is_still_asked(self):
+        self.verdicts = {r: DOCUMENT_ANSWERS_IT for r in ("r1", "r2", "r3", "r5", "r9")}
+        res = self.build()
+        self.assertEqual(self.asked(res), ["r1", "r2", "r3", "r5", "r9"])
+        self.assertEqual(res["counts"].get("skip_never_asked", 0), 0)
+
+    def test_a_band_c_cause_under_a_hold_a_document_answers_is_left_out(self):
+        self.verdicts = {"r2": {"rule_risk_percent": {"review_big_track_without_trusted_credit": 100,
+                                                      "reject_individual_org_credit": 100}}}
+        self.assertEqual(self.asked(self.build()), ["r1", "r3", "r5", "r9"])
+
+    def test_a_verdict_that_cannot_be_read_is_asked_as_before(self):
+        self.verdicts = {"r1": "not a mapping", "r2": {"rule_risk_percent": "not a mapping"}}
+        self.assertEqual(self.asked(self.build()), ["r1", "r2", "r3", "r5", "r9"])
+
+    def test_a_request_held_after_the_list_was_built_is_not_named_by_the_send(self):
+        self.pending[1] = ["r1"]
+        db = sqlite3.connect(self.proof)          # only document A on file, so its ask is not held by a newer intake
+        db.execute("DELETE FROM proof_intake WHERE user_id=1 AND file_sha256=?", (SHA_B,)); db.commit(); db.close()
+        lst = self.d / "list.json"
+        lst.write_text(json.dumps(self.build()))
+        _rep, gate = self.send_(lst)
+        self.assertEqual([[c["request_id"] for c in p["credits"]] for _a, p in gate.calls], [["r1"]])   # control
+        self.verdicts = {"r1": IMPERSONATION}                             # the hold lands between build and send
+        _rep, gate = self.send_(lst)
+        self.assertEqual(gate.calls, [])
+
+    def test_a_drain_ask_this_run_read_as_held_is_neither_asked_nor_listed_as_waiting(self):
+        self.verdicts = {"r1": FRAUD}
+        d = Path(tempfile.mkdtemp())
+        plan = d / "plan.jsonl"
+        plan.write_text("\n".join(json.dumps(r) for r in (
+            {"request_id": "r1", "rule": "ask", "outcome": "ask", "user_id": 1},
+            {"request_id": "r2", "rule": "ask", "outcome": "ask", "user_id": 1})) + "\n")
+        res = na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying),
+                       query=self.q, from_drain=str(plan))
+        self.assertEqual(self.asked(res), ["r2"])
+        self.assertEqual([w for w in res["waits"] if w["request_id"] == "r1"], [])
+        self.assertEqual(res["counts"]["drain_asks_never_asked"], 1)
+
 
 class BoundAfterLedgerTest(unittest.TestCase):
     """QA #1418: --max-users bounds the users still askable, so a second bounded run reaches the next users."""
@@ -1307,6 +1371,13 @@ class BuildSubcommandBudgetTest(unittest.TestCase):
                            "--check-recipients", "--apply-budget-s", "900"])
         self.assertEqual(rc, 2, "--check-recipients with --mode apply is refused before anything is sent")
         budget.assert_called_once_with(900.0)
+
+
+FRAUD = {"rule_risk_percent": {}, "fraud_hold": {"decision": "hold"}}
+HELD_SUBMITTER = {"rule_risk_percent": {"review_held_submitter": 100}}
+IMPERSONATION = {"rule_risk_percent": {"review_role_credited_to_other_at_trusted_source": 100}}
+BAND_C = {"rule_risk_percent": {"reject_publisher_label_credit": 100}}
+DOCUMENT_ANSWERS_IT = {"rule_risk_percent": {"review_big_track_without_trusted_credit": 100}}
 
 
 class DrainReconciliationTest(NeedAsksTest):

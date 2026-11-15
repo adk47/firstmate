@@ -1315,9 +1315,10 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   (`HARD_HOLD_CAUSES`, `_hold_on_error` included), any band C cause of the table
   (`validation_error` and `_no_signal` included), a velocity cause outside an editing
   burst or with unreadable roles, and a band table that cannot be read
-  (`bands_table_unreadable`). `hold_causes` not read from the snapshot
-  (`hold_cause_unmeasured`), a snapshot with no cause (`hold_cause_not_in_snapshot`) and
-  a cause in no list (`unclassified:<cause>`) hold only beside `validator_hold`; where
+  (`bands_table_unreadable`, which holds claim-proof-ask too, by user).
+  `hold_causes` not read from the snapshot (`hold_cause_unmeasured`), a snapshot with
+  no cause (`hold_cause_not_in_snapshot`) and a cause in no list
+  (`unclassified:<cause>`) hold only beside `validator_hold`; where
   core lists no `validator_hold` those rows are asked. The band list itself is `band_c_rules` +
   `band_c_error_keys` of `credit_trust_bands.json`, read at run time and never copied
   (plus `fraud_hold`), found wherever the verdict records it (`rule_risk_percent`,
@@ -1335,19 +1336,26 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   never reported as waiting on an ask. No tier-2 or person queue for a refused approval,
   the run that meets those refusals is not an error (`held_by_core`, `errors` 0, exit 0),
   and a held row is never an incomplete run: `apply` exits 0 with the held counts printed.
-- **That band C rule covers the refusal route only, not the ladder's own ask rows.**
-  `plan()` keeps the snapshot's hold causes on `approve` rows only
-  (`held = _causes_tuple(causes) if outcome == "approve" else None`), and `asks --plan`
-  emits every ladder `ask` row without consulting `never_asked_cause()`, so a ladder
-  `ask` row carrying a band C cause is still offered to `need_asks.py`. The refused-approve
-  population that rule does classify is the smaller one (2,146 on the ask route of the
-  3,326 approve intents). The exposure, measured from the core replica 2026-11-14 12:46Z:
-  of 101,415 pending requests (8,245 users), 13,157 (1,319 users) carry a non-velocity
-  band C cause or a fraud hold (8,956 publisher/label credit, 1,862 impersonation, 1,566
-  held submitter, 1,244 fraud hold, 414 individual/org credit). That is all pending rows,
-  not the ladder's ask bucket, and how many of them an ask would actually be sent to is
-  not measured. Holding those ladder rows is the next change, already decided by the
-  owner, and is not in this one.
+- **No ask names a request held for a cause no document clears, in ANY sender** (owner
+  2026-11-14: "fraud or impersonation means no ask, ever"). The reading is ONE function,
+  `credit_review/policy.never_ask(verdict, claimed_roles)`; `scale_drain` re-exports it and
+  no sender restates it. Where it is applied: the drain's refusal route (above) and its
+  ladder `ask` rows (`asks --plan` drops them, `held_never_asked`); `uvn_status` for every
+  ask campaign (`NEVER_ASKED` in `NO_ASK`, so uvn-status, gap-ask and uvn-new-rows leave
+  the request out, and it outranks the proof-required override); `need_asks.build` AND its
+  send-time read (`skip_never_asked`); `claim_proof_ask` first notes and reminders, by
+  USER (`uvn_status.never_ever_users`: fraud and impersonation because a claim
+  carries no credit verdict, plus an unreadable band table, which holds everyone; it reads
+  `unverified` requests too, where 2,303 of the 3,443 flagged requests sat on
+  2026-11-14). The answer names ONE cause and fraud, then impersonation, is named before
+  any other on the row: the account hold reads that one class, so a `reject_*` rule that
+  sorts first must never be the one named. A held request is not locked or closed: it is
+  read again each run.
+  Status notes (`status-*`, `claim-status`) are not asks and are unchanged.
+  `doc-result` has no sender in this repo: its 37 messages of 2026-11-11 came from a
+  one-off script on node-8 that reads none of this. A new ask sender calls
+  `policy.never_ask` and gets a test; why this exists: 26 of 480 impersonation-flagged
+  users were sent a verify message 10-14 November, 22 of them by uvn-status.
 - **The pass is small, and an `ask` is not a decision.** Measured on the live snapshot
   2026-11-11: 3,294 approve, 1,324 queued for a human, 856 `already_on_profile`
   (unmatched), 91,229 ask of 96,703. Never describe it as deciding the backlog; the table

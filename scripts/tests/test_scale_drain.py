@@ -34,6 +34,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from credit_review import need_asks as na  # noqa: E402
+from credit_review import policy  # noqa: E402
 from credit_review import scale_drain as sd  # noqa: E402
 
 NOW = datetime(2026, 11, 11, 12, 0, 0, tzinfo=timezone.utc)
@@ -1182,7 +1183,7 @@ class ReplicaSnapshotTests(unittest.TestCase):
 
     def test_a_band_table_that_cannot_be_read_measures_nothing(self):
         verdict = {"rule_risk_percent": {"review_big_track_without_trusted_credit": 40}}
-        kept = sd._BANDS
+        kept = policy._BANDS
         try:
             for broken in ({}, {"band_c_rules": "x", "band_c_error_keys": []},
                            {"band_c_rules": [], "band_c_error_keys": []},
@@ -1197,7 +1198,7 @@ class ReplicaSnapshotTests(unittest.TestCase):
                            {"band_c_rules": ["reject_artist_credit"],
                             "band_c_error_keys": ["_no_signal", {}]}):
                 with self.subTest(broken=broken):
-                    sd._BANDS = broken
+                    policy._BANDS = broken
                     self.assertIsNone(sd.band_c_causes())
                     self.assertIsNone(sd.hold_causes(verdict))
                     self.assertEqual(sd.never_asked_cause((), None), "bands_table_unreadable")
@@ -1206,8 +1207,10 @@ class ReplicaSnapshotTests(unittest.TestCase):
                     for reasons in (["proof_required"], ["proof_required", "validator_hold"]):
                         self.assertEqual(sd.core_refusal_route(
                             reasons, ("reject_publisher_label_credit",), None), "hold")
+                    # and the one reading every sender uses holds too
+                    self.assertEqual(policy.never_ask(verdict, ["Mixing"]), "bands_table_unreadable")
         finally:
-            sd._BANDS = kept
+            policy._BANDS = kept
         self.assertEqual(sd.hold_causes(verdict), ["review_big_track_without_trusted_credit"])
 
     def test_the_fraud_class_and_the_hard_codes_rest_on_the_validator_s_own_record(self):
@@ -1231,13 +1234,15 @@ class ReplicaSnapshotTests(unittest.TestCase):
         self.assertIsNone(sd.hold_causes({**askable, "fraud_hold": {}}))
         self.assertEqual(sd.hold_causes({**askable, "fraud_hold": {"decision": "hold"}}),
                          ["fraud_hold", "review_big_track_without_trusted_credit"])
-    def test_the_causes_ride_the_plan_on_approve_rows_only_and_survive_a_round_trip(self):
+    def test_the_causes_ride_the_plan_on_approve_and_ask_rows_and_survive_a_round_trip(self):
         precedent = [{"precedent_key": "k", "outcome": "approve", "request_id": rid(9999)}]
         db = snapshot([row(1, precedent_key="k", hold_causes=["review_role_cardinality", "class_c"]),
                        row(2, precedent_key="k", hold_causes=[]),
                        row(3, precedent_key="k"),
                        row(4, precedent_key="k", hold_causes="[1, 2]"),
-                       row(5, hold_causes=["review_held_submitter"])],
+                       row(5, hold_causes=["review_held_submitter"]),
+                       row(6, hold_causes=["review_held_submitter"], asked_at="2026-09-01T00:00:00Z",
+                           expires_at="2026-10-01T00:00:00Z")],
                       precedent=precedent)
         decisions = sd.plan(db, now=NOW)
         self.assertEqual([(d.outcome, d.hold_causes) for d in decisions], [
@@ -1245,7 +1250,10 @@ class ReplicaSnapshotTests(unittest.TestCase):
             ("approve", ()),
             ("approve", None),
             ("approve", None),      # a malformed value is not measured
-            ("ask", None),          # only an approve can be refused by core
+            # an ask row carries them too: the ask path must not ask about a cause no
+            # document clears (split_asks)
+            ("ask", ("review_held_submitter",)),
+            ("queue_tier2", None),  # a row that ends in no message carries none
         ])
         again = sd.parse_plan(sd.serialize(decisions))
         self.assertEqual([d.hold_causes for d in again], [d.hold_causes for d in decisions])
@@ -1254,8 +1262,8 @@ class ReplicaSnapshotTests(unittest.TestCase):
         old = [json.dumps({k: v for k, v in d.as_row().items()
                            if k not in ("hold_causes", "editing_burst")})
                for d in decisions]
-        self.assertEqual([d.hold_causes for d in sd.parse_plan("\n".join(old))], [None] * 5)
-        self.assertEqual([d.editing_burst for d in sd.parse_plan("\n".join(old))], [None] * 5)
+        self.assertEqual([d.hold_causes for d in sd.parse_plan("\n".join(old))], [None] * 6)
+        self.assertEqual([d.editing_burst for d in sd.parse_plan("\n".join(old))], [None] * 6)
 
     def test_a_snapshot_file_made_before_the_causes_gains_the_column(self):
         with tempfile.TemporaryDirectory() as td:
@@ -4458,6 +4466,57 @@ class WriteFailureTests(unittest.TestCase):
         self.assertEqual((again["refused_to_ask"], again["refused_held"], again["attempted"]),
                          (2, 0, 0))
 
+    def test_a_ladder_ask_row_held_for_a_cause_no_document_clears_is_not_offered_to_the_ask_path(self):
+        """The ladder's own ask bucket is the larger channel (91,229 of 96,703 rows): a
+        request the validator holds for fraud, impersonation or another band C cause must
+        not reach the need-ask audience just because no ladder rule matched it."""
+        table = json.loads(policy.BANDS_PATH.read_text())
+        velocity = sorted(sd.velocity_hold_causes())[0]
+        rows = [row(1),                                                         # no verdict read: asked
+                row(2, hold_causes=[]),                                         # holds nothing: asked
+                row(3, hold_causes=["review_big_track_without_trusted_credit"]),  # a document answers it
+                row(4, hold_causes=["fraud_hold"]),
+                row(5, hold_causes=["review_role_credited_to_other_at_trusted_source"]),
+                row(6, hold_causes=["reject_publisher_label_credit"]),
+                row(7, hold_causes=["review_big_track_without_trusted_credit", "validation_error"]),
+                row(8, hold_causes=[velocity], claimed_roles=["Mixing"]),
+                row(9, hold_causes=[velocity], claimed_roles=[table["high_risk_roles"]["catalog_children"][0]])]
+        decisions = sd.plan(snapshot(rows), now=NOW)
+        self.assertEqual({d.outcome for d in decisions}, {"ask"})
+        offered, held = sd.split_asks(decisions)
+        self.assertEqual([d.request_id for d in offered], [rid(1), rid(2), rid(3), rid(9)])
+        self.assertEqual([(d.request_id, why) for d, why in held], [
+            (rid(4), "fraud:fraud_hold"),
+            (rid(5), "impersonation:review_role_credited_to_other_at_trusted_source"),
+            (rid(6), "band_c:reject_publisher_label_credit"),
+            (rid(7), "unmeasured:validation_error"),
+            (rid(8), f"band_c_velocity:{velocity}")])
+        plan = self.dir / "plan.jsonl"
+        plan.write_bytes(sd.serialize(decisions))
+        audience = self.dir / "asks.jsonl"
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = sd._main(["asks", "--plan", str(plan), "--ledger",
+                           str(self.dir / "ledger.sqlite"), "--out", str(audience)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(na.drain_asks(str(audience)),
+                         {(1001, rid(1)), (1002, rid(2)), (1003, rid(3)), (1009, rid(9))})
+        said = json.loads(err.getvalue().strip().splitlines()[-1])
+        self.assertEqual((said["held_never_asked"], said["held_never_asked_users"]), (5, 5))
+        self.assertEqual(said["held_by_class"],
+                         {"band_c": 1, "band_c_velocity": 1, "fraud": 1, "impersonation": 1, "unmeasured": 1})
+
+    def test_a_plan_written_before_ask_rows_carried_causes_offers_them_as_before(self):
+        """An old plan names no cause on an ask row: unmeasured is asked, as it always
+        was, so the deploy does not silently empty the audience of a plan in flight."""
+        decisions = sd.plan(snapshot([row(1, hold_causes=["fraud_hold"])]), now=NOW)
+        old = [json.loads(line) for line in sd.serialize(decisions).splitlines()]
+        for r in old:
+            r.pop("hold_causes", None), r.pop("editing_burst", None)
+        again = sd.parse_plan("\n".join(json.dumps(r) for r in old).encode() + b"\n")
+        offered, held = sd.split_asks(again)
+        self.assertEqual(([d.request_id for d in offered], held), ([rid(1)], []))
+
     def test_a_validator_hold_stays_held_and_is_not_asked(self):
         sd.apply(approvals(1), self.db, shards=1, write_pool=1,
                  writer=self._row_refused("validator_hold", "proof_required"))
@@ -4567,6 +4626,24 @@ class WriteFailureTests(unittest.TestCase):
                     self.assertEqual(got, ("validator_hold", "refused_by_core:validator_hold",
                                            "hold", f"{kind}:{cause}"))
                     self.assertEqual(sd.refused_asks(self.db), [])
+
+    def test_fraud_then_impersonation_is_the_cause_named_on_a_row_with_several(self):
+        """A row can carry several never-asked causes and one is named. A sender that holds
+        an account reads the class of that one, so it is fraud, then impersonation, before
+        any cause whose name merely sorts first."""
+        impersonation, submitter = "review_role_credited_to_other_at_trusted_source", "review_held_submitter"
+        for causes, note in (
+                (("reject_publisher_label_credit", impersonation), f"impersonation:{impersonation}"),
+                (("reject_publisher_label_credit", submitter), f"fraud:{submitter}"),
+                (("review_duplicate_of_approved_credit", impersonation), f"impersonation:{impersonation}"),
+                (("reject_artist_credit", impersonation, submitter), f"fraud:{submitter}"),
+                (("reject_artist_credit", "reject_publisher_label_credit"), "band_c:reject_artist_credit")):
+            with self.subTest(causes=causes):
+                self.assertEqual(sd.never_asked_cause(causes), note)
+                self.assertEqual(sd.never_asked_cause(tuple(reversed(causes))), note)
+                self.setUp()
+                got = self._held_with(causes, "proof_required", "validator_hold")
+                self.assertEqual(got[2:], ("hold", note))
 
     def test_a_hold_whose_cause_was_not_measured_or_not_classified_stays_held(self):
         """Unmeasured is not an ask: no cause on the plan row, a hold core reports that the

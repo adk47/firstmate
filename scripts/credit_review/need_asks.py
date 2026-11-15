@@ -422,8 +422,20 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
     users: list[dict[str, Any]] = []
     waits: list[dict[str, Any]] = []
     t_now = now or datetime.now(timezone.utc)
+    never: set[tuple[int, str]] = set()         # held for a cause no document clears: no ask, and no wait row
     for uid, rows in cands.items():
-        live = {r["request_id"].lower() for r in pend.get(uid, []) if not r["_incomplete"]}
+        # A request held for a cause no document clears (uvn_status.never_ask_of: a fraud hold, impersonation,
+        # any other band C cause) is never named by an ask, whatever its document reads (owner 2026-11-14).
+        for r in pend.get(uid, []):
+            if r["_no_ask"] == uvn_status.NEVER_ASKED:
+                never.add((uid, r["request_id"].lower()))
+        held_here = {r["request_id"].lower() for r in rows} & {rid for u, rid in never if u == uid}
+        for rid in sorted(held_here):
+            why = next(r["_never_ask"] for r in pend[uid] if r["request_id"].lower() == rid)
+            counts["skip_never_asked"] += 1
+            counts[f"skip_never_asked_{why.split(':', 1)[0]}"] += 1
+        live = {r["request_id"].lower() for r in pend.get(uid, [])
+                if not r["_incomplete"] and r["_no_ask"] != uvn_status.NEVER_ASKED}
         rows = sorted((r for r in rows if r["request_id"] in live), key=lambda r: r["doc_received_at"])
         is_paid = uid in (tray_paid if tray_paid is not None else paying)
         # fable-copy-1030-r5/l2 (1) / p1 552: a document older than STALE_FILING_DAYS is NOT asked about by the automated
@@ -450,7 +462,11 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
         # second one: two rows for one request read as two outstanding asks, and the
         # operator cannot tell which is the live one.
         already_waiting = {(int(w["user_id"]), str(w["request_id"]).lower()) for w in waits}
-        for uid, rid in sorted(asked - covered - already_waiting):
+        # A request this run read as held is not listed as waiting on a document either. Only the users this run
+        # already read are checked: the drain's own `asks` drops held rows from its audience (scale_drain.ask_hold),
+        # and a second replica read of every drain user here would be a new load on the send path.
+        counts["drain_asks_never_asked"] = len((asked - covered - already_waiting) & never)
+        for uid, rid in sorted(asked - covered - already_waiting - never):
             if rid in told:
                 counts["drain_ask_told_approved_elsewhere"] += 1      # told the line: not a wait row either
                 continue
@@ -587,7 +603,9 @@ def payloads(users: list[dict[str, Any]], query: uvn_status.Query, asked: set[st
         if not acct or not acct.get("email"):
             _filtered(filtered_out, uid, "no_deliverable_account")
             continue
-        rows = {r["request_id"].lower(): r for r in pend.get(uid, []) if not r["_incomplete"]}
+        # the same hold as build(), on this fresh read: a request held since the list was built is not named
+        rows = {r["request_id"].lower(): r for r in pend.get(uid, [])
+                if not r["_incomplete"] and r["_no_ask"] != uvn_status.NEVER_ASKED}
         n_out, n_held = len(out), len(held)
         for need in NEED_ORDER:
             cand = [a for a in u["asks"] if a["need"] == need and a["request_id"].lower() in rows

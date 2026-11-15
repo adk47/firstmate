@@ -301,6 +301,7 @@ class UvnReport(verify_notify.Report):
     recheck_after: str = ""
     approval_path: int = 0
     already_on_profile: int = 0
+    never_asked: int = 0               # requests held for a cause no document clears (never_ask_of): not asked about
     low_risk_asked: int = 0
     outcome_unknown: int = 0
     incomplete: int = 0
@@ -431,7 +432,9 @@ def accounts_of(user_ids: list[int], query: Query = trino) -> dict[int, dict[str
 
 
 APPROVAL_PATH_MAX_RISK = 30
-NO_ASK = ("already_on_profile", "approval_path")
+#: A request held for a cause no document clears (never_ask_of): never asked about, by any ask campaign.
+NEVER_ASKED = "never_asked"
+NO_ASK = ("already_on_profile", "approval_path", NEVER_ASKED)
 BAND_HINT_ONLY = ["validator_band_hint"]
 POPULARITY_REASONS = ("popularity_unknown", "big_track", "popularity_unattributable")
 
@@ -539,7 +542,8 @@ def uvn_requests_sql(chunk: list[int], statuses: tuple[str, ...] = PENDING_STATU
 def uvn_requests(user_ids: list[int], query: Query = trino,
                  statuses: tuple[str, ...] = PENDING_STATUSES[CAMPAIGN]) -> dict[int, list[dict[str, Any]]]:
     """Requests in `statuses` (default: still UVN) by user id, most popular first, from the core replica.
-    Each carries `_no_ask` (its ask_class) and `_incomplete` (_row_incomplete): True when the gate would
+    Each carries `_no_ask` (its ask_class, or NEVER_ASKED with the cause in `_never_ask`) and `_incomplete`
+    (_row_incomplete): True when the gate would
     refuse the row (a blank title, artist or role, a field over the gate's length caps, or a malformed
     profile or track id). Such a row is left out of the note, never shown; a user with nothing else
     to show is held and re-checked next run."""
@@ -563,12 +567,39 @@ def uvn_requests(user_ids: list[int], query: Query = trino,
                 "_pop": int(pop) if str(pop).isdigit() else -1,
                 "_created": str(extra[2]) if len(extra) > 2 and extra[2] else "",
                 "_no_ask": _no_ask_of(credits, pop, *(list(extra) + [None, None])[:2]),
+                "_never_ask": never_ask_of(credits, extra[0] if extra else None),
                 "_proof_required": _proof_required(*(list(extra) + [None, None])[:2])})
     for rows in reqs.values():
         rows.sort(key=lambda r: (-r["_pop"], r["track_title"].casefold()))  # most popular first
         for r in rows:
             r.pop("_pop", None)
     return reqs
+
+
+#: The undecided statuses a hold on the ACCOUNT is read from (never_ever_users).
+NEVER_EVER_STATUSES = ("user_verification_needed", "unverified")
+
+
+def never_ever_users(user_ids: list[int], query: Query = trino) -> dict[int, str]:
+    """Users with a pending credit request under a fraud hold, impersonation or an unreadable band table, as
+    {user id: `<class>:<cause>`}.
+
+    For a sender whose message names no credit request (claim-proof-ask names a claim): "fraud or impersonation
+    means no ask, ever" (owner 2026-11-14) is then a fact about the account. The reading is policy.never_ask on
+    each pending request's stored verdict, the same one every other audience builder uses; only the classes of
+    policy.NEVER_EVER_HOLD_CLASSES count here, because any other band C cause is about one credit and says nothing
+    about a claim, while a band table that cannot be read holds everyone (owner 2026-11-14 18:35Z). Every undecided
+    request counts (NEVER_EVER_STATUSES), not only the ones an ask may name: the hold is on the account. A user with
+    no undecided request is not held. The replica read is uvn_requests', so an unreadable replica raises and the
+    caller sends nothing."""
+    held: dict[int, str] = {}
+    for uid, rows in uvn_requests(user_ids, query, NEVER_EVER_STATUSES).items():
+        for r in rows:
+            why = r.get("_never_ask") or ""
+            if policy.never_ask_class(why) in policy.NEVER_EVER_HOLD_CLASSES:
+                held[uid] = why
+                break
+    return held
 
 
 def asks_proof_on_file(proof_path: str | None, *, now: datetime | None = None,
@@ -648,11 +679,30 @@ def gmail_held(uid: Any, paid: bool) -> dict[str, Any]:
             "due_at": due if isinstance(due, str) and due else None, "paid": bool(paid)}
 
 
+def never_ask_of(roles: str, vd_raw: Any) -> str:
+    """Why no ask may name this request, as `<class>:<cause>`, or "" when one may (owner 2026-11-14).
+
+    The rule is policy.never_ask, the one reading every audience builder and the drain share; this only hands it
+    the row's stored verdict and claimed roles. A verdict that cannot be read names no cause and is asked as
+    before; a bands table that cannot be read holds every row."""
+    try:
+        vd = _json(vd_raw)
+    except ValueError:
+        vd = None
+    return policy.never_ask(vd, [r.strip() for r in (roles or "").split(",") if r.strip()]) or ""
+
+
 def _no_ask_of(roles: str, pop: Any, vd_raw: Any, meta_raw: Any) -> str:
     """The row's no-ask class - except that core's EXPLICIT proof_required verdict (QA #1565) overrides the approval-path
     exclusion: a row core says needs proof is owed and asked, whatever the low-risk shortcut would have said.
-    already_on_profile (the credit is already shown) is a different fact and stays."""
+    already_on_profile (the credit is already shown) is a different fact and stays. A cause no document clears
+    (never_ask_of) outranks both the approval path and that override: core asking for proof does not make a fraud
+    hold answerable."""
     cls = _row_class(roles, pop, vd_raw, meta_raw)
+    if cls == "already_on_profile":
+        return cls
+    if never_ask_of(roles, vd_raw):
+        return NEVER_ASKED
     return "" if cls == "approval_path" and _proof_required(vd_raw, meta_raw) else cls
 
 
@@ -2174,6 +2224,8 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
                       "popularity 1-59, no proof needed)", report.approval_path),
                      ("request(s) asked although low risk (server needs proof)", report.low_risk_asked),
                      ("request(s) not asked about: already on the profile (duplicate)", report.already_on_profile),
+                     ("request(s) not asked about: held for a cause no document clears (fraud hold, "
+                      "impersonation, or another band C cause)", report.never_asked),
                      ("held by the fraud lens (watchlist, velocity above the band, or 10+ big-track "
                       "single-signal rows; never messaged, not closed)", report.fraud_held),
                      ("held from this status note: big-track single-signal rows, so the uvn-status document "

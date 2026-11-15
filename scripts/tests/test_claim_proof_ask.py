@@ -68,10 +68,21 @@ class LedgerGate(FakeGate):
         return res
 
 
-def replica(states: dict[int, tuple[str, int]], users: dict[int, str] | None = None):
-    """Trino rows as strings: claiming(id, status, userid) and users(id, email, firstname, pro, auth0).
+def request_rows(verdicts: dict[int, dict] | None) -> list[list[str]]:
+    """Trino rows of the pending credit requests read (uvn_status.uvn_requests_sql): one request per user, whose
+    stored verdict is the given mapping."""
+    return [[f"req-{u}", str(u), "p1", "t1", "Song", '[{"name": "Big Star"}]', "{Mixing}", "40", json.dumps(vd), "{}"]
+            for u, vd in (verdicts or {}).items()]
+
+
+def replica(states: dict[int, tuple[str, int]], users: dict[int, str] | None = None,
+            verdicts: dict[int, dict] | None = None):
+    """Trino rows as strings: claiming(id, status, userid), users(id, email, firstname, pro, auth0) and the pending
+    credit requests of the users in `verdicts` (user id -> the validator's stored verdict).
     q.user_reads counts the account lookups."""
     def q(sql):
+        if "public.credit_requests" in sql:
+            return request_rows(verdicts)
         if "public.claiming" in sql:
             return [[str(c), s, str(u)] for c, (s, u) in states.items()]
         q.user_reads += 1
@@ -157,6 +168,8 @@ class ClaimProofAskTests(unittest.TestCase):
         accounts = {7: ("", ""), 8: ("u8@x.com", "")}       # 7 has no email; 8 has an email but no professional id
 
         def q(sql):
+            if "public.credit_requests" in sql:
+                return []
             if "public.claiming" in sql:
                 return [[str(c), s, str(u)] for c, (s, u) in states.items()]
             return [[str(u), e, "Jane", pro, ""] for u, (e, pro) in accounts.items()]
@@ -420,6 +433,101 @@ class ClaimProofAskTests(unittest.TestCase):
         db = verify_ledger.connect(self.ledger)
         self.assertFalse(verify_ledger.asked_within(db, user_key="a@x.com", day="2026-10-24", user_id="7"))
 
+    # --- never asked (owner 2026-11-14) ---
+    # A claim carries no credit verdict of its own, so this sender holds by USER: a claimant with a pending credit
+    # request under a fraud hold or impersonation gets no claim ask and no reminder (owner 2026-11-14). The reading
+    # is policy.never_ask through uvn_status.never_ever_users, the one every sender uses.
+
+    FRAUD = {"rule_risk_percent": {}, "fraud_hold": {"decision": "hold"}}
+    HELD_SUBMITTER = {"rule_risk_percent": {"review_held_submitter": 100}}
+    IMPERSONATION = {"rule_risk_percent": {"review_role_credited_to_other_at_trusted_source": 100}}
+    OTHER_BAND_C = {"rule_risk_percent": {"reject_publisher_label_credit": 100}}
+    DOCUMENT_ANSWERS_IT = {"rule_risk_percent": {"review_big_track_without_trusted_credit": 100}}
+    USERS = (7, 8, 9, 10, 11, 12)
+
+    def test_a_claimant_under_a_fraud_hold_or_impersonation_gets_no_first_note(self):
+        q = replica({c: ("pending", u) for c, u in enumerate(self.USERS, 1)}, {u: f"u{u}@x.com" for u in self.USERS},
+                    {7: self.FRAUD, 8: self.HELD_SUBMITTER, 9: self.IMPERSONATION,
+                     10: self.OTHER_BAND_C, 11: self.DOCUMENT_ANSWERS_IT})
+        rep, gate = self.go(self.lst([claim(c, u) for c, u in enumerate(self.USERS, 1)]), q)
+        # another band C cause is about that one credit, not the account: the claim is still asked
+        self.assertEqual(sorted(p["user"]["id"] for _, p in gate.calls), ["10", "11", "12"])
+        self.assertEqual(rep.never_asked, 3)
+        self.assertIn("held: the user's credit request is under fraud, impersonation or an unreadable band table "
+                      "(never asked)", claim_proof_ask.render(rep, "apply", "paid"))
+
+    def test_another_cause_on_the_same_request_does_not_hide_the_account_hold(self):
+        """Impersonation or a held submitter beside another band C cause on ONE request still holds the claimant,
+        for the first note and the reminder: the reject rule's name sorts first and used to be the only one read."""
+        both = {"rule_risk_percent": {**self.OTHER_BAND_C["rule_risk_percent"], **self.IMPERSONATION["rule_risk_percent"]}}
+        submitter = {"rule_risk_percent": {**self.OTHER_BAND_C["rule_risk_percent"],
+                                           **self.HELD_SUBMITTER["rule_risk_percent"]}}
+        q = replica({1: ("pending", 7), 2: ("pending", 8), 3: ("pending", 10)},
+                    {7: "u7@x.com", 8: "u8@x.com", 10: "u10@x.com"}, {7: both, 8: submitter, 10: self.OTHER_BAND_C})
+        claims = [claim(1, 7), claim(2, 8), claim(3, 10)]
+        rep, gate = self.go(self.lst(claims), q)
+        self.assertEqual(([p["user"]["id"] for _, p in gate.calls], rep.never_asked), (["10"], 2))
+        for c, u in ((1, 7), (2, 8), (3, 10)):
+            self._sent_note(c, u, f"u{u}@x.com", "2026-10-17")
+        rep, gate = self.go(self.lst(claims), q, reminders=True)
+        self.assertEqual(([p["credits"][0]["request_id"] for _, p in gate.calls], rep.never_asked), (["claim-3"], 2))
+
+    def test_the_hold_is_one_count_per_user_and_takes_no_cap_slot(self):
+        q = replica({1: ("pending", 7), 2: ("pending", 7), 3: ("pending", 8)}, {7: "u7@x.com", 8: "u8@x.com"},
+                    {7: self.IMPERSONATION})
+        rep, gate = self.go(self.lst([claim(1, 7), claim(2, 7), claim(3, 8)]), q, max_users=1)
+        self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["8"])       # the one slot went to user 8
+        self.assertEqual((rep.never_asked, rep.over_daily_max), (1, 0))
+
+    def test_no_reminder_goes_to_a_claimant_held_since_the_first_note(self):
+        self._sent_note(1, 7, "u7@x.com", "2026-10-17")
+        self._sent_note(2, 8, "u8@x.com", "2026-10-17")
+        q = replica({1: ("pending", 7), 2: ("pending", 8)}, {7: "u7@x.com", 8: "u8@x.com"}, {7: self.FRAUD})
+        rep, gate = self.go(self.lst([claim(1, 7), claim(2, 8)]), q, reminders=True)
+        self.assertEqual([p["credits"][0]["request_id"] for _, p in gate.calls], ["claim-2"])
+        self.assertEqual(rep.never_asked, 1)
+        # held, not closed: the reminder is still due if the hold lifts
+        db = verify_ledger.connect(self.ledger)
+        self.assertEqual(verify_ledger.reminder_state(db, parent_message_id="901", kind="reminder-7",
+                                                      day="2026-10-24")["result"], "due")
+
+    def test_an_unreadable_band_table_holds_every_claimant_both_asks(self):
+        """Owner 2026-11-14 18:35Z: a bands table nobody can read holds everyone here too, so neither the first
+        note nor the reminder goes out while it is unreadable - held, not closed. A claimant with no undecided
+        credit request is still asked."""
+        from credit_review import policy
+        q = replica({1: ("pending", 7), 2: ("pending", 8)}, {7: "u7@x.com", 8: "u8@x.com"},
+                    {7: self.DOCUMENT_ANSWERS_IT, 8: self.FRAUD})
+        plain = replica({3: ("pending", 12)}, {12: "u12@x.com"})
+        kept = policy._BANDS
+        try:
+            policy._BANDS = {}
+            rep, gate = self.go(self.lst([claim(1, 7), claim(2, 8)]), q)
+            self.assertEqual((gate.calls, rep.never_asked), ([], 2))
+            rep, gate = self.go(self.lst([claim(3, 12)]), plain)
+            self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["12"])   # nothing undecided: still asked
+            self._sent_note(1, 7, "u7@x.com", "2026-10-17")
+            rep, gate = self.go(self.lst([claim(1, 7), claim(2, 8)]), q, reminders=True)
+            self.assertEqual((gate.calls, rep.never_asked), ([], 1))
+        finally:
+            policy._BANDS = kept
+        # held, not closed: the reminder is still due once the table can be read again
+        db = verify_ledger.connect(self.ledger)
+        self.assertEqual(verify_ledger.reminder_state(db, parent_message_id="901", kind="reminder-7",
+                                                      day="2026-10-24")["result"], "due")
+        db.close()
+
+    def test_a_requests_read_that_fails_sends_nothing(self):
+        inner = replica({1: ("pending", 7)}, {7: "u7@x.com"})
+
+        def q(sql):
+            if "public.credit_requests" in sql:
+                raise RuntimeError("replica down")
+            return inner(sql)
+        gate = FakeGate()
+        with self.assertRaises(RuntimeError):
+            self.go(self.lst([claim(1, 7)]), q, gate=gate)
+        self.assertEqual(gate.calls, [])
 
 
 class ClaimStatusTests(unittest.TestCase):
@@ -448,6 +556,8 @@ class ClaimStatusTests(unittest.TestCase):
         accounts = {7: ("", "")}
 
         def q(sql):
+            if "public.credit_requests" in sql:
+                return []
             if "public.claiming" in sql:
                 return [[str(c), s, str(u)] for c, (s, u) in states.items()]
             return [[str(u), e, "Jane", pro, ""] for u, (e, pro) in accounts.items()]

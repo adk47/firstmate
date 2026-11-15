@@ -574,15 +574,14 @@ Five bounds follow from that record:
   read.
 - **On the refusal route, a band C cause is never asked, alone or under a hold that would
   be, and with or without core's `validator_hold`** (`never_asked_cause()`; review of
-  #1976, 2026-11-14). This rule applies to an approve that core REFUSED
-  (`core_refusal_route` / `refused_asks`); it does not apply to the ladder's own ask rows
-  (see the scope note below).
+  #1976, 2026-11-14). The same reading holds the ladder's own ask rows and every sender's
+  audience (see "No ask names a held request" below).
   Band C is the validator's "held for a reason the claimant cannot answer", so an ask
   there is one no document clears. Core answers `validator_hold` only for its own
   reading, so a row whose only hold is a `reject_*` rule is refused `proof_required`
   with no `validator_hold` at all, and it is held all the same. The list is the band
   table's, never a copy in this file: a rule added to `band_c_rules` holds with no change
-  here, and a table that cannot be read holds every refused row
+  here, and a table that cannot be read holds every refused row and every ask audience
   (`bands_table_unreadable`). An entry that is not a rule name (null, a number, an empty
   string) makes the whole table unreadable, never a shorter list. `HARD_HOLD_CAUSES` only names the class a few of them are
   recorded under. `core_refusals.hold_note` says which cause held the row:
@@ -640,19 +639,57 @@ Five bounds follow from that record:
   In all, 2,146 on the ask route (343 users) and 628 held (163 users). None of the 112 has
   a band C cause beneath its askable hold. Of the 112, 52 (17 users) have a document with
   a sendable need and 60 (20 users) have none; 75 (24 users) have never been sent any ask.
-- **The band C rule covers the refusal route only, not the ladder's own ask rows.**
-  `plan()` keeps the snapshot's hold causes on `approve` rows only
-  (`held = _causes_tuple(causes) if outcome == "approve" else None`), and `asks --plan`
-  emits every ladder `ask` row without consulting `never_asked_cause()`. A ladder `ask`
-  row whose stored verdict carries a band C cause therefore still reaches
-  `need_asks.py build --from-drain`, which is the population measured at 91,229 ask rows
-  of 96,703 - the larger channel, not this one. Exposure, measured from the core replica
-  2026-11-14 12:46Z: of 101,415 pending requests (8,245 users), 13,157 (1,319 users)
-  carry a non-velocity band C cause or a fraud hold (8,956 publisher/label credit, 1,862
-  impersonation, 1,566 held submitter, 1,244 fraud hold, 414 individual/org credit). That
-  is all pending rows, not the ladder's ask bucket, and how many of them an ask would
-  actually be sent to is not measured. Holding those ladder rows is the next change,
-  already decided by the owner, and is not in this one.
+- **No ask names a held request, in the ladder or in any sender** (owner 2026-11-14:
+  "fraud or impersonation means no ask, ever"; other band C causes are asked only where an
+  ask can clear them, and the bands table says none can). The reading is one function,
+  `policy.never_ask(verdict, claimed_roles)` in `scripts/credit_review/policy.py`, which
+  also owns `hold_causes`, `never_asked_cause`, the cause classes and the bands read;
+  `scale_drain` imports them. Where it is applied:
+
+  | Audience | How | Counter |
+  |---|---|---|
+  | drain, refused approve | `core_refusal_route` (above) | `held_by_core`, `hold_note` |
+  | drain, ladder `ask` row | `plan()` keeps the causes on `ask` rows too; `asks --plan` drops a held row (`split_asks`) | `held_never_asked`, `held_by_class` |
+  | `uvn_status` (uvn-status, gap-ask, uvn-new-rows) | the request is `NEVER_ASKED`, one of `NO_ASK`; it outranks the approval path and the proof-required override | `never_asked` |
+  | `need_asks.build` and its send-time read | a held request is left out of the list, the drain wait list and the payload | `skip_never_asked`, `skip_never_asked_<class>`, `drain_asks_never_asked` |
+  | `claim_proof_ask`, first note and reminder | by USER: any undecided request of the claimant (`user_verification_needed` or `unverified`) under fraud or impersonation, or while the band table cannot be read (`uvn_status.never_ever_users`, classes `policy.NEVER_EVER_HOLD_CLASSES`) | `never_asked` |
+
+  A request can carry several causes and the answer names one: fraud first, then
+  impersonation, then the others in name order. The account hold reads the class of that
+  one answer, so the order is the rule, not a display choice: named by name order alone,
+  an impersonation finding beside `reject_publisher_label_credit` read as `band_c` and the
+  claimant was not held.
+
+  A held request is not locked, closed or tagged: it is read again on every run, so a
+  hold that lifts is asked then. A verdict nobody can read names no cause and is asked as
+  before; a bands table nobody can read holds every request. A plan written before ask
+  rows carried causes offers its ask rows as before, so build a new snapshot and plan
+  after this deploys. Not changed: status notes (`status-*`, `claim-status`) are not asks
+  and still name the request; the claim sender holds on fraud and impersonation only,
+  because another band C cause is about one credit and says nothing about a claim, and,
+  like every other sender, it holds every claimant while the bands table cannot be read.
+  A claimant with no undecided credit request is still asked.
+  `doc-result` is not a sender in this repo: the 37 `doc-result-1` messages of 2026-11-11
+  came from `/root/doc_result.py` on node-8, a one-off that posts to Intercom directly
+  with no send gate and no copy gate, on no timer. It reads none of this; if it is run
+  again it must go through a repo sender first.
+  Why: read from the verify ledger 2026-11-14 12:57Z, 26 of the 480 users with an
+  impersonation-flagged pending request were sent a verify message between 10 and 14
+  November (22 by uvn-status, 3 by that one-off, 1 by proof-need-ask); 8 of the 23 asks
+  named a flagged request. None of the 22 fraud-flagged users was sent one. Exposure
+  measured from the core replica 12:46Z: of 101,415 pending requests (8,245 users), 13,157
+  (1,319 users) carry a non-velocity band C cause or a fraud hold, and 3,266 of those were
+  in that day's `need_asks` audience.
+  Projected with this code against production, read-only, 2026-11-14 14:16Z and 14:33Z
+  (nothing was sent, and it is not a measurement of a deployed run): `need_asks.build`
+  named none of the 3,443 fraud- or impersonation-flagged undecided requests (1,566 and
+  1,877; 500 users) and listed none as a wait, leaving 8,136 held requests out
+  (`skip_never_asked`: 4,229 velocity, 2,155 other band C, 1,058 fraud, 584 impersonation,
+  76 already held, 33 unmeasured, 1 legal); the uvn-status read marked every flagged
+  request it saw `never_asked`; and `never_ever_users` held 500 of the 500 flagged users.
+  2,303 of those 3,443 requests are `unverified`, not `user_verification_needed`, which
+  is why the account hold reads both statuses: read from `user_verification_needed` alone
+  it held 242 of the 500.
 - **`--max-writes N`** is the most API writes one run may start. This is the bounded
   batch: `--max-writes 25 --report batch.jsonl` gives 25 rows with request, user and result.
 - **The breaker** stops the run after 10 failed writes in a row with no success between

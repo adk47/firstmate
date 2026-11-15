@@ -526,6 +526,118 @@ class UvnStatusTests(unittest.TestCase):
         self.assertEqual([[c["request_id"] for c in p["credits"]] for _, p in gate.calls],
                          [["a1", "a2", "a3", "a4"], ["b1"]])
 
+    def test_uvn_status_never_asks_about_a_request_held_for_a_cause_no_document_clears(self):
+        """Owner 2026-11-14: fraud or impersonation means no ask, ever, and no other band C cause is asked either.
+        The reading is policy.never_ask, the one every audience builder shares."""
+        fraud = {"rule_risk_percent": {}, "fraud_hold": {"decision": "hold"}}
+        held_submitter = {"rule_risk_percent": {"review_held_submitter": 100}}
+        impersonation = {"rule_risk_percent": {"review_role_credited_to_other_at_trusted_source": 100}}
+        band_c = {"rule_risk_percent": {"reject_publisher_label_credit": 100}}
+        answerable = {"rule_risk_percent": {"review_big_track_without_trusted_credit": 100}}
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["a1", "a2"]},
+                      {"user_id": 2, "paid": True, "skip": None, "request_ids": ["b1"]},
+                      {"user_id": 3, "paid": True, "skip": None, "request_ids": ["c1", "c2"]},
+                      {"user_id": 4, "paid": True, "skip": None, "request_ids": ["d1"]},
+                      {"user_id": 5, "paid": True, "skip": None, "request_ids": ["e1"]}]
+        self.write_list()
+        q = replica((1, 2, 3, 4, 5), requests={1: ["a1", "a2"], 2: ["b1"], 3: ["c1", "c2"], 4: ["d1"], 5: ["e1"]},
+                    verification={"a1": fraud, "a2": answerable, "b1": impersonation, "c1": band_c,
+                                  "c2": dict(answerable, rule_risk_percent=dict(answerable["rule_risk_percent"],
+                                                                                 **band_c["rule_risk_percent"])),
+                                  "d1": held_submitter, "e1": answerable},
+                    # core asking for proof does not make a fraud hold answerable
+                    rows={"d1": {"metadata": {"proofRequest": {"at": "2026-10-19"}}}})
+        rep, gate = self.run_(query=q)
+        # user 1 is asked about the request a document can answer, never the held one; users 2, 3, 4 get no message
+        self.assertEqual([(p["user"]["id"], [c["request_id"] for c in p["credits"]]) for _, p in gate.calls],
+                         [("1", ["a2"]), ("5", ["e1"])])
+        self.assertEqual(rep.never_asked, 5)
+        self.assertIn("5 request(s) not asked about: held for a cause no document clears",
+                      uvn_status.render(rep, "apply", "paid"))
+        # nothing is locked: the row is read again next run, so a hold that lifts is asked then
+        db = verify_ledger.connect(self.ledger)
+        self.assertEqual(verify_ledger.blocked_ids(db, ["a1", "b1", "c1", "c2", "d1"], "uvn-status"), set())
+        db.close()
+        # a verdict nobody can read names no cause: asked as before
+        rep, gate = self.run_(query=replica((2,), requests={2: ["b1"]}, verification={"b1": "not a mapping"}))
+        self.assertEqual([[c["request_id"] for c in p["credits"]] for _, p in gate.calls], [["b1"]])
+        self.assertEqual(rep.never_asked, 0)
+
+    def test_the_reason_a_request_is_never_asked_is_the_shared_reading(self):
+        from credit_review import policy
+        for vd, roles in (({"rule_risk_percent": {"review_held_submitter": 100}}, "{Mixing}"),
+                          ({"rule_risk_percent": {"reject_artist_credit": 1}}, "{Mixing}"),
+                          ({"rule_risk_percent": {"review_hourly_velocity_profile": 100}}, "{Mixing}"),
+                          ({"rule_risk_percent": {"review_hourly_velocity_profile": 100}}, "{Editorial}"),
+                          ({"rule_risk_percent": {"review_hold_for_documents": 100}}, "{Mixing}"),
+                          ({}, "{Mixing}")):
+            with self.subTest(vd=vd, roles=roles):
+                want = policy.never_ask(vd, [r for r in roles.strip("{}").split(",") if r]) or ""
+                self.assertEqual(uvn_status.never_ask_of(roles.strip("{}"), json.dumps(vd)), want)
+                self.assertEqual(uvn_status._no_ask_of(roles, "5", json.dumps(vd), "{}") == uvn_status.NEVER_ASKED,
+                                 bool(want))
+
+    def test_the_account_hold_reads_every_undecided_request_and_only_fraud_or_impersonation(self):
+        """never_ever_users is what a sender that names no credit request holds on (claim-proof-ask)."""
+        fraud = {"rule_risk_percent": {}, "fraud_hold": {"decision": "hold"}}
+        impersonation = {"rule_risk_percent": {"review_role_credited_to_other_at_trusted_source": 30}}
+        q = replica((1, 2, 3, 4, 5), status={2: "unverified", 5: "approved"},
+                    requests={1: ["a1", "a2"], 2: ["b1"], 3: ["c1"], 4: ["d1"], 5: ["e1"]},
+                    verification={"a2": fraud, "b1": impersonation,
+                                  "c1": {"rule_risk_percent": {"reject_publisher_label_credit": 100}},
+                                  "d1": {"rule_risk_percent": {"review_hourly_velocity_profile": 100}},
+                                  "e1": fraud})
+        self.assertEqual(uvn_status.never_ever_users([1, 2, 3, 4, 5], q),
+                         {1: "fraud:fraud_hold", 2: "impersonation:review_role_credited_to_other_at_trusted_source"})
+        self.assertEqual(uvn_status.never_ever_users([], q), {})
+
+    def test_the_account_hold_is_not_hidden_by_another_cause_on_the_same_request(self):
+        """One request can carry fraud or impersonation AND another band C cause. The account is held on the
+        first two whatever the other cause's name sorts to: read by the name that sorts first, an impersonation
+        finding beside reject_publisher_label_credit named the reject rule and the account was not held."""
+        from credit_review import policy
+        impersonation, submitter = "review_role_credited_to_other_at_trusted_source", "review_held_submitter"
+        # every other band C RULE of the table (the "_" entries are error keys, not rules a verdict scores)
+        others = sorted(c for c in policy.band_c_causes()
+                        if policy.hold_class(c) not in policy.NEVER_EVER_CLASSES
+                        and not c.startswith("_") and c not in policy.velocity_hold_causes())
+        self.assertIn("reject_publisher_label_credit", others)
+        self.assertTrue(any(o < impersonation for o in others) and any(o < submitter for o in others))
+        for other in others:
+            with self.subTest(other=other):
+                q = replica((1, 2, 3), requests={1: ["a1"], 2: ["b1"], 3: ["c1"]},
+                            verification={"a1": {"rule_risk_percent": {other: 100, impersonation: 100}},
+                                          "b1": {"rule_risk_percent": {other: 100, submitter: 100}},
+                                          "c1": {"rule_risk_percent": {other: 100}}})
+                self.assertEqual(uvn_status.never_ever_users([1, 2, 3], q),
+                                 {1: f"impersonation:{impersonation}", 2: f"fraud:{submitter}"})
+        # fraud is named before impersonation, and a velocity hold beside either changes nothing
+        q = replica((1, 2), requests={1: ["a1"], 2: ["b1"]},
+                    verification={"a1": {"rule_risk_percent": {impersonation: 100, submitter: 100,
+                                                               "reject_artist_credit": 100}},
+                                  "b1": {"rule_risk_percent": {impersonation: 100,
+                                                               "review_hourly_velocity_profile": 100}}})
+        self.assertEqual(uvn_status.never_ever_users([1, 2], q),
+                         {1: f"fraud:{submitter}", 2: f"impersonation:{impersonation}"})
+
+    def test_an_unreadable_band_table_holds_every_account_the_claim_sender_reads(self):
+        """Owner 2026-11-14 18:35Z: the unreadable-table rule holds claim-proof-ask too, so an account with an
+        ordinary verdict is held while the table cannot be read, and a user with no undecided request is not."""
+        from credit_review import policy
+        fraud = {"rule_risk_percent": {}, "fraud_hold": {"decision": "hold"}}
+        ordinary = {"rule_risk_percent": {"review_big_track_without_trusted_credit": 40}}
+        q = replica((1, 2, 3), status={3: "approved"}, requests={1: ["a1"], 2: ["b1"], 3: ["c1"]},
+                    verification={"a1": fraud, "b1": ordinary, "c1": fraud})
+        kept = policy._BANDS
+        try:
+            policy._BANDS = {}
+            self.assertEqual(uvn_status.never_ever_users([1, 2, 3], q),
+                             {1: policy.BANDS_TABLE_UNREADABLE, 2: policy.BANDS_TABLE_UNREADABLE})
+        finally:
+            policy._BANDS = kept
+        # a readable table again: only the fraud hold is a fact about the account
+        self.assertEqual(uvn_status.never_ever_users([1, 2, 3], q), {1: "fraud:fraud_hold"})
+
     def test_only_rows_the_approval_path_can_actually_admit_skip_the_ask(self):
         def cls(vd, role="Mixing", pop=5, meta=None):
             return uvn_status.ask_class({"verificationData": vd, "metadata": meta or {}, "spotifyPopularity": pop,

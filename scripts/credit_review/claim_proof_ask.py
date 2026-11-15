@@ -25,6 +25,10 @@ Rules, all re-checked here at send time:
     state, a deleted claim or another owner: not sent);
   - users who emailed support@ in the last 90 days are held for a human (proof-on-file feed;
     unreadable feed = nothing sent);
+  - a USER any of whose undecided credit requests is under a cause no document clears is held
+    (`uvn_status.never_ever_users`, the same reading every sender uses): fraud and impersonation
+    always, and every claimant while the bands table cannot be read - a claim carries no credit
+    verdict of its own, so another band C cause says nothing about it. Held, never closed;
   - one claim per user per run (the gate also caps one message per user per UTC day);
   - paid first, then oldest claim id; at most the shared claim cap (policy shared_daily_cap.claim) a day (first notes and
     reminders together).
@@ -57,7 +61,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import apply_queue, proof_parts, verify_ledger, verify_notify
-from .uvn_status import Query, accounts_of, gmail_held, trino
+from .uvn_status import Query, accounts_of, gmail_held, never_ever_users, trino
 
 CAMPAIGN = verify_ledger.CLAIM_CAMPAIGN
 BANDS = ("B", "C")
@@ -114,6 +118,7 @@ class ClaimReport(verify_notify.Report):
     no_profile_id: int = 0
     status_audience: int = 0          # ask run: rows the list routes to the status note instead
     ask_audience: int = 0             # status run: rows that get the proof ask instead
+    never_asked: int = 0              # held: the USER's pending credit request is under fraud, impersonation or an unreadable band table
     held_user_window: int = 0         # held: a note to this USER (any of their claims) within the 7-day window
     # QA on #1681: the window is counted in TWO places and they must not be mixed - a check-time hold (above)
     # never enters deferred_users, a send-time hold does (window_after_gate in verify_notify.Report).
@@ -372,6 +377,9 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
             keep.append(c)
     states = claim_states([int(c["claim_id"]) for c in keep], query) if keep else {}
     accts = accounts_of(sorted({int(c["user_id"]) for c in keep}), query) if keep else {}
+    # Owner 2026-11-14: fraud or impersonation means no ask, ever. A claim carries no credit verdict of its own, so
+    # the hold is read per USER from their pending credit requests (never_ever_users -> policy.never_ask).
+    never = never_ever_users(sorted({int(c["user_id"]) for c in keep}), query) if keep else {}
     budget = _budget(db, day, max_users)
     seen: set[int] = set()
     payloads: list[dict[str, Any]] = []
@@ -386,6 +394,10 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
         # times for the same missing email, since nothing had consumed their slot yet.
         if uid in seen:
             report.second_claim += 1
+            continue
+        if uid in never:
+            report.never_asked += 1          # [key=per-user-counters]: a fact about the USER, so ONE per user
+            seen.add(uid)
             continue
         if str(uid) in support_contacts:
             _support_held(report, uid, scoped, bool(c.get("paid")))
@@ -613,6 +625,7 @@ def _reminders(report: ClaimReport, by_id: dict[int, dict[str, Any]], *, db: Any
     states = claim_states(cids, query) if cids else {}
     uids = sorted({int(by_id[c]["user_id"]) for c in cids if c in by_id})
     accts = accounts_of(uids, query) if uids else {}
+    never = never_ever_users(uids, query) if uids else {}   # a reminder is an ask too: same hold as the first note
     budget = _budget(db, day, max_users)
     payloads: list[dict[str, Any]] = []
     for d in due:
@@ -651,6 +664,9 @@ def _reminders(report: ClaimReport, by_id: dict[int, dict[str, Any]], *, db: Any
             continue
         if not _profile_id(c):
             report.no_profile_id += 1         # held, never sent without the profile id
+            continue
+        if int(c["user_id"]) in never:
+            report.never_asked += 1           # held, nothing closed: the reminder is re-checked next run
             continue
         if str(c["user_id"]) in support_contacts:
             _support_held(report, int(c["user_id"]), scoped, bool(c.get("paid")))
@@ -698,6 +714,9 @@ def render(report: ClaimReport, mode: str, segment: str, reminders: bool = False
                      ("claim no longer pending or another owner", report.not_pending),
                      ("held: emailed support@ in 90 days", report.support_hold),
                      (f"held: {STALE_GMAIL_REASON} (cs-gmail could vouch for them)", report.stale_source_hold),
+                     ("held: the user's credit request is under fraud, impersonation or an unreadable band table "
+                      "(never asked)",
+                      report.never_asked),
                      ("no account email", report.no_email),
                      ("another claim of the same user (next run)", report.second_claim),
                      ("over today's cap (next run)", report.over_daily_max),

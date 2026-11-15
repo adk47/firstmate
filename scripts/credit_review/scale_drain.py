@@ -80,11 +80,19 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
-from .policy import HOLD_ON_ERROR_KEY, HOLD_RULE_PREFIX, conflict_scan
+# The hold reading (which causes hold a row, and which are never asked) lives ONCE, in policy.py:
+# the drain, uvn-status, need_asks and claim-proof-ask all read it from there.
+from .policy import (  # noqa: F401 - re-exported: callers and tests read these as scale_drain names
+    ASKABLE_HOLD_CAUSES, BAND_C_CLASS, CLASS_C_HOLD, FRAUD_HOLD, HARD_HOLD_CAUSES,
+    HOLD_ON_ERROR_KEY, HOLD_RULE_PREFIX, UNMEASURED_CLASS, band_c_causes, bands_config,
+    conflict_scan, editing_burst, hold_causes, hold_class, never_ask, never_asked_cause,
+    velocity_hold_causes,
+)
 
 #: Bumped whenever a rule's meaning changes. It is part of the idempotency key, so a
 #: rule change deliberately produces NEW keys and a re-run re-decides those rows; an
@@ -229,138 +237,6 @@ CORE_ASK_REASONS = ("proof_required", "no_sound_precedent")
 #: the audience ``need_asks.py --from-drain`` decides the document for) or ``hold``.
 ROUTE_ASK, ROUTE_HOLD = "ask", "hold"
 CORE_REFUSED = "refused_by_core"
-
-#: Core answers ``validator_hold`` for every validator hold alike and does not say which
-#: one, so the CAUSE is read from the request's own stored verdict when the snapshot is
-#: taken (``hold_causes``). A hold on this list is one the claimant's document answers,
-#: so a row core refuses with an ask reason AND ``validator_hold`` is still asked
-#: (owner decision 2026-11-14: a row held with no ask waits on nobody the customer can
-#: reach). The eight proof rules are the validator's own band B (credit_trust_bands.json
-#: ``proof_required.rules``); the class C score signature is a score fact, not a finding
-#: about the person. The two velocity rules are NOT unconditionally askable: the bands
-#: make a velocity hold band B only on an editing role, so they are read from the table
-#: at run time (``velocity_hold_causes``) and asked only on an editing burst
-#: (``editing_burst``).
-CLASS_C_HOLD = "class_c"
-ASKABLE_HOLD_CAUSES = frozenset({
-    "review_org_role_without_outside_source", "review_high_risk_profile_score",
-    "review_big_track_weak_footprint", "review_editing_role_without_trusted_credit",
-    "review_big_track_without_trusted_credit", "review_role_cardinality",
-    "review_hold_for_documents", "review_account_unanchored_sum",
-    CLASS_C_HOLD,
-})
-
-#: The class a hold cause is recorded under when it keeps a row off the ask path. WHICH
-#: causes are never asked is not this map: it is the validator's own band C
-#: (``band_c_causes``, read from the band table at run time) plus the fraud hold. This
-#: map only names the classes the owner's decision named (fraud, impersonation, legal)
-#: and two more: ``already_held`` is a request racing or repeating an approved credit on
-#: the same profile (a proof ask there asks a customer to document a credit they already
-#: have), ``unmeasured`` is a check the validator could not complete. Every other band C
-#: cause (the ``reject_*`` rules) is recorded as ``band_c``.
-FRAUD_HOLD = "fraud_hold"
-BAND_C_CLASS, UNMEASURED_CLASS = "band_c", "unmeasured"
-HARD_HOLD_CAUSES = {
-    "review_held_submitter": "fraud",
-    FRAUD_HOLD: "fraud",
-    "review_role_credited_to_other_at_trusted_source": "impersonation",
-    "review_operations_tombstone": "legal",
-    "review_duplicate_of_approved_credit": "already_held",
-    HOLD_ON_ERROR_KEY: "unmeasured",
-}
-
-
-#: The validator's own band table. The editing-role definition (``high_risk_roles``) and
-#: the velocity rules (``proof_required.editing_burst_rules``) are read from it at run
-#: time, never copied into this file: a table that cannot be read makes both unmeasured,
-#: which holds.
-BANDS_PATH = Path(__file__).resolve().parent.parent / "credit_trust" / "credit_trust_bands.json"
-_BANDS: dict[str, Any] | None = None
-
-
-def bands_config() -> dict[str, Any]:
-    """The validated band table, or ``{}`` when it cannot be read."""
-    global _BANDS
-    if _BANDS is None:
-        try:
-            loaded = json.loads(BANDS_PATH.read_text())
-        except (OSError, ValueError):
-            loaded = {}
-        _BANDS = loaded if isinstance(loaded, dict) else {}
-    return _BANDS
-
-
-def band_c_causes() -> frozenset[str] | None:
-    """Every cause the bands call band C: ``band_c_rules`` and ``band_c_error_keys``.
-
-    Band C is "held for a reason the claimant cannot answer", so no document clears it
-    and a row carrying one is never asked, alone or under a hold that would be. Read
-    from the table, never copied here: a rule the validator adds to band C holds without
-    a change to this file. ``None`` when the table cannot be read, which holds. An entry
-    that is not a rule name (null, a number, an empty string) makes the whole table
-    unreadable: dropping it would leave a shorter list that reads as complete, and a
-    cause missing from that list is asked.
-    """
-    bands = bands_config()
-    rules, keys = bands.get("band_c_rules"), bands.get("band_c_error_keys")
-    if not isinstance(rules, list) or not isinstance(keys, list) or not rules:
-        return None
-    causes = [*rules, *keys]
-    if any(not isinstance(c, str) or not c.strip() for c in causes):
-        return None
-    return frozenset(causes)
-
-
-def hold_class(cause: str) -> str | None:
-    """The class a never-asked cause is recorded under, or ``None`` for any other cause."""
-    if cause in HARD_HOLD_CAUSES:
-        return HARD_HOLD_CAUSES[cause]
-    band_c = band_c_causes() or frozenset()
-    if cause not in band_c:
-        return None
-    keys = bands_config().get("band_c_error_keys")
-    return UNMEASURED_CLASS if isinstance(keys, list) and cause in keys else BAND_C_CLASS
-
-
-def velocity_hold_causes() -> frozenset[str]:
-    """The velocity rules of the bands (``proof_required.editing_burst_rules``)."""
-    proof = bands_config().get("proof_required")
-    rules = proof.get("editing_burst_rules") if isinstance(proof, dict) else None
-    if not isinstance(rules, list):
-        return frozenset()
-    return frozenset(r for r in rules if isinstance(r, str) and r)
-
-
-def editing_burst(claimed_roles: Sequence[str] | None) -> bool | None:
-    """Did the request claim an editing role, the one case a velocity hold may be asked.
-
-    The bands call a velocity hold band B only when an editing role was held
-    (``high_risk_roles``: a ``catalog_children`` role or a ``code_pattern`` match); every
-    other velocity hold is band C, which no document clears. ``None`` when the roles or
-    that definition could not be read: unmeasured is not an ask.
-    """
-    roles = [str(r).strip().lower() for r in claimed_roles or () if str(r).strip()]
-    if not roles:
-        return None
-    high = bands_config().get("high_risk_roles")
-    if not isinstance(high, dict):
-        return None
-    raw_children = high.get("catalog_children")
-    children = ({str(c).strip().lower() for c in raw_children if str(c).strip()}
-                if isinstance(raw_children, list) else set())
-    raw_pattern = high.get("code_pattern")
-    pattern = raw_pattern if isinstance(raw_pattern, str) and raw_pattern else None
-    if not children and pattern is None:
-        return None
-    try:
-        regex = re.compile(pattern, re.IGNORECASE) if pattern else None
-    except re.error:
-        return None
-    for role in roles:
-        if role in children or (regex is not None and regex.search(role)):
-            return True
-    return False
-
 
 class DrainWriteError(DrainError):
     """A write through the reviewed path did not land. The row is NOT committed.
@@ -588,69 +464,6 @@ def open_snapshot(path: str | None = None) -> sqlite3.Connection:
     if "uncovered_holds" not in {r[1] for r in db.execute("PRAGMA table_info(requests)")}:
         db.execute("ALTER TABLE requests ADD COLUMN uncovered_holds TEXT")
     return db
-
-
-def _rule_fired(value: Any) -> bool:
-    """Did a band C rule fire: anything but an absent, false or zero score."""
-    if value is None or value is False:
-        return False
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return value > 0
-    return True
-
-
-def hold_causes(verification_data: Any) -> list[str] | None:
-    """Why the validator holds a request, from its stored verdict; ``None`` = unreadable.
-
-    Two readings, joined. The first is core's ``validatorConflict``
-    (``policy.conflict_scan``: any ``review_*`` rule at or above 30, the class C
-    signature, ``rule_errors._hold_on_error``), which is what core answers
-    ``validator_hold`` for. The second is the validator's own band C
-    (``band_c_causes``), wherever the verdict records it: a band C rule that fired in
-    ``rule_risk_percent`` (the ``reject_*`` rules and ``validation_error`` are not
-    ``review_*``, so core's reading never shows them), a band C key in ``rule_errors``,
-    and a band C code in ``hold_reason_codes``; plus the fraud hold. Core's one word
-    cannot tell these apart, and a band C cause under an askable one is an ask no
-    document can clear.
-
-    A verdict with no readable ``rule_risk_percent`` is not measured, never "holds
-    nothing"; so is a ``fraud_hold`` that is there but is not a mapping with a decision
-    (an absent or null one is simply no fraud hold), and so is every verdict while the
-    band table cannot be read.
-    """
-    scan = conflict_scan(verification_data)
-    band_c = band_c_causes()
-    if not scan["measured"] or band_c is None:
-        return None
-    out: set[str] = set(scan["hold_rules"])
-    if scan["class_c"]:
-        out.add(CLASS_C_HOLD)
-    if scan["hold_on_error"]:
-        out.add(HOLD_ON_ERROR_KEY)
-    never_asked = band_c | set(HARD_HOLD_CAUSES)
-    # A ``review_*`` rule holds from 30 up in both readings, and the scan above has those;
-    # every other band C rule (``reject_*``, ``validation_error``) holds once it fired.
-    for rule, score in verification_data["rule_risk_percent"].items():
-        if rule in band_c and not rule.startswith(HOLD_RULE_PREFIX) and _rule_fired(score):
-            out.add(rule)
-    errors = verification_data.get("rule_errors")
-    if isinstance(errors, dict):
-        out.update(key for key in errors if key in band_c)
-    fraud = verification_data.get(FRAUD_HOLD)
-    if fraud is not None:
-        decision = fraud.get("decision") if isinstance(fraud, dict) else None
-        if not isinstance(decision, str):
-            return None
-        if decision.strip().lower() == "hold":
-            out.add(FRAUD_HOLD)
-    # The validator's own machine record of why a verdict was not an approval. Only the
-    # never-asked codes are causes here: the score codes (``score:*``,
-    # ``risk_score_at_or_above_threshold``) ride every askable row and are not a hold this
-    # code classifies.
-    codes = verification_data.get("hold_reason_codes")
-    if isinstance(codes, (list, tuple)):
-        out.update(code for code in codes if isinstance(code, str) and code in never_asked)
-    return sorted(out)
 
 
 def _causes_tuple(value: Any) -> tuple[str, ...] | None:
@@ -882,11 +695,12 @@ class Decision:
     #: is only autonomous because that original decision stands, so the ledger row and
     #: the audit trail both name it.
     duplicate_of: str | None = None
-    #: On an approve: why the validator holds the request, from the snapshot (see
-    #: ``hold_causes``). ``()`` = it holds nothing, ``None`` = not measured. It decides
-    #: whether a row core refuses with ``validator_hold`` may still be asked.
+    #: On an approve or an ask: why the validator holds the request, from the snapshot
+    #: (see ``hold_causes``). ``()`` = it holds nothing, ``None`` = not measured. It
+    #: decides whether a row core refuses with ``validator_hold`` may still be asked, and
+    #: whether a ladder ask is offered to the ask path at all (``ask_hold``).
     hold_causes: tuple[str, ...] | None = None
-    #: On an approve whose causes include a velocity rule: did the request claim an
+    #: On such a row whose causes include a velocity rule: did the request claim an
     #: editing role (the bands' band B case)? ``None`` = the roles could not be read,
     #: which holds, and nothing for a row with no velocity cause.
     editing_burst: bool | None = None
@@ -980,7 +794,10 @@ def plan(db: sqlite3.Connection, *, now: datetime | None = None) -> list[Decisio
             # On hold, and core's guard would not stop it: never approved here, whichever
             # rule found the approve. A hold the guard covers is left to core, below.
             outcome, reason = UNMATCHED, REASON_CODES["held_by_validator"]
-        held = _causes_tuple(causes) if outcome == "approve" else None
+        # an approve can be refused by core onto the ask path, and an ask is offered to the
+        # ask path as it is: both need the causes, so that no row a document cannot clear
+        # is asked (never_asked_cause). Every other outcome asks nobody.
+        held = _causes_tuple(causes) if outcome in CAUSE_OUTCOMES else None
         burst = (editing_burst(_roles_tuple(roles))
                  if held and velocity_hold_causes().intersection(held) else None)
         out.append(Decision(
@@ -996,7 +813,6 @@ def plan(db: sqlite3.Connection, *, now: datetime | None = None) -> list[Decisio
             proof_verdict=proof_verdict,
             evidence_anchor=anchor,
             duplicate_of=duplicate_of if rule == "duplicate" else None,
-            # only an approve can be refused by core, so only an approve carries them
             hold_causes=held,
             editing_burst=burst,
         ))
@@ -1339,31 +1155,35 @@ def is_refusal(failure: dict[str, Any] | None) -> bool:
     return isinstance(status, int) and 400 <= status < 500 and status not in NOT_A_ROW_VERDICT
 
 
-def never_asked_cause(hold_causes: Sequence[str] | None,
-                      editing_burst: bool | None = None) -> str | None:
-    """The cause on a row that no document clears, as ``<class>:<cause>``, or ``None``.
+#: The ladder outcomes that can end in a message asking the claimant for a document.
+CAUSE_OUTCOMES = ("approve", "ask")
 
-    Band C by the validator's own table, or the fraud hold. It holds the row whatever
-    core answered and whatever else is on the row: core says ``validator_hold`` only for
-    its own conflict reading, so a ``reject_*`` rule reaches here with no word from core
-    at all. A velocity rule is band C except on an editing burst (the bands' one
-    exception); with roles that could not be read it is not measured, which holds.
+
+def ask_hold(d: "Decision") -> str | None:
+    """Why a ladder ``ask`` row is NOT offered to the ask path, or ``None`` when it is.
+
+    The same rule as a refused approve with no word from core: a cause no document clears
+    (band C by the validator's table, a fraud hold, impersonation, legal, a credit the
+    profile already has, a velocity hold outside an editing burst) keeps the row held, and
+    nobody is asked. An unmeasured verdict is asked, as it always was: the wait is then on
+    the customer and not on nobody.
     """
-    if band_c_causes() is None:
-        return "bands_table_unreadable"
-    causes = sorted({str(c) for c in hold_causes or ()})
-    velocity = velocity_hold_causes()
-    for cause in causes:
-        kind = None if cause in velocity else hold_class(cause)
-        if kind:
-            return f"{kind}:{cause}"
-    for cause in causes:
-        if cause in velocity:
-            if editing_burst is None:
-                return f"velocity_roles_unmeasured:{cause}"
-            if not editing_burst:
-                return f"band_c_velocity:{cause}"
-    return None
+    return never_asked_cause(d.hold_causes, d.editing_burst)
+
+
+def split_asks(decisions: "Sequence[Decision]") -> "tuple[list[Decision], list[tuple[Decision, str]]]":
+    """The ladder's ask rows as (offered to the ask path, held with the reason)."""
+    offered: list[Decision] = []
+    held: list[tuple[Decision, str]] = []
+    for d in decisions:
+        if d.outcome != "ask":
+            continue
+        why = ask_hold(d)
+        if why is None:
+            offered.append(d)
+        else:
+            held.append((d, why))
+    return offered, held
 
 
 def hold_blocks_ask(hold_causes: Sequence[str] | None,
@@ -2945,11 +2765,12 @@ def _cmd_asks(args: argparse.Namespace) -> int:
     This selects and sends nothing. WHICH document each ask names, and the send itself,
     stay with ``need_asks.py`` (the one reviewed ask path), never here.
     """
+    offered, held = split_asks(parse_plan(Path(args.plan).read_bytes()))
     rows = [{"decision_key": d.decision_key, "outcome": "ask",
              "reason_code": d.reason_code, "request_id": d.request_id,
-             "user_id": d.user_id}
-            for d in parse_plan(Path(args.plan).read_bytes()) if d.outcome == "ask"]
+             "user_id": d.user_id} for d in offered]
     ladder = len(rows)
+    held_by: Counter[str] = Counter(why.split(":", 1)[0] for _d, why in held)
     rows.extend(refused_asks(open_ledger(args.ledger)))
     merged = {(r["user_id"], str(r["request_id"]).lower()): r for r in rows}
     payload = "".join(json.dumps(merged[k], sort_keys=True) + "\n"
@@ -2959,7 +2780,11 @@ def _cmd_asks(args: argparse.Namespace) -> int:
     else:
         sys.stdout.write(payload)
     print(json.dumps({"asks": len(merged), "from_ladder": ladder,
-                      "from_core_refusals": len(rows) - ladder}, sort_keys=True),
+                      "from_core_refusals": len(rows) - ladder,
+                      # ladder asks NOT offered: a cause no document clears (ask_hold)
+                      "held_never_asked": len(held),
+                      "held_never_asked_users": len({d.user_id for d, _w in held}),
+                      "held_by_class": dict(sorted(held_by.items()))}, sort_keys=True),
           file=sys.stderr)
     return 0
 
