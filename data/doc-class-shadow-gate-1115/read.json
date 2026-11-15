@@ -1,0 +1,45 @@
+{
+ "order": "#7 doc_class shadow gate",
+ "read_started_at": "2026-11-15T15:53:52Z",
+ "threshold": 0.01,
+ "min_pairs": 200,
+ "ledger": "/var/lib/hydra/credit-review/ledger.sqlite3",
+ "deployed_sha": "be9e53e6e9a52fff04ac2684f842f2f18514f150",
+ "live_policy": {
+  "approved": false,
+  "approved_by": null,
+  "doc_class.shadow": true,
+  "verdict_version": "dv-4"
+ },
+ "recorded": {
+  "tables_present": {
+   "doc_approval_events": true,
+   "doc_approvals": true,
+   "doc_approval_audit": true
+  },
+  "rows": {
+   "doc_approval_events_by_state": {},
+   "doc_approvals": 0,
+   "doc_approval_audit": 0,
+   "decisions_doc_kinds": {}
+  },
+  "requests_with_recorded_verdict": 0,
+  "recorded_approve": 0,
+  "recorded_refuse_only": 0
+ },
+ "core_decided_requests": {
+  "approved": 5380319,
+  "rejected": 180602
+ },
+ "gate": {
+  "paired_decisions": 0,
+  "paired_doc_class_approve": 0,
+  "paired_doc_class_refuse": 0,
+  "false_approves": 0,
+  "false_approve_rate_of_paired_decisions": null,
+  "false_approve_rate_of_paired_approvals": null,
+  "verdict": "NOT MEASURED",
+  "why": "0 paired decision(s), 0 of them a doc_class approve: fewer than 200"
+ },
+ "read_finished_at": "2026-11-15T16:02:59Z"
+}
