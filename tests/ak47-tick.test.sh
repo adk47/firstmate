@@ -808,10 +808,63 @@ test_a_partial_walk_does_not_claim_the_tree_was_measured() {
 
 test_the_health_beat_prunes_only_its_own_keys() {
   local h=$ROOT/ak47/hdevops/ansible/playbooks/templates/ak47-health.sh
-  grep -q 'kf=\$SD/keys/health/\$k' "$h" \
-    || fail "the health beat does not keep its keys in their own directory"
-  grep -q 'for kf in "\$SD"/keys/health/\*' "$h" \
-    || fail "the health beat prunes keys outside its own directory; it will delete the tick's keys"
+  local home=$SANDBOX/health-home bin=$SANDBOX/health-bin sd
+  rm -rf "$home" "$bin"
+  mkdir -p "$home/.local/state/ak47" "$home/fmhome/bin" "$home/fmhome/state" "$bin"
+  sd=$home/.local/state/ak47
+  cat >"$home/fmhome/bin/fm-inbox.sh" <<'SH'
+#!/bin/sh
+exit 0
+SH
+  chmod +x "$home/fmhome/bin/fm-inbox.sh"
+  # Keep the beat off the real box: no Wi-Fi, sensors, failed units, agents, or
+  # /tmp walk. A fresh state directory has no devops.log, so devops-absent is a
+  # deterministic finding that must be delivered and keyed.
+  cat >"$bin/du" <<'SH'
+#!/bin/sh
+printf '1\t/tmp\n'
+SH
+  cat >"$bin/sudo" <<'SH'
+#!/bin/sh
+exit 1
+SH
+  cat >"$bin/ip" <<'SH'
+#!/bin/sh
+exit 0
+SH
+  cat >"$bin/sensors" <<'SH'
+#!/bin/sh
+exit 0
+SH
+  cat >"$bin/systemctl" <<'SH'
+#!/bin/sh
+exit 0
+SH
+  cat >"$bin/pgrep" <<'SH'
+#!/bin/sh
+case "$*" in *-c*) echo 0 ;; esac
+exit 0
+SH
+  cat >"$bin/notify-send" <<'SH'
+#!/bin/sh
+exit 0
+SH
+  chmod +x "$bin"/*
+  mkdir -p "$sd/keys"
+  printf 'tick\n' >"$sd/keys/tmp-gb-stale"
+  HOME="$home" FM_HOME="$home/fmhome" AK47_USER_SLICE="$home/no-slice" \
+    PATH="$bin:$PATH" bash "$h" >/dev/null 2>&1 || fail "the health beat exited non-zero"
+  [ -f "$sd/keys/health/devops-absent" ] \
+    || fail "a delivered finding did not commit its key under keys/health"
+  printf 'old\n' >"$sd/keys/health/old-finding"
+  HOME="$home" FM_HOME="$home/fmhome" AK47_USER_SLICE="$home/no-slice" \
+    PATH="$bin:$PATH" bash "$h" >/dev/null 2>&1 || fail "the health beat exited non-zero"
+  [ -e "$sd/keys/health/old-finding" ] \
+    && fail "the health beat did not prune a stale key of its own"
+  [ -e "$sd/keys/tmp-gb-stale" ] \
+    || fail "the health beat pruned the tick's key"
+  [ -e "$sd/keys/health/devops-absent" ] \
+    || fail "the health beat pruned the key for a finding it still reports"
   pass "the health beat prunes only its own keys, so the tick keeps its episodes"
 }
 test_a_stale_size_walk_is_reported_once_per_episode

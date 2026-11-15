@@ -194,11 +194,10 @@ ak47_tmp_gb() {
 # so the walk always returns.
 #
 # Returns 0 when every entry was measured, 1 when the budget ran out first. In
-# both cases the partial total is printed and AK47_TMP_GB_COVERED /
-# AK47_TMP_GB_ENTRIES describe the coverage.
+# both cases the partial total is printed and tmp_gb_partial records the coverage.
 ak47_tmp_gb_walk() {
   local budget=${1:-300} root=${AK47_TMP_ROOT:-/tmp} start elapsed
-  local list total=0 covered=0 entries=0 kb batch=()
+  local list total=0 covered=0 entries=0 kb rc batch=()
   start=$(ak47_epoch)
   list=$(mktemp) || return 1
   find "$root" -mindepth 1 -maxdepth 1 -print0 >"$list" 2>/dev/null || true
@@ -208,31 +207,30 @@ ak47_tmp_gb_walk() {
     batch+=("$p")
     if [ "${#batch[@]}" -ge 25 ]; then
       elapsed=$(( $(ak47_epoch) - start ))
-      kb=$(timeout $(( budget - elapsed + 5 )) du -sx --block-size=1K "${batch[@]}" 2>/dev/null \
-             | awk '{s+=$1} END{print s+0}')
-      # A batch that failed or was cut off measured nothing: counting it as
-      # covered would let a walk that never finished claim the whole tree.
+      kb=$( { timeout $(( budget - elapsed + 5 )) du -sx --block-size=1K "${batch[@]}" 2>/dev/null \
+             | awk '{s+=$1} END{print s+0}'; exit "${PIPESTATUS[0]}"; } )
+      rc=$?
+      # A batch that failed or was cut off may have measured only some of its
+      # entries: its total is still a lower bound, but it cannot count as full
+      # coverage or a walk that never finished could claim the whole tree.
       [ -n "${kb:-}" ] && [ "${kb:-0}" -gt 0 ] || { batch=(); break; }
       total=$(( total + kb ))
-      covered=$(( covered + ${#batch[@]} ))
+      [ "$rc" -eq 0 ] && covered=$(( covered + ${#batch[@]} ))
       batch=()
       [ $(( $(ak47_epoch) - start )) -ge "$budget" ] && break
     fi
   done <"$list"
   if [ "${#batch[@]}" -gt 0 ]; then
     elapsed=$(( $(ak47_epoch) - start ))
-    kb=$(timeout $(( budget - elapsed + 5 )) du -sx --block-size=1K "${batch[@]}" 2>/dev/null \
-           | awk '{s+=$1} END{print s+0}')
+    kb=$( { timeout $(( budget - elapsed + 5 )) du -sx --block-size=1K "${batch[@]}" 2>/dev/null \
+           | awk '{s+=$1} END{print s+0}'; exit "${PIPESTATUS[0]}"; } )
+    rc=$?
     if [ -n "${kb:-}" ] && [ "${kb:-0}" -gt 0 ]; then
       total=$(( total + kb ))
-      covered=$(( covered + ${#batch[@]} ))
+      [ "$rc" -eq 0 ] && covered=$(( covered + ${#batch[@]} ))
     fi
   fi
   rm -f "$list" 2>/dev/null || true
-  # shellcheck disable=SC2034  # read by the tick's stale-size finding
-  AK47_TMP_GB_COVERED=$covered
-  # shellcheck disable=SC2034  # read by the tick's stale-size finding
-  AK47_TMP_GB_ENTRIES=$entries
   ak47_cache_put tmp_gb_partial "$covered/$entries"
   printf '%s' $(( total / 1048576 ))
   [ "$covered" -ge "$entries" ]

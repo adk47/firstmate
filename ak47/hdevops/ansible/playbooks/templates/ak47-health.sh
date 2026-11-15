@@ -32,7 +32,7 @@
 # Usage: ak47-health.sh [--print] [--no-notify]
 set -u
 export FM_HOME=${FM_HOME:-/home/aaron/Projects/firstmate}
-SD=$HOME/.local/state/ak47; mkdir -p "$SD/snaps" "$SD/keys"
+SD=$HOME/.local/state/ak47; mkdir -p "$SD/snaps" "$SD/keys" "$SD/keys/health"
 LOG=$SD/health.log
 CORES=$(nproc)
 SPIKE=$((CORES * 3 / 2))
