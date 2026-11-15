@@ -372,6 +372,33 @@ class Stats:
                 **({"provider_down": self.provider_down} if self.provider_down else {})}
 
 
+def untraced(stats: Stats, steps: int, outcomes: int) -> str | None:
+    """Why this run left less on file than it says it did, or None when its record adds up.
+
+    `steps` and `outcomes` are the dv_steps / dv_outcomes rows found on file under this run's id
+    (`store.run_rows`), never the counters the run kept for itself: `dv_outcomes` is the store of record for
+    doc-verify's verdicts, and a run that reports work the file does not hold cannot be audited or re-run.
+
+    Two facts fail a run. (1) It judged claims and fewer outcome rows are on file: every judged claim
+    (`pairs`) and every superseded `verified` row is one `store.outcome` call under this run id. (2) It
+    processed documents and no step row is on file: every document a run counts leaves at least one step
+    (`intake_keys`, `locate`, or the `run`/`error` step of a document that raised). The one exception is a
+    claim-only filing whose bytes went missing between selection and the read (`blob_owed`), which is recorded
+    by nothing on purpose, so those documents are not owed a row.
+
+    A run with rows on file and no outcome is not a failure here: a claim-only filing is read for its
+    extraction, and a retried or closed document is judged later or never."""
+    judged = stats.pairs + stats.superseded
+    if outcomes < judged:
+        return (f"judged {judged} claim(s) and {outcomes} dv_outcomes row(s) are on file under {stats.run_id}: "
+                f"{judged - outcomes} verdict(s) left no record")
+    owed = stats.documents - stats.blob_owed
+    if owed > 0 and steps == 0:
+        return (f"processed {stats.documents} document(s) and wrote zero rows under {stats.run_id} "
+                f"(dv_steps {steps}, dv_outcomes {outcomes})")
+    return None
+
+
 def extract_attempts(store: DocVerifyStore, proof_id: str) -> int:
     return store.db.execute("SELECT COUNT(*) FROM dv_steps WHERE proof_id=? AND step='extract' AND status='error' "
                             "AND version=?", (proof_id, VERSION)).fetchone()[0]

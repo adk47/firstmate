@@ -86,6 +86,36 @@ The first `run` records the cutoff (`dv_state.since` = now). From then on, every
 
 **A rule change is a `VERSION` bump** (proof-loop lead 075). Nobody writes outcome rows by hand. `CARRY` in `docverify/__init__.py` names the previous version and the outcomes that send a document back to the reader. On the first open after the deploy, `store.carry_forward` copies, once, the rows of every document whose standing outcomes include none of those (marked `detail.carried_from`); the deployed reader re-reads the rest. `dv-1 → dv-2` (the #1452/#1457 sender rules) re-reads the documents standing `forged` or `verified`, because those rules can only remove a `forged` or block a `verified`. A rule that can change any outcome sets the set to `None`, and nothing carries. Until a document is re-read its old rows stand in no tray; the tray footer counts them (`store.awaiting_reread`). Use `--since` to widen a single run. The admin client needs the gateway env (`MUSO_API_URL` …, in `/etc/openclaw/main.env`), which the cron inherits.
 
+## A run leaves a record, or it fails
+
+`dv_outcomes` (with `dv_steps`) in this store is the store of record for what doc-verify decides. It is not
+`proof_verifications`: that table belongs to the credit-removal executor (`credit_review/proof_verifications.py`),
+asks a different question in different words, and doc-verify never writes it
+(`data/proof-verifications-persist-r1/premise-check.md`).
+
+After `runner.run` returns, `run` reads back the rows on file under its own run id through a new read-only
+connection (`store.run_rows`), never from the counters the run kept, and `runner.untraced` compares the two:
+
+| What the run says | What is on file | Result |
+|---|---|---|
+| it judged N claims (`pairs` + `superseded`) | fewer than N `dv_outcomes` rows | exit 70, `run FAILED: NO TRACE: judged N claim(s) and M dv_outcomes row(s) are on file ...` |
+| it processed documents | no `dv_steps` row | exit 70, `run FAILED: NO TRACE: processed N document(s) and wrote zero rows ...` |
+| anything | the rows cannot be read back | exit 70; unmeasured is a failure, never "it wrote them" |
+| its record adds up | | exit 0 |
+
+The run line carries what was found (`"written": {"steps": n, "outcomes": n}`). A provider refusal keeps exit 75 and
+the missing trace is still logged. With `--workers`, the parent exits 1 and names the shards that left no trace.
+Rows on file with no outcome are not a failure: a claim-only filing is read for its extraction, and a retried or
+closed document has no verdict yet. A filing whose bytes went missing between selection and the read (`blob_owed`)
+is recorded by nothing on purpose and is owed no row.
+
+**The outcome words are pinned on both sides** (`scripts/tests/test_doc_verify_trace.py`). The gate emits six: the
+five in the table above and `forged_positive` (`gate.FORGED_POSITIVE`, whose rule is in `gate.py`; it has no row in
+that table yet). Other jobs read them as string literals in their own files. The test holds the gate to `EMITTED`,
+every file that reads `dv_outcomes` to the words it names (`READERS`), and each reader that translates an outcome to
+a position on every word (`MAPS`). Adding, renaming or dropping a word on either side fails it until the other side
+is looked at; a new file that reads `dv_outcomes` fails it until it has a row.
+
 ## A claimant's filing with no credit request
 
 A filed document is selected by its candidate credit requests. One with none (`candidate_request_ids_json = '[]'`)

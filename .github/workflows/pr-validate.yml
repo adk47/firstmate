@@ -2789,6 +2789,10 @@ jobs:
           # Doc-verify SHADOW (never take a returned document at face value): extraction,
           # forensics, independent cross-checks, gate. Model, network, DNS, Intercom faked.
           python3 scripts/tests/test_doc_verify.py
+          # Doc-verify leaves a record: a run that reports work its store does not hold exits non-zero
+          # (read back from the file, never from the run's own counters), and the six outcome words the
+          # gate emits are pinned against every file that reads dv_outcomes, so neither side moves alone.
+          python3 scripts/tests/test_doc_verify_trace.py
           # Prompt-injection watch, Python side (caroline-guard-g1): support@ + proof-extract detection is
           # ledger-only (the hooks never change a reader's result), digest/watch candidates, and the doc-verify
           # red-team (an injected document can never make the gate verify without an independent anchor).

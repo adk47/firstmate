@@ -1,0 +1,896 @@
+{
+ "dv_outcomes": {
+  "low_id": 720735,
+  "max_id": 732384
+ },
+ "dv_steps": {
+  "low_id": 2787581,
+  "max_id": 2850719
+ },
+ "measured_at": "2026-11-15T07:43:06Z",
+ "run_id_query_plan": [
+  "SCAN dv_steps",
+  "SCAN dv_outcomes"
+ ],
+ "run_ids_straddling_the_bound": [
+  "dv-2026-11-14T16:50:01Z-34a88006",
+  "dv-2026-11-14T16:50:01Z-f2126118",
+  "dv-2026-11-14T16:50:01Z-d5167e9d",
+  "dv-2026-11-14T16:50:01Z-2be2ff4d"
+ ],
+ "runs": {
+  "dv-2026-11-14T17:50:01Z-1cafeef6": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T17:50:20Z",
+   "gate_steps": 322,
+   "last": "2026-11-14T17:57:03Z",
+   "outcome_words": {
+    "unverifiable": 322
+   },
+   "outcomes": 322,
+   "steps": 1710
+  },
+  "dv-2026-11-14T17:50:01Z-660169ca": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T17:50:11Z",
+   "gate_steps": 320,
+   "last": "2026-11-14T17:57:16Z",
+   "outcome_words": {
+    "unverifiable": 320
+   },
+   "outcomes": 320,
+   "steps": 1684
+  },
+  "dv-2026-11-14T17:50:01Z-8625654c": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T17:50:12Z",
+   "gate_steps": 215,
+   "last": "2026-11-14T17:54:29Z",
+   "outcome_words": {
+    "unverifiable": 215
+   },
+   "outcomes": 215,
+   "steps": 1175
+  },
+  "dv-2026-11-14T17:50:01Z-fa4f946f": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T17:50:14Z",
+   "gate_steps": 110,
+   "last": "2026-11-14T17:54:28Z",
+   "outcome_words": {
+    "unverifiable": 110
+   },
+   "outcomes": 110,
+   "steps": 634
+  },
+  "dv-2026-11-14T18:50:01Z-07e61b37": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T18:50:14Z",
+   "gate_steps": 1059,
+   "last": "2026-11-14T18:55:23Z",
+   "outcome_words": {
+    "unverifiable": 1059
+   },
+   "outcomes": 1059,
+   "steps": 5379
+  },
+  "dv-2026-11-14T18:50:01Z-146ade7a": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 3,
+   "first": "2026-11-14T18:50:16Z",
+   "gate_steps": 172,
+   "last": "2026-11-14T18:56:59Z",
+   "outcome_words": {
+    "forged": 15,
+    "unverifiable": 157
+   },
+   "outcomes": 172,
+   "steps": 952
+  },
+  "dv-2026-11-14T18:50:01Z-44d97b42": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 11,
+   "error_steps": 4,
+   "first": "2026-11-14T18:50:14Z",
+   "gate_steps": 187,
+   "last": "2026-11-14T18:57:26Z",
+   "outcome_words": {
+    "unverifiable": 187
+   },
+   "outcomes": 187,
+   "steps": 1037
+  },
+  "dv-2026-11-14T18:50:01Z-ea99dc96": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-14T18:50:15Z",
+   "gate_steps": 184,
+   "last": "2026-11-14T18:55:15Z",
+   "outcome_words": {
+    "unverifiable": 178,
+    "verified": 6
+   },
+   "outcomes": 184,
+   "steps": 1003
+  },
+  "dv-2026-11-14T19:50:02Z-3f92eff8": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-14T19:50:22Z",
+   "gate_steps": 120,
+   "last": "2026-11-14T19:54:02Z",
+   "outcome_words": {
+    "unverifiable": 120
+   },
+   "outcomes": 120,
+   "steps": 698
+  },
+  "dv-2026-11-14T19:50:02Z-cdb65481": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T19:50:23Z",
+   "gate_steps": 197,
+   "last": "2026-11-14T19:54:46Z",
+   "outcome_words": {
+    "unverifiable": 197
+   },
+   "outcomes": 197,
+   "steps": 1069
+  },
+  "dv-2026-11-14T19:50:02Z-e0bc068c": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-14T19:50:24Z",
+   "gate_steps": 96,
+   "last": "2026-11-14T19:54:11Z",
+   "outcome_words": {
+    "unverifiable": 96
+   },
+   "outcomes": 96,
+   "steps": 564
+  },
+  "dv-2026-11-14T19:50:02Z-e4fd53db": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T19:50:24Z",
+   "gate_steps": 131,
+   "last": "2026-11-14T19:56:23Z",
+   "outcome_words": {
+    "unverifiable": 131
+   },
+   "outcomes": 131,
+   "steps": 749
+  },
+  "dv-2026-11-14T20:50:02Z-44ae7d1b": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-14T20:50:09Z",
+   "gate_steps": 442,
+   "last": "2026-11-14T20:53:49Z",
+   "outcome_words": {
+    "unverifiable": 442
+   },
+   "outcomes": 442,
+   "steps": 2292
+  },
+  "dv-2026-11-14T20:50:02Z-aecd2531": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 4,
+   "first": "2026-11-14T20:50:11Z",
+   "gate_steps": 244,
+   "last": "2026-11-14T20:53:07Z",
+   "outcome_words": {
+    "unverifiable": 244
+   },
+   "outcomes": 244,
+   "steps": 1306
+  },
+  "dv-2026-11-14T20:50:02Z-c7a9fa85": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-14T20:50:14Z",
+   "gate_steps": 97,
+   "last": "2026-11-14T20:53:30Z",
+   "outcome_words": {
+    "unverifiable": 97
+   },
+   "outcomes": 97,
+   "steps": 577
+  },
+  "dv-2026-11-14T20:50:02Z-db86ac12": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T20:50:12Z",
+   "gate_steps": 95,
+   "last": "2026-11-14T20:54:18Z",
+   "outcome_words": {
+    "unverifiable": 95
+   },
+   "outcomes": 95,
+   "steps": 561
+  },
+  "dv-2026-11-14T21:49:05Z-21a36671": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 5,
+   "error_steps": 0,
+   "first": "2026-11-14T21:49:14Z",
+   "gate_steps": 213,
+   "last": "2026-11-14T21:50:59Z",
+   "outcome_words": {
+    "unverifiable": 213
+   },
+   "outcomes": 213,
+   "steps": 1105
+  },
+  "dv-2026-11-14T21:49:05Z-81515d4b": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 5,
+   "error_steps": 0,
+   "first": "2026-11-14T21:49:14Z",
+   "gate_steps": 29,
+   "last": "2026-11-14T21:50:49Z",
+   "outcome_words": {
+    "unverifiable": 29
+   },
+   "outcomes": 29,
+   "steps": 185
+  },
+  "dv-2026-11-14T21:49:05Z-a1d2eb2e": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 5,
+   "error_steps": 0,
+   "first": "2026-11-14T21:49:27Z",
+   "gate_steps": 80,
+   "last": "2026-11-14T21:51:26Z",
+   "outcome_words": {
+    "unverifiable": 80
+   },
+   "outcomes": 80,
+   "steps": 442
+  },
+  "dv-2026-11-14T21:49:05Z-f810bbed": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 5,
+   "error_steps": 2,
+   "first": "2026-11-14T21:49:17Z",
+   "gate_steps": 118,
+   "last": "2026-11-14T21:53:23Z",
+   "outcome_words": {
+    "unverifiable": 118
+   },
+   "outcomes": 118,
+   "steps": 630
+  },
+  "dv-2026-11-14T21:50:02Z-4d634eb5": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T21:50:08Z",
+   "gate_steps": 123,
+   "last": "2026-11-14T21:52:58Z",
+   "outcome_words": {
+    "unverifiable": 123
+   },
+   "outcomes": 123,
+   "steps": 695
+  },
+  "dv-2026-11-14T21:50:02Z-9b8eabf0": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-14T21:50:10Z",
+   "gate_steps": 418,
+   "last": "2026-11-14T21:54:17Z",
+   "outcome_words": {
+    "unverifiable": 418
+   },
+   "outcomes": 418,
+   "steps": 2170
+  },
+  "dv-2026-11-14T21:50:02Z-cc4bade3": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T21:50:10Z",
+   "gate_steps": 416,
+   "last": "2026-11-14T21:58:37Z",
+   "outcome_words": {
+    "unverifiable": 416
+   },
+   "outcomes": 416,
+   "steps": 2160
+  },
+  "dv-2026-11-14T21:50:02Z-d3c78ac5": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T21:50:19Z",
+   "gate_steps": 168,
+   "last": "2026-11-14T21:59:13Z",
+   "outcome_words": {
+    "unverifiable": 168
+   },
+   "outcomes": 168,
+   "steps": 922
+  },
+  "dv-2026-11-14T23:24:09Z-1b750b3c": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-14T23:24:48Z",
+   "gate_steps": 123,
+   "last": "2026-11-14T23:30:13Z",
+   "outcome_words": {
+    "unverifiable": 123
+   },
+   "outcomes": 123,
+   "steps": 705
+  },
+  "dv-2026-11-14T23:24:09Z-7dc1c633": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 4,
+   "first": "2026-11-14T23:24:48Z",
+   "gate_steps": 202,
+   "last": "2026-11-14T23:28:52Z",
+   "outcome_words": {
+    "unverifiable": 202
+   },
+   "outcomes": 202,
+   "steps": 1106
+  },
+  "dv-2026-11-14T23:24:09Z-ace84d08": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T23:24:49Z",
+   "gate_steps": 133,
+   "last": "2026-11-14T23:31:59Z",
+   "outcome_words": {
+    "unverifiable": 133
+   },
+   "outcomes": 133,
+   "steps": 755
+  },
+  "dv-2026-11-14T23:24:10Z-3cb52c12": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T23:24:51Z",
+   "gate_steps": 452,
+   "last": "2026-11-14T23:28:53Z",
+   "outcome_words": {
+    "unverifiable": 452
+   },
+   "outcomes": 452,
+   "steps": 2348
+  },
+  "dv-2026-11-14T23:50:00Z-009143cc": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-14T23:50:05Z",
+   "gate_steps": 135,
+   "last": "2026-11-14T23:53:17Z",
+   "outcome_words": {
+    "unverifiable": 135
+   },
+   "outcomes": 135,
+   "steps": 755
+  },
+  "dv-2026-11-14T23:50:00Z-de4ed45f": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-14T23:50:06Z",
+   "gate_steps": 60,
+   "last": "2026-11-14T23:54:02Z",
+   "outcome_words": {
+    "unverifiable": 60
+   },
+   "outcomes": 60,
+   "steps": 380
+  },
+  "dv-2026-11-14T23:50:00Z-e50360d2": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-14T23:50:07Z",
+   "gate_steps": 444,
+   "last": "2026-11-14T23:52:06Z",
+   "outcome_words": {
+    "unverifiable": 444
+   },
+   "outcomes": 444,
+   "steps": 2300
+  },
+  "dv-2026-11-14T23:50:00Z-e986724e": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 4,
+   "first": "2026-11-14T23:50:19Z",
+   "gate_steps": 289,
+   "last": "2026-11-14T23:53:28Z",
+   "outcome_words": {
+    "unverifiable": 289
+   },
+   "outcomes": 289,
+   "steps": 1527
+  },
+  "dv-2026-11-15T00:50:01Z-1a155eb8": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-15T00:50:36Z",
+   "gate_steps": 35,
+   "last": "2026-11-15T00:53:03Z",
+   "outcome_words": {
+    "unverifiable": 35
+   },
+   "outcomes": 35,
+   "steps": 257
+  },
+  "dv-2026-11-15T00:50:01Z-56093f15": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-15T00:50:37Z",
+   "gate_steps": 208,
+   "last": "2026-11-15T00:53:20Z",
+   "outcome_words": {
+    "unverifiable": 208
+   },
+   "outcomes": 208,
+   "steps": 1122
+  },
+  "dv-2026-11-15T00:50:01Z-59816da2": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-15T00:50:35Z",
+   "gate_steps": 115,
+   "last": "2026-11-15T00:55:01Z",
+   "outcome_words": {
+    "unverifiable": 115
+   },
+   "outcomes": 115,
+   "steps": 661
+  },
+  "dv-2026-11-15T00:50:01Z-7006d2f0": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 8,
+   "first": "2026-11-15T00:50:34Z",
+   "gate_steps": 29,
+   "last": "2026-11-15T00:52:29Z",
+   "outcome_words": {
+    "unverifiable": 29
+   },
+   "outcomes": 29,
+   "steps": 227
+  },
+  "dv-2026-11-15T01:50:00Z-74404754": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-15T01:50:41Z",
+   "gate_steps": 22,
+   "last": "2026-11-15T01:53:55Z",
+   "outcome_words": {
+    "unverifiable": 22
+   },
+   "outcomes": 22,
+   "steps": 198
+  },
+  "dv-2026-11-15T01:50:00Z-8f611b82": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-15T01:50:39Z",
+   "gate_steps": 378,
+   "last": "2026-11-15T01:58:22Z",
+   "outcome_words": {
+    "unverifiable": 378
+   },
+   "outcomes": 378,
+   "steps": 1976
+  },
+  "dv-2026-11-15T01:50:00Z-9b094639": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 8,
+   "first": "2026-11-15T01:50:39Z",
+   "gate_steps": 99,
+   "last": "2026-11-15T01:54:33Z",
+   "outcome_words": {
+    "unverifiable": 99
+   },
+   "outcomes": 99,
+   "steps": 581
+  },
+  "dv-2026-11-15T01:50:00Z-9ce488f4": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-15T01:50:38Z",
+   "gate_steps": 75,
+   "last": "2026-11-15T01:55:57Z",
+   "outcome_words": {
+    "unverifiable": 75
+   },
+   "outcomes": 75,
+   "steps": 461
+  },
+  "dv-2026-11-15T02:50:01Z-15b2d194": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-15T02:50:10Z",
+   "gate_steps": 57,
+   "last": "2026-11-15T02:54:03Z",
+   "outcome_words": {
+    "unverifiable": 57
+   },
+   "outcomes": 57,
+   "steps": 365
+  },
+  "dv-2026-11-15T02:50:01Z-1f6be837": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-15T02:50:10Z",
+   "gate_steps": 142,
+   "last": "2026-11-15T02:52:57Z",
+   "outcome_words": {
+    "unverifiable": 142
+   },
+   "outcomes": 142,
+   "steps": 790
+  },
+  "dv-2026-11-15T02:50:01Z-59643083": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 4,
+   "first": "2026-11-15T02:50:09Z",
+   "gate_steps": 75,
+   "last": "2026-11-15T02:52:36Z",
+   "outcome_words": {
+    "unverifiable": 75
+   },
+   "outcomes": 75,
+   "steps": 455
+  },
+  "dv-2026-11-15T02:50:01Z-9a514458": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-15T02:50:08Z",
+   "gate_steps": 532,
+   "last": "2026-11-15T02:52:22Z",
+   "outcome_words": {
+    "unverifiable": 532
+   },
+   "outcomes": 532,
+   "steps": 2740
+  },
+  "dv-2026-11-15T03:50:01Z-22b55fa7": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-15T03:50:11Z",
+   "gate_steps": 772,
+   "last": "2026-11-15T03:59:26Z",
+   "outcome_words": {
+    "unverifiable": 772
+   },
+   "outcomes": 772,
+   "steps": 3940
+  },
+  "dv-2026-11-15T03:50:01Z-9a62f5b2": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 4,
+   "first": "2026-11-15T03:50:14Z",
+   "gate_steps": 82,
+   "last": "2026-11-15T03:59:03Z",
+   "outcome_words": {
+    "unknown": 4,
+    "unverifiable": 78
+   },
+   "outcomes": 82,
+   "steps": 490
+  },
+  "dv-2026-11-15T03:50:01Z-db41fb05": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-15T03:50:10Z",
+   "gate_steps": 215,
+   "last": "2026-11-15T03:52:56Z",
+   "outcome_words": {
+    "unverifiable": 215
+   },
+   "outcomes": 215,
+   "steps": 1155
+  },
+  "dv-2026-11-15T03:50:01Z-dbb45133": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-15T03:50:13Z",
+   "gate_steps": 36,
+   "last": "2026-11-15T03:52:51Z",
+   "outcome_words": {
+    "unverifiable": 36
+   },
+   "outcomes": 36,
+   "steps": 260
+  },
+  "dv-2026-11-15T04:50:01Z-04973f0c": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-15T04:50:11Z",
+   "gate_steps": 30,
+   "last": "2026-11-15T04:56:56Z",
+   "outcome_words": {
+    "unknown": 4,
+    "unverifiable": 26
+   },
+   "outcomes": 30,
+   "steps": 230
+  },
+  "dv-2026-11-15T04:50:01Z-6fd0c669": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-15T04:50:10Z",
+   "gate_steps": 10,
+   "last": "2026-11-15T04:52:42Z",
+   "outcome_words": {
+    "unverifiable": 10
+   },
+   "outcomes": 10,
+   "steps": 130
+  },
+  "dv-2026-11-15T04:50:01Z-7d7b4ec4": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 10,
+   "first": "2026-11-15T04:50:13Z",
+   "gate_steps": 249,
+   "last": "2026-11-15T04:52:56Z",
+   "outcome_words": {
+    "unverifiable": 249
+   },
+   "outcomes": 249,
+   "steps": 1325
+  },
+  "dv-2026-11-15T04:50:01Z-8aeb9d3f": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 4,
+   "first": "2026-11-15T04:50:12Z",
+   "gate_steps": 130,
+   "last": "2026-11-15T04:52:25Z",
+   "outcome_words": {
+    "unverifiable": 130
+   },
+   "outcomes": 130,
+   "steps": 730
+  },
+  "dv-2026-11-15T05:50:01Z-775171ad": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 4,
+   "first": "2026-11-15T05:50:09Z",
+   "gate_steps": 75,
+   "last": "2026-11-15T05:52:14Z",
+   "outcome_words": {
+    "unverifiable": 75
+   },
+   "outcomes": 75,
+   "steps": 455
+  },
+  "dv-2026-11-15T05:50:01Z-b2af1030": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-15T05:50:15Z",
+   "gate_steps": 157,
+   "last": "2026-11-15T05:53:23Z",
+   "outcome_words": {
+    "unverifiable": 157
+   },
+   "outcomes": 157,
+   "steps": 867
+  },
+  "dv-2026-11-15T05:50:01Z-d5e5f734": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-15T05:50:13Z",
+   "gate_steps": 48,
+   "last": "2026-11-15T05:56:59Z",
+   "outcome_words": {
+    "unknown": 4,
+    "unverifiable": 44
+   },
+   "outcomes": 48,
+   "steps": 322
+  },
+  "dv-2026-11-15T05:50:01Z-f97df5c2": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 6,
+   "first": "2026-11-15T05:50:10Z",
+   "gate_steps": 66,
+   "last": "2026-11-15T05:52:28Z",
+   "outcome_words": {
+    "unverifiable": 66
+   },
+   "outcomes": 66,
+   "steps": 410
+  },
+  "dv-2026-11-15T06:50:00Z-c4f550f6": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-15T06:50:09Z",
+   "gate_steps": 315,
+   "last": "2026-11-15T06:58:10Z",
+   "outcome_words": {
+    "unverifiable": 315
+   },
+   "outcomes": 315,
+   "steps": 1657
+  },
+  "dv-2026-11-15T06:50:00Z-de034f8f": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 6,
+   "first": "2026-11-15T06:50:06Z",
+   "gate_steps": 46,
+   "last": "2026-11-15T06:52:03Z",
+   "outcome_words": {
+    "unverifiable": 46
+   },
+   "outcomes": 46,
+   "steps": 310
+  },
+  "dv-2026-11-15T06:50:00Z-de3c7aaa": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 2,
+   "first": "2026-11-15T06:50:09Z",
+   "gate_steps": 26,
+   "last": "2026-11-15T06:52:38Z",
+   "outcome_words": {
+    "unverifiable": 26
+   },
+   "outcomes": 26,
+   "steps": 210
+  },
+  "dv-2026-11-15T06:50:00Z-fe431130": {
+   "account_hold_steps": 0,
+   "documents_with_a_step": 10,
+   "error_steps": 0,
+   "first": "2026-11-15T06:50:05Z",
+   "gate_steps": 232,
+   "last": "2026-11-15T06:53:24Z",
+   "outcome_words": {
+    "unverifiable": 232
+   },
+   "outcomes": 232,
+   "steps": 1240
+  }
+ },
+ "seconds": 0.06,
+ "since": "2026-11-14T17:45:00Z",
+ "ticks": [
+  {
+   "error_text": "",
+   "finished": "2026-11-14T17:57:16Z",
+   "started": "2026-11-14T17:50:01Z",
+   "status": "ok"
+  },
+  {
+   "error_text": "",
+   "finished": "2026-11-14T18:57:26Z",
+   "started": "2026-11-14T18:50:01Z",
+   "status": "ok"
+  },
+  {
+   "error_text": "",
+   "finished": "2026-11-14T19:56:23Z",
+   "started": "2026-11-14T19:50:02Z",
+   "status": "ok"
+  },
+  {
+   "error_text": "",
+   "finished": "2026-11-14T20:54:18Z",
+   "started": "2026-11-14T20:50:01Z",
+   "status": "ok"
+  },
+  {
+   "error_text": "",
+   "finished": "2026-11-14T21:59:13Z",
+   "started": "2026-11-14T21:50:02Z",
+   "status": "ok"
+  },
+  {
+   "error_text": "",
+   "finished": "2026-11-14T23:32:00Z",
+   "started": "2026-11-14T23:24:09Z",
+   "status": "ok"
+  },
+  {
+   "error_text": "",
+   "finished": "2026-11-14T23:54:02Z",
+   "started": "2026-11-14T23:50:00Z",
+   "status": "ok"
+  },
+  {
+   "error_text": "",
+   "finished": "2026-11-15T00:55:01Z",
+   "started": "2026-11-15T00:50:01Z",
+   "status": "ok"
+  },
+  {
+   "error_text": "",
+   "finished": "2026-11-15T01:58:22Z",
+   "started": "2026-11-15T01:50:00Z",
+   "status": "ok"
+  },
+  {
+   "error_text": "",
+   "finished": "2026-11-15T02:54:03Z",
+   "started": "2026-11-15T02:50:01Z",
+   "status": "ok"
+  },
+  {
+   "error_text": "",
+   "finished": "2026-11-15T03:59:26Z",
+   "started": "2026-11-15T03:50:01Z",
+   "status": "ok"
+  },
+  {
+   "error_text": "",
+   "finished": "2026-11-15T04:56:56Z",
+   "started": "2026-11-15T04:50:01Z",
+   "status": "ok"
+  },
+  {
+   "error_text": "",
+   "finished": "2026-11-15T05:56:59Z",
+   "started": "2026-11-15T05:50:01Z",
+   "status": "ok"
+  },
+  {
+   "error_text": "",
+   "finished": "2026-11-15T06:58:10Z",
+   "started": "2026-11-15T06:50:00Z",
+   "status": "ok"
+  }
+ ]
+}

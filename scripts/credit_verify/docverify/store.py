@@ -280,6 +280,17 @@ class DocVerifyStore:
                  reason[:600], need, int(account_hold), json.dumps(detail, default=str, ensure_ascii=False)[:20_000],
                  VERSION, intake_id))
 
+    def run_rows(self, run_id: str) -> tuple[int, int]:
+        """(dv_steps rows, dv_outcomes rows) ON FILE under `run_id`, read through a new read-only connection: what
+        any other reader of the file finds, not what this writer counted for itself. A store that cannot be
+        read raises sqlite3.Error."""
+        db = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=60)
+        try:
+            return (db.execute("SELECT COUNT(*) FROM dv_steps WHERE run_id=?", (run_id,)).fetchone()[0],
+                    db.execute("SELECT COUNT(*) FROM dv_outcomes WHERE run_id=?", (run_id,)).fetchone()[0])
+        finally:
+            db.close()
+
     def llm_call(self, row: dict[str, Any]) -> int:
         with self.lock, self.db:
             cur = self.db.execute("INSERT INTO dv_llm_calls (at, proof_id, model, outcome, reason, prompt_sha256,"

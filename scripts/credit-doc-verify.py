@@ -118,8 +118,10 @@ def run_workers(args: argparse.Namespace, popen=None) -> int:
     procs = [(i, popen(worker_argv(args, i, args.workers, b))) for i, b in plan]
     rcs = {i: p.wait() for i, p in procs}
     bad = {i: rc for i, rc in rcs.items() if rc != 0}
+    silent = sorted(i for i, rc in bad.items() if rc == EX_NO_TRACE)
     log(f"workers {args.workers}: started {len(plan)} (budgets {[b for _, b in plan]}), exit {rcs}"
-        + (f"; FAILED shards {sorted(bad)}" if bad else ""))
+        + (f"; FAILED shards {sorted(bad)}" if bad else "")
+        + (f"; NO TRACE in shards {silent}: work reported that the store does not hold" if silent else ""))
     return 1 if bad else 0
 
 
@@ -169,9 +171,11 @@ def cmd_blob_backfill(args: argparse.Namespace) -> int:
 
 
 EX_PROVIDER_DOWN = 75        # EX_TEMPFAIL: the model provider refused (credit / auth / rate limit / cap / no key)
+EX_NO_TRACE = 70             # EX_SOFTWARE: the run reports work that the store does not hold (runner.untraced)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    import sqlite3
     from credit_verify.docverify import runner
     from credit_verify.docverify.store import DocVerifyStore
     if Path(KILL_SWITCH).exists():
@@ -200,14 +204,26 @@ def cmd_run(args: argparse.Namespace) -> int:
     # the carried-set metric is a whole-store scan (~15 s on node-8): one shard reports it, not all of them
     extra = {"carried_remaining": store.carried_remaining()} \
         if args.reread_carried and (shard is None or shard[0] == 0) else {}
-    log("run " + json.dumps({**stats.as_dict(), "shard": args.shard, **extra}))
+    # Read back what the run left on file, from the file: a run that judged and recorded nothing used to exit 0.
+    # A store that cannot be read back is unmeasured, and unmeasured is a failure too, never "it wrote them".
+    try:
+        steps, outcomes = store.run_rows(stats.run_id)
+        written: dict[str, int | None] = {"steps": steps, "outcomes": outcomes}
+        silent = runner.untraced(stats, steps, outcomes)
+    except sqlite3.Error as exc:
+        written = {"steps": None, "outcomes": None}
+        silent = (f"the rows of {stats.run_id} could not be read back from {store.path} "
+                  f"({type(exc).__name__}: {str(exc)[:160]})")
+    log("run " + json.dumps({**stats.as_dict(), "written": written, "shard": args.shard, **extra}))
     print("NO_REPLY")
+    if silent:
+        log(f"run FAILED: NO TRACE: {silent}")
     if stats.provider_down:
         # Fable b1 #1518: a run the provider refused is a FAILED run (a shard / the cron sees nonzero, the
         # unknown-share watchdog and the shard loop's back-off see it), never a quiet success
         log(f"run FAILED: provider down ({stats.provider_down})")
         return EX_PROVIDER_DOWN
-    return 0
+    return EX_NO_TRACE if silent else 0
 
 
 FORGED_SQL = ("SELECT DISTINCT proof_id, request_id || '#' || role, user_id FROM stage2_shadow WHERE user_id IN ({}) "
