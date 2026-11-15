@@ -140,13 +140,22 @@ ak47_tmp_gb() {
   # The retry window owns the failed walk: once it has elapsed the walk is due
   # even though the fallback value is still cached.
   if [ "$retrying" -eq 0 ] && v=$(ak47_cache_get tmp_gb "$ttl"); then printf '%s' "$v"; return 0; fi
-  if v=$(ak47_tmp_gb_walk "$budget"); then
+  # One walk over the whole tree is the cheap case and the accurate one: on the
+  # 2026-11-15 box (108 GB, 129k entries) it takes 3m34s, inside the 300 s budget.
+  v=$(timeout "$budget" du -sx --block-size=1G "${AK47_TMP_ROOT:-/tmp}" 2>/dev/null | cut -f1)
+  case "${v:-}" in
+    ''|*[!0-9]*) v="" ;;
+  esac
+  if [ -n "$v" ]; then
     rm -f "$marker" 2>/dev/null || true
     ak47_cache_put tmp_gb "$v"
     ak47_cache_put tmp_gb_ok "$(ak47_epoch)"
     printf '%s' "$v"
     return 0
   fi
+  # The whole-tree walk did not finish. Measure what fits in half the budget and
+  # report the coverage, so the number is a real lower bound instead of nothing.
+  v=$(ak47_tmp_gb_walk $(( budget / 2 )))
   case "${v:-}" in
     ''|*[!0-9]*)
       # The walk produced nothing at all. Keep the last real measurement rather

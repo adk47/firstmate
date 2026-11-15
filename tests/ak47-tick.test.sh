@@ -768,8 +768,9 @@ test_a_partial_size_walk_records_its_coverage() {
   for i in $(seq 1 30); do mkdir -p "$AK47_TMP_ROOT/d$i"; head -c 20000 /dev/zero >"$AK47_TMP_ROOT/d$i/blob"; done
   local slow=$SANDBOX/slowbin-part
   mkdir -p "$slow"
-  # Every batch costs a second, so a 1 s budget can only reach the first batch.
-  printf '#!/bin/sh\nsleep 1\nexec /usr/bin/du "$@"\n' >"$slow/du"
+  # The whole-tree walk never finishes; the batched walk works but costs a
+  # second per batch, so a 1 s budget can only reach the first batch.
+  printf '#!/bin/sh\nif [ $# -gt 1 ]; then sleep 1; exec /usr/bin/du "$@"; fi\nexec sleep 300\n' >"$slow/du"
   chmod +x "$slow/du"
   PATH="$slow:$PATH" AK47_DU_BUDGET=1 AK47_DU_TTL=0 bash -c \
     '. "$1/ak47/lib/common.sh"; ak47_tmp_gb >/dev/null' _ "$ROOT" \
@@ -790,7 +791,7 @@ test_a_partial_walk_does_not_claim_the_tree_was_measured() {
   for i in $(seq 1 30); do mkdir -p "$AK47_TMP_ROOT/d$i"; head -c 20000 /dev/zero >"$AK47_TMP_ROOT/d$i/blob"; done
   local slow=$SANDBOX/slowbin-part2
   mkdir -p "$slow"
-  printf '#!/bin/sh\nsleep 1\nexec /usr/bin/du "$@"\n' >"$slow/du"
+  printf '#!/bin/sh\nif [ $# -gt 1 ]; then sleep 1; exec /usr/bin/du "$@"; fi\nexec sleep 300\n' >"$slow/du"
   chmod +x "$slow/du"
   PATH="$slow:$PATH" AK47_DU_BUDGET=1 AK47_DU_TTL=0 bash -c \
     '. "$1/ak47/lib/common.sh"; ak47_tmp_gb >/dev/null' _ "$ROOT" \
