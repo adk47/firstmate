@@ -58,7 +58,7 @@
 # The standing allow: the adk47 self-authorship credit-approval-guard is the one
 # admin-bypassed red the captain named (2026-11-03 12:2xZ), and only for adk47's
 # own pull requests.
-FM_MERGE_GATE_STANDING_ALLOW=credit-approval-guard
+FM_MERGE_GATE_STANDING_ALLOW='credit-approval-guard'
 FM_MERGE_GATE_STANDING_ALLOW_AUTHOR=adk47
 
 # Red conclusions and states. A pending check is not red; a pending qa-review is
@@ -417,7 +417,7 @@ fm_merge_gate() {
   if [ "$owner" = muso-ai ]; then
     coverage=qa
   elif fm_merge_gate_is_no_qa_repo "$repo"; then
-    coverage=no-qa
+    coverage='no-qa'
   fi
   if [ -z "$coverage" ]; then
     printf 'error: refusing to merge %s#%s: QA coverage unknown\n' "$repo" "$number" >&2
@@ -463,7 +463,7 @@ fm_merge_gate() {
         refusals="$refusals  - the qa-review verdict on head $FM_MERGE_GATE_HEAD is $qa, not SUCCESS
 "
       fi
-      verdict_label=qa-review
+      verdict_label='qa-review'
       verdict_value=$qa
       ;;
     no-qa)
@@ -475,7 +475,7 @@ fm_merge_gate() {
         refusals="$refusals  - the no-mistakes attestation on head $FM_MERGE_GATE_HEAD is $attestation, not SUCCESS
 "
       fi
-      verdict_label=no-mistakes-attestation
+      verdict_label='no-mistakes-attestation'
       verdict_value=$attestation
       ;;
   esac
