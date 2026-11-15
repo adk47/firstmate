@@ -43,8 +43,11 @@
 #   and clears the previous harness's per-task wiring before arming the new
 #   incarnation. A tmux task whose recorded window reads `missing` has that
 #   window recreated in its recorded session, under its recorded name, starting
-#   in the recorded worktree, so the cwd proof reads the window the relaunch
-#   just created. Orca is the other exception to "same endpoint": when its
+#   in the recorded worktree - but only once the worktree is proven free of any
+#   live copy (no window of that session in it, no agent process working in
+#   it), since a renamed window is missing by name while still holding an agent;
+#   the cwd proof then reads the window the relaunch just created. Orca is the
+#   other exception to "same endpoint": when its
 #   classifier reports the recorded terminal `missing` (a stale handle, e.g.
 #   after an Orca or host restart) or `dead` (still listed, with an empty or
 #   shell-only pty), the replacement launches in a NEW terminal created in the
@@ -2547,12 +2550,23 @@ if [ "$RELAUNCH" -eq 1 ]; then
   WT_TARGET=$T
   SES=${T%%:*}
   # `missing` is the tmux classifier's proof that a successful session inventory
-  # omitted the recorded window, so nothing can be hosting an agent there. The
-  # endpoint itself must therefore be recreated - same recorded session, same
-  # recorded window name, starting in the recorded worktree - before the cwd
-  # proof below, which reads that new window's stable id instead of letting
-  # display-message fall back to whichever window the active client is on.
+  # omitted the recorded window, which by itself only proves the NAME is gone: a
+  # `tmux rename-window` hides a running agent from the inventory. So the
+  # worktree must also be proven free of any live copy - no window of the
+  # recorded session sitting in it, and no agent process working in it - before
+  # a replacement window is created. With that proof the endpoint is recreated
+  # (same recorded session, same recorded window name, starting in the recorded
+  # worktree) ahead of the cwd proof below, which reads the new window's stable
+  # id rather than letting display-message fall back to the active client.
   if [ "$BACKEND" = tmux ] && [ "$RELAUNCH_STATE" = missing ]; then
+    if ! tmux_occupants=$(fm_backend_tmux_worktree_occupants "$SES" "$WT"); then
+      echo "error: task $ID's recorded window $T is absent, but its worktree $WT could not be proven free of a live copy; refusing to create a second endpoint (inspect it with tmux list-windows and ps, then stop any agent with bin/fm-control.sh $ID exit)" >&2
+      exit 2
+    fi
+    if [ -n "$tmux_occupants" ]; then
+      echo "error: task $ID's recorded window $T is absent, but its worktree $WT is not free: $tmux_occupants; refusing to create a second endpoint beside a live copy" >&2
+      exit 2
+    fi
     WT_TARGET=$(fm_backend_tmux_ensure_task "$SES" "$W" "$WT") || exit 1
   fi
 else

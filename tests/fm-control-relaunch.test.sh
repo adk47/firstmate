@@ -121,7 +121,26 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  list-windows)
+    fmt=''
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -F) fmt=${2:-}; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    case "$fmt" in
+      *pane_current_path*)
+        n=0
+        while IFS= read -r name; do
+          [ -n "$name" ] || continue
+          n=$((n + 1))
+          printf '@%s|%s|%s\n' "$n" "$name" "$(cat "$D/cwd" 2>/dev/null)"
+        done < "$D/windows"
+        ;;
+      *) [ -f "$D/windows" ] && cat "$D/windows" ;;
+    esac
+    exit 0 ;;
   has-session) [ ! -e "$D/no-session" ] && exit 0; exit 1 ;;
   new-window|new-session)
     shift
@@ -1486,6 +1505,48 @@ test_spawn_relaunch_recreates_a_gone_session_for_its_window() {
   pass "fm-spawn --relaunch: a gone recorded session is recreated under its own name"
 }
 
+test_spawn_relaunch_refuses_a_renamed_window_still_in_the_worktree() {
+  local dir out rc
+  dir=$(new_case window-renamed rl42)
+  add_ship_task "$dir" rl42 claude
+  # The task's window was renamed in tmux, so the recorded name is absent and
+  # the task reads `missing` while its agent is still sitting in the worktree.
+  printf 'renamed-lane\n' > "$dir/fake/windows"
+  out=$(run_spawn "$dir" rl42 --relaunch --harness claude); rc=$?
+  expect_code 2 "$rc" "relaunching beside a renamed window in the worktree must refuse"$'\n'"$out"
+  assert_contains "$out" "is not free" "the refusal should say the worktree is occupied"
+  assert_contains "$out" "renamed-lane" "the refusal should name the window it found"
+  [ ! -s "$dir/fake/window-ids" ] \
+    || fail "a refused relaunch must not create a window, got '$(cat "$dir/fake/window-ids")'"
+  pass "fm-spawn --relaunch: a renamed live window in the recorded worktree is refused"
+}
+
+test_spawn_relaunch_refuses_an_agent_process_in_the_worktree() {
+  local dir out rc spid
+  dir=$(new_case window-orphan-agent rl43)
+  add_ship_task "$dir" rl43 claude
+  : > "$dir/fake/windows"
+  # A shell launched straight into the worktree, outside any tmux window: the
+  # session inventory proves nothing about it, so the process scan has to.
+  mkdir -p "$dir/agentbin"
+  ln -sf "$(command -v sleep)" "$dir/agentbin/claude" 2>/dev/null \
+    || cp "$(command -v sleep)" "$dir/agentbin/claude"
+  ( cd "$dir/wt" && exec "$dir/agentbin/claude" 300 ) &
+  spid=$!
+  sleep 0.3
+  out=$(run_spawn "$dir" rl43 --relaunch --harness claude); rc=$?
+  kill "$spid" 2>/dev/null || true
+  wait "$spid" 2>/dev/null || true
+  expect_code 2 "$rc" "relaunching beside a live agent in the worktree must refuse"$'\n'"$out"
+  assert_contains "$out" "is not free" "the refusal should say the worktree is occupied"
+  [ ! -s "$dir/fake/window-ids" ] \
+    || fail "a refused relaunch must not create a window, got '$(cat "$dir/fake/window-ids")'"
+  if command -v lsof >/dev/null 2>&1; then
+    assert_contains "$out" "is working in" "the refusal should name the agent process it found"
+  fi
+  pass "fm-spawn --relaunch: a live agent process in the recorded worktree is refused"
+}
+
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
   local dir meta target out rc
   dir=$(new_case symlink-meta rl37)
@@ -1690,6 +1751,8 @@ test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_replaces_a_window_that_is_gone
 test_spawn_relaunch_does_not_create_a_window_that_still_exists
 test_spawn_relaunch_recreates_a_gone_session_for_its_window
+test_spawn_relaunch_refuses_a_renamed_window_still_in_the_worktree
+test_spawn_relaunch_refuses_an_agent_process_in_the_worktree
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous

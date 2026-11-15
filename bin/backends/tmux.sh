@@ -129,6 +129,64 @@ fm_backend_tmux_ensure_task() {  # <session> <window-name> <cwd> -> prints windo
   printf '%s\n' "$wid"
 }
 
+# fm_backend_tmux_worktree_occupants: describe every live copy of a task that
+# is already sitting in <cwd> of <session>. A name-absent inventory proves only
+# that the recorded window NAME is gone - `tmux rename-window` hides a running
+# agent from it - so a relaunch that would recreate a window must first prove
+# the worktree itself is free: no window of the session sits in <cwd>, and no
+# agent-classified process has its working directory at or under <cwd>. Prints
+# one line per occupant; empty output with status 0 means provably free, and
+# status 1 means the process scan could not be read, so absence is unproven.
+fm_backend_tmux_worktree_occupants() {  # <session> <cwd> -> occupants on stdout
+  local ses=$1 cwd=$2 real rows id name path pid out line comm
+  [ -n "$ses" ] && [ -n "$cwd" ] || return 1
+  [ -d "$cwd" ] || return 1
+  real=$(cd "$cwd" && pwd -P) || return 1
+  rows=$(LC_ALL=C tmux list-windows -t "=$ses" -F '#{window_id}|#{window_name}|#{pane_current_path}' 2>/dev/null) || rows=
+  while IFS='|' read -r id name path; do
+    [ -n "$id" ] || continue
+    [ -n "$path" ] || continue
+    path=${path%/}
+    case "$path" in
+      "$real"|"$real"/*)
+        printf 'window %s:%s is in %s\n' "$ses" "$name" "$path"
+        ;;
+    esac
+  done <<EOF
+$rows
+EOF
+  command -v lsof >/dev/null 2>&1 || return 1
+  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
+  pid=
+  while IFS= read -r line; do
+    case "$line" in
+      p*)
+        pid=${line#p}
+        case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+        ;;
+      fcwd) [ -n "$pid" ] || return 1 ;;
+      n*)
+        [ -n "$pid" ] || return 1
+        path=${line#n}
+        case "$path" in
+          "$real"|"$real"/*) ;;
+          *) continue ;;
+        esac
+        [ "$pid" != "$$" ] || continue
+        comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || continue
+        [ -n "$comm" ] || continue
+        if [ "$(fm_backend_tmux_classify_process_name "$comm")" = agent ]; then
+          printf 'pid %s (%s) is working in %s\n' "$pid" "$comm" "$path"
+        fi
+        ;;
+      '') ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$out
+EOF
+}
+
 # fm_backend_tmux_current_path: the live pane's current working directory, or
 # empty on any tmux error. Mirrors fm-spawn.sh's worktree-discovery poll:
 # `tmux display-message -p -t "$T" '#{pane_current_path}'`.

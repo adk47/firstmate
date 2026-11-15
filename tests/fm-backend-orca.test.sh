@@ -610,11 +610,14 @@ test_relaunch_replaces_a_shell_only_orca_terminal_with_a_new_one() {
   spawn_orca_task_for_relaunch "$id" relaunch-dead
   reset_orca_responses
   # A terminal Orca still lists, whose pty still exists, holding only a shell:
-  # the classifier's `dead`. `zsh` is a shell name, so the process tree below
-  # the pty proves no agent is running there.
-  spinner="$TMP_ROOT/relaunch-dead-zsh"
+  # the classifier's `dead`. The pty root is Orca's own wrapper and is never
+  # classified, so the shell has to be its CHILD - a shell-named root would
+  # leave an empty tree, which the empty-tree fallthrough also calls `dead`
+  # without ever exercising shell classification.
+  spinner="$TMP_ROOT/relaunch-dead-shell/zsh"
+  mkdir -p "${spinner%/*}"
   ln -sf "$(command -v sleep)" "$spinner" 2>/dev/null || cp "$(command -v sleep)" "$spinner"
-  "$spinner" 300 &
+  bash -c '"$1" 300 & wait' _ "$spinner" &
   local spid=$!
   printf '{"ok":true,"result":{"terminal":{"handle":"term-old","ptyId":"wt-rl@@p1","worktreePath":"%s"}}}\n' "$RL_WT" > "$RESP/1.out"
   printf '{"ok":true,"result":{"worktrees":[{"sessions":[{"sessionId":"wt-rl@@p1","pid":%s}]}]}}\n' "$spid" > "$RESP/2.out"
