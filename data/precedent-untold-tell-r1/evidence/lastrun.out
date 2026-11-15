@@ -1,0 +1,31 @@
+2026-11-14T20:52:10Z
+2026-11-14 20:37:41.734648479 +0000 408
+{
+ "carried": {
+  "270441": "route:nothing_owed",
+  "305363": "route:held_messaging_hold",
+  "347304": "route:nothing_owed"
+ },
+ "chunks": [
+  {
+   "affirmed": 0,
+   "asked": 3,
+   "carried": 3,
+   "carried_in": 0,
+   "index": 0,
+   "new": 3,
+   "sent": 0,
+   "unconfirmed": 0,
+   "waiting": 0
+  }
+ ],
+ "not_reached": 0,
+ "sender_failures": [],
+ "sent": [],
+ "stopped": "",
+ "unconfirmed": [],
+ "untold": 3
+}
+notify-tick: sent 0 this run, 3 still untold (3 carried, 0 not reached)
+ls: cannot access '/etc/hydra/credit-notify-tick.disabled': No such file or directory
+ls: cannot access '/etc/hydra/credit-decision-told.disabled': No such file or directory

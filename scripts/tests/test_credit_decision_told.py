@@ -194,7 +194,7 @@ class PlanTest(Base):
     def test_mixed_decisions_hold(self):
         p = dt.plan([{"user_id": 1, "paid": True, "requests": [{"request_id": A1, "status": "approved"},
                                                               {"request_id": C1, "status": "rejected"}]}],
-                    {A1: ("approved", False, False, "w", "p"), C1: ("rejected", False, False, "w", "p")}, {}, {}, NOW)
+                    {A1: ("approved", False, False, "w", "p"), C1: ("rejected", False, False, "w", "p")}, {}, {}, NOW, told={})
         self.assertEqual(p[0].hold, "mixed_decisions")
 
 
@@ -246,7 +246,7 @@ class GateInputsTest(Base):
             dt.run(db, [p], route, run_id="r", now=NOW, channel="live", apply=False, limit=5, kill_file=self.kill)
         self.assertEqual(route.calls, [])
 
-    def test_an_unknown_send_stays_reserved_even_if_the_process_dies_mid_call(self):
+    def test_an_unknown_send_holds_the_slot_even_if_the_process_dies_mid_call(self):
         self.signed_dry()
 
         def dies(body):
@@ -260,7 +260,8 @@ class GateInputsTest(Base):
         rc, out = run(["apply", *self.base, "--signed", self.dry, "--limit", "5", "--readback-ok", "x"], route)
         self.assertNotIn(20, [c["userId"] for c in route.calls])
         rc, out = run(["plan", *self.base], Route())
-        self.assertEqual(out["held"].get("already_told"), 1)                   # never retried as new
+        # Nobody confirmed that send, so it is not "told"; it is not sent again inside the slot either.
+        self.assertEqual((out["held"].get("already_told"), out["held"].get("slot_wait")), (None, 1))
 
 
 class LadderTest(Base):
@@ -373,10 +374,10 @@ class LadderTest(Base):
         tried[40] = {k: old for k in tried[40]}
         hd, users = dt.load_list(Path(self.lst).read_bytes(), self.sha)
         core = {k: (v[0], v[1] == "true", v[2] == "true", v[3], v[4]) for k, v in LIVE.items()}
-        p40 = [p for p in dt.plan(users, core, {}, tried, NOW) if p.user_id == 40][0]
+        p40 = [p for p in dt.plan(users, core, {}, tried, NOW, told=dt.told(db)) if p.user_id == 40][0]
         self.assertEqual((p40.hold, p40.group_key, p40.subject_ids), ("", "w2|p5", [D3]))
 
-    def test_a_failed_send_stays_reserved(self):
+    def test_a_failed_send_holds_the_slot(self):
         self.first_real()
 
         def boom(body):
@@ -384,7 +385,7 @@ class LadderTest(Base):
         run(["apply", *self.base, "--signed", self.dry, "--limit", "1", *self.rb], boom)
         route = Route()
         run(["apply", *self.base, "--signed", self.dry, "--limit", "5", *self.rb], route)
-        self.assertEqual([c["userId"] for c in route.calls], [40, 10])          # 30 stays reserved
+        self.assertEqual([c["userId"] for c in route.calls], [40, 10])          # 30 waits for its slot
 
     def test_the_day_cap_bounds_a_run(self):
         db = sqlite3.connect(self.led)
@@ -425,7 +426,7 @@ class LadderTest(Base):
                       day1 + timedelta(seconds=60)])                 # 00:00:30: day 2
         hd, users = dt.load_list(Path(self.lst).read_bytes(), self.sha)
         core = {k: (v[0], v[1] == "true", v[2] == "true", v[3], v[4]) for k, v in LIVE.items()}
-        plans = dt.plan(users, core, {}, dt.attempts(db), day1)
+        plans = dt.plan(users, core, {}, dt.attempts(db), day1, told=dt.told(db))
         signed = {p.user_id: (p.group_key, p.subject_ids) for p in plans if not p.hold}
         route = Route()
         dt.run(db, plans, route, run_id="midnight", now=day1, channel="live", apply=True, limit=9, signed=signed,
@@ -464,7 +465,7 @@ class LadderTest(Base):
                 db = sqlite3.connect(self.led, timeout=30, isolation_level=None)
                 hd, users = dt.load_list(Path(lst2).read_bytes(), sha2)
                 core = {k: (v[0], v[1] == "true", v[2] == "true", v[3], v[4]) for k, v in LIVE.items()}
-                plans = dt.plan(users, core, {}, dt.attempts(db), NOW)
+                plans = dt.plan(users, core, {}, dt.attempts(db), NOW, told=dt.told(db))
                 signed = dt.signed_subjects(json.loads(Path(self.dry).read_text()))
                 dt.run(db, plans, Route(on_call=calls.append), run_id=f"r{threading.get_ident()}", now=NOW,
                        channel="live", apply=True, limit=50, signed=signed, kill_file=self.kill)
@@ -506,7 +507,7 @@ class LadderTest(Base):
         db = sqlite3.connect(self.led, isolation_level=None)
         hd, users = dt.load_list(Path(self.lst).read_bytes(), self.sha)
         core = {k: (v[0], v[1] == "true", v[2] == "true", v[3], v[4]) for k, v in LIVE.items()}
-        plans = dt.plan(users, core, {}, dt.attempts(db), NOW)
+        plans = dt.plan(users, core, {}, dt.attempts(db), NOW, told=dt.told(db))
         db.execute("INSERT INTO decision_told (run_id, at, user_id, group_key, copy_ref, subject_ids_json, mode, "
                    "outcome) VALUES ('other', ?, 30, 'w|p3', 'decision-rejected', '[]', 'apply', 'attempt')",
                    (NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),))
@@ -522,6 +523,124 @@ class LadderTest(Base):
         db = sqlite3.connect(self.led)
         with self.assertRaises(sqlite3.DatabaseError):
             db.execute("DELETE FROM decision_told")
+
+
+class DeliveryKeyTest(Base):
+    """Captain ruling 2026-11-14: a group is "already told" only when a `sent` row exists for it. An attempt nobody
+    confirmed is attempted again, once the slot its own attempt opened has passed. Measured the same day: 38 users
+    whose one attempt core had refused (409 no_channel, 413) were held as `already_told` for good."""
+
+    LATER = NOW + timedelta(days=dt.SLOT_DAYS + 1)
+
+    def setUp(self):
+        super().setUp()
+        self.core = {k: (v[0], v[1] == "true", v[2] == "true", v[3], v[4]) for k, v in LIVE.items()}
+        self.users = dt.load_list(Path(self.lst).read_bytes(), self.sha)[1]
+        self.db = sqlite3.connect(self.led, isolation_level=None)
+        dt.ensure_table(self.db)
+
+    def row(self, user, group, outcome, at=NOW, mode="apply", run_id="seed"):
+        self.db.execute("INSERT INTO decision_told (run_id, at, user_id, group_key, copy_ref, subject_ids_json, mode, "
+                        "outcome) VALUES (?,?,?,?,'decision-approved','[]',?,?)",
+                        (run_id, at.strftime("%Y-%m-%dT%H:%M:%SZ"), user, group, mode, outcome))
+
+    def plans(self, now):
+        return {p.user_id: p for p in dt.plan(self.users, self.core, {}, dt.attempts(self.db), now,
+                                              told=dt.told(self.db))}
+
+    def apply(self, now, run_id, route):
+        plans = list(self.plans(now).values())
+        signed = {p.user_id: (p.group_key, p.subject_ids) for p in plans if not p.hold}
+        return dt.run(self.db, plans, route, run_id=run_id, now=now, channel="live", apply=True, limit=9,
+                      signed=signed, kill_file=self.kill, readback_of="seed", clock=lambda: now)
+
+    def test_a_user_with_a_sent_row_is_still_refused_whatever_its_age(self):
+        self.row(20, "w|p2", "attempt")
+        self.row(20, "w|p2", "sent")
+        for now in (NOW, self.LATER, NOW + timedelta(days=400)):
+            self.assertEqual(self.plans(now)[20].hold, "already_told")
+
+    def test_a_user_with_only_a_dry_row_is_eligible(self):
+        self.row(20, "w|p2", "dry_ok", mode="dry")
+        self.row(20, "w|p2", "dry_refused", mode="dry")
+        self.assertEqual((self.plans(NOW)[20].hold, self.plans(NOW)[20].group_key), ("", "w|p2"))
+
+    def test_an_attempt_nobody_confirmed_is_eligible_again_once_its_slot_has_passed(self):
+        for outcomes in (("attempt",), ("attempt", "error")):                  # reserved and never answered; refused
+            with self.subTest(outcomes=outcomes):
+                self.db.execute("DROP TABLE decision_told")
+                dt.ensure_table(self.db)
+                for o in outcomes:
+                    self.row(20, "w|p2", o)
+                self.assertEqual(self.plans(NOW)[20].hold, "slot_wait")        # not "told", and not sent twice in a week
+                p = self.plans(self.LATER)[20]
+                self.assertEqual((p.hold, p.group_key, p.subject_ids), ("", "w|p2", [B1]))
+
+    def test_the_refused_attempt_is_made_again_after_the_slot_and_only_once(self):
+        self.row(999, "g", "attempt", run_id="seed")                           # the run the ladder was read back from
+        self.row(999, "g", "sent", run_id="seed")
+        self.row(20, "w|p2", "attempt")
+        self.row(20, "w|p2", "error")
+        route = Route()
+        out = self.apply(self.LATER, "retry", route)
+        self.assertIn(20, [c["userId"] for c in route.calls])
+        self.assertEqual([r["outcome"] for r in out["results"] if r["user_id"] == 20], ["sent"])
+        self.assertEqual(self.plans(self.LATER)[20].hold, "already_told")      # delivered now: closed for good
+        again = Route()
+        self.apply(self.LATER + timedelta(days=dt.SLOT_DAYS + 1), "after", again)
+        self.assertNotIn(20, [c["userId"] for c in again.calls])
+
+    def test_the_slot_counts_from_the_latest_attempt_not_the_first(self):
+        self.row(999, "g", "attempt", run_id="seed")
+        self.row(999, "g", "sent", run_id="seed")
+        self.row(20, "w|p2", "attempt")
+        self.row(20, "w|p2", "error")
+        refused = Route(sent=False)
+        self.apply(self.LATER, "retry", refused)                               # second attempt, refused again
+        self.assertEqual([c["userId"] for c in refused.calls if c["userId"] == 20], [20])
+        soon = Route()
+        self.apply(self.LATER + timedelta(hours=1), "soon", soon)              # a slot read from the FIRST attempt
+        self.assertNotIn(20, [c["userId"] for c in soon.calls])                # would be open here, on every run
+        self.assertEqual(self.plans(self.LATER + timedelta(hours=1))[20].hold, "slot_wait")
+        n = self.db.execute("SELECT count(*) FROM decision_told WHERE user_id = 20 AND mode = 'apply' AND "
+                            "outcome = 'attempt'").fetchone()[0]
+        self.assertEqual(n, 2)
+
+    def test_a_sent_user_is_never_sent_twice_across_runs(self):
+        self.signed_dry()
+        rc, first = run(["apply", *self.base, "--signed", self.dry, "--limit", "50"], Route())
+        self.assertEqual([(r["user_id"], r["outcome"]) for r in first["results"]], [(20, "sent")])
+        rb = ["--readback-ok", first["run_id"]]
+        for _ in range(3):                                                     # the same list, run again and again
+            route, _out = self.signed_dry()
+            route = Route()
+            run(["apply", *self.base, "--signed", self.dry, "--limit", "50", *rb], route)
+            self.assertNotIn(20, [c["userId"] for c in route.calls])
+        for now in (self.LATER, NOW + timedelta(days=90)):                     # and after any number of slots
+            route = Route()
+            self.apply(now, f"later-{now.date()}", route)
+            self.assertNotIn(20, [c["userId"] for c in route.calls])
+        sent = self.db.execute("SELECT count(*) FROM decision_told WHERE user_id = 20 AND outcome = 'sent'").fetchone()
+        self.assertEqual(sent[0], 1)
+
+    def test_a_plan_older_than_the_send_is_stopped_under_the_lock(self):
+        self.row(999, "g", "attempt", run_id="seed")
+        self.row(999, "g", "sent", run_id="seed")
+        stale = list(self.plans(NOW).values())                                 # made before the other run sent
+        signed = {p.user_id: (p.group_key, p.subject_ids) for p in stale if not p.hold}
+        self.row(20, "w|p2", "attempt", at=NOW - timedelta(days=30), run_id="other")
+        self.row(20, "w|p2", "sent", at=NOW - timedelta(days=30), run_id="other")
+        self.row(30, "w|p3", "attempt", run_id="other")                        # mid-call in another process
+        route = Route()
+        out = dt.run(self.db, stale, route, run_id="late", now=NOW, channel="live", apply=True, limit=9,
+                     signed=signed, kill_file=self.kill, readback_of="seed", clock=lambda: NOW)
+        self.assertEqual(sorted(c["userId"] for c in route.calls), [10, 40])
+        self.assertIn({"user_id": 20, "outcome": "already_told"}, out["results"])
+        self.assertIn({"user_id": 30, "outcome": "already_attempted"}, out["results"])
+
+    def test_plan_cannot_be_called_without_the_delivered_groups(self):
+        with self.assertRaises(TypeError):
+            dt.plan(self.users, self.core, {}, dt.attempts(self.db), NOW)      # pylint: disable=missing-kwoa
 
 
 if __name__ == "__main__":

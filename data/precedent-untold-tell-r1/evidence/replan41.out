@@ -1,0 +1,53 @@
+2026-11-14T21:52:22Z
+tick idle at 2026-11-14T21:52:22Z
+c31a4ac0ddc3086483608632d5837677a6d76b36dd28983965af0d67d9415368  /tmp/precedent-untold-tell-r1/new/credit_review/decision_told.py
+356589993917ff8281e358aa55219c34b0271eef128470c47bb55448a6d2c833  /tmp/precedent-untold-tell-r1/new/credit-decision-told.py
+c2f3e8a974a9f457cc2c317c5c88ff5fa47c93a793e03490b64e7b6cc3922d77  /opt/hydra/scripts/credit_review/decision_told.py
+9e160845489b16c0601cd881c86ea2e0756e2b3e41c415a1255f42daedd10459  /tmp/precedent-untold-tell-r1/list41.json
+copied decision_told rows: 4436 max id: 4436
+rc 0 users 41 eligible 3 held {'slot_wait': 38} refused None
+keys: ['by_copy_ref', 'eligible', 'eligible_paid', 'facts_header', 'first', 'held', 'later_groups', 'requests', 'users', 'with_prior_status_note']
+6678 last_attempt 2026-11-10T19:07:45Z attempted_groups 1 sent_groups 0
+17097 last_attempt 2026-11-10T19:26:12Z attempted_groups 1 sent_groups 0
+19104 last_attempt 2026-11-11T00:15:33Z attempted_groups 1 sent_groups 0
+19327 last_attempt 2026-11-11T00:15:34Z attempted_groups 1 sent_groups 0
+26504 last_attempt 2026-11-10T20:18:44Z attempted_groups 1 sent_groups 0
+27448 last_attempt 2026-11-10T21:10:35Z attempted_groups 1 sent_groups 0
+27927 last_attempt 2026-11-10T21:10:38Z attempted_groups 1 sent_groups 0
+32439 last_attempt 2026-11-10T22:10:19Z attempted_groups 1 sent_groups 0
+50621 last_attempt 2026-11-11T01:38:39Z attempted_groups 1 sent_groups 0
+53479 last_attempt 2026-11-10T21:27:17Z attempted_groups 1 sent_groups 0
+56521 last_attempt 2026-11-10T19:57:19Z attempted_groups 1 sent_groups 0
+61588 last_attempt 2026-11-11T00:26:22Z attempted_groups 1 sent_groups 0
+63778 last_attempt 2026-11-11T00:34:53Z attempted_groups 1 sent_groups 0
+68272 last_attempt 2026-11-13T14:06:43Z attempted_groups 1 sent_groups 0
+72407 last_attempt 2026-11-10T20:06:35Z attempted_groups 1 sent_groups 0
+75714 last_attempt 2026-11-10T20:20:20Z attempted_groups 1 sent_groups 0
+77481 last_attempt 2026-11-11T01:19:56Z attempted_groups 1 sent_groups 0
+96293 last_attempt 2026-11-11T02:24:11Z attempted_groups 1 sent_groups 0
+99416 last_attempt 2026-11-11T00:45:14Z attempted_groups 1 sent_groups 0
+109550 last_attempt 2026-11-11T03:08:59Z attempted_groups 1 sent_groups 0
+109681 last_attempt 2026-11-11T03:10:09Z attempted_groups 1 sent_groups 0
+119526 last_attempt 2026-11-13T20:15:56Z attempted_groups 1 sent_groups 0
+153177 last_attempt 2026-11-10T20:24:06Z attempted_groups 1 sent_groups 0
+155423 last_attempt 2026-11-10T20:29:06Z attempted_groups 1 sent_groups 0
+230556 last_attempt 2026-11-11T07:31:35Z attempted_groups 1 sent_groups 0
+233234 last_attempt 2026-11-10T20:32:29Z attempted_groups 1 sent_groups 0
+243908 last_attempt 2026-11-11T08:04:17Z attempted_groups 1 sent_groups 0
+252460 last_attempt 2026-11-10T20:38:33Z attempted_groups 1 sent_groups 0
+255205 last_attempt 2026-11-10T20:40:11Z attempted_groups 1 sent_groups 0
+270441 last_attempt - attempted_groups 0 sent_groups 0
+279975 last_attempt 2026-11-11T09:42:17Z attempted_groups 1 sent_groups 0
+288257 last_attempt 2026-11-11T09:57:39Z attempted_groups 1 sent_groups 0
+291623 last_attempt 2026-11-10T20:37:59Z attempted_groups 1 sent_groups 0
+304550 last_attempt 2026-11-11T10:32:53Z attempted_groups 1 sent_groups 0
+305363 last_attempt - attempted_groups 0 sent_groups 0
+319572 last_attempt 2026-11-11T10:48:22Z attempted_groups 1 sent_groups 0
+325208 last_attempt 2026-11-11T10:58:14Z attempted_groups 1 sent_groups 0
+336111 last_attempt 2026-11-11T11:16:23Z attempted_groups 1 sent_groups 0
+347304 last_attempt - attempted_groups 0 sent_groups 0
+368676 last_attempt 2026-11-10T20:42:16Z attempted_groups 1 sent_groups 0
+368924 last_attempt 2026-11-10T20:42:17Z attempted_groups 1 sent_groups 0
+rc=0
+REPLAN_JSON {"by_copy_ref": {"decision-approved": 3, "decision-rejected": 0}, "eligible": 3, "eligible_paid": 0, "facts_header": {"class": "precedent_v1_untold", "counts": {"requests": 10366, "users": 1207}, "generated_at": "2026-11-14T21:01:36.002Z", "list_sha": "9e160845489b", "query_sha": "precedent_v1_untold", "ruling": "captain 2026-11-10 no humans", "source": "credit_requests"}, "first": [{"copy_ref": "decision-approved", "dropped": {}, "group_key": "4df4202f-c31b-43e0-9da2-28d8744e0642|121d8601-48cb-42f2-b448-c12ef2b2c436", "hold": "", "later_groups": [], "paid": false, "prior_status_note": [], "subject_ids": 8, "user_id": 270441}, {"copy_ref": "decision-approved", "dropped": {}, "group_key": "9738a1e8-634f-43bf-b5ac-4fa96e076ddf|10646c7d-898b-471e-81bf-ef441396c7ce", "hold": "", "later_groups": [], "paid": false, "prior_status_note": [], "subject_ids": 1, "user_id": 305363}, {"copy_ref": "decision-approved", "dropped": {}, "group_key": "b4754363-08c6-46d4-b020-367efe65051c|d57bed7c-6159-468f-a88f-9774f10daae4", "hold": "", "later_groups": [], "paid": false, "prior_status_note": [733, 6597], "subject_ids": 342, "user_id": 347304}], "held": {"slot_wait": 38}, "later_groups": 0, "requests": 351, "users": 41, "with_prior_status_note": 1}
+2026-11-14T21:55:04Z

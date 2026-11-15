@@ -1,0 +1,12 @@
+2026-11-14T21:09:32Z
+ids41 41
+41 rows_by_mode_outcome(rows,users) [('apply', 'attempt', 38, 38), ('apply', 'error', 38, 38), ('dry', 'dry_ok', 38, 38), ('dry', 'dry_refused', 367, 3)]
+41 sent_apply_users [(0,)]
+41 max_apply_at [('2026-11-13T20:15:56Z',)]
+41 rows since 2026-11-14T20:50Z [(4419, 'decision-told-dry-d0320d0701', '2026-11-14T20:58:07Z', 270441, 'dry', 'dry_refused', '{"error": "route report names no subjects, or subjects outside the planned group", "report": {"channel": "live", "claimState": "none", "copyRef": "decision-appr'), (4420, 'decision-told-dry-d0320d0701', '2026-11-14T20:58:07Z', 305363, 'dry', 'dry_refused', '{"error": "route dry run is not affirmative (outcome \'held_messaging_hold\')", "report": {"channel": "live", "claimState": "none", "copyRef": "decision-approved"'), (4421, 'decision-told-dry-d0320d0701', '2026-11-14T20:58:08Z', 347304, 'dry', 'dry_refused', '{"error": "route report names no subjects, or subjects outside the planned group", "report": {"channel": "live", "claimState": "none", "copyRef": "decision-appr'), (4428, 'decision-told-dry-62fcd9c893', '2026-11-14T21:08:02Z', 270441, 'dry', 'dry_refused', '{"error": "route call rc=1: ERROR: MUSO_API_URL not set", "report": null}'), (4429, 'decision-told-dry-62fcd9c893', '2026-11-14T21:08:02Z', 305363, 'dry', 'dry_refused', '{"error": "route call rc=1: ERROR: MUSO_API_URL not set", "report": null}'), (4430, 'decision-told-dry-62fcd9c893', '2026-11-14T21:08:02Z', 347304, 'dry', 'dry_refused', '{"error": "route call rc=1: ERROR: MUSO_API_URL not set", "report": null}')]
+12 told: rows since 2026-11-14T20:37Z [(0,)]
+my run [('dry', 'dry_refused', 3)]
+fleet apply [('attempt', 1204), ('error', 46), ('sent', 1154)]
+notify-tick: sent 2 this run, 3 still untold (3 carried, 0 not reached)
+{"carried": {"270441": "route:nothing_owed", "305363": "route:held_messaging_hold", "347304": "route:nothing_owed"}, "sent": [20016, 22158], "untold": 5, "stopped": "", "sender_failures": []}
+2026-11-14 21:00:39.346758437 +0000

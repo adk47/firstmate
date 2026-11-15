@@ -319,7 +319,8 @@ class PaidFirst(unittest.TestCase):
         q = replica(CLASS_ROWS)
         raw = json.dumps(nt.select(nt.build_list(q, NOW), set())).encode()
         _, users = dt.load_list(raw, dt.file_sha(raw))
-        plans = dt.plan(users, dt.core_rows(q, dt._ids(users)), dt.status_notes(notes_db(), dt._ids(users)), {}, NOW)
+        plans = dt.plan(users, dt.core_rows(q, dt._ids(users)), dt.status_notes(notes_db(), dt._ids(users)), {}, NOW,
+                        told={})
         self.assertEqual([(p.user_id, p.paid) for p in plans],
                          [(80, True), (90, True), (10, False), (20, False), (30, False)])
 
@@ -334,7 +335,7 @@ class DryRunSendsNothing(unittest.TestCase):
         raw = json.dumps(nt.select(nt.build_list(q, NOW), nt.already_told(self.db))).encode()
         _, users = dt.load_list(raw, dt.file_sha(raw))
         plans = dt.plan(users, dt.core_rows(q, dt._ids(users)), dt.status_notes(notes_db(), dt._ids(users)),
-                        dt.attempts(self.db), NOW)
+                        dt.attempts(self.db), NOW, told=dt.told(self.db))
         self.route = Route()
         self.out = dt.run(self.db, plans, self.route, run_id="dry-1", now=NOW, channel="live", apply=False, limit=25,
                           kill_file="/nonexistent/kill")

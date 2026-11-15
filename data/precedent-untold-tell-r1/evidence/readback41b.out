@@ -1,0 +1,37 @@
+2026-11-14T21:55:29Z
+a.log
+b.log
+bytes.err
+bytes.out
+dry41.err
+dry41.json
+dry41.out
+list2.json
+list2.json.sha
+list41.json
+list41.json.sha
+nb
+new
+notice_bytes.py
+plan-list2.err
+plan-list2.out
+plan-list41.err
+plan-list41.out
+ids 41
+apply rows for the 41 by outcome (rows, users): [('attempt', 38, 38), ('error', 38, 38)]
+users of the 41 with a sent apply row: 0
+newest apply row for the 41: 2026-11-13T20:15:56Z
+rows of any mode for the 41 since 2026-11-14T21:10Z:
+  (4431, '2026-11-14T21:18:12Z', 270441, 'dry', 'dry_refused', '{"error": "route report names no subjects, or subjects outside the planned group", "report": {"channel": "live", "claimState": "none", "copyRef": "dec')
+  (4432, '2026-11-14T21:18:13Z', 305363, 'dry', 'dry_refused', '{"error": "route dry run is not affirmative (outcome \'held_messaging_hold\')", "report": {"channel": "live", "claimState": "none", "copyRef": "decision')
+  (4433, '2026-11-14T21:18:14Z', 347304, 'dry', 'dry_refused', '{"error": "route report names no subjects, or subjects outside the planned group", "report": {"channel": "live", "claimState": "none", "copyRef": "dec')
+  (4434, '2026-11-14T21:38:41Z', 270441, 'dry', 'dry_refused', '{"error": "route report names no subjects, or subjects outside the planned group", "report": {"channel": "live", "claimState": "none", "copyRef": "dec')
+  (4435, '2026-11-14T21:38:43Z', 305363, 'dry', 'dry_refused', '{"error": "route dry run is not affirmative (outcome \'held_messaging_hold\')", "report": {"channel": "live", "claimState": "none", "copyRef": "decision')
+  (4436, '2026-11-14T21:38:45Z', 347304, 'dry', 'dry_refused', '{"error": "route report names no subjects, or subjects outside the planned group", "report": {"channel": "live", "claimState": "none", "copyRef": "dec')
+rows for the 12 since 2026-11-14T20:37Z: 0
+our 3 dry rows: [(4428, '2026-11-14T21:08:02Z', 270441, 'dry', 'dry_refused', 'decision-told-dry-62fcd9c893'), (4429, '2026-11-14T21:08:02Z', 305363, 'dry', 'dry_refused', 'decision-told-dry-62fcd9c893'), (4430, '2026-11-14T21:08:02Z', 347304, 'dry', 'dry_refused', 'decision-told-dry-62fcd9c893')]
+fleet apply: [('attempt', 1204), ('error', 46), ('sent', 1154)]
+triggers: ['decision_told_no_update', 'decision_told_no_delete']
+notify-tick: sent 0 this run, 3 still untold (3 carried, 0 not reached)
+carried {'270441': 'route:nothing_owed', '305363': 'route:held_messaging_hold', '347304': 'route:nothing_owed'} sent 0 untold 3 stopped ''
+2026-11-14 21:38:55.846876756 +0000

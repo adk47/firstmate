@@ -1,0 +1,115 @@
+2026-11-14T21:42:21Z
+inactive
+cc00153a2eeb714cbdc37da004e85df747b74955070bde16aafdcdb0033faae7  notice_size.py
+{
+ "gateway_limit_bytes": 65536,
+ "proposed_limit_bytes": 524288,
+ "groups": [
+  {
+   "user": 1333,
+   "ledger": "sent",
+   "attempted_subjects": 195,
+   "rows_read": 195,
+   "items_after_dedupe": 191,
+   "creditDetails_bytes": 63511,
+   "bytes_per_item": 332.5,
+   "largest_item_bytes": 603,
+   "artists_unparsed": 0,
+   "over_gateway_limit": false,
+   "under_proposed_limit": true
+  },
+  {
+   "user": 61448,
+   "ledger": "sent",
+   "attempted_subjects": 152,
+   "rows_read": 152,
+   "items_after_dedupe": 89,
+   "creditDetails_bytes": 36315,
+   "bytes_per_item": 408.0,
+   "largest_item_bytes": 486,
+   "artists_unparsed": 0,
+   "over_gateway_limit": false,
+   "under_proposed_limit": true
+  },
+  {
+   "user": 360296,
+   "ledger": "sent",
+   "attempted_subjects": 127,
+   "rows_read": 127,
+   "items_after_dedupe": 48,
+   "creditDetails_bytes": 16430,
+   "bytes_per_item": 342.3,
+   "largest_item_bytes": 408,
+   "artists_unparsed": 0,
+   "over_gateway_limit": false,
+   "under_proposed_limit": true
+  },
+  {
+   "user": 334868,
+   "ledger": "sent",
+   "attempted_subjects": 119,
+   "rows_read": 119,
+   "items_after_dedupe": 119,
+   "creditDetails_bytes": 37020,
+   "bytes_per_item": 311.1,
+   "largest_item_bytes": 322,
+   "artists_unparsed": 0,
+   "over_gateway_limit": false,
+   "under_proposed_limit": true
+  },
+  {
+   "user": 275342,
+   "ledger": "timeout, core stamp",
+   "attempted_subjects": 242,
+   "rows_read": 242,
+   "items_after_dedupe": 238,
+   "creditDetails_bytes": 77682,
+   "bytes_per_item": 326.4,
+   "largest_item_bytes": 421,
+   "artists_unparsed": 0,
+   "over_gateway_limit": true,
+   "under_proposed_limit": true
+  },
+  {
+   "user": 50621,
+   "ledger": "413",
+   "attempted_subjects": 281,
+   "rows_read": 281,
+   "items_after_dedupe": 225,
+   "creditDetails_bytes": 127876,
+   "bytes_per_item": 568.3,
+   "largest_item_bytes": 806,
+   "artists_unparsed": 0,
+   "over_gateway_limit": true,
+   "under_proposed_limit": true
+  },
+  {
+   "user": 72407,
+   "ledger": "413",
+   "attempted_subjects": 281,
+   "rows_read": 281,
+   "items_after_dedupe": 281,
+   "creditDetails_bytes": 92556,
+   "bytes_per_item": 329.4,
+   "largest_item_bytes": 423,
+   "artists_unparsed": 0,
+   "over_gateway_limit": true,
+   "under_proposed_limit": true
+  },
+  {
+   "user": 17097,
+   "ledger": "413",
+   "attempted_subjects": 364,
+   "rows_read": 364,
+   "items_after_dedupe": 364,
+   "creditDetails_bytes": 149530,
+   "bytes_per_item": 410.8,
+   "largest_item_bytes": 592,
+   "artists_unparsed": 0,
+   "over_gateway_limit": true,
+   "under_proposed_limit": true
+  }
+ ]
+}
+rc=0
+2026-11-14T21:44:16Z

@@ -1,0 +1,839 @@
+[
+ {
+  "user_id": 6678,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 17097,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 503: {\"result\": \"error\", \"message\": \"notify-gatew",
+  "by_status": {
+   "approved/live/unstamped": 364
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 364,
+  "unstamped_approved": 364
+ },
+ {
+  "user_id": 19104,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 22
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 22,
+  "unstamped_approved": 22
+ },
+ {
+  "user_id": 19327,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 51
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 51,
+  "unstamped_approved": 51
+ },
+ {
+  "user_id": 22104,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "Command '['bash', '/opt/hydra/skills-all/muso-ops-admin/scri",
+  "by_status": {
+   "approved/live/stamped": 2
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": true,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 2,
+  "unstamped_approved": 0
+ },
+ {
+  "user_id": 26504,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 27448,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 27927,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 2
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 2,
+  "unstamped_approved": 2
+ },
+ {
+  "user_id": 29419,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "Command '['bash', '/opt/hydra/skills-all/muso-ops-admin/scri",
+  "by_status": {
+   "approved/live/stamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": true,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 0
+ },
+ {
+  "user_id": 32439,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 4
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 4,
+  "unstamped_approved": 4
+ },
+ {
+  "user_id": 50621,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 503: {\"result\": \"error\", \"message\": \"notify-gatew",
+  "by_status": {
+   "approved/live/unstamped": 281
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 281,
+  "unstamped_approved": 281
+ },
+ {
+  "user_id": 53479,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 56521,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 6
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 6,
+  "unstamped_approved": 6
+ },
+ {
+  "user_id": 61588,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 63778,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 14
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 14,
+  "unstamped_approved": 14
+ },
+ {
+  "user_id": 68272,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 70317,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "Command '['bash', '/opt/hydra/skills-all/muso-ops-admin/scri",
+  "by_status": {
+   "approved/live/stamped": 21
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": true,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 21,
+  "unstamped_approved": 0
+ },
+ {
+  "user_id": 72407,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 503: {\"result\": \"error\", \"message\": \"notify-gatew",
+  "by_status": {
+   "approved/live/unstamped": 281
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 281,
+  "unstamped_approved": 281
+ },
+ {
+  "user_id": 75714,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 6
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 6,
+  "unstamped_approved": 6
+ },
+ {
+  "user_id": 77481,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 2
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 2,
+  "unstamped_approved": 2
+ },
+ {
+  "user_id": 78042,
+  "live_outcomes": [
+   "attempt"
+  ],
+  "error": "",
+  "by_status": {
+   "approved/live/stamped": 3
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": true,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 3,
+  "unstamped_approved": 0
+ },
+ {
+  "user_id": 84189,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "Expecting value: line 1 column 30 (char 29)",
+  "by_status": {
+   "approved/live/stamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": true,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 0
+ },
+ {
+  "user_id": 91567,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "Command '['bash', '/opt/hydra/skills-all/muso-ops-admin/scri",
+  "by_status": {
+   "approved/live/stamped": 2
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": true,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 2,
+  "unstamped_approved": 0
+ },
+ {
+  "user_id": 96293,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 96558,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "Command '['bash', '/opt/hydra/skills-all/muso-ops-admin/scri",
+  "by_status": {
+   "approved/live/stamped": 3
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": true,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 3,
+  "unstamped_approved": 0
+ },
+ {
+  "user_id": 99416,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 14
+  },
+  "n_groups": 2,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 1,
+  "approved_live": 14,
+  "unstamped_approved": 14
+ },
+ {
+  "user_id": 100814,
+  "live_outcomes": [
+   "attempt"
+  ],
+  "error": "",
+  "by_status": {
+   "approved/live/stamped": 6
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": true,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 6,
+  "unstamped_approved": 0
+ },
+ {
+  "user_id": 102783,
+  "live_outcomes": [
+   "attempt"
+  ],
+  "error": "",
+  "by_status": {
+   "approved/live/stamped": 21,
+   "approved/live/unstamped": 4
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": true,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 25,
+  "unstamped_approved": 4
+ },
+ {
+  "user_id": 109550,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 29
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 29,
+  "unstamped_approved": 29
+ },
+ {
+  "user_id": 109681,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 13
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 13,
+  "unstamped_approved": 13
+ },
+ {
+  "user_id": 119162,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "Expecting value: line 1 column 30 (char 29)",
+  "by_status": {
+   "approved/live/stamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": true,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 0
+ },
+ {
+  "user_id": 119526,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 153177,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 155423,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 2
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 2,
+  "unstamped_approved": 2
+ },
+ {
+  "user_id": 212494,
+  "live_outcomes": [
+   "attempt"
+  ],
+  "error": "",
+  "by_status": {
+   "approved/live/stamped": 5
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": true,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 5,
+  "unstamped_approved": 0
+ },
+ {
+  "user_id": 230556,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 2
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 2,
+  "unstamped_approved": 2
+ },
+ {
+  "user_id": 233234,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 5
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 5,
+  "unstamped_approved": 5
+ },
+ {
+  "user_id": 243908,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 252460,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 15
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 15,
+  "unstamped_approved": 15
+ },
+ {
+  "user_id": 255205,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 7
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 7,
+  "unstamped_approved": 7
+ },
+ {
+  "user_id": 270441,
+  "live_outcomes": [],
+  "error": "",
+  "by_status": {
+   "approved/live/unstamped": 8
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 1,
+  "approved_live": 8,
+  "unstamped_approved": 8
+ },
+ {
+  "user_id": 275342,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "Command '['bash', '/opt/hydra/skills-all/muso-ops-admin/scri",
+  "by_status": {
+   "approved/live/unstamped": 32,
+   "approved/live/stamped": 242
+  },
+  "n_groups": 2,
+  "attempted_group_stamped": true,
+  "other_unstamped_approved_groups": 1,
+  "approved_live": 274,
+  "unstamped_approved": 32
+ },
+ {
+  "user_id": 279975,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 288257,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 65
+  },
+  "n_groups": 2,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 1,
+  "approved_live": 65,
+  "unstamped_approved": 65
+ },
+ {
+  "user_id": 291623,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 19
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 19,
+  "unstamped_approved": 19
+ },
+ {
+  "user_id": 304550,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 305363,
+  "live_outcomes": [],
+  "error": "",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 1,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 319572,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 1
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 1,
+  "unstamped_approved": 1
+ },
+ {
+  "user_id": 325208,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 14
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 14,
+  "unstamped_approved": 14
+ },
+ {
+  "user_id": 336111,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 11
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 11,
+  "unstamped_approved": 11
+ },
+ {
+  "user_id": 347304,
+  "live_outcomes": [],
+  "error": "",
+  "by_status": {
+   "approved/live/unstamped": 342
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 1,
+  "approved_live": 342,
+  "unstamped_approved": 342
+ },
+ {
+  "user_id": 368676,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 3
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 3,
+  "unstamped_approved": 3
+ },
+ {
+  "user_id": 368924,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confi",
+  "by_status": {
+   "approved/live/unstamped": 9
+  },
+  "n_groups": 1,
+  "attempted_group_stamped": false,
+  "other_unstamped_approved_groups": 0,
+  "approved_live": 9,
+  "unstamped_approved": 9
+ }
+]

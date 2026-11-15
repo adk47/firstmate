@@ -1,0 +1,13 @@
+const {Client}=require("/app/node_modules/pg");
+(async()=>{
+ const c=new Client({connectionString:process.env.DATABASE_URL});await c.connect();
+ const r=await c.query(`select cr."userId" uid, cr.id, cr.status, cr."updatedAt" from credit_requests cr
+  where cr."deletedAt" is null and cr.metadata->'approval'->>'via'='precedent_v1'
+    and cr.metadata->'approval'->>'noticeSentAt' is null order by cr."userId"`);
+ const by={}; for(const x of r.rows){ (by[x.uid]=by[x.uid]||[]).push([x.id,x.status,x.updatedAt]); }
+ const users=Object.entries(by).map(([uid,f])=>({user_id:Number(uid),paid:false,class:"precedent_v1",facts:f}));
+ process.stdout.write(JSON.stringify({class:"precedent_v1_untold",counts:{users:users.length,requests:r.rows.length},
+   generated_at:new Date().toISOString(),query_sha:"precedent_v1_untold",ruling:"captain 2026-11-10 no humans",
+   source:"credit_requests",users}));
+ await c.end();
+})().catch(e=>{console.error(e.message);process.exit(1)});

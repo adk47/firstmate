@@ -39,7 +39,7 @@ def _plans(a: argparse.Namespace, db: sqlite3.Connection, now: datetime, query, 
     vdb = sqlite3.connect(f"file:{verify_ledger}?mode=ro", uri=True)
     notes = dt.status_notes(vdb, ids)
     dt.ensure_table(db)
-    return header, dt.plan(users, core, notes, dt.attempts(db), now)
+    return header, dt.plan(users, core, notes, dt.attempts(db), now, told=dt.told(db))
 
 
 def main(argv: list[str] | None = None, *, query=trino, caller=None, ledger: str = LEDGER,

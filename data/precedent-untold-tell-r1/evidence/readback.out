@@ -1,0 +1,10 @@
+2026-11-14T20:49:39Z
+4bbf36bbc80604cbd975e6e346da39c07942f7577c89f26a2ae39314bef37239  /tmp/prec_untold_users.txt
+ids 53
+rows_by_mode_outcome [('apply', 'attempt', 50, 50), ('apply', 'error', 46, 46), ('dry', 'dry_ok', 67, 50), ('dry', 'dry_refused', 361, 3)]
+sent_apply_users (0,)
+max_apply_at_for_53 ('2026-11-14T00:50:11Z',)
+apply_rows_since_2037Z_for_53 (0,)
+fleet [('apply', 'attempt', 1202), ('apply', 'error', 46), ('apply', 'sent', 1152)]
+fleet_max_at ('2026-11-14T20:37:31Z',)
+notify-tick: sent 0 this run, 3 still untold (3 carried, 0 not reached)

@@ -1,0 +1,5 @@
+date -u +%FT%TZ
+cat <<'SQL' | timeout 200 /opt/hydra/scripts/trino-query.sh 2>&1 | tail -400
+SELECT CAST(userid AS varchar), CAST(workspaceid AS varchar), CAST(profileid AS varchar), status, CAST(deletedat IS NOT NULL AS varchar), CAST(json_extract_scalar(metadata, '$.approvedNotice.noticeSentAt') IS NOT NULL AS varchar), CAST(json_extract_scalar(metadata, '$.decisionNotice.noticeSentAt') IS NOT NULL AS varchar), CAST(count(*) AS varchar) FROM postgresql_core.public.credit_requests WHERE userid IN (6678,17097,19104,19327,22104,26504,27448,27927,29419,32439,50621,53479,56521,61588,63778,68272,70317,72407,75714,77481,78042,84189,91567,96293,96558,99416,100814,102783,109550,109681,119162,119526,153177,155423,212494,230556,233234,243908,252460,255205,270441,275342,279975,288257,291623,304550,305363,319572,325208,336111,347304,368676,368924) AND json_extract_scalar(metadata, '$.approval.via') = 'precedent_v1' GROUP BY 1,2,3,4,5,6,7 ORDER BY 1,2,3
+SQL
+echo "rc=${PIPESTATUS[1]}"; date -u +%FT%TZ

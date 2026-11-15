@@ -1,0 +1,71 @@
+total 3483156
+drwxrwx--T  9 root 1000      4096 Nov 14 20:34 .
+drwxr-xr-x 49 root root      4096 Nov 14 19:41 ..
+-rw-r--r--  1 root root         0 Nov  8 17:47 .kill-lift.lock
+-rw-r--r--  1 root root         0 Nov  4 17:33 apply.lock
+-rw-r--r--  1 root root     57645 Nov 14 07:12 claim-proof-asked.jsonl
+-rw-r--r--  1 root root         0 Nov 14 01:15 claim-status-daily.lock
+-rw-r--r--  1 root root     31508 Nov 14 01:20 claim-status-daily.log
+-rw-------  1 root root    266395 Nov 14 01:20 claim-status-list.json
+-rw-r--r--  1 root root     15509 Nov  6 21:33 coded-invalidation-proof-20261106T213355Z.txt
+-rw-r--r--  1 root root     15739 Nov  6 23:19 coded-invalidation-proof-20261106T231911Z.txt
+-rw-r--r--  1 root root      2135 Nov  7 00:40 coded-invalidation-proof-20261107T004016Z.txt
+-rw-r--r--  1 root root     15731 Nov  7 00:42 coded-invalidation-proof-20261107T004204Z.txt
+-rw-r--r--  1 root root     13162 Nov  8 17:46 coded-invalidation-proof-20261108T174623Z.txt
+-rw-r--r--  1 root root     18025 Nov  8 17:47 coded-invalidation-proof-20261108T174707Z.txt
+-rw-r--r--  1 root root     17909 Nov  7 09:18 coded-invalidation-proof-hostprobe-20261107T091836Z.txt
+-rw-r--r--  1 root root        46 Nov 14 20:30 decider-support-watch.state
+-rw-r--r--  1 root root         0 Nov 10 18:51 decision-told.sqlite3
+-rw-r--r--  1 root root  36659200 Nov 14 20:34 drain.sqlite
+-rw-r--r--  1 root root     42725 Oct 29 11:37 fable-decider-audit.jsonl
+-rw-r--r--  1 root root    355389 Nov 14 20:11 fable-decider.coded-input.json
+drwx------  2 root root      4096 Oct 30 14:13 fable-trays
+drwx------  2 root root      4096 Oct 27 23:01 intercom-reconcile
+-rw-r--r--  1 root root      3273 Nov  4 15:40 kill-lift-1104-1505.evidence
+-rw-r--r--  1 root root      5321 Nov  4 17:33 kill-lift-1104-1724.evidence
+-rw-r--r--  1 root root      4224 Nov  4 20:45 kill-lift-1104-2035.evidence
+-rw-r--r--  1 root root      1239 Nov  4 21:41 kill-lift-1104-2141.evidence
+-rw-r--r--  1 root root      1445 Nov  4 21:55 kill-lift-1104-2155-FALSE-KILL.evidence
+-rw-r--r--  1 root root      2976 Nov  5 11:02 kill-lift-1105-1105.evidence
+-rw-r--r--  1 root root      3402 Nov  6 21:43 kill-lift-1106-2143.evidence
+--- kill files
+-rw-r--r-- 1 root root 126 Nov 13 01:10 /etc/hydra/apply-queue.disabled
+-rw-r--r-- 1 root root   0 Nov 14 17:38 /etc/hydra/backlog-sentinel.disabled
+-rw-r--r-- 1 root root 180 Oct 21 00:13 /etc/hydra/credit-trust-decide-provisional-paid.disabled
+-rw-r--r-- 1 root root 135 Oct 29 16:07 /etc/hydra/fable-decider.disabled
+-rw-r--r-- 1 root root 142 Nov 14 01:23 /etc/hydra/gdpr-hide-batch.disabled
+-rw-r--r-- 1 root root   0 Nov 14 17:38 /etc/hydra/verification-queue-report.disabled
+--- tables
+['applied', 'core_refusals', 'decision_outcomes', 'decision_told', 'decisions', 'digest_sent', 'doc_approval_audit', 'doc_approval_events', 'doc_approval_freeze', 'doc_approvals', 'dsp_capture_requests', 'evidence_retry', 'intents', 'link_proposals', 'link_runs', 'p', 'pofpaid', 'proof_marks', 'reply_ref_picks', 'request_state', 'request_state_log', 'rereview_queue', 'reviews', 'sqlite_sequence', 'state', 'state_transitions', 'told', 'verify_channel_clears', 'verify_messages', 'verify_proof_reviews', 'verify_read_failures', 'verify_refusal_holds', 'verify_requests', 'write_failures']
+CREATE TABLE decision_told (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at TEXT NOT NULL, user_id INTEGER NOT NULL,
+  group_key TEXT NOT NULL, copy_ref TEXT NOT NULL, subject_ids_json TEXT NOT NULL, mode TEXT NOT NULL,
+  outcome TEXT NOT NULL, report_json TEXT)
+decision_told by mode/outcome: [('apply', 'attempt', 1202, 1202), ('apply', 'error', 46, 46), ('apply', 'sent', 1152, 1152), ('dry', 'dry_ok', 1595, 1202), ('dry', 'dry_refused', 418, 13)]
+last rows: [(4413, 'decision-told-apply-e5935208a0', '2026-11-14T20:24:40Z', 217307, 'apply', 'sent'), (4412, 'decision-told-apply-e5935208a0', '2026-11-14T20:24:40Z', 217307, 'apply', 'attempt'), (4411, 'decision-told-apply-e5935208a0', '2026-11-14T20:23:18Z', 213168, 'apply', 'sent'), (4410, 'decision-told-apply-e5935208a0', '2026-11-14T20:23:18Z', 213168, 'apply', 'attempt'), (4409, 'decision-told-apply-e5935208a0', '2026-11-14T20:22:13Z', 209664, 'apply', 'sent')]
+apply attempts today: (28,)
+--- tick status
+notify-tick: sent 8 this run, 3 still untold (3 carried, 0 not reached)
+-rw-r--r-- 1 root root 34388 Nov 13 14:44 c002.json
+-rw-r--r-- 1 root root 13833 Nov 10 22:29 c003.dry.json
+-rw-r--r-- 1 root root 18648 Nov 10 22:28 c003.json
+-rw-r--r-- 1 root root 12188 Nov 10 22:39 c004.dry.json
+-rw-r--r-- 1 root root 25241 Nov 10 22:39 c004.json
+-rw-r--r-- 1 root root 13019 Nov 10 22:49 c005.dry.json
+-rw-r--r-- 1 root root 20895 Nov 10 22:49 c005.json
+-rw-r--r-- 1 root root   490 Nov 14 20:26 last-run.json
+--- timer
+Sat 2026-11-14 20:50:01 UTC          12min Sat 2026-11-14 20:35:54 UTC      1min 35s ago merge-outcome-notify.timer                       merge-outcome-notify.service
+Sun 2026-11-15 02:25:00 UTC       5h 47min Sat 2026-11-14 20:25:00 UTC         12min ago resolve-notify.timer                             resolve-notify.service
+-                                        - Sat 2026-11-14 20:36:01 UTC      1min 28s ago credit-notify-tick.timer                         credit-notify-tick.service
+active
+enabled
+--- deployed sha
+284745cd6fe4fec9a477c1c5eb26ca9b85676a91
+
+e709a2b68cb2d2ffac0134a29a4df642f23eadac2a08d3befb654d9e4f159f0e  /opt/hydra/scripts/credit-notify-tick.py
+8fff8573bd482e3c0ebb113ca90ca41a0284e8cc66be10f7e0775f47041f9de7  /opt/hydra/scripts/credit-decision-told.py
+c2f3e8a974a9f457cc2c317c5c88ff5fa47c93a793e03490b64e7b6cc3922d77  /opt/hydra/scripts/credit_review/decision_told.py
+f3bd2648d0f4610c5754ebe3af3f1291591952945022aaae048037f3d2aefc2e  /opt/hydra/scripts/credit_review/notify_chunks.py
+a29e7b31380389afe33854b990f4602af9f7335d720e3e5c09ae5b28ecc1303a  /opt/hydra/scripts/credit_review/notify_tick.py
+169e90f9d8136d32a16b53547d987ff6baeb6e4b4b9623ef1b3867a48dbf03ea  /root/mklist2.js

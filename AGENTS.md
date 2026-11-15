@@ -1587,8 +1587,15 @@ hand-written host file) walks the untold precedent approvals in chunks; the loop
   next chunk unreadable too. A stop is per user, per chunk (`dry_failed`) or the run (`kill_file`, `day_cap`, the
   ladder), and `notify-tick/last-run.json` accounts for every untold user.
   `/etc/hydra/credit-notify-tick.disabled` stops this tick alone; `credit-decision-told.disabled` stops the sender.
-- **Who was sent is read from the ledger, not the apply's stdout.** `decision_told.py` on node-8 still differs
-  from git (hand patches): changing it in a PR is a deploy CONFLICT until that drift is settled.
+- **Who was sent is read from the ledger, not the apply's stdout.** `decision_told.py` carries node-8's hand
+  patches and the git-wins marker since 2026-11-14, so a deploy writes the repo copy over the host's.
+- **Only a `sent` row closes a group; an attempt holds the slot** (captain 2026-11-14). `decision_told.plan()`
+  holds `already_told` on a `sent` row for the (user, group) and `slot_wait` for 7 days after the user's latest
+  live attempt, confirmed or not. A user with no `sent` row is still not thereby untold: an attempt whose answer
+  was lost (timeout, unparseable answer) can carry core's `metadata.decisionNotice.noticeSentAt`, which `plan()`
+  drops per request. The tick lists nobody who has a live row (`notify_tick.already_told`), so an unconfirmed
+  attempt is made again only from an explicit list: leave out a user core answered `no_channel`, and a notice
+  the mail gateway refused with 413 until its limit moves. Measured: `data/precedent-untold-tell-r1/report.md`.
 - **The read-back run id comes from the ledger, never from the environment.** `notify_chunks.ladder_state` names a
   prior confirmed send only when the ledger holds MORE apply attempts than `FIRST_LIVE_LIMIT` — a caller cannot
   reach the ladder's second live write without one, so that count is durable proof an operator climbed the rung.

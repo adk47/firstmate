@@ -1,0 +1,96 @@
+{
+ "plan-list2": {
+  "by_copy_ref": {
+   "decision-approved": 0,
+   "decision-rejected": 0
+  },
+  "eligible": 0,
+  "eligible_paid": 0,
+  "facts_header": {
+   "class": "precedent_v1_untold",
+   "counts": {
+    "requests": 10366,
+    "users": 1207
+   },
+   "generated_at": "2026-11-14T21:01:36.002Z",
+   "list_sha": "589fd5091380",
+   "query_sha": "precedent_v1_untold",
+   "ruling": "captain 2026-11-10 no humans",
+   "source": "credit_requests"
+  },
+  "first": [],
+  "held": {
+   "slot_wait": 2
+  },
+  "later_groups": 0,
+  "requests": 0,
+  "users": 2,
+  "with_prior_status_note": 0
+ },
+ "plan-list41": {
+  "by_copy_ref": {
+   "decision-approved": 3,
+   "decision-rejected": 0
+  },
+  "eligible": 3,
+  "eligible_paid": 0,
+  "facts_header": {
+   "class": "precedent_v1_untold",
+   "counts": {
+    "requests": 10366,
+    "users": 1207
+   },
+   "generated_at": "2026-11-14T21:01:36.002Z",
+   "list_sha": "9e160845489b",
+   "query_sha": "precedent_v1_untold",
+   "ruling": "captain 2026-11-10 no humans",
+   "source": "credit_requests"
+  },
+  "first": [
+   {
+    "copy_ref": "decision-approved",
+    "dropped": {},
+    "group_key": "4df4202f-c31b-43e0-9da2-28d8744e0642|121d8601-48cb-42f2-b448-c12ef2b2c436",
+    "hold": "",
+    "later_groups": [],
+    "paid": false,
+    "prior_status_note": [],
+    "subject_ids": "<8 request ids>",
+    "user_id": 270441
+   },
+   {
+    "copy_ref": "decision-approved",
+    "dropped": {},
+    "group_key": "9738a1e8-634f-43bf-b5ac-4fa96e076ddf|10646c7d-898b-471e-81bf-ef441396c7ce",
+    "hold": "",
+    "later_groups": [],
+    "paid": false,
+    "prior_status_note": [],
+    "subject_ids": "<1 request ids>",
+    "user_id": 305363
+   },
+   {
+    "copy_ref": "decision-approved",
+    "dropped": {},
+    "group_key": "b4754363-08c6-46d4-b020-367efe65051c|d57bed7c-6159-468f-a88f-9774f10daae4",
+    "hold": "",
+    "later_groups": [],
+    "paid": false,
+    "prior_status_note": [
+     733,
+     6597
+    ],
+    "subject_ids": "<342 request ids>",
+    "user_id": 347304
+   }
+  ],
+  "held": {
+   "already_told": 36,
+   "slot_wait": 2
+  },
+  "later_groups": 0,
+  "requests": 351,
+  "users": 41,
+  "with_prior_status_note": 1
+ }
+}

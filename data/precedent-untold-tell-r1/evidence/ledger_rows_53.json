@@ -1,0 +1,1924 @@
+[
+ {
+  "user_id": 6678,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    103,
+    "decision-told-apply-2b687a163c",
+    "2026-11-10T19:07:45Z",
+    "attempt"
+   ],
+   [
+    104,
+    "decision-told-apply-2b687a163c",
+    "2026-11-10T19:07:45Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "62e79b38-9c48-42a0-963a-29e25fa3f814|ca3e7f3d-084b-461c-89eb-725aefb60038"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T19:05:36Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 17097,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    145,
+    "decision-told-apply-f80ecaa6e4",
+    "2026-11-10T19:26:12Z",
+    "attempt"
+   ],
+   [
+    146,
+    "decision-told-apply-f80ecaa6e4",
+    "2026-11-10T19:26:12Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "5cc0e4b8-9e19-4caf-8dce-d5d3104a2f78|03039d5d-d0ea-4d4c-8062-cb1129ff5bbf"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   364
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T19:17:59Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 503: {\"result\": \"error\", \"message\": \"notify-gateway did not confirm the notification (send-gateway /v1/send failed (413): Request failed with status code 413); it may have been delivered, so this user is not retried for 7 days and nothing was recorded as sent\", \"errorCode\": \"delivery_unce"
+ },
+ {
+  "user_id": 19104,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    1360,
+    "decision-told-apply-f7f4be283f",
+    "2026-11-11T00:15:33Z",
+    "attempt"
+   ],
+   [
+    1361,
+    "decision-told-apply-f7f4be283f",
+    "2026-11-11T00:15:33Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "41680735-d643-454f-a74a-832a4a3e03c4|4a8fc1b5-209a-49f7-b44b-a064fff5d9a8"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   22
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T00:12:26Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 19327,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    1362,
+    "decision-told-apply-f7f4be283f",
+    "2026-11-11T00:15:34Z",
+    "attempt"
+   ],
+   [
+    1363,
+    "decision-told-apply-f7f4be283f",
+    "2026-11-11T00:15:34Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "0a922efd-fdfd-4a14-9225-88a37bb6a078|47283df5-b644-477a-a4cf-8922d35631ee"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   51
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T00:12:27Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 22104,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    3969,
+    "decision-told-apply-361d20cd70",
+    "2026-11-14T00:48:11Z",
+    "attempt"
+   ],
+   [
+    3970,
+    "decision-told-apply-361d20cd70",
+    "2026-11-14T00:48:11Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "55ebcf7f-c064-4a1a-92c2-127c0f937f61|6b7b1c63-c7e1-42d0-9737-2afba39081db"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   2
+  ],
+  "dry_counts": {
+   "dry_ok": 10
+  },
+  "last_dry": [
+   "2026-11-14T00:46:59Z",
+   "dry_ok"
+  ],
+  "error": "Command '['bash', '/opt/hydra/skills-all/muso-ops-admin/scripts/muso-admin-api.sh', '--requester', 'agent-uvn-cron@muso.ai', 'call', 'POST', '/admin/notifications/status', '{\"apply\":true,\"channel\":\"live\",\"copyRef\":\"decision-approved\",\"subjectIds\":[\"2de47443-9e96-48e6-9db5-6436e5922fa6\",\"ed8cafea-88e"
+ },
+ {
+  "user_id": 26504,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    406,
+    "decision-told-apply-40c446a709",
+    "2026-11-10T20:18:44Z",
+    "attempt"
+   ],
+   [
+    407,
+    "decision-told-apply-40c446a709",
+    "2026-11-10T20:18:44Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "4b837b1b-5192-4882-be83-1fc19ebf6f80|f53d2b9f-2d04-4fe4-a0d7-cb9fb80a72f2"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T20:10:37Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 27448,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    955,
+    "decision-told-apply-c61f21c898",
+    "2026-11-10T21:10:35Z",
+    "attempt"
+   ],
+   [
+    956,
+    "decision-told-apply-c61f21c898",
+    "2026-11-10T21:10:35Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "0dd597aa-85ba-4bc6-8248-b4e8dbab0bf3|c92a7649-c0ae-4a10-8725-5b4cc2a911ba"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T21:07:15Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 27927,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    957,
+    "decision-told-apply-c61f21c898",
+    "2026-11-10T21:10:38Z",
+    "attempt"
+   ],
+   [
+    958,
+    "decision-told-apply-c61f21c898",
+    "2026-11-10T21:10:38Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "15ddd40b-036a-46e7-bd85-ce73e9a03191|23392b51-4b42-42cb-ad62-d579af6b8367"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   2
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T21:07:15Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 29419,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    3971,
+    "decision-told-apply-361d20cd70",
+    "2026-11-14T00:50:11Z",
+    "attempt"
+   ],
+   [
+    3972,
+    "decision-told-apply-361d20cd70",
+    "2026-11-14T00:50:11Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "1a15ff70-a305-4c9e-bab1-0983bd8cc9b1|24b84e9a-b274-43d6-b57d-5538f5671d20"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 6
+  },
+  "last_dry": [
+   "2026-11-14T00:47:01Z",
+   "dry_ok"
+  ],
+  "error": "Command '['bash', '/opt/hydra/skills-all/muso-ops-admin/scripts/muso-admin-api.sh', '--requester', 'agent-uvn-cron@muso.ai', 'call', 'POST', '/admin/notifications/status', '{\"apply\":true,\"channel\":\"live\",\"copyRef\":\"decision-approved\",\"subjectIds\":[\"3961db9e-08c5-4d4d-a178-51437126d6b4\"],\"userId\":294"
+ },
+ {
+  "user_id": 32439,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    1124,
+    "decision-told-apply-ab28df017b",
+    "2026-11-10T22:10:19Z",
+    "attempt"
+   ],
+   [
+    1125,
+    "decision-told-apply-ab28df017b",
+    "2026-11-10T22:10:19Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "52d45ec2-3b83-494e-954f-6759ca8606ae|75122dc5-4156-42fb-9271-27ecf71b5b69"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   4
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T22:05:51Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 50621,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    1534,
+    "decision-told-apply-57ce61463d",
+    "2026-11-11T01:38:39Z",
+    "attempt"
+   ],
+   [
+    1535,
+    "decision-told-apply-57ce61463d",
+    "2026-11-11T01:38:39Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "f7d5122f-a96c-4a01-b8b3-e6b12b4aaa21|5d63101a-0880-45c1-9201-356b99987e50"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   281
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T01:22:59Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 503: {\"result\": \"error\", \"message\": \"notify-gateway did not confirm the notification (send-gateway /v1/send failed (413): Request failed with status code 413); it may have been delivered, so this user is not retried for 7 days and nothing was recorded as sent\", \"errorCode\": \"delivery_unce"
+ },
+ {
+  "user_id": 53479,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    997,
+    "decision-told-apply-0b55e73b25",
+    "2026-11-10T21:27:17Z",
+    "attempt"
+   ],
+   [
+    998,
+    "decision-told-apply-0b55e73b25",
+    "2026-11-10T21:27:17Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "434ca1d4-0c1e-4edd-9412-4052658d9337|aaf2f65b-637b-4761-99ea-c9e8f4feb842"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T21:18:14Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 56521,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    233,
+    "decision-told-apply-286889ce25",
+    "2026-11-10T19:57:19Z",
+    "attempt"
+   ],
+   [
+    234,
+    "decision-told-apply-286889ce25",
+    "2026-11-10T19:57:19Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "1681312e-8ba9-4712-b06e-c275456a4146|5364e4a9-6369-482e-9685-e3a62b4f6191"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   6
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T19:50:45Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 61588,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    1388,
+    "decision-told-apply-1f18a1210a",
+    "2026-11-11T00:26:22Z",
+    "attempt"
+   ],
+   [
+    1389,
+    "decision-told-apply-1f18a1210a",
+    "2026-11-11T00:26:22Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "e2152399-e9e7-4a72-be6e-d4aa90aed295|bc4b60a7-1044-4499-9c5c-8386397e08b7"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T00:25:28Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 63778,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    1404,
+    "decision-told-apply-1f18a1210a",
+    "2026-11-11T00:34:53Z",
+    "attempt"
+   ],
+   [
+    1405,
+    "decision-told-apply-1f18a1210a",
+    "2026-11-11T00:34:53Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "191fd393-21d2-442b-92e7-4705aeacdbdf|9d7c7b9a-2fd7-471f-9795-96e6dd4cedba"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   14
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T00:25:32Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 68272,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    3553,
+    "decision-told-apply-c8defd99ca",
+    "2026-11-13T14:06:43Z",
+    "attempt"
+   ],
+   [
+    3554,
+    "decision-told-apply-c8defd99ca",
+    "2026-11-13T14:06:43Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "c3eb2f98-e208-4e36-8e8f-8f648e993c28|8f5fb9ce-19fc-46d1-9439-7d06e1cebadc"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-13T13:54:17Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 70317,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    1478,
+    "decision-told-apply-96cf41a384",
+    "2026-11-11T01:13:43Z",
+    "attempt"
+   ],
+   [
+    1479,
+    "decision-told-apply-96cf41a384",
+    "2026-11-11T01:13:43Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "2c013337-f248-4fd2-9670-c6d1147eb4ce|4b241320-67be-4338-9120-a8339eeea896"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   21
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T01:12:47Z",
+   "dry_ok"
+  ],
+  "error": "Command '['bash', '/opt/hydra/skills-all/muso-ops-admin/scripts/muso-admin-api.sh', '--requester', 'agent-uvn-cron@muso.ai', 'call', 'POST', '/admin/notifications/status', '{\"apply\":true,\"channel\":\"live\",\"copyRef\":\"decision-approved\",\"subjectIds\":[\"09c086fd-1884-4db0-be87-b777de57bc18\",\"2da68c23-132"
+ },
+ {
+  "user_id": 72407,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    261,
+    "decision-told-apply-b1eff2b9b7",
+    "2026-11-10T20:06:35Z",
+    "attempt"
+   ],
+   [
+    262,
+    "decision-told-apply-b1eff2b9b7",
+    "2026-11-10T20:06:35Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "7c41cdf5-d40c-4399-9c68-9a3cb3f0bbb0|56b7c7c8-f602-4c8d-8382-c679066614bc"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   281
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T20:00:53Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 503: {\"result\": \"error\", \"message\": \"notify-gateway did not confirm the notification (send-gateway /v1/send failed (413): Request failed with status code 413); it may have been delivered, so this user is not retried for 7 days and nothing was recorded as sent\", \"errorCode\": \"delivery_unce"
+ },
+ {
+  "user_id": 75714,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    437,
+    "decision-told-apply-44e238db6b",
+    "2026-11-10T20:20:20Z",
+    "attempt"
+   ],
+   [
+    438,
+    "decision-told-apply-44e238db6b",
+    "2026-11-10T20:20:20Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "86b47df2-ccf8-4793-93bc-96d32ab36d82|0a63df3d-9a44-442d-b9bd-b4b0287fd55d"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   6
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T20:12:14Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 77481,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    1486,
+    "decision-told-apply-96cf41a384",
+    "2026-11-11T01:19:56Z",
+    "attempt"
+   ],
+   [
+    1487,
+    "decision-told-apply-96cf41a384",
+    "2026-11-11T01:19:56Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "0e19eacb-acf9-4419-a668-1a2828c8dea7|73ef811b-7cb0-4e91-937d-7384496afb01"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   2
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T01:12:52Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 78042,
+  "live_outcomes": [
+   "attempt"
+  ],
+  "live_rows": [
+   [
+    1488,
+    "decision-told-apply-96cf41a384",
+    "2026-11-11T01:19:56Z",
+    "attempt"
+   ]
+  ],
+  "live_groups": [
+   "e123dc3f-697a-402f-96e8-dd28d484bfda|ad5ac85f-4e3c-4a62-8b0b-ba5e0a9e97f5"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   3
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T01:12:53Z",
+   "dry_ok"
+  ]
+ },
+ {
+  "user_id": 84189,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    3571,
+    "decision-told-apply-c8defd99ca",
+    "2026-11-13T14:17:13Z",
+    "attempt"
+   ],
+   [
+    3572,
+    "decision-told-apply-c8defd99ca",
+    "2026-11-13T14:17:13Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "1de8ab63-4250-4b57-b0e0-aef8255f0679|54ebfd30-64ac-4822-993f-b7afbe464bd2"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-13T13:54:21Z",
+   "dry_ok"
+  ],
+  "error": "Expecting value: line 1 column 30 (char 29)"
+ },
+ {
+  "user_id": 91567,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    1636,
+    "decision-told-apply-a7168e8627",
+    "2026-11-11T02:11:55Z",
+    "attempt"
+   ],
+   [
+    1637,
+    "decision-told-apply-a7168e8627",
+    "2026-11-11T02:11:55Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "f43671bc-20d5-4b3d-990f-2f0fd1212412|8eb8b791-5ef6-451b-99c0-d69600c71e77"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   2
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T01:58:52Z",
+   "dry_ok"
+  ],
+  "error": "Command '['bash', '/opt/hydra/skills-all/muso-ops-admin/scripts/muso-admin-api.sh', '--requester', 'agent-uvn-cron@muso.ai', 'call', 'POST', '/admin/notifications/status', '{\"apply\":true,\"channel\":\"live\",\"copyRef\":\"decision-approved\",\"subjectIds\":[\"1509af54-a7fc-4eea-8136-a4549b5a0944\",\"20b5494a-acb"
+ },
+ {
+  "user_id": 96293,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    1652,
+    "decision-told-apply-a7168e8627",
+    "2026-11-11T02:24:11Z",
+    "attempt"
+   ],
+   [
+    1653,
+    "decision-told-apply-a7168e8627",
+    "2026-11-11T02:24:11Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "4397a30b-2f63-4e18-99a7-67c91b94c9b3|97374839-b96e-4749-88fa-8c5e644cbc0d"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T01:58:56Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 96558,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    3840,
+    "decision-told-apply-0667061495",
+    "2026-11-13T19:59:06Z",
+    "attempt"
+   ],
+   [
+    3841,
+    "decision-told-apply-0667061495",
+    "2026-11-13T19:59:06Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "5f3456f0-6c81-4b5b-b6d3-4e5e51f819e0|1181f59a-6ede-42d5-ae6d-e98c0688eb95"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   3
+  ],
+  "dry_counts": {
+   "dry_ok": 4
+  },
+  "last_dry": [
+   "2026-11-13T19:53:00Z",
+   "dry_ok"
+  ],
+  "error": "Command '['bash', '/opt/hydra/skills-all/muso-ops-admin/scripts/muso-admin-api.sh', '--requester', 'agent-uvn-cron@muso.ai', 'call', 'POST', '/admin/notifications/status', '{\"apply\":true,\"channel\":\"live\",\"copyRef\":\"decision-approved\",\"subjectIds\":[\"038f3c60-ef0b-4f91-b53c-4be60342aafa\",\"b25c9072-eaa"
+ },
+ {
+  "user_id": 99416,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    1434,
+    "decision-told-apply-4cb6d8676e",
+    "2026-11-11T00:45:14Z",
+    "attempt"
+   ],
+   [
+    1435,
+    "decision-told-apply-4cb6d8676e",
+    "2026-11-11T00:45:14Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "afc2623a-a8db-4458-b185-6ba190cbfcd4|23cb0677-5eea-4074-9a0d-cff00cbc09a2"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   12
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T00:36:22Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 100814,
+  "live_outcomes": [
+   "attempt"
+  ],
+  "live_rows": [
+   [
+    1700,
+    "decision-told-apply-b585135e95",
+    "2026-11-11T02:38:29Z",
+    "attempt"
+   ]
+  ],
+  "live_groups": [
+   "b38cef66-e754-4a19-9010-db654eb34f1e|183d27d4-ef04-4c01-bcef-fd449ade6d13"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   6
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T02:30:52Z",
+   "dry_ok"
+  ]
+ },
+ {
+  "user_id": 102783,
+  "live_outcomes": [
+   "attempt"
+  ],
+  "live_rows": [
+   [
+    1077,
+    "decision-told-apply-2ff050327c",
+    "2026-11-10T21:52:12Z",
+    "attempt"
+   ]
+  ],
+  "live_groups": [
+   "2d01ce04-70a4-4b6d-8c4e-8fced26e61b8|abeb15a4-7b7a-4630-b6cc-6caaba3a14fa"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   21
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T21:48:19Z",
+   "dry_ok"
+  ]
+ },
+ {
+  "user_id": 109550,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    1803,
+    "decision-told-apply-5a3988338c",
+    "2026-11-11T03:08:59Z",
+    "attempt"
+   ],
+   [
+    1804,
+    "decision-told-apply-5a3988338c",
+    "2026-11-11T03:08:59Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "429784cd-dc06-40c7-b786-efccc4fe3250|8dff4f6d-35aa-41f9-801d-43b7ee4d2c75"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   29
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T03:07:38Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 109681,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    1807,
+    "decision-told-apply-5a3988338c",
+    "2026-11-11T03:10:09Z",
+    "attempt"
+   ],
+   [
+    1808,
+    "decision-told-apply-5a3988338c",
+    "2026-11-11T03:10:09Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "9ed816e0-d985-4192-8e27-db06d9b6c4c8|0efdd9b9-1f28-49a0-b4d1-6573e905fbdb"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   13
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T03:07:39Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 119162,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    3626,
+    "decision-told-apply-369aaf1fd0",
+    "2026-11-13T14:33:16Z",
+    "attempt"
+   ],
+   [
+    3627,
+    "decision-told-apply-369aaf1fd0",
+    "2026-11-13T14:33:16Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "6bbe33f5-f683-45f0-8dc1-ab7f405823cc|38f8b53a-0e9b-4e5e-bfeb-108ee803958b"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-13T14:19:15Z",
+   "dry_ok"
+  ],
+  "error": "Expecting value: line 1 column 30 (char 29)"
+ },
+ {
+  "user_id": 119526,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    3846,
+    "decision-told-apply-0667061495",
+    "2026-11-13T20:15:56Z",
+    "attempt"
+   ],
+   [
+    3847,
+    "decision-told-apply-0667061495",
+    "2026-11-13T20:15:56Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "43483176-7a2c-4d96-a7ee-c11824d18bdf|28908882-fbe5-43df-92f2-c714cd3b6d6e"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-13T19:53:02Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 153177,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    532,
+    "decision-told-apply-8e90d4a6d7",
+    "2026-11-10T20:24:06Z",
+    "attempt"
+   ],
+   [
+    533,
+    "decision-told-apply-8e90d4a6d7",
+    "2026-11-10T20:24:06Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "6aa56457-d116-4451-8e9d-f47dd081be50|9d402071-2e95-4797-bdc5-92b0013b3f8e"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T20:23:27Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 155423,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    603,
+    "decision-told-apply-8e90d4a6d7",
+    "2026-11-10T20:29:06Z",
+    "attempt"
+   ],
+   [
+    604,
+    "decision-told-apply-8e90d4a6d7",
+    "2026-11-10T20:29:06Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "d6d16e5e-eca7-4d64-859d-99a1721363de|8557e1dd-aaaf-45f3-8846-dc9ad9e62e25"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   2
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T20:23:30Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 212494,
+  "live_outcomes": [
+   "attempt"
+  ],
+  "live_rows": [
+   [
+    2374,
+    "decision-told-apply-63fc6c11d4",
+    "2026-11-11T06:46:32Z",
+    "attempt"
+   ]
+  ],
+  "live_groups": [
+   "6ff03dc9-5475-4f7b-86ae-ad28c80dfc98|36c68112-9025-42f6-a034-4d14d8dd383b"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   5
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T06:17:23Z",
+   "dry_ok"
+  ]
+ },
+ {
+  "user_id": 230556,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    2507,
+    "decision-told-apply-401bafdc95",
+    "2026-11-11T07:31:35Z",
+    "attempt"
+   ],
+   [
+    2508,
+    "decision-told-apply-401bafdc95",
+    "2026-11-11T07:31:35Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "9b2ea7a3-979f-4e13-b496-66aa0a1ca363|904ed6e4-2a64-4276-a1f5-9e34c9e7a990"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   2
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T07:14:44Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 233234,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    687,
+    "decision-told-apply-e768e7d70d",
+    "2026-11-10T20:32:29Z",
+    "attempt"
+   ],
+   [
+    688,
+    "decision-told-apply-e768e7d70d",
+    "2026-11-10T20:32:29Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "58239d0b-6ed8-48d5-b163-b0d4e01f5100|3b5a4ba1-4141-451d-b3cb-ee60f9ed94c8"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   5
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T20:31:50Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 243908,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    2598,
+    "decision-told-apply-d1afc5a74b",
+    "2026-11-11T08:04:17Z",
+    "attempt"
+   ],
+   [
+    2599,
+    "decision-told-apply-d1afc5a74b",
+    "2026-11-11T08:04:17Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "8481c27a-b3e0-49dd-8b29-2d15ae0324e7|6c14354c-7505-4400-b0ad-6acda0b1464a"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T07:40:05Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 252460,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    784,
+    "decision-told-apply-d6a8208a29",
+    "2026-11-10T20:38:33Z",
+    "attempt"
+   ],
+   [
+    785,
+    "decision-told-apply-d6a8208a29",
+    "2026-11-10T20:38:33Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "5253360d-8b97-4e50-b928-ab592277cb49|5c59e8fb-2846-4419-8442-7b9569aa0d3d"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   15
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T20:32:15Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 255205,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    807,
+    "decision-told-apply-d6a8208a29",
+    "2026-11-10T20:40:11Z",
+    "attempt"
+   ],
+   [
+    809,
+    "decision-told-apply-d6a8208a29",
+    "2026-11-10T20:40:11Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "11a47187-57e8-4c21-a3d1-ed6ca4c2b1b2|fa4da195-2412-401b-8fd7-062cb3540c33"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   7
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T20:32:16Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 270441,
+  "live_outcomes": [],
+  "live_rows": [],
+  "live_groups": [],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [],
+  "dry_counts": {
+   "dry_refused": 122
+  },
+  "last_dry": [
+   "2026-11-14T20:37:30Z",
+   "dry_refused"
+  ],
+  "last_dry_error": "route report names no subjects, or subjects outside the planned group"
+ },
+ {
+  "user_id": 275342,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    2819,
+    "decision-told-apply-f6bb9c58dd",
+    "2026-11-11T09:26:13Z",
+    "attempt"
+   ],
+   [
+    2820,
+    "decision-told-apply-f6bb9c58dd",
+    "2026-11-11T09:26:13Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "612f24f5-a152-448c-9444-f2507784c669|d9607770-681c-489d-acd2-27dcf92a35e1"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   242
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T08:59:18Z",
+   "dry_ok"
+  ],
+  "error": "Command '['bash', '/opt/hydra/skills-all/muso-ops-admin/scripts/muso-admin-api.sh', '--requester', 'agent-uvn-cron@muso.ai', 'call', 'POST', '/admin/notifications/status', '{\"apply\":true,\"channel\":\"live\",\"copyRef\":\"decision-approved\",\"subjectIds\":[\"03a28159-7c8f-4133-873d-3d4549d44f06\",\"04fa996a-840"
+ },
+ {
+  "user_id": 279975,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    2872,
+    "decision-told-apply-713b79b70c",
+    "2026-11-11T09:42:17Z",
+    "attempt"
+   ],
+   [
+    2873,
+    "decision-told-apply-713b79b70c",
+    "2026-11-11T09:42:17Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "47a444a8-48c2-4785-b1a6-0dfff05d81d4|7ead0bf9-4a6b-40d2-82db-639f19aebe84"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T09:30:22Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 288257,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    2927,
+    "decision-told-apply-46ad7ecc9a",
+    "2026-11-11T09:57:39Z",
+    "attempt"
+   ],
+   [
+    2928,
+    "decision-told-apply-46ad7ecc9a",
+    "2026-11-11T09:57:39Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "5aaf1f14-84af-46c3-a1c0-d5168335d5d5|6e02bca2-c41c-4bc4-9ff0-9433b4bff774"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   64
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T09:53:44Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 291623,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    776,
+    "decision-told-apply-cd7d702467",
+    "2026-11-10T20:37:59Z",
+    "attempt"
+   ],
+   [
+    777,
+    "decision-told-apply-cd7d702467",
+    "2026-11-10T20:37:59Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "68d57cde-a7b5-4451-95d6-6be067713746|b3eed4f1-a573-45bd-abd4-be815ada709d"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   19
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T20:34:08Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 304550,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    3022,
+    "decision-told-apply-3f99e15165",
+    "2026-11-11T10:32:53Z",
+    "attempt"
+   ],
+   [
+    3023,
+    "decision-told-apply-3f99e15165",
+    "2026-11-11T10:32:53Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "b395588a-ee71-491d-b9e2-bb5a9348c506|4b8b4f06-f1c3-4889-9a61-a46ad5323ce0"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T10:19:28Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 305363,
+  "live_outcomes": [],
+  "live_rows": [],
+  "live_groups": [],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [],
+  "dry_counts": {
+   "dry_refused": 120
+  },
+  "last_dry": [
+   "2026-11-14T20:37:31Z",
+   "dry_refused"
+  ],
+  "last_dry_error": "route dry run is not affirmative (outcome 'held_messaging_hold')"
+ },
+ {
+  "user_id": 319572,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    3077,
+    "decision-told-apply-02e2e2d011",
+    "2026-11-11T10:48:22Z",
+    "attempt"
+   ],
+   [
+    3078,
+    "decision-told-apply-02e2e2d011",
+    "2026-11-11T10:48:22Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "489876dc-7dee-43c4-9007-de0b96aa18b3|ad092b18-4326-4356-93c1-28c930e6996d"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T10:43:41Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 325208,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    3101,
+    "decision-told-apply-02e2e2d011",
+    "2026-11-11T10:58:14Z",
+    "attempt"
+   ],
+   [
+    3102,
+    "decision-told-apply-02e2e2d011",
+    "2026-11-11T10:58:14Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "ca4f726d-e82e-4a51-81f9-b1d3c697842a|f0905480-b530-4d79-b277-a477f7376389"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   14
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T10:43:50Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 336111,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    3154,
+    "decision-told-apply-7809fc0e51",
+    "2026-11-11T11:16:23Z",
+    "attempt"
+   ],
+   [
+    3155,
+    "decision-told-apply-7809fc0e51",
+    "2026-11-11T11:16:23Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "b579f371-4ef3-462e-a218-a8f9a472f337|6827ec38-754d-4e0c-bca3-1b1af2716f1e"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   11
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-11T11:06:25Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 347304,
+  "live_outcomes": [],
+  "live_rows": [],
+  "live_groups": [],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [],
+  "dry_counts": {
+   "dry_refused": 119
+  },
+  "last_dry": [
+   "2026-11-14T20:37:31Z",
+   "dry_refused"
+  ],
+  "last_dry_error": "route report names no subjects, or subjects outside the planned group"
+ },
+ {
+  "user_id": 368676,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    852,
+    "decision-told-apply-3675fb3959",
+    "2026-11-10T20:42:16Z",
+    "attempt"
+   ],
+   [
+    853,
+    "decision-told-apply-3675fb3959",
+    "2026-11-10T20:42:16Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "a07489aa-bc18-4796-9e01-812eaaf78f4d|50543227-d30a-484d-8959-e13564964460"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   1
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T20:41:10Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ },
+ {
+  "user_id": 368924,
+  "live_outcomes": [
+   "attempt",
+   "error"
+  ],
+  "live_rows": [
+   [
+    854,
+    "decision-told-apply-3675fb3959",
+    "2026-11-10T20:42:17Z",
+    "attempt"
+   ],
+   [
+    855,
+    "decision-told-apply-3675fb3959",
+    "2026-11-10T20:42:17Z",
+    "error"
+   ]
+  ],
+  "live_groups": [
+   "f0c688be-b7b1-428e-bd9d-416c5873e4ae|77045f83-4609-41ad-a984-2309c6b687cb"
+  ],
+  "copy_refs": [
+   "decision-approved"
+  ],
+  "n_subjects_live": [
+   8
+  ],
+  "dry_counts": {
+   "dry_ok": 1
+  },
+  "last_dry": [
+   "2026-11-10T20:41:10Z",
+   "dry_ok"
+  ],
+  "error": "route HTTP 409: {\"result\": \"error\", \"message\": \"no leg confirmed delivery (email skipped, bell not_visible): the user was NOT told (no_channel) \\u2014 nothing was recorded as sent\", \"errorCode\": \"no_channel\", \"legs\": {\"email\": \"skipped\", \"bell\": \"not_visible\", \"told\": false}, \"code\": 409}"
+ }
+]

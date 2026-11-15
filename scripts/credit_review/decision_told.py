@@ -10,8 +10,10 @@ never supplies wording: the body is {userId, copyRef, channel, subjectIds, apply
 Per user, re-read at signing (fail closed - anything unreadable holds the user):
   - every listed request is still in its decided status and not deleted (core replica);
   - no core notice stamp on it (metadata.approvedNotice / decisionNotice .noticeSentAt);
-  - this ledger (decision_told) has no attempt for that (user, profile) group: ONE decision notice per group, ever
-    (never the 161334 class); a user's next group waits until the route's 7-day slot has passed since the last;
+  - this ledger (decision_told) has no SENT row for that (user, profile) group: ONE delivered decision notice per
+    group, ever (never the 161334 class). An attempt core did not confirm (an error, a timeout, a reservation with
+    no outcome row) told nobody we can name, so the group is attempted again - after the slot: any live attempt,
+    confirmed or not, holds the user for the route's 7 days, counted from the user's LATEST attempt;
   - one decision per user (an approved + rejected mix holds).
 A hydra STATUS note ('in review' / 'doc received') is a different class (Fable 197): it does not exclude the user;
 its ledger ids ride along as prior_status_note. The only hold is a status note sent TODAY (next day's slot).
@@ -21,13 +23,21 @@ what p1 + r5 sign. Ladder: 10 signed dry -> ONE real -> read-back -> the rest, p
 write is one user; its first UTC day <= 100 users.
 
 Ledger (append-only, in the decider ledger): decision_told(run_id, at, user_id, copy_ref, subject_ids_json, mode,
-outcome, report_json). An attempt row is written BEFORE the call (a reservation counts as an attempt).
+outcome, report_json). An attempt row is written BEFORE the call (a reservation counts as an attempt for the slot,
+the day cap and the ladder; only a `sent` row counts as told - captain ruling 2026-11-14, before which an attempt
+alone closed the group for good and 38 users core had refused or never answered read as told).
+
+Reviewed baseline: deploy overwrites - 2026-11-14 (precedent-untold-tell-r1). node-8 held a hand-edited copy
+(sha256 c2f3e8a9..., read 2026-11-14T20:38Z): the day cap from DECISION_TOLD_DAY_CAP, 100-id replica chunks with one
+retry and a uuid comparison, the requester as an email, and the route report read from the admin API's `data`. This
+file is that copy plus the ruling above, so the deploy loses none of it.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import sqlite3
+import time
 from dataclasses import dataclass, field
 import os
 from datetime import datetime, timedelta
@@ -36,7 +46,7 @@ from typing import Any, Callable, Iterable
 COPY_REF = {"approved": "decision-approved", "rejected": "decision-rejected"}
 ROUTE = "/admin/notifications/status"
 FIRST_LIVE_LIMIT = 1
-FIRST_DAY_CAP = 100
+FIRST_DAY_CAP = int(os.environ.get("DECISION_TOLD_DAY_CAP", "100"))
 SLOT_DAYS = 7
 MIN_SIGNED_DRY = 10          # the signed dry-run rung: ten affirmative route dry runs before any live send
 KILL_FILE = "/etc/hydra/credit-decision-told.disabled"
@@ -88,17 +98,31 @@ def _ids(users: Iterable[dict[str, Any]]) -> list[str]:
     return out
 
 
+def _query_retry(query: Query, sql: str, tries: int = 2):
+    last = None
+    for n in range(tries):
+        try:
+            return query(sql)
+        except Exception as exc:  # noqa: BLE001 - re-raised below if the retry also fails
+            last = exc
+            time.sleep(2 * (n + 1))
+    raise last
+
+
 def core_rows(query: Query, ids: list[str]) -> dict[str, tuple[str, bool, bool, str, str]]:
     """{request id: (status, deleted, approved_notice_sent, workspace, profile)} from the core replica."""
     out: dict[str, tuple[str, bool, bool, str, str]] = {}
-    for i in range(0, len(ids), 400):
-        chunk = ids[i:i + 400]
-        rows = query("SELECT lower(CAST(id AS varchar)), status, CAST(deletedat IS NOT NULL AS varchar), "
+    # 400 ids per Trino statement timed out on a 9,465-id list (2026-11-10: "canceling statement
+    # due to statement timeout"). 100 keeps each statement small; a chunk that still fails is
+    # retried once, then the whole call raises rather than silently dropping rows.
+    for i in range(0, len(ids), 100):
+        chunk = ids[i:i + 100]
+        rows = _query_retry(query, "SELECT lower(CAST(id AS varchar)), status, CAST(deletedat IS NOT NULL AS varchar), "
                      "CAST(json_extract_scalar(metadata, '$.approvedNotice.noticeSentAt') IS NOT NULL OR "
                      "json_extract_scalar(metadata, '$.decisionNotice.noticeSentAt') IS NOT NULL AS varchar), "
                      "CAST(workspaceid AS varchar), CAST(profileid AS varchar) "
-                     "FROM postgresql_core.public.credit_requests WHERE lower(CAST(id AS varchar)) IN ("
-                     + ",".join(f"'{x}'" for x in chunk) + ")")
+                     "FROM postgresql_core.public.credit_requests WHERE id IN ("
+                     + ",".join(f"CAST('{x}' AS uuid)" for x in chunk) + ")")
         for r in rows:
             if len(r) != 6 or r[2] not in ("true", "false") or r[3] not in ("true", "false"):
                 raise DecisionToldError("unexpected replica row shape")
@@ -135,11 +159,23 @@ BEGIN SELECT RAISE(ABORT, 'decision_told is append-only'); END;""")
 
 
 def attempts(db: sqlite3.Connection) -> dict[int, dict[str, str]]:
-    """{user: {group key: first attempt at}} for live (apply) attempts."""
+    """{user: {group key: LATEST attempt at}} for live (apply) attempts. The slot reads these. The latest, not the
+    first: a group can be attempted again once its slot has passed, and a slot counted from the first attempt would
+    then be open on every later run."""
     out: dict[int, dict[str, str]] = {}
-    for uid, key, at in db.execute("SELECT user_id, group_key, min(at) FROM decision_told WHERE mode = 'apply' "
+    for uid, key, at in db.execute("SELECT user_id, group_key, max(at) FROM decision_told WHERE mode = 'apply' "
                                    "AND outcome = 'attempt' GROUP BY 1, 2"):
         out.setdefault(int(uid), {})[str(key)] = str(at)
+    return out
+
+
+def told(db: sqlite3.Connection) -> dict[int, set[str]]:
+    """{user: {group key}} for the groups core CONFIRMED a live send for (a `sent` row). The only thing that closes a
+    group: an attempt row alone says a call was made, not that anyone was told."""
+    out: dict[int, set[str]] = {}
+    for uid, key in db.execute("SELECT DISTINCT user_id, group_key FROM decision_told WHERE mode = 'apply' "
+                               "AND outcome = 'sent'"):
+        out.setdefault(int(uid), set()).add(str(key))
     return out
 
 
@@ -162,9 +198,13 @@ class Plan:
 
 
 def plan(users: list[dict[str, Any]], core: dict[str, tuple[str, bool, bool, str, str]],
-         notes: dict[str, list[tuple[int, str]]], tried: dict[int, dict[str, str]], now: datetime) -> list[Plan]:
+         notes: dict[str, list[tuple[int, str]]], tried: dict[int, dict[str, str]], now: datetime, *,
+         told: dict[int, set[str]]) -> list[Plan]:
     """Per-user eligibility, paid first: the next untold (workspace, profile) group, biggest first (the route's
-    order). Never raises on one user: a row-level doubt drops the row, a user-level doubt holds the user."""
+    order). Never raises on one user: a row-level doubt drops the row, a user-level doubt holds the user.
+
+    `told` (the groups with a `sent` row) is what closes a group; `tried` (every live attempt) is what the slot
+    reads. `told` is required and keyword-only so that a caller cannot leave it out and re-plan a delivered group."""
     today = now.strftime("%Y-%m-%d")
     slot_from = (now - timedelta(days=SLOT_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     out = []
@@ -187,10 +227,11 @@ def plan(users: list[dict[str, Any]], core: dict[str, tuple[str, bool, bool, str
                 note_today = note_today or day == today
         p.prior_status_note = sorted(note_ids)
         done = tried.get(p.user_id, {})
+        sent = told.get(p.user_id, set())
         # A listed request the replica did not return is UNKNOWN, not gone: sending the rest would reserve the group
         # forever and that request would never be told. The whole user waits for a complete read (QA #1575).
         missing = p.dropped.get("not_on_replica", 0)
-        todo = sorted(((k, sorted(v)) for k, v in groups.items() if k not in done), key=lambda kv: (-len(kv[1]), kv[0]))
+        todo = sorted(((k, sorted(v)) for k, v in groups.items() if k not in sent), key=lambda kv: (-len(kv[1]), kv[0]))
         if missing:
             p.hold = "replica_incomplete"
         elif not groups:
@@ -224,7 +265,9 @@ def admin_caller(script: str, identity: str = "uvn-cron", timeout_s: int = 120) 
 
     def call(b: dict[str, Any]) -> dict[str, Any]:
         env = {**os.environ, "MUSO_ADMIN_IDENTITY": identity}
-        proc = subprocess.run(["bash", script, "--requester", "credit-refresh-t01b", "call", "POST", ROUTE,
+        # The requester must be an email: muso-admin-api.sh resolves it via resolve_slack_to_email and
+        # exits 1 on a bare handle, which surfaced as "route call rc=1: " with an empty stderr.
+        proc = subprocess.run(["bash", script, "--requester", "agent-uvn-cron@muso.ai", "call", "POST", ROUTE,
                                json.dumps(b, separators=(",", ":"), sort_keys=True)],
                               capture_output=True, text=True, timeout=timeout_s, check=False, env=env)
         if proc.returncode != 0:
@@ -235,7 +278,10 @@ def admin_caller(script: str, identity: str = "uvn-cron", timeout_s: int = 120) 
             raise DecisionToldError(f"route HTTP {code}: {json.dumps(resp.get('body') or resp.get('raw'))[:300]}")
         if not isinstance(resp.get("body"), dict):
             raise DecisionToldError("route returned no report body")
-        return resp["body"]
+        # The admin API wraps the route's own JSON: {code, data, result}. report_subjects() reads the
+        # route's report (dryRun/userId/copyRef/outcome), which lives under "data".
+        body = resp["body"]
+        return body.get("data") if isinstance(body.get("data"), dict) else body
     return call
 
 
@@ -327,8 +373,16 @@ def run(db: sqlite3.Connection, plans: list[Plan], call: Caller, *, run_id: str,
             read_back = bool(readback_of) and db.execute(
                 "SELECT 1 FROM decision_told WHERE mode = 'apply' AND outcome = 'sent' AND run_id = ? AND run_id <> ?",
                 (readback_of, run_id)).fetchone() is not None
-            again = db.execute("SELECT 1 FROM decision_told WHERE mode = 'apply' AND user_id = ? AND group_key = ?",
-                               (p.user_id, p.group_key)).fetchone()
+            # Re-read under the write lock, because the plan is older than this moment. A `sent` row for the group
+            # means it was delivered: never again. Any live attempt for the user inside the slot means another run
+            # got here after the plan was made (or is mid-call now): this run leaves the user alone.
+            slot_from = (t - timedelta(days=SLOT_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            again = ("already_told" if db.execute(
+                "SELECT 1 FROM decision_told WHERE mode = 'apply' AND outcome = 'sent' AND user_id = ? AND "
+                "group_key = ?", (p.user_id, p.group_key)).fetchone() else
+                "already_attempted" if db.execute(
+                "SELECT 1 FROM decision_told WHERE mode = 'apply' AND outcome = 'attempt' AND user_id = ? AND at > ?",
+                (p.user_id, slot_from)).fetchone() else "")
             # The ladder, counted under the write lock across every process: until the operator names a run whose
             # live send core CONFIRMED (--readback-ok, after reading it back), the path holds exactly
             # FIRST_LIVE_LIMIT attempt(s) in total. A UTC day never passes FIRST_DAY_CAP users.
@@ -338,7 +392,7 @@ def run(db: sqlite3.Connection, plans: list[Plan], call: Caller, *, run_id: str,
                     "readback_required" if tried_n >= FIRST_LIVE_LIMIT else "")
             if again:
                 db.rollback()
-                out["results"].append({"user_id": p.user_id, "outcome": "already_attempted"})
+                out["results"].append({"user_id": p.user_id, "outcome": again})
                 continue
             if stop:
                 db.rollback()
@@ -357,7 +411,7 @@ def run(db: sqlite3.Connection, plans: list[Plan], call: Caller, *, run_id: str,
             rep = call(body(p, channel, apply))
             accepted = report_subjects(rep, p, apply=apply)
             outcome = "sent" if apply else "dry_ok"
-        except Exception as exc:  # noqa: BLE001 - recorded; an apply attempt stays reserved (never re-sent)
+        except Exception as exc:  # noqa: BLE001 - recorded; the attempt holds the user's slot, then may be repeated
             rep = {"error": str(exc)[:300], "report": rep if isinstance(rep, dict) else None}
             outcome = "error" if apply else "dry_refused"
         db.execute("INSERT INTO decision_told (run_id, at, user_id, group_key, copy_ref, subject_ids_json, mode, "

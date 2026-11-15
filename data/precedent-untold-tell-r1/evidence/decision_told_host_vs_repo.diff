@@ -1,0 +1,79 @@
+--- ../../scripts/credit_review/decision_told.py	2026-11-14 15:35:28.745388611 -0500
++++ live_decision_told.py	2026-11-14 15:38:34.726822752 -0500
+@@ -28,6 +28,7 @@
+ import hashlib
+ import json
+ import sqlite3
++import time
+ from dataclasses import dataclass, field
+ import os
+ from datetime import datetime, timedelta
+@@ -36,7 +37,7 @@
+ COPY_REF = {"approved": "decision-approved", "rejected": "decision-rejected"}
+ ROUTE = "/admin/notifications/status"
+ FIRST_LIVE_LIMIT = 1
+-FIRST_DAY_CAP = 100
++FIRST_DAY_CAP = int(os.environ.get("DECISION_TOLD_DAY_CAP", "100"))
+ SLOT_DAYS = 7
+ MIN_SIGNED_DRY = 10          # the signed dry-run rung: ten affirmative route dry runs before any live send
+ KILL_FILE = "/etc/hydra/credit-decision-told.disabled"
+@@ -88,17 +89,31 @@
+     return out
+ 
+ 
++def _query_retry(query: Query, sql: str, tries: int = 2):
++    last = None
++    for n in range(tries):
++        try:
++            return query(sql)
++        except Exception as exc:  # noqa: BLE001 - re-raised below if the retry also fails
++            last = exc
++            time.sleep(2 * (n + 1))
++    raise last
++
++
+ def core_rows(query: Query, ids: list[str]) -> dict[str, tuple[str, bool, bool, str, str]]:
+     """{request id: (status, deleted, approved_notice_sent, workspace, profile)} from the core replica."""
+     out: dict[str, tuple[str, bool, bool, str, str]] = {}
+-    for i in range(0, len(ids), 400):
+-        chunk = ids[i:i + 400]
+-        rows = query("SELECT lower(CAST(id AS varchar)), status, CAST(deletedat IS NOT NULL AS varchar), "
++    # 400 ids per Trino statement timed out on a 9,465-id list (2026-11-10: "canceling statement
++    # due to statement timeout"). 100 keeps each statement small; a chunk that still fails is
++    # retried once, then the whole call raises rather than silently dropping rows.
++    for i in range(0, len(ids), 100):
++        chunk = ids[i:i + 100]
++        rows = _query_retry(query, "SELECT lower(CAST(id AS varchar)), status, CAST(deletedat IS NOT NULL AS varchar), "
+                      "CAST(json_extract_scalar(metadata, '$.approvedNotice.noticeSentAt') IS NOT NULL OR "
+                      "json_extract_scalar(metadata, '$.decisionNotice.noticeSentAt') IS NOT NULL AS varchar), "
+                      "CAST(workspaceid AS varchar), CAST(profileid AS varchar) "
+-                     "FROM postgresql_core.public.credit_requests WHERE lower(CAST(id AS varchar)) IN ("
+-                     + ",".join(f"'{x}'" for x in chunk) + ")")
++                     "FROM postgresql_core.public.credit_requests WHERE id IN ("
++                     + ",".join(f"CAST('{x}' AS uuid)" for x in chunk) + ")")
+         for r in rows:
+             if len(r) != 6 or r[2] not in ("true", "false") or r[3] not in ("true", "false"):
+                 raise DecisionToldError("unexpected replica row shape")
+@@ -224,7 +239,9 @@
+ 
+     def call(b: dict[str, Any]) -> dict[str, Any]:
+         env = {**os.environ, "MUSO_ADMIN_IDENTITY": identity}
+-        proc = subprocess.run(["bash", script, "--requester", "credit-refresh-t01b", "call", "POST", ROUTE,
++        # The requester must be an email: muso-admin-api.sh resolves it via resolve_slack_to_email and
++        # exits 1 on a bare handle, which surfaced as "route call rc=1: " with an empty stderr.
++        proc = subprocess.run(["bash", script, "--requester", "agent-uvn-cron@muso.ai", "call", "POST", ROUTE,
+                                json.dumps(b, separators=(",", ":"), sort_keys=True)],
+                               capture_output=True, text=True, timeout=timeout_s, check=False, env=env)
+         if proc.returncode != 0:
+@@ -235,7 +252,10 @@
+             raise DecisionToldError(f"route HTTP {code}: {json.dumps(resp.get('body') or resp.get('raw'))[:300]}")
+         if not isinstance(resp.get("body"), dict):
+             raise DecisionToldError("route returned no report body")
+-        return resp["body"]
++        # The admin API wraps the route's own JSON: {code, data, result}. report_subjects() reads the
++        # route's report (dryRun/userId/copyRef/outcome), which lives under "data".
++        body = resp["body"]
++        return body.get("data") if isinstance(body.get("data"), dict) else body
+     return call
+ 
+ 

@@ -1,0 +1,538 @@
+=====GREP gate in live path
+grep rc=1
+=====GATE REPORT
+{
+ "campaigns": {
+  "account-digest-1": {
+   "approve": 2,
+   "mode": "observe",
+   "pending": 0,
+   "ready_to_enforce": true,
+   "refuse": 0,
+   "rewrite": 0,
+   "stale": 0
+  },
+  "backlog-drain": {
+   "approve": 13,
+   "mode": "observe",
+   "pending": 0,
+   "ready_to_enforce": false,
+   "refuse": 0,
+   "rewrite": 2,
+   "stale": 0
+  },
+  "claim-proof-ask": {
+   "approve": 20,
+   "mode": "observe",
+   "pending": 0,
+   "ready_to_enforce": false,
+   "refuse": 0,
+   "rewrite": 13,
+   "stale": 0
+  },
+  "encore26-app-banner": {
+   "approve": 0,
+   "mode": "observe",
+   "pending": 0,
+   "ready_to_enforce": false,
+   "refuse": 2,
+   "rewrite": 0,
+   "stale": 0
+  },
+  "gdpr-ack": {
+   "approve": 36,
+   "mode": "enforce",
+   "pending": 0,
+   "ready_to_enforce": false,
+   "refuse": 0,
+   "rewrite": 0,
+   "stale": 0
+  },
+  "gdpr-status": {
+   "approve": 111,
+   "mode": "enforce",
+   "pending": 0,
+   "ready_to_enforce": false,
+   "refuse": 0,
+   "rewrite": 1,
+   "stale": 0
+  },
+  "merge-outcome-notify": {
+   "approve": 2,
+   "mode": "observe",
+   "pending": 0,
+   "ready_to_enforce": false,
+   "refuse": 0,
+   "rewrite": 1,
+   "stale": 0
+  },
+  "overdue-verification-notifier": {
+   "approve": 0,
+   "mode": "observe",
+   "pending": 0,
+   "ready_to_enforce": false,
+   "refuse": 0,
+   "rewrite": 1,
+   "stale": 0
+  },
+  "proof-need-ask": {
+   "approve": 11,
+   "mode": "observe",
+   "pending": 0,
+   "ready_to_enforce": false,
+   "refuse": 0,
+   "rewrite": 6,
+   "stale": 0
+  },
+  "uvn-reminder-14": {
+   "approve": 0,
+   "mode": "enforce",
+   "pending": 100,
+   "ready_to_enforce": false,
+   "refuse": 0,
+   "rewrite": 0,
+   "stale": 0
+  },
+  "uvn-status": {
+   "approve": 225,
+   "mode": "observe",
+   "pending": 0,
+   "ready_to_enforce": false,
+   "refuse": 0,
+   "rewrite": 1,
+   "stale": 0
+  }
+ },
+ "default": "observe",
+ "retired": [
+  "verify-live/windowed"
+ ]
+}
+
+report rc=0
+=====GATE MODE
+usage: gate.py mode [-h] --campaign CAMPAIGN
+gate.py mode: error: the following arguments are required: --campaign
+=====LIVE decision_told.py
+"""decision-told: tell a user about a decision core made and never told them (Fable [key=decided-not-told-531],
+r5 [key=decided-not-told-copy]).
+
+The class: credit requests core decided (approved / rejected) whose own transition notice never went out, mostly
+validator approvals that landed under a notify:false re-drive marker (10-23 / 10-26) plus a few direct writes. The
+copy is core's live credits_accepted / credits_rejected template, byte for byte, sent by core's agent status route
+(POST /admin/notifications/status, core #11076) under the copyRefs decision-approved / decision-rejected. Hydra
+never supplies wording: the body is {userId, copyRef, channel, subjectIds, apply} and nothing else.
+
+Per user, re-read at signing (fail closed - anything unreadable holds the user):
+  - every listed request is still in its decided status and not deleted (core replica);
+  - no core notice stamp on it (metadata.approvedNotice / decisionNotice .noticeSentAt);
+  - this ledger (decision_told) has no attempt for that (user, profile) group: ONE decision notice per group, ever
+    (never the 161334 class); a user's next group waits until the route's 7-day slot has passed since the last;
+  - one decision per user (an approved + rejected mix holds).
+A hydra STATUS note ('in review' / 'doc received') is a different class (Fable 197): it does not exclude the user;
+its ledger ids ride along as prior_status_note. The only hold is a status note sent TODAY (next day's slot).
+The notice folds only the listed DECIDED rows.
+The route itself applies the 7-day slot, the hold list, mutes and its own owed-subject ledger; its dry-run report is
+what p1 + r5 sign. Ladder: 10 signed dry -> ONE real -> read-back -> the rest, paid first. A new path's first live
+write is one user; its first UTC day <= 100 users.
+
+Ledger (append-only, in the decider ledger): decision_told(run_id, at, user_id, copy_ref, subject_ids_json, mode,
+outcome, report_json). An attempt row is written BEFORE the call (a reservation counts as an attempt).
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+import time
+from dataclasses import dataclass, field
+import os
+from datetime import datetime, timedelta
+from typing import Any, Callable, Iterable
+
+COPY_REF = {"approved": "decision-approved", "rejected": "decision-rejected"}
+ROUTE = "/admin/notifications/status"
+FIRST_LIVE_LIMIT = 1
+FIRST_DAY_CAP = int(os.environ.get("DECISION_TOLD_DAY_CAP", "100"))
+SLOT_DAYS = 7
+MIN_SIGNED_DRY = 10          # the signed dry-run rung: ten affirmative route dry runs before any live send
+KILL_FILE = "/etc/hydra/credit-decision-told.disabled"
+UUID_CHARS = set("0123456789abcdef-")
+#: never automated, excluded from every list (captain 2026-10-30 21:4xZ): a list naming one is REFUSED, never skipped
+NEVER_AUTOMATED_USERS = frozenset({15})
+
+Query = Callable[[str], list[list[str]]]
+Caller = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+class DecisionToldError(RuntimeError):
+    pass
+
+
+def file_sha(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()[:12]
+
+
+def load_list(raw: bytes, expect_sha: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """n1's signed list (decided_not_told_531.json): {class, counts, query_sha, ruling, source, users: [{user_id,
+    paid, class, request_ids, facts: [[request id, status, updatedat, ...]]}]}. The file's sha must be the one the
+    ruling names (the facts header): a list that moved is refused, never re-derived here."""
+    got = file_sha(raw)
+    if not expect_sha or got != expect_sha:
+        raise DecisionToldError(f"list sha {got} != the signed sha {expect_sha or '(none given)'}")
+    doc = json.loads(raw)
+    users = doc.get("users") if isinstance(doc, dict) else None
+    if not isinstance(users, list) or not users:
+        raise DecisionToldError("list has no users")
+    header = {k: doc.get(k) for k in ("class", "counts", "generated_at", "query_sha", "ruling", "source")}
+    header["list_sha"] = got
+    out = []
+    for u in users:
+        uid, facts = u.get("user_id"), u.get("facts")
+        if not str(uid).isdigit() or not isinstance(facts, list) or not facts:
+            raise DecisionToldError(f"list row unreadable for user {uid!r}")
+        if int(uid) in NEVER_AUTOMATED_USERS:
+            raise DecisionToldError(f"list names user {int(uid)} (never automated): the whole list is refused")
+        out.append({"user_id": int(uid), "paid": u.get("paid") is True, "class": u.get("class", ""),
+                    "requests": [{"request_id": str(f[0]).lower(), "status": str(f[1])} for f in facts]})
+    return header, out
+
+
+def _ids(users: Iterable[dict[str, Any]]) -> list[str]:
+    out = sorted({str(r["request_id"]).lower() for u in users for r in u["requests"]})
+    if any(not set(i) <= UUID_CHARS or len(i) != 36 for i in out):
+        raise DecisionToldError("a request id is not a uuid")
+    return out
+
+
+def _query_retry(query: Query, sql: str, tries: int = 2):
+    last = None
+    for n in range(tries):
+        try:
+            return query(sql)
+        except Exception as exc:  # noqa: BLE001 - re-raised below if the retry also fails
+            last = exc
+            time.sleep(2 * (n + 1))
+    raise last
+
+
+def core_rows(query: Query, ids: list[str]) -> dict[str, tuple[str, bool, bool, str, str]]:
+    """{request id: (status, deleted, approved_notice_sent, workspace, profile)} from the core replica."""
+    out: dict[str, tuple[str, bool, bool, str, str]] = {}
+    # 400 ids per Trino statement timed out on a 9,465-id list (2026-11-10: "canceling statement
+    # due to statement timeout"). 100 keeps each statement small; a chunk that still fails is
+    # retried once, then the whole call raises rather than silently dropping rows.
+    for i in range(0, len(ids), 100):
+        chunk = ids[i:i + 100]
+        rows = _query_retry(query, "SELECT lower(CAST(id AS varchar)), status, CAST(deletedat IS NOT NULL AS varchar), "
+                     "CAST(json_extract_scalar(metadata, '$.approvedNotice.noticeSentAt') IS NOT NULL OR "
+                     "json_extract_scalar(metadata, '$.decisionNotice.noticeSentAt') IS NOT NULL AS varchar), "
+                     "CAST(workspaceid AS varchar), CAST(profileid AS varchar) "
+                     "FROM postgresql_core.public.credit_requests WHERE id IN ("
+                     + ",".join(f"CAST('{x}' AS uuid)" for x in chunk) + ")")
+        for r in rows:
+            if len(r) != 6 or r[2] not in ("true", "false") or r[3] not in ("true", "false"):
+                raise DecisionToldError("unexpected replica row shape")
+            out[r[0]] = (r[1], r[2] == "true", r[3] == "true", r[4], r[5])
+    return out
+
+
+def status_notes(db: sqlite3.Connection | None, ids: Iterable[str]) -> dict[str, list[tuple[int, str]]]:
+    """{request id: [(verify_messages id, sent day)]} for hydra notes (attempted / sent) naming it. Unreadable = error."""
+    if db is None:
+        raise DecisionToldError("verify ledger unreadable")
+    want: dict[str, list[tuple[int, str]]] = {i: [] for i in ids}
+    for vid, blob, day, sent in db.execute("SELECT id, request_ids_json, day, sent_at FROM verify_messages "
+                                           "WHERE status IN ('attempted', 'sent')"):
+        try:
+            named = {str(x).lower() for x in json.loads(blob or "[]")}
+        except ValueError as exc:
+            raise DecisionToldError("verify ledger row unreadable") from exc
+        for rid in named & want.keys():
+            want[rid].append((int(vid), str(sent or day or "")[:10]))
+    return want
+
+
+def ensure_table(db: sqlite3.Connection) -> None:
+    db.executescript("""
+CREATE TABLE IF NOT EXISTS decision_told (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at TEXT NOT NULL, user_id INTEGER NOT NULL,
+  group_key TEXT NOT NULL, copy_ref TEXT NOT NULL, subject_ids_json TEXT NOT NULL, mode TEXT NOT NULL,
+  outcome TEXT NOT NULL, report_json TEXT);
+CREATE TRIGGER IF NOT EXISTS decision_told_no_update BEFORE UPDATE ON decision_told
+BEGIN SELECT RAISE(ABORT, 'decision_told is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS decision_told_no_delete BEFORE DELETE ON decision_told
+BEGIN SELECT RAISE(ABORT, 'decision_told is append-only'); END;""")
+
+
+def attempts(db: sqlite3.Connection) -> dict[int, dict[str, str]]:
+    """{user: {group key: first attempt at}} for live (apply) attempts."""
+    out: dict[int, dict[str, str]] = {}
+    for uid, key, at in db.execute("SELECT user_id, group_key, min(at) FROM decision_told WHERE mode = 'apply' "
+                                   "AND outcome = 'attempt' GROUP BY 1, 2"):
+        out.setdefault(int(uid), {})[str(key)] = str(at)
+    return out
+
+
+@dataclass
+class Plan:
+    user_id: int
+    paid: bool
+    copy_ref: str = ""
+    group_key: str = ""
+    subject_ids: list[str] = field(default_factory=list)
+    later_groups: list[dict[str, Any]] = field(default_factory=list)
+    prior_status_note: list[int] = field(default_factory=list)
+    hold: str = ""
+    dropped: dict[str, int] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"user_id": self.user_id, "paid": self.paid, "copy_ref": self.copy_ref, "group_key": self.group_key,
+                "subject_ids": self.subject_ids, "later_groups": self.later_groups,
+                "prior_status_note": self.prior_status_note, "hold": self.hold, "dropped": self.dropped}
+
+
+def plan(users: list[dict[str, Any]], core: dict[str, tuple[str, bool, bool, str, str]],
+         notes: dict[str, list[tuple[int, str]]], tried: dict[int, dict[str, str]], now: datetime) -> list[Plan]:
+    """Per-user eligibility, paid first: the next untold (workspace, profile) group, biggest first (the route's
+    order). Never raises on one user: a row-level doubt drops the row, a user-level doubt holds the user."""
+    today = now.strftime("%Y-%m-%d")
+    slot_from = (now - timedelta(days=SLOT_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = []
+    for u in users:
+        p = Plan(int(u["user_id"]), bool(u.get("paid")))
+        groups: dict[str, list[str]] = {}
+        decisions, note_ids, note_today = set(), set(), False
+        for r in u["requests"]:
+            rid, listed = str(r["request_id"]).lower(), r["status"]
+            live = core.get(rid)
+            why = ("not_on_replica" if live is None else "deleted" if live[1] else
+                   f"moved:{live[0]}" if live[0] != listed else "core_notice_recorded" if live[2] else "")
+            if why:
+                p.dropped[why.split(":")[0]] = p.dropped.get(why.split(":")[0], 0) + 1
+                continue
+            decisions.add(listed)
+            groups.setdefault(f"{live[3]}|{live[4]}", []).append(rid)
+            for vid, day in notes.get(rid, []):
+                note_ids.add(vid)
+                note_today = note_today or day == today
+        p.prior_status_note = sorted(note_ids)
+        done = tried.get(p.user_id, {})
+        # A listed request the replica did not return is UNKNOWN, not gone: sending the rest would reserve the group
+        # forever and that request would never be told. The whole user waits for a complete read (QA #1575).
+        missing = p.dropped.get("not_on_replica", 0)
+        todo = sorted(((k, sorted(v)) for k, v in groups.items() if k not in done), key=lambda kv: (-len(kv[1]), kv[0]))
+        if missing:
+            p.hold = "replica_incomplete"
+        elif not groups:
+            p.hold = "nothing_left"
+        elif len(decisions) > 1:
+            p.hold = "mixed_decisions"
+        elif next(iter(decisions)) not in COPY_REF:
+            p.hold = f"not_a_decision:{next(iter(decisions))}"
+        elif not todo:
+            p.hold = "already_told"
+        elif any(at > slot_from for at in done.values()):
+            p.hold = "slot_wait"
+        elif note_today:
+            p.hold = "status_note_today"
+        else:
+            p.copy_ref = COPY_REF[next(iter(decisions))]
+            p.group_key, p.subject_ids = todo[0]
+            p.later_groups = [{"group_key": k, "subject_ids": v} for k, v in todo[1:]]
+        out.append(p)
+    out.sort(key=lambda x: (not x.paid, x.user_id))
+    return out
+
+
+CHANNEL = "live"
+
+
+def admin_caller(script: str, identity: str = "uvn-cron", timeout_s: int = 120) -> Caller:
+    """POST the route through muso-admin-api.sh on the agent login the route allows (agent-uvn-cron@). A response
+    with no JSON object body is an error, never an empty report."""
+    import subprocess
+
+    def call(b: dict[str, Any]) -> dict[str, Any]:
+        env = {**os.environ, "MUSO_ADMIN_IDENTITY": identity}
+        # The requester must be an email: muso-admin-api.sh resolves it via resolve_slack_to_email and
+        # exits 1 on a bare handle, which surfaced as "route call rc=1: " with an empty stderr.
+        proc = subprocess.run(["bash", script, "--requester", "agent-uvn-cron@muso.ai", "call", "POST", ROUTE,
+                               json.dumps(b, separators=(",", ":"), sort_keys=True)],
+                              capture_output=True, text=True, timeout=timeout_s, check=False, env=env)
+        if proc.returncode != 0:
+            raise DecisionToldError(f"route call rc={proc.returncode}: {proc.stderr.strip()[-300:]}")
+        resp = json.loads(proc.stdout)
+        code = resp.get("http_status")
+        if not isinstance(code, int) or not 200 <= code < 300:
+            raise DecisionToldError(f"route HTTP {code}: {json.dumps(resp.get('body') or resp.get('raw'))[:300]}")
+        if not isinstance(resp.get("body"), dict):
+            raise DecisionToldError("route returned no report body")
+        # The admin API wraps the route's own JSON: {code, data, result}. report_subjects() reads the
+        # route's report (dryRun/userId/copyRef/outcome), which lives under "data".
+        body = resp["body"]
+        return body.get("data") if isinstance(body.get("data"), dict) else body
+    return call
+
+
+def body(p: Plan, channel: str, apply: bool) -> dict[str, Any]:
+    return {"userId": p.user_id, "copyRef": p.copy_ref, "channel": channel, "subjectIds": p.subject_ids,
+            "apply": apply}
+
+
+def report_subjects(rep: Any, p: Plan, *, apply: bool) -> list[str]:
+    """The subjects core affirmatively accepted (dry) or sent (apply), read from core's ACTUAL report shape
+    (core #11090 adminStatusNotification: dryRun, userId, copyRef, group.subjects, outcome, blockedBy,
+    refusedSubjects, sent). Anything short of an affirmative report raises:
+      dry   - outcome 'would_send' exactly ('would_send_when_unblocked' = a blocker such as decisions_off is up),
+              blockedBy empty, refusedSubjects empty (a row refused since the replica read stops the whole user);
+      apply - sent true and outcome 'sent' (refusedSubjects on a confirmed send are recorded, not hidden)."""
+    if not isinstance(rep, dict) or rep.get("dryRun") is not (not apply) or str(rep.get("userId")) != str(p.user_id) \
+            or rep.get("copyRef") != p.copy_ref:
+        raise DecisionToldError("route report missing or not for this user / ref / mode")
+    for legacy in ("refused", "blockers"):
+        if rep.get(legacy):
+            raise DecisionToldError(f"route report carries {legacy}: {json.dumps(rep[legacy])[:200]}")
+    blocked = rep.get("blockedBy")
+    if blocked is not None and not isinstance(blocked, list):
+        raise DecisionToldError("route report blockedBy unreadable")
+    if blocked:
+        raise DecisionToldError(f"route blocked: {json.dumps(blocked)[:200]}")
+    refused = rep.get("refusedSubjects")
+    if refused is not None and not isinstance(refused, list):
+        raise DecisionToldError("route report refusedSubjects unreadable")
+    if refused and not apply:
+        raise DecisionToldError(f"route refused subjects: {json.dumps(refused)[:200]}")
+    group = rep.get("group")
+    subjects = sorted(str(x).lower() for x in (group.get("subjects") or [])) if isinstance(group, dict) else []
+    if not subjects or not set(subjects) <= set(p.subject_ids):
+        raise DecisionToldError("route report names no subjects, or subjects outside the planned group")
+    if apply:
+        if rep.get("sent") is not True or rep.get("outcome") != "sent":
+            raise DecisionToldError(f"route did not confirm the send (outcome {rep.get('outcome')!r})")
+    elif rep.get("outcome") != "would_send":
+        raise DecisionToldError(f"route dry run is not affirmative (outcome {rep.get('outcome')!r})")
+    return subjects
+
+
+def run(db: sqlite3.Connection, plans: list[Plan], call: Caller, *, run_id: str, now: datetime, channel: str,
+        apply: bool, limit: int, signed: dict[int, tuple[str, list[str]]] | None = None,
+        kill_file: str = KILL_FILE, readback_of: str = "",
+        clock: Callable[[], datetime] | None = None) -> dict[str, Any]:
+    """Dry run (route dry run per user) or apply. Apply needs a signed dry run whose (group, subjects) equal this
+    re-read; the first live write ever is ONE user and a UTC day never passes FIRST_DAY_CAP users - both counted and
+    reserved under the write lock, per user; the kill file is re-checked before every send."""
+    ensure_table(db)
+    from datetime import timezone
+    clock = clock or (lambda: datetime.now(timezone.utc))
+    ready = [p for p in plans if not p.hold]
+    if apply:
+        if signed is None:
+            raise DecisionToldError("apply needs the signed dry run (--signed)")
+        ready = [p for p in ready if signed.get(p.user_id, ("", []))[0] == p.group_key
+                 and set(signed[p.user_id][1]) <= set(p.subject_ids)]
+        for p in ready:
+            p.subject_ids = sorted(signed[p.user_id][1])
+    out: dict[str, Any] = {"mode": "apply" if apply else "dry", "run_id": run_id, "eligible": len(ready),
+                           "held": {}, "results": []}
+    for p in plans:
+        if p.hold:
+            out["held"][p.hold] = out["held"].get(p.hold, 0) + 1
+    done = 0
+    for p in ready:
+        if done >= max(0, limit):
+            break
+        if p.user_id in NEVER_AUTOMATED_USERS:            # second line of defence: plans built without load_list
+            raise DecisionToldError(f"user {p.user_id} is never automated")
+        mode = "apply" if apply else "dry"
+        if apply:
+            if os.path.exists(kill_file):
+                out["stopped"] = f"kill file {kill_file}"
+                break
+            db.execute("BEGIN IMMEDIATE")
+            # the clock is read INSIDE the lock, per reservation: a batch crossing midnight counts each attempt on
+            # the UTC day it was actually made (QA: a day frozen at start let a batch overrun the next day's cap)
+            t = clock()
+            at, day = t.strftime("%Y-%m-%dT%H:%M:%SZ"), t.strftime("%Y-%m-%d")
+            today_n = db.execute("SELECT count(DISTINCT user_id) FROM decision_told WHERE mode = 'apply' AND "
+                                 "outcome = 'attempt' AND substr(at, 1, 10) = ?", (day,)).fetchone()[0]
+            tried_n = db.execute("SELECT count(*) FROM decision_told WHERE mode = 'apply' AND outcome = 'attempt'"
+                                 ).fetchone()[0]
+            sent_n = db.execute("SELECT count(*) FROM decision_told WHERE mode = 'apply' AND outcome = 'sent'"
+                                ).fetchone()[0]
+            read_back = bool(readback_of) and db.execute(
+                "SELECT 1 FROM decision_told WHERE mode = 'apply' AND outcome = 'sent' AND run_id = ? AND run_id <> ?",
+                (readback_of, run_id)).fetchone() is not None
+            again = db.execute("SELECT 1 FROM decision_told WHERE mode = 'apply' AND user_id = ? AND group_key = ?",
+                               (p.user_id, p.group_key)).fetchone()
+            # The ladder, counted under the write lock across every process: until the operator names a run whose
+            # live send core CONFIRMED (--readback-ok, after reading it back), the path holds exactly
+            # FIRST_LIVE_LIMIT attempt(s) in total. A UTC day never passes FIRST_DAY_CAP users.
+            stop = ("day_cap" if today_n >= FIRST_DAY_CAP else
+                    "" if read_back else
+                    "first_live_write_is_one_user" if tried_n >= FIRST_LIVE_LIMIT and sent_n == 0 else
+                    "readback_required" if tried_n >= FIRST_LIVE_LIMIT else "")
+            if again:
+                db.rollback()
+                out["results"].append({"user_id": p.user_id, "outcome": "already_attempted"})
+                continue
+            if stop:
+                db.rollback()
+                out["stopped"] = stop
+                break
+            db.execute("INSERT INTO decision_told (run_id, at, user_id, group_key, copy_ref, subject_ids_json, mode, "
+                       "outcome) VALUES (?,?,?,?,?,?,?,?)", (run_id, at, p.user_id, p.group_key, p.copy_ref,
+                                                             json.dumps(p.subject_ids), mode, "attempt"))
+            db.commit()
+        if not apply:
+            t = clock()
+            at = t.strftime("%Y-%m-%dT%H:%M:%SZ")
+        rep: Any = None
+        accepted: list[str] = []
+        try:
+            rep = call(body(p, channel, apply))
+            accepted = report_subjects(rep, p, apply=apply)
+            outcome = "sent" if apply else "dry_ok"
+        except Exception as exc:  # noqa: BLE001 - recorded; an apply attempt stays reserved (never re-sent)
+            rep = {"error": str(exc)[:300], "report": rep if isinstance(rep, dict) else None}
+            outcome = "error" if apply else "dry_refused"
+        db.execute("INSERT INTO decision_told (run_id, at, user_id, group_key, copy_ref, subject_ids_json, mode, "
+                   "outcome, report_json) VALUES (?,?,?,?,?,?,?,?,?)",
+                   (run_id, at, p.user_id, p.group_key, p.copy_ref, json.dumps(p.subject_ids), mode, outcome,
+                    json.dumps(rep, sort_keys=True, default=str)[:4000]))
+        if db.in_transaction:
+            db.commit()
+        done += 1
+        out["results"].append({"user_id": p.user_id, "paid": p.paid, "copy_ref": p.copy_ref,
+                               "group_key": p.group_key, "subject_ids": p.subject_ids, "accepted": accepted,
+                               "later_groups": p.later_groups, "prior_status_note": p.prior_status_note,
+                               "outcome": outcome, "report": rep})
+    return out
+
+
+def signed_subjects(dry: dict[str, Any]) -> dict[int, tuple[str, list[str]]]:
+    """The signed dry run's {user: (group, subjects core accepted)} - only users whose route dry run affirmed them.
+    The file is the ladder's first rung: it must hold MIN_SIGNED_DRY affirmed users (or every user it tried, when
+    the list had fewer eligible), else nothing in it may be sent."""
+    if dry.get("mode") != "dry":
+        raise DecisionToldError("the signed file is not a dry run")
+    affirmed = [r for r in dry.get("results", []) if r.get("outcome") == "dry_ok" and r.get("accepted")]
+    need = min(MIN_SIGNED_DRY, int(dry.get("eligible") or 0))
+    if need < 1 or len(affirmed) < need:
+        raise DecisionToldError(f"the signed dry run has {len(affirmed)} affirmed user(s); the rung needs {need or MIN_SIGNED_DRY}")
+    return {int(r["user_id"]): (str(r.get("group_key") or ""), sorted(r.get("accepted") or []))
+            for r in dry.get("results", []) if r.get("outcome") == "dry_ok" and r.get("accepted")}
+=====MKLIST
+const {Client}=require("/app/node_modules/pg");
+(async()=>{
+ const c=new Client({connectionString:process.env.DATABASE_URL});await c.connect();
+ const r=await c.query(`select cr."userId" uid, cr.id, cr.status, cr."updatedAt" from credit_requests cr
+  where cr."deletedAt" is null and cr.metadata->'approval'->>'via'='precedent_v1'
+    and cr.metadata->'approval'->>'noticeSentAt' is null order by cr."userId"`);
+ const by={}; for(const x of r.rows){ (by[x.uid]=by[x.uid]||[]).push([x.id,x.status,x.updatedAt]); }
+ const users=Object.entries(by).map(([uid,f])=>({user_id:Number(uid),paid:false,class:"precedent_v1",facts:f}));
+ process.stdout.write(JSON.stringify({class:"precedent_v1_untold",counts:{users:users.length,requests:r.rows.length},
+   generated_at:new Date().toISOString(),query_sha:"precedent_v1_untold",ruling:"captain 2026-11-10 no humans",
+   source:"credit_requests",users}));
+ await c.end();
+})().catch(e=>{console.error(e.message);process.exit(1)});
