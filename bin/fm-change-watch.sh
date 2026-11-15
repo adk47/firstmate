@@ -38,14 +38,22 @@
 #           and one that deploys to a host rather than the cluster is watched
 #           through its own deploy workflow instead. A large family is capped
 #           at MAX_TARGETS busiest Deployments and the registration line states
-#           the cap. A repository that also has a Sentry project, and any
-#           workflow the map names, become additional targets of their own; a
-#           Sentry project this home has no token for is not a target. A
-#           PR that touches no deployable service registers nothing and says
-#           so, as does one that only deletes a manifest, one whose only target
-#           could not be read, one whose manifests could not be read, and one
-#           whose cluster image inventory could not be read; each says which of
-#           those it was. Every one of those still writes the merge's durable
+#           the cap. A repository whose map names more than one service is a
+#           monorepo, so only the services the merged diff actually touches are
+#           cluster targets: a path names a service by one of its segments, or
+#           by the segment under the map's path: prefix, and a deployable path
+#           no service owns is shared build input that keeps every Deployment in
+#           scope. A diff whose every touched path is documentation, a test, a
+#           monorepo's script, or non-deploy CI deploys nothing: the watch says
+#           so and completes clean. A repository that also has a Sentry project,
+#           and any workflow the map names, become additional targets of their
+#           own whatever the diff touches, since those reads never touch the
+#           cluster; a Sentry project this home has no token for is not a
+#           target. A PR that touches no deployable service registers nothing
+#           and says so, as does one that only deletes a manifest, one whose
+#           only target could not be read, one whose manifests could not be
+#           read, and one whose cluster image inventory could not be read; each
+#           says which of those it was. Every one of those still writes the merge's durable
 #           row, and one whose surface could not be read records it as
 #           unmeasurable-with-reason and queues the unmeasurable wake.
 #           Every Kubernetes target records a rollout FINGERPRINT at
@@ -216,14 +224,18 @@
 #                        Without a Sentry token or a mapped project it is
 #                        unmeasured for the whole watch, with the reason
 #                        recorded.
-#   deploy_run           the repository's own deploy workflow as 1 when a run
-#                        created at or after the merge completed successfully
-#                        and 0 when it failed, was cancelled, or timed out;
-#                        regressed when value is 0, because a failed deploy is
-#                        definite whether or not any run existed at registration
-#                        (so its baseline reads "unmeasured"). Its target is
-#                        run/<owner>/<repo>#<workflow-path>. No run yet, or one
-#                        still in flight, is awaiting the deploy and unmeasured.
+#   deploy_run           the repository's own deploy workflow as 1 when the
+#                        next scheduled or dispatched run whose tree carries the
+#                        merged commit completed successfully, and 0 when that
+#                        run failed, was cancelled, or timed out; regressed when
+#                        value is 0, because a failed deploy is definite whether
+#                        or not any run existed at registration (so its baseline
+#                        reads "unmeasured"). Its target is
+#                        run/<owner>/<repo>#<workflow-path>. No run yet, one
+#                        still in flight, or a merge sha the forge cannot name
+#                        is awaiting the deploy and unmeasured: a run that does
+#                        not carry the merge is never scored as this release's
+#                        success or regression.
 # The baseline window is the 60 minutes before the change's rollout start, read
 # as a level for counters (restarts, oomkilled, rss_ratio) and as a rate for the
 # others. An unmeasured metric is skipped, never scored as a pass, and a metric
@@ -281,7 +293,8 @@
 # Test seams (all optional, all inert in production):
 #   FM_CW_NOW              fixed current epoch (integer) instead of `date +%s`
 #   FM_CW_FORGE_DIR        directory replacing every forge read (files.txt,
-#                          merge-epoch, head-ref, diff.txt, content/<path>)
+#                          merge-epoch, head-ref, merge-sha, diff.txt,
+#                          content/<path>)
 #   FM_CW_HDEVOPS_K8S_DIR  k8s/prod tree of an H-DevOps checkout, the last-resort
 #                          way to resolve an application repository to a Deployment
 #   FM_CW_KUBECONFIG       kubeconfig file used for every cluster read
@@ -296,7 +309,9 @@
 #   FM_CW_SENTRY_DIR       directory of stubbed Sentry responses: issues-<project>.json
 #   FM_CW_GH               gh command used for the deploy-run target (default gh)
 #   FM_CW_GH_DIR           directory of stubbed gh responses:
-#                          runs-<owner>-<repo>-<workflow-path with / and space as _>.json
+#                          runs-<owner>-<repo>-<workflow-path with / and space as _>.json,
+#                          and contains-<head-sha> listing the shas that run's
+#                          tree carries, one per line
 #   FM_CW_FORGE_TIMEOUT    per-call bound on a forge read (default 12s)
 #   FM_CW_FORGE_BUDGET     total bound on forge reads in one register (default 60s)
 #   FM_CW_SAMPLE_DEADLINE  hard budget for one sample or baseline capture (default 25)
