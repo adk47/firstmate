@@ -183,11 +183,10 @@ human_age() {
 }
 
 # read_meta_fields <meta>: the handful of recorded fields this digest needs, in
-# one pass and no subprocess. Sets M_KIND M_PROJECT M_MODEL M_PR M_WINDOW
-# M_BACKEND M_TERMINAL M_REMOTE.
+# one pass and no subprocess. Sets M_KIND M_PROJECT M_MODEL M_PR M_BACKEND.
 read_meta_fields() {
   local line key val
-  M_KIND='' M_PROJECT='' M_MODEL='' M_PR='' M_WINDOW='' M_BACKEND='' M_TERMINAL='' M_REMOTE=''
+  M_KIND='' M_PROJECT='' M_MODEL='' M_PR='' M_BACKEND=''
   while IFS= read -r line || [ -n "$line" ]; do
     key=${line%%=*}
     val=${line#*=}
@@ -196,10 +195,7 @@ read_meta_fields() {
       project) M_PROJECT=$val ;;
       model) M_MODEL=$val ;;
       pr) M_PR=$val ;;
-      window) M_WINDOW=$val ;;
       backend) M_BACKEND=$val ;;
-      terminal) M_TERMINAL=$val ;;
-      remote_host) M_REMOTE=$val ;;
     esac
   done < "$1" 2>/dev/null || true
 }

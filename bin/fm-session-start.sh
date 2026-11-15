@@ -406,7 +406,6 @@ BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
 # tests/fm-session-start.test.sh holds to that bound. Each section that hits its
 # budget discloses an exact omitted count and the command that shows the rest.
 COMPACT_TITLE_CAP=40
-COMPACT_STATUS_CAP=64
 COMPACT_ROW_CAP=160
 COMPACT_READY_LIMIT=10
 COMPACT_INFLIGHT_BUDGET=2048
