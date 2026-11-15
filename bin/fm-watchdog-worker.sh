@@ -712,7 +712,7 @@ reassign_note() {
 # ladder does not escalate the watchdog's own message back to firstmate.
 task_ring() {  # <id> <why>
   local id=$1 why=$2 out rc
-  out=$("$SEND_BIN" "$id" --fire-and-forget "watchdog-$id-$(now_epoch)" \
+  out=$("$SEND_BIN" "$id" --fire-and-forget "$(delivery_id "ring-$id" "$(now_epoch)")" \
     "The watchdog sees this task's pane stopped producing anything new while it read as working ($why). Continue the task from where you left off. If you are waiting on something external, say so on one status line so the fleet stops treating this as a stall. If the task is finished, append your done: line." 2>&1)
   rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -727,7 +727,7 @@ task_ring() {  # <id> <why>
 # whose own current state still reads working.
 task_steer_idle() {  # <id>
   local id=$1 out rc
-  out=$("$SEND_BIN" "$id" --fire-and-forget "watchdog-idle-$id-$(now_epoch)" \
+  out=$("$SEND_BIN" "$id" --fire-and-forget "$(delivery_id "idle-$id" "$(now_epoch)")" \
     "The watchdog sees this task idle with no new status event and no finished outcome. Continue from where you left off. If you are blocked or waiting on someone, say so on one status line; if the task is finished, append your done: line." 2>&1)
   rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -749,7 +749,7 @@ task_conn_continue() {  # <id> <minutes>
     printf 'watchdog: would continue %s after a connection error (%s minutes)\n' "$id" "$minutes"
     return 0
   fi
-  out=$("$SEND_BIN" "$id" --fire-and-forget "watchdog-conn-$id-$(now_epoch)" \
+  out=$("$SEND_BIN" "$id" --fire-and-forget "$(delivery_id "conn-$id" "$(now_epoch)")" \
     "The watchdog sees a connection error on your pane and nothing new for $minutes minutes. The interrupted step was not completed; pick the task up from where it stopped and continue. Do not restart finished work." 2>&1)
   rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -1251,6 +1251,10 @@ task_pass() {
               continue
             fi
             relaunches=$(csv_append "$relaunches" "$now")
+            if [ "$rc" -ne 0 ]; then
+              task_store "$id"
+              continue
+            fi
             stage=2
             stage_at=$now
           fi
@@ -1268,6 +1272,10 @@ task_pass() {
               continue
             fi
             relaunches=$(csv_append "$relaunches" "$now")
+            if [ "$rc" -ne 0 ]; then
+              task_store "$id"
+              continue
+            fi
             stage=3
             stage_at=$now
           fi
@@ -1421,7 +1429,7 @@ task_interrupt_continue() {  # <id> <why>
     printf 'watchdog: interrupt of %s was refused: %s\n' "$id" "$(first_line "$out")"
     return 1
   fi
-  "$SEND_BIN" "$id" --fire-and-forget "watchdog-interrupt-$id" \
+  "$SEND_BIN" "$id" --fire-and-forget "$(delivery_id "interrupt-$id" "$(now_epoch)")" \
     "The watchdog interrupted your turn: a steering message has been waiting unread for $why. Read state/$id.inbox/ now, act on every message in order, move each handled record into handled/, then continue the task." \
     >/dev/null 2>&1 || true
   printf 'watchdog: interrupted %s and asked it to drain its inbox (%s)\n' "$id" "$why"
@@ -1489,6 +1497,12 @@ inbox_pass() {
         # stops climbing and firstmate gets the exact reason instead.
         task_relaunch_refused "$id" "$state" \
           "No relaunch budget was spent and it will not retry for $((REFUSAL_RETRY_SECS / 3600))h; its steering inbox stays unread and the lane needs a hand"
+        continue
+      fi
+      if [ "$rc" -ne 0 ]; then
+        # The rung was not taken: the lane keeps its place in the ladder so a
+        # transient relaunch failure is retried rather than announced as done.
+        task_store "$id"
         continue
       fi
       istage=3

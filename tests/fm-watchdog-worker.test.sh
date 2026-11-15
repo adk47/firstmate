@@ -183,6 +183,19 @@ wakes() {  # <home>
   awk -F'\t' '$3 == "check" { print $4 " " $5 }' "$1/state/.wake-queue" 2>/dev/null
 }
 
+# assert_delivery_ids <home>: every fire-and-forget the watchdog sent carried
+# the 16-lowercase-hex id bin/fm-send.sh requires, so the rung actually landed.
+assert_delivery_ids() {  # <home>
+  local id
+  while read -r id; do
+    [ -n "$id" ] || continue
+    [[ "$id" =~ ^[0-9a-f]{16}$ ]] \
+      || fail "watchdog sent an invalid fire-and-forget id '$id': $(cat "$1/steers")"
+  done < <(awk '/--fire-and-forget/ {
+      for (i = 1; i <= NF; i++) if ($i == "--fire-and-forget") print $(i + 1)
+    }' "$1/steers" 2>/dev/null)
+}
+
 # counter <home> <pattern>: how many recorded lines match.
 counter() {  # <home> <pattern>
   local n
@@ -422,6 +435,56 @@ test_a_new_boot_identity_runs_the_boot_pass_again() {
   pass "a new boot identity runs the boot pass again, so a second reboot is recovered too"
 }
 
+test_a_transient_stall_relaunch_failure_does_not_climb_the_ladder() {
+  local home now out
+  home=$(make_home ladder-transient); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 alive
+  pane "$home" w1 busy 'a tool call that never returns'
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 1900))" >/dev/null
+  out=$(tick "$home" "$((now + 2600))")
+  assert_contains "$out" "relaunch failed w1" \
+    "a transient relaunch failure was not reported as a failure"
+  assert_not_contains "$out" "relaunched w1" \
+    "a transient relaunch failure was announced as a relaunch"
+  out=$(tick "$home" "$((now + 2700))")
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "2" \
+    "a transient relaunch failure did not retry on the next pass"
+  assert_eq "$(jq -r '.tasks.w1.stage' "$home/state/.watchdog-worker.json")" "1" \
+    "a transient relaunch failure advanced the stall ladder"
+  out=$(tick "$home" "$((now + 4000))")
+  assert_not_contains "$out" "still stalled after every rung" \
+    "the ladder escalated after relaunches that never happened"
+  pass "a transient stall relaunch failure leaves the ladder where it was"
+}
+
+test_a_transient_inbox_relaunch_failure_is_not_announced_as_done() {
+  local home now out
+  home=$(make_home inbox-transient); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 alive
+  pane "$home" w1 idle 'waiting'
+  steer "$home" w1 2800
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  steer "$home" w1 5500
+  out=$(tick "$home" "$now")
+  assert_contains "$out" "relaunch failed w1" \
+    "a transient inbox relaunch failure was not reported as a failure"
+  out=$(tick "$home" "$now")
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "2" \
+    "a transient inbox relaunch failure was not retried"
+  assert_eq "$(wakes "$home" | grep -c 'steering inbox went unread')" "0" \
+    "a transient inbox relaunch failure was announced as a relaunch"
+  assert_eq "$(jq -r '.tasks.w1.istage' "$home/state/.watchdog-worker.json")" "2" \
+    "a transient inbox relaunch failure consumed the last rung"
+  pass "a transient inbox relaunch failure neither announces nor consumes the rung"
+}
+
 test_a_stalled_worker_climbs_the_ladder_and_escalates_once() {
   local home now out
   home=$(make_home ladder); fake_tools "$home"
@@ -437,6 +500,7 @@ test_a_stalled_worker_climbs_the_ladder_and_escalates_once() {
     "the re-ring did not carry the bounded continue"
   assert_contains "$(cat "$home/steers")" "--fire-and-forget" \
     "the re-ring was not fire-and-forget, so the steering ladder would escalate it back to firstmate"
+  assert_delivery_ids "$home"
   out=$(tick "$home" "$((now + 2000))")
   [ -z "$out" ] || fail "the ladder climbed before the rung had its grace: $out"
   out=$(tick "$home" "$((now + 2600))")
@@ -514,6 +578,7 @@ test_an_idle_worker_is_nudged_once_and_run_steps_are_left_alone() {
   [ -z "$out" ] || fail "ten idle minutes already acted at the 30-minute default: $out"
   out=$(tick "$home" "$((now + 1900))")
   assert_contains "$out" "watchdog: nudged idle w1" "an idle worker that still reads working was not nudged"
+  assert_delivery_ids "$home"
   assert_not_contains "$out" "w2" "a pipeline run-step was nudged as an idle agent"
   assert_not_contains "$out" "w3" "a finished worker was nudged"
   out=$(tick "$home" "$((now + 2000))")
@@ -637,6 +702,7 @@ test_an_unread_steer_is_interrupted_then_relaunched_once_each() {
   assert_eq "$(counter "$home" 'interrupt')" "1" "the interrupt rung did not fire exactly once"
   assert_contains "$(cat "$home/steers" 2>/dev/null)" 'waiting unread' \
     "the continue did not tell the worker why it was interrupted"
+  assert_delivery_ids "$home"
   assert_eq "$(counter "$home" '^control .* relaunch')" "0" "the interrupt rung relaunched the lane"
 
   out=$(tick "$home" "$now")
@@ -666,6 +732,7 @@ test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model(
   out=$(tick "$home" "$((now + 700))")
   assert_contains "$out" "watchdog: continued w1 after a connection error" \
     "a frozen connection error did not get a continue"
+  assert_delivery_ids "$home"
   assert_eq "$(counter "$home" 'interrupt')" "0" "a connection error interrupted the lane instead of continuing it"
   out=$(tick "$home" "$((now + 710))")
   out=$(tick "$home" "$((now + 720))")
@@ -938,6 +1005,7 @@ test_a_transient_spawn_failure_is_not_a_refusal
 test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake
 test_an_unread_steer_is_interrupted_then_relaunched_once_each
+test_a_transient_inbox_relaunch_failure_is_not_announced_as_done
 test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model
 test_a_pi_lane_is_never_asked_to_move_to_a_model_it_cannot_reach
 test_a_review_seat_keeps_its_model_and_a_permanent_error_is_never_retried
@@ -948,6 +1016,7 @@ test_a_dry_run_plan_matches_the_connection_relaunch_model
 test_a_reboot_rebuilds_the_fleet_and_starts_the_chair_last
 test_the_same_boot_is_not_a_boot_twice
 test_a_new_boot_identity_runs_the_boot_pass_again
+test_a_transient_stall_relaunch_failure_does_not_climb_the_ladder
 test_a_stalled_worker_climbs_the_ladder_and_escalates_once
 test_progress_and_status_lines_reset_the_ladder
 test_the_relaunch_cap_escalates_once_instead_of_looping
