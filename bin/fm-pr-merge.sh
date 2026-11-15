@@ -712,7 +712,9 @@ if [ -n "$OVERRIDE_REASON" ]; then
 else
   gate_args=(--forge "$PROVIDER")
   [ -z "$RECORDED_HEAD" ] || gate_args+=(--recorded-head "$RECORDED_HEAD")
-  fm_merge_gate "$PR_OWNER/$PR_REPO" "$PR_NUMBER" "$(caller_match_head_commit "$@")" \
+  gate_repo=$PR_OWNER/$PR_REPO
+  [ "$PROVIDER" != gitlab ] || gate_repo=$FM_PR_PATH
+  fm_merge_gate "$gate_repo" "$PR_NUMBER" "$(caller_match_head_commit "$@")" \
     ${gate_args[@]+"${gate_args[@]}"} || exit 1
 fi
 

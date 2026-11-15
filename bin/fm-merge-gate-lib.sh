@@ -34,11 +34,11 @@
 # variable that turns the gate off; the only escape is the caller's explicit
 # --override-gate <reason>, which bin/fm-pr-merge.sh records durably.
 #
-# The gate reads through gh, because the verdict has to come from the forge's
-# own per-commit check rollup rather than from anything firstmate recorded.
-# Every forge merge passes through the gate. A forge with no qa-review verdict
-# source, such as GitLab today, refuses with that exact reason; the caller's
-# recorded --override-gate <reason> is the only way past it.
+# The gate reads the forge's own per-commit check rollup, not anything
+# firstmate recorded. Declared coverage decides on every forge: a QA-covered
+# repository on a forge with no qa-review verdict source refuses with that exact
+# reason, a no-QA repository needs the same attestation check on GitLab and
+# GitHub, and an unlisted repository refuses as coverage unknown.
 #
 # Usage (sourced): fm_merge_gate <owner/repo> <pr-number> <expected-head> \
 #                    [--recorded-head <sha>] [--forge <github|gitlab>]
@@ -76,7 +76,7 @@ FM_MERGE_GATE_MERGED_AT=
 FM_MERGE_GATE_BODY=
 FM_MERGE_GATE_CHECKS=
 fm_merge_gate_read_pr() {
-  local repo=$1 number=$2 fields line
+  local repo=$1 number=$2 forge=${3:-github} fields line
   local total=0 named=0
   local head='' author='' base='' headref='' state='' merged_at='' body=''
   local checks=''
@@ -90,24 +90,61 @@ fm_merge_gate_read_pr() {
   FM_MERGE_GATE_BODY=
   FM_MERGE_GATE_CHECKS=
 
-  command -v gh >/dev/null 2>&1 || return 1
-  # One read, so the head and the checks that authorize it come from the same
-  # snapshot. The body is folded onto one line because the payload is parsed as
-  # key=value lines.
-  if ! fields=$(gh pr view "$number" --repo "$repo" \
-    --json headRefOid,author,baseRefName,headRefName,state,mergedAt,body,statusCheckRollup \
-    --jq '(
-        ("head=" + (.headRefOid // "")),
-        ("author=" + ((.author.login) // "")),
-        ("base=" + (.baseRefName // "")),
-        ("headref=" + (.headRefName // "")),
-        ("state=" + (.state // "")),
-        ("merged_at=" + ((.mergedAt // "") | tostring)),
-        ("body=" + ((.body // "") | gsub("[\r\n]+"; " "))),
-        ((.statusCheckRollup // [])[] | ("check=" + ((.name // .context) // "") + "\u001f" + ((.conclusion // .state) // "")))
-      )' 2>/dev/null) || [ -z "$fields" ]; then
-    return 1
+  if [ "$forge" = gitlab ]; then
+    local host=${FM_PR_HOST:-${GITLAB_HOST:-}} encoded mr statuses
+    command -v glab >/dev/null 2>&1 || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    encoded=${repo//\//%2F}
+    mr=$(GITLAB_HOST="$host" glab api "projects/$encoded/merge_requests/$number" 2>/dev/null) || return 1
+    [ -n "$mr" ] || return 1
+    head=$(printf '%s' "$mr" | jq -r '.sha // empty' 2>/dev/null) || return 1
+    [ -n "$head" ] || return 1
+    statuses=$(GITLAB_HOST="$host" glab api "projects/$encoded/repository/commits/$head/statuses?per_page=100" 2>/dev/null) || return 1
+    fields=$(printf '%s\n%s\n' "$mr" "$statuses" | jq -r -s '
+      def conclusion:
+        if . == "success" then "SUCCESS"
+        elif . == "failed" then "FAILURE"
+        elif . == "canceled" then "CANCELLED"
+        elif . == "skipped" then "SKIPPED"
+        elif . == "manual" then "ACTION_REQUIRED"
+        else "PENDING" end;
+      def state:
+        if . == "opened" then "OPEN"
+        elif . == "merged" then "MERGED"
+        elif . == "closed" then "CLOSED"
+        else (. // "" | ascii_upcase) end;
+      .[0] as $mr | (.[1] | if type == "array" then . else [] end) as $statuses |
+      (
+        ("head=" + ($mr.sha // "")),
+        ("author=" + (($mr.author.username) // "")),
+        ("base=" + (($mr.target_branch) // "")),
+        ("headref=" + (($mr.source_branch) // "")),
+        ("state=" + (($mr.state) // "" | state)),
+        ("merged_at=" + (($mr.merged_at) // "" | tostring)),
+        ("body=" + (($mr.description // "") | gsub("[\r\n]+"; " "))),
+        ($statuses[] | ("check=" + ((.name // "") | gsub("[\r\n]+"; " ")) + "\u001f" + ((.status // "") | conclusion)))
+      )' 2>/dev/null) || return 1
+  else
+    command -v gh >/dev/null 2>&1 || return 1
+    # One read, so the head and the checks that authorize it come from the same
+    # snapshot. The body is folded onto one line because the payload is parsed as
+    # key=value lines.
+    if ! fields=$(gh pr view "$number" --repo "$repo" \
+      --json headRefOid,author,baseRefName,headRefName,state,mergedAt,body,statusCheckRollup \
+      --jq '(
+          ("head=" + (.headRefOid // "")),
+          ("author=" + ((.author.login) // "")),
+          ("base=" + (.baseRefName // "")),
+          ("headref=" + (.headRefName // "")),
+          ("state=" + (.state // "")),
+          ("merged_at=" + ((.mergedAt // "") | tostring)),
+          ("body=" + ((.body // "") | gsub("[\r\n]+"; " "))),
+          ((.statusCheckRollup // [])[] | ("check=" + ((.name // .context) // "") + "\u001f" + ((.conclusion // .state) // "")))
+        )' 2>/dev/null) || [ -z "$fields" ]; then
+      return 1
+    fi
   fi
+  [ -n "$fields" ] || return 1
   while IFS= read -r line; do
     total=$((total + 1))
     case "$line" in
@@ -336,16 +373,27 @@ fm_merge_gate() {
   esac
 
   case "$forge" in
-    github) ;;
-    gitlab)
-      printf 'error: refusing to merge %s#%s: no qa-review verdict available on this forge\n' \
-        "$repo" "$number" >&2
-      return 1
-      ;;
+    github|gitlab) ;;
     *) echo "error: merge gate needs --forge github or --forge gitlab" >&2; return 2 ;;
   esac
 
-  if ! fm_merge_gate_read_pr "$repo" "$number"; then
+  owner=$(printf '%s' "${repo%%/*}" | tr '[:upper:]' '[:lower:]')
+  if [ "$owner" = muso-ai ]; then
+    coverage=qa
+  elif fm_merge_gate_is_no_qa_repo "$repo"; then
+    coverage=no-qa
+  fi
+  if [ -z "$coverage" ]; then
+    printf 'error: refusing to merge %s#%s: QA coverage unknown\n' "$repo" "$number" >&2
+    return 1
+  fi
+  if [ "$coverage" = qa ] && [ "$forge" != github ]; then
+    printf 'error: refusing to merge %s#%s: QA-covered repo, no verdict source on this forge\n' \
+      "$repo" "$number" >&2
+    return 1
+  fi
+
+  if ! fm_merge_gate_read_pr "$repo" "$number" "$forge"; then
     printf 'error: refusing to merge %s#%s: the review verdict and check state on the current head could not be read, and an unread verdict is not a GO\n' \
       "$repo" "$number" >&2
     return 1
@@ -369,18 +417,6 @@ fm_merge_gate() {
 "
   fi
 
-  # QA coverage is declared. The owner Muso-AI is qa-review-covered; each
-  # no-QA repository needs a green no-mistakes attestation instead; anything
-  # else is unknown, and silence is not a GO.
-  owner=$(printf '%s' "${repo%%/*}" | tr '[:upper:]' '[:lower:]')
-  if [ "$owner" = muso-ai ]; then
-    coverage=qa
-  elif fm_merge_gate_is_no_qa_repo "$repo"; then
-    coverage=no-qa
-  else
-    refusals="$refusals  - QA coverage unknown for $repo: it is not a Muso-AI repository and is not declared in config/merge-gate-no-qa-repos
-"
-  fi
   case "$coverage" in
     qa)
       qa=$(fm_merge_gate_check_conclusion qa-review)

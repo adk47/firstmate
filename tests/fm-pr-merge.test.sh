@@ -16,7 +16,7 @@
 #   (h) repo override args fail fast because the repo comes from the URL,
 #       including a bundled short-option cluster that carries -R
 #   (i) a GitLab MR URL resolves and merges through glab when the gate is
-#       explicitly overridden, and refuses without that override
+#       explicitly overridden, and an undeclared project refuses without it
 #   (j) glab is addressed by the host from the URL, never an assumed one
 #   (k) no merge method is imposed on GitLab, so the project's own one applies
 #   (l) each pre-merge condition refuses independently, and all of them report
@@ -1615,15 +1615,15 @@ test_gitlab_gate_refuses_without_qa_source() {
   expect_code 1 "$rc" "gitlab-gate-refuses: the gate must refuse a forge with no qa-review source"
   assert_grep "error: refusing to merge" "$case_dir/stderr" \
     "gitlab-gate-refuses: the refusal did not name the merge request"
-  assert_grep "no qa-review verdict available on this forge" \
-    "$case_dir/stderr" "gitlab-gate-refuses: the refusal did not name the missing verdict source"
+  assert_grep "QA coverage unknown" \
+    "$case_dir/stderr" "gitlab-gate-refuses: the refusal did not name the undeclared coverage"
   [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
     || fail "gitlab-gate-refuses: a merge was attempted without a qa-review verdict"
   assert_no_grep "pr=$MR_URL" "$case_dir/state/task-x1.meta" \
     "gitlab-gate-refuses: the merge request was recorded despite the refusal"
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "gitlab-gate-refuses: the refusal armed a merge poll"
-  pass "the gate refuses a GitLab merge when no qa-review verdict source exists"
+  pass "the gate refuses an undeclared GitLab merge"
 }
 
 test_gitlab_gate_override_records_and_merges() {

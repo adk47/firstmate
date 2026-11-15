@@ -27,7 +27,7 @@
 #   (n) --override-gate records the reason, the operator, and the time, then
 #       merges
 #   (o) bin/fm-go-queue-run.sh merges only through the gate, and a refused row
-#       is reported and skipped
+#       is reported and skipped, including when the queue file follows --
 #   (q) an unreadable twin list refuses rather than passing
 #   (r) an unreadable twin PR referenced by the body refuses
 #   (s) a repeated qa-review check reports its worst conclusion
@@ -39,6 +39,7 @@
 #   (y) declared no-QA coverage needs a green no-mistakes attestation
 #   (z) an undeclared repository refuses until a recorded override
 #   (aa) a red check whose name contains the old field delimiter still refuses
+#   (ab) declared no-QA coverage applies on GitLab instead of a forge refusal
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -180,6 +181,21 @@ write_no_qa_repos() {
     printf '# local no-QA coverage declarations\n\n'
     for repo in "$@"; do printf '%s\n' "$repo"; done
   } > "$case_dir/config/merge-gate-no-qa-repos"
+}
+
+# write_glab_mock <case_dir>: serve a merge request and its commit statuses.
+write_glab_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"/merge_requests/7") cat "$FM_TEST_GLAB_FIXTURES/mr.json" ;;
+  *"/statuses"*) cat "$FM_TEST_GLAB_FIXTURES/statuses.json" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/glab"
+  ln -sf "$JQ_BIN" "$case_dir/fakebin/jq"
 }
 
 # run_gate <case_dir> [args...]: run the gate in check-only mode.
@@ -655,7 +671,7 @@ test_gate_undeclared_repository_refuses() {
   rc=$?
   set -e
   expect_code 1 "$rc" "an undeclared repository must refuse"
-  assert_contains "$(cat "$case_dir/err")" "QA coverage unknown for Acme/widgets" \
+  assert_contains "$(cat "$case_dir/err")" "QA coverage unknown" \
     "the refusal must say coverage is unknown, not silently allow"
   pass "an undeclared repository refuses with QA coverage unknown"
 }
@@ -896,6 +912,68 @@ test_go_queue_refuses_row_and_continues() {
   pass "the queue merges only through the gate, and a refused row is skipped"
 }
 
+test_go_queue_accepts_double_dash_separator() {
+  local case_dir rc queue
+  case_dir=$(make_case go-queue-double-dash)
+  queue=$case_dir/queue.txt
+  printf '%s\n' '# empty queue' > "$queue"
+
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$QUEUE_RUN" -- "$queue" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a queue file after -- must be accepted"
+  assert_contains "$(cat "$case_dir/out")" "queue: 0 merged, 0 not merged, 0 malformed" \
+    "the queue after -- must be read"
+  pass "the queue runner accepts a queue file after --"
+}
+
+test_gate_gitlab_declared_no_qa_attestation_passes() {
+  local case_dir rc
+  case_dir=$(make_case gitlab-no-qa-green)
+  write_no_qa_repos "$case_dir" group/project
+  write_glab_mock "$case_dir"
+  mkdir -p "$case_dir/glabfixtures"
+  cat > "$case_dir/glabfixtures/mr.json" <<JSON
+{"sha":"$HEAD","author":{"username":"someone"},"target_branch":"feature","source_branch":"feature/x","state":"opened","merged_at":null,"description":"Closes nothing."}
+JSON
+  cat > "$case_dir/glabfixtures/statuses.json" <<JSON
+[{"name":"PR must be raised via no-mistakes","status":"success"},{"name":"unit-tests","status":"success"}]
+JSON
+
+  set +e
+  FM_PR_HOST=gitlab.example \
+  FM_TEST_GLAB_FIXTURES="$case_dir/glabfixtures" \
+  run_gate "$case_dir" group/project 7 "$HEAD" --forge gitlab
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a declared no-QA repository with a green attestation must merge on GitLab"
+  assert_contains "$(cat "$case_dir/out")" "no-mistakes-attestation=SUCCESS" \
+    "the gate must report the attestation it verified on GitLab"
+  pass "declared no-QA coverage applies on GitLab instead of a forge refusal"
+}
+
+test_gate_gitlab_qa_coverage_refuses_without_a_verdict_source() {
+  local case_dir rc
+  case_dir=$(make_case gitlab-qa)
+  set +e
+  run_gate "$case_dir" Muso-AI/project 7 "$HEAD" --forge gitlab
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a QA-covered repository must refuse on a forge with no verdict source"
+  assert_contains "$(cat "$case_dir/err")" \
+    "QA-covered repo, no verdict source on this forge" \
+    "the refusal must name the missing verdict source"
+  assert_contains "$(cat "$case_dir/err")" "refusing to merge Muso-AI/project#7" \
+    "the refusal must name the merge request"
+  pass "a QA-covered repository refuses on a forge with no verdict source"
+}
+
 # A named test may be run alone, which is how the ungated-script proof in the
 # pull request body was produced: each refusal case run against the script as it
 # stood before this library existed.
@@ -937,3 +1015,6 @@ test_gate_red_check_name_with_pipe_refuses
 test_pr_merge_refuses_before_merge_call
 test_pr_merge_override_records_and_merges
 test_go_queue_refuses_row_and_continues
+test_go_queue_accepts_double_dash_separator
+test_gate_gitlab_declared_no_qa_attestation_passes
+test_gate_gitlab_qa_coverage_refuses_without_a_verdict_source

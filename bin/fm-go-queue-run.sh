@@ -44,7 +44,15 @@ QUEUE=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --) shift; break ;;
+    --)
+      shift
+      if [ -n "$QUEUE" ]; then
+        [ "$#" -eq 0 ] || { echo "error: unexpected argument: $1" >&2; exit 2; }
+      else
+        [ "$#" -eq 0 ] || { QUEUE=$1; shift; }
+      fi
+      break
+      ;;
     -*) echo "error: unknown option: $1" >&2; exit 2 ;;
     *)
       if [ -n "$QUEUE" ]; then
