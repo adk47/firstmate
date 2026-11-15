@@ -888,9 +888,6 @@ case "${1:-} ${2:-}" in
     exit 0
     ;;
   api\ *)
-    case " $* " in
-      *contents/.github/workflows*) exit 0 ;;
-    esac
     exit 1
     ;;
 esac

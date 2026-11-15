@@ -18,6 +18,7 @@
 #   (f) the same red on anyone else's pull request refuses
 #   (g) a master twin whose develop counterpart is unmerged refuses
 #   (h) a master twin whose develop counterpart is merged passes
+#   (h2) the twin rule is skipped outside the declared twin repositories
 #   (i) a head that moved off the expected commit refuses
 #   (j) an unreadable verdict refuses rather than merging blind
 #   (k) a green head with a qa-review GO passes and reports what it verified
@@ -39,7 +40,8 @@
 #   (y) declared no-QA coverage needs a green no-mistakes attestation
 #   (z) an undeclared repository refuses until a recorded override
 #   (aa) a red check whose name contains the old field delimiter still refuses
-#   (ab) declared no-QA coverage applies on GitLab instead of a forge refusal
+#   (ab) declared no-QA coverage applies on GitLab instead of a forge refusal,
+#        and the GitHub-only twin rule notes its skip instead of refusing
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -53,7 +55,7 @@ TMP_ROOT=$(fm_test_tmproot fm-merge-gate-tests)
 
 JQ_BIN=$(command -v jq) || fail "these tests read fixtures with the real jq, which was not found"
 
-REPO=Muso-AI/repo
+REPO=Muso-AI/core-backend
 HEAD=1111111111111111111111111111111111111111
 OLD_HEAD=2222222222222222222222222222222222222222
 
@@ -371,6 +373,26 @@ test_gate_allows_merged_develop_twin() {
   set -e
   expect_code 0 "$rc" "a merged develop twin must not refuse"
   pass "a master twin whose develop counterpart is merged passes"
+}
+
+# --- (h2) a repository outside the twin list skips the twin rule ------------
+
+test_gate_skips_twin_check_for_other_repositories() {
+  local case_dir rc
+  case_dir=$(make_case non-twin-repository)
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    checks='qa-review:SUCCESS,unit-tests:SUCCESS'
+  printf '[]\n' > "$case_dir/fixtures/pr-list.json"
+
+  set +e
+  run_gate "$case_dir" Muso-AI/repo 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a repository outside the twin list must skip the twin rule"
+  assert_contains "$(cat "$case_dir/out")" \
+    "twin check skipped for Muso-AI/repo#9: the repository is not declared a twin repository" \
+    "the pass must note that the twin check was skipped"
+  pass "the twin rule is skipped outside the declared twin repositories"
 }
 
 # --- (i) a moved head refuses ----------------------------------------------
@@ -940,7 +962,7 @@ test_gate_gitlab_declared_no_qa_attestation_passes() {
   write_glab_mock "$case_dir"
   mkdir -p "$case_dir/glabfixtures"
   cat > "$case_dir/glabfixtures/mr.json" <<JSON
-{"sha":"$HEAD","author":{"username":"someone"},"target_branch":"feature","source_branch":"feature/x","state":"opened","merged_at":null,"description":"Closes nothing."}
+{"sha":"$HEAD","author":{"username":"someone"},"target_branch":"main","source_branch":"feature/x","state":"opened","merged_at":null,"description":"Closes nothing."}
 JSON
   cat > "$case_dir/glabfixtures/statuses.json" <<JSON
 [{"name":"PR must be raised via no-mistakes","status":"success"},{"name":"unit-tests","status":"success"}]
@@ -955,6 +977,9 @@ JSON
   expect_code 0 "$rc" "a declared no-QA repository with a green attestation must merge on GitLab"
   assert_contains "$(cat "$case_dir/out")" "no-mistakes-attestation=SUCCESS" \
     "the gate must report the attestation it verified on GitLab"
+  assert_contains "$(cat "$case_dir/out")" \
+    "twin check skipped for group/project#7: the develop/beta twin rule is GitHub-only" \
+    "a main-targeting GitLab merge must note the skipped twin rule"
   pass "declared no-QA coverage applies on GitLab instead of a forge refusal"
 }
 
@@ -992,6 +1017,7 @@ test_gate_allows_adk47_credit_guard
 test_gate_refuses_credit_guard_for_other_author
 test_gate_refuses_unmerged_develop_twin
 test_gate_allows_merged_develop_twin
+test_gate_skips_twin_check_for_other_repositories
 test_gate_refuses_moved_head
 test_gate_refuses_unreadable_verdict
 test_gate_passes_green_with_qa_go

@@ -58,10 +58,12 @@
 # the current head that is not success, a head that moved since the verdict, any
 # red check other than the adk47 self-authorship credit-approval-guard, and a
 # master/main twin whose develop/beta counterpart is unmerged all refuse. A
-# verdict that cannot be read refuses too, because silence is not a GO. A forge
-# with no qa-review verdict source, such as GitLab today, refuses for that
-# reason; its live pipeline guard below stays an additional check, never a
-# substitute. The gate's own header owns the full rule set. --override-gate
+# verdict that cannot be read refuses too, because silence is not a GO. Declared
+# coverage decides on every forge: a QA-covered repository on a forge with no
+# verdict source refuses, a declared no-QA repository needs its attestation green
+# on GitLab and GitHub alike, and an undeclared repository refuses as coverage
+# unknown. The live GitLab pipeline guard below stays an additional check, never
+# a substitute. The gate's own header owns the full rule set. --override-gate
 # <reason> is the only escape, and it records the reason, the operator, and the
 # timestamp in the task's metadata before the merge is attempted; it exists for
 # the captain's explicit "merge it anyway" word, never as a routine flag.

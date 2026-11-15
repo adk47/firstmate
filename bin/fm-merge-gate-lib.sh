@@ -17,8 +17,10 @@
 #   - the repository is in neither declared class, so QA coverage is unknown;
 #   - any check on the current head is red, except credit-approval-guard when
 #     the pull request author is adk47 (the by-design self-authorship check);
-#   - the pull request is a master/main twin whose develop/beta counterpart is
-#     not merged.
+#   - the pull request is a master/main twin in a declared twin repository whose
+#     develop/beta counterpart is not merged. The twin rule is GitHub-only and
+#     applies to core-backend and web-credits-next by default; elsewhere it is
+#     skipped with a note rather than refused.
 # It passes otherwise and prints the head, the verdict it verified, and the
 # standing allowed red, so the merge record carries what was actually checked.
 #
@@ -28,6 +30,9 @@
 # are ignored. That file is local and gitignored in this repo, so its absence is
 # normal; the built-in default and the Muso-AI rule still decide coverage. A
 # repository on neither list is refused rather than treated as unrequired.
+# The twin-repo class is core-backend and web-credits-next plus each entry on
+# one line of config/merge-gate-twin-repos; an entry without a slash matches a
+# repository name, and an entry with a slash matches the full owner/repo.
 #
 # Silence means refuse: a read that cannot be completed, a missing gh, and an
 # unparseable payload are all refusals, never a pass. There is no environment
@@ -241,6 +246,37 @@ fm_merge_gate_is_no_qa_repo() {
     line=$(printf '%s' "$line" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
     [ -n "$line" ] || continue
     [ "$line" = "$repo" ] && return 0
+  done < "$file"
+  return 1
+}
+
+# The local, gitignored config file that declares the twin repositories.
+fm_merge_gate_twin_config() {
+  local home
+  home=${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}
+  printf '%s/merge-gate-twin-repos' "${FM_CONFIG_OVERRIDE:-$home/config}"
+}
+
+# Whether the repository carries the develop/beta twin rule. core-backend and
+# web-credits-next are the built-in defaults; a configured entry without a slash
+# matches the repository name, and one with a slash matches the full owner/repo.
+fm_merge_gate_is_twin_repo() {
+  local repo=$1 name file line
+  repo=$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')
+  name=${repo##*/}
+  case "$name" in
+    core-backend|web-credits-next) return 0 ;;
+  esac
+  file=$(fm_merge_gate_twin_config)
+  [ -r "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%%#*}
+    line=$(printf '%s' "$line" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+    [ -n "$line" ] || continue
+    case "$line" in
+      */*) [ "$line" = "$repo" ] && return 0 ;;
+      *) [ "$line" = "$name" ] && return 0 ;;
+    esac
   done < "$file"
   return 1
 }
@@ -462,14 +498,23 @@ fm_merge_gate() {
 $FM_MERGE_GATE_CHECKS
 CHECKS
 
-  # Twin rule: a master/main pull request whose develop/beta counterpart has not
-  # merged is refused, because the twin would land the same change twice.
+  # Twin rule: a master/main pull request in a declared twin repository whose
+  # develop/beta counterpart has not merged is refused, because the twin would
+  # land the same change twice.
   case "$FM_MERGE_GATE_BASE" in
     master|main)
-      twin=$(fm_merge_gate_unmerged_twin "$repo" "$FM_MERGE_GATE_HEADREF" "$FM_MERGE_GATE_BODY")
-      if [ -n "$twin" ]; then
-        refusals="$refusals  - this is a $FM_MERGE_GATE_BASE twin and its develop/beta counterpart is unmerged: $twin
+      if [ "$forge" != github ]; then
+        printf 'merge gate: twin check skipped for %s#%s: the develop/beta twin rule is GitHub-only\n' \
+          "$repo" "$number"
+      elif ! fm_merge_gate_is_twin_repo "$repo"; then
+        printf 'merge gate: twin check skipped for %s#%s: the repository is not declared a twin repository\n' \
+          "$repo" "$number"
+      else
+        twin=$(fm_merge_gate_unmerged_twin "$repo" "$FM_MERGE_GATE_HEADREF" "$FM_MERGE_GATE_BODY")
+        if [ -n "$twin" ]; then
+          refusals="$refusals  - this is a $FM_MERGE_GATE_BASE twin and its develop/beta counterpart is unmerged: $twin
 "
+        fi
       fi
       ;;
   esac
