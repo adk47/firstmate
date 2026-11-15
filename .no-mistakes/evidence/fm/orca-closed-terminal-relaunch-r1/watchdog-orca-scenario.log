@@ -1,0 +1,37 @@
+
+===== SCENARIO A: ten Orca lanes with dead endpoints (control relaunch structurally refuses) =====
+pass 0: control relaunch attempts=10  wakes=10  rel="error: task lane1 runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'exit' and respawn the task instead"
+watchdog: relaunch refused lane1 after endpoint dead: error: task lane1 runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'exit' and respawn the task instead
+watchdog: lane1 cannot be relaunched on its endpoint (error: task lane1 runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'exit' and respawn the task instead); not spending its relaunch budget, asking firstmate
+watchdog: relaunch refused lane10 after endpoint dead: error: task lane10 runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'exit' and respawn the task instead
+watchdog: lane10 cannot be relaunched on its endpoint (error: task lane10 runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'exit' and respawn the task instead); not spending its relaunch budget, asking firstmate
+pass 1: control relaunch attempts=10  wakes=10  rel="error: task lane1 runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'exit' and respawn the task instead"
+pass 2: control relaunch attempts=10  wakes=10  rel="error: task lane1 runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'exit' and respawn the task instead"
+pass 3: control relaunch attempts=10  wakes=10  rel="error: task lane1 runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'exit' and respawn the task instead"
+pass 4: control relaunch attempts=10  wakes=10  rel="error: task lane1 runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'exit' and respawn the task instead"
+pass 5: control relaunch attempts=10  wakes=10  rel="error: task lane1 runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'exit' and respawn the task instead"
+
+After six 5-minute passes in one hour:
+  total control relaunch attempts for all ten lanes: 10 (was: 3 per lane per hour = 30)
+  "cannot relaunch" firstmate wakes: 10 (one per lane, not one per pass)
+  "hourly relaunch budget" pages: 0 (a refusal spends no budget)
+  persisted relaunch budget entries for lane1: 0
+  sample wake: watchdog-refused-lane1 check: watchdog cannot relaunch lane1 (endpoint dead): error: task lane1 runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'exit' and respawn the task instead. No relaunch budget was spent and it will not retry for 6h; the endpoint needs a hand
+
+===== SCENARIO B: an Orca terminal Orca itself reports gone is replaced with a new terminal in the recorded worktree =====
+watchdog: relaunched caroline-monitor-and-fixloop-k2 after endpoint missing
+  control relaunch attempts: 0
+  fm-spawn --relaunch calls: 1
+  firstmate wakes: 0
+  carry-over note delivered to the replacement:
+    caroline-monitor-and-fixloop-k2 --fire-and-forget e306e0f6e120dec3 The watchdog found your endpoint missing while the host stayed up, and relaunched your agent. Your worktree and commits are intact. Re-orient from your status log, your steering inbox (state/caroline-monitor-and-fixloop-k2.inbox/), and your worktree, then resume exactly where you left off. Do not repeat any send, merge, or prod write your status log shows already done.
+
+===== SCENARIO C: an unread steering inbox whose relaunch keeps failing (timeout) is charged to the hourly budget, then escalates once =====
+pass 0: attempts=1  charged=1  inbox pages=0
+pass 1: attempts=2  charged=2  inbox pages=0
+pass 2: attempts=3  charged=3  inbox pages=0
+pass 3: attempts=3  charged=3  inbox pages=1
+pass 4: attempts=3  charged=3  inbox pages=1
+pass 5: attempts=3  charged=3  inbox pages=1
+  sample wake: watchdog-inbox-w1 check: watchdog w1's steering inbox has gone unread for 91 minutes and its hourly relaunch budget (3) is spent; it needs a hand
+  inbox rung claimed (istage, should stay 0): 0
