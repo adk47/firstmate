@@ -222,8 +222,8 @@ def snapshot_rows(requests: Iterable[dict[str, Any]], *, precedent_of: Any = Non
             "proof_received_at": r.get("proofReceivedAt"),
             "proof_id": r.get("proofId"),
             # When we last asked this user. NULL means never asked, and the ladder will
-            # ASK rather than refuse on expiry: refusing a customer we never asked is a
-            # customer-facing denial we do not do.
+            # ASK rather than record an expiry: the expiry is the record of a window the
+            # customer was given and did not answer, and one we never asked has none.
             "asked_at": r.get("askedAt") or vd.get("asked_at"),
         })
     return out

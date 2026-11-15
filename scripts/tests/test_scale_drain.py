@@ -43,6 +43,29 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 
 REGISTRY = SCRIPTS.parent / "policies/credit-approval-automation.json"
 
+#: The proof store's other table the snapshot reads: the documents customers filed. The
+#: real store creates it beside ``verdicts`` (``credit_verify/proof/store.py``), and a
+#: store without it is unreadable to the snapshot, so every fixture store carries it.
+INTAKE_DDL = ("CREATE TABLE proof_intake (intake_id TEXT PRIMARY KEY,"
+              " candidate_request_ids_json TEXT NOT NULL DEFAULT '[]', received_at TEXT NOT NULL)")
+#: No fixture reads the host's DSP store: a test that wants anchors passes its own file.
+NO_DSP_STORE = "/nonexistent/dsp-verify.sqlite"
+#: The snapshot joins the host's verify ledger when no path is given, and node-8's live
+#: ledger is large enough to dominate a memory measurement. A test that wants ask history
+#: passes its own ledger.
+NO_LEDGER = "/nonexistent/verify-ledger.sqlite3"
+
+
+def setUpModule():
+    from credit_review import verify_ledger  # noqa: PLC0415
+    from credit_verify.dspverify import store as dsp_store  # noqa: PLC0415
+
+    for module, default in ((dsp_store, NO_DSP_STORE), (verify_ledger, NO_LEDGER)):
+        pin = mock.patch.object(module, "DEFAULT_PATH", default)
+        pin.start()
+        unittest.addModuleCleanup(pin.stop)
+
+
 
 def cli(*argv: str) -> list[str]:
     """The ONE CLI: the module's own entry point (f6 - two CLIs is how a bypass hides)."""
@@ -77,8 +100,8 @@ class DecisionKeyTests(unittest.TestCase):
         self.assertEqual(sd.decision_key(rid(1), "precedent", "approve"), want)
 
     def test_a_changed_outcome_is_a_new_key(self):
-        """QA review 2: a queued refusal that becomes an approval must not be skipped."""
-        self.assertNotEqual(sd.decision_key(rid(1), "proof_verdict", "queue_tier2"),
+        """QA review 2: a decision that later becomes an approval must not be skipped."""
+        self.assertNotEqual(sd.decision_key(rid(1), "proof_verdict", "ask"),
                             sd.decision_key(rid(1), "proof_verdict", "approve"))
 
     def test_key_differs_by_rule_and_version(self):
@@ -88,8 +111,8 @@ class DecisionKeyTests(unittest.TestCase):
         self.assertEqual(len({a, b, c}), 3)
 
     def test_key_is_stable(self):
-        self.assertEqual(sd.decision_key(rid(7), "expired", "queue_tier2"),
-                         sd.decision_key(rid(7), "expired", "queue_tier2"))
+        self.assertEqual(sd.decision_key(rid(7), "expired", "cannot_confirm"),
+                         sd.decision_key(rid(7), "expired", "cannot_confirm"))
 
     def test_unknown_rule_refused(self):
         with self.assertRaises(sd.DrainError):
@@ -151,11 +174,13 @@ class RankOrderTests(unittest.TestCase):
         self.assertEqual(d.outcome, sd.UNMATCHED)
         self.assertEqual(d.reason_code, "unmatched_proof_verdict")
 
-    def test_proof_verdict_refuse_is_queued_for_a_tier2_approver(self):
-        """A refusal is a customer-facing denial: the drain queues it, never makes it."""
+    def test_proof_verdict_refuse_is_an_ask_until_the_refusal_guard_exists(self):
+        """No outcome is a person, and nothing yet tells "the document contradicts the
+        claim" from "the document is not enough": the row is asked, and its reason code
+        keeps the refusing verdict so the row can be found and planned again."""
         db = snapshot([row(1, proof_verdict="refuse")])
         d = sd.plan(db, now=NOW)[0]
-        self.assertEqual(d.outcome, "queue_tier2")
+        self.assertEqual(d.outcome, "ask")
         self.assertEqual(d.reason_code, "proof_verdict_refuse")
 
     def test_an_unmapped_verdict_is_unmatched_not_asked(self):
@@ -169,7 +194,7 @@ class RankOrderTests(unittest.TestCase):
         db = snapshot([row(1, expires_at="2026-11-01T00:00:00Z", asked_at="2026-10-01T00:00:00Z")])
         d = sd.plan(db, now=NOW)[0]
         self.assertEqual(d.rule, "expired")
-        self.assertEqual(d.outcome, "queue_tier2")
+        self.assertEqual(d.outcome, "cannot_confirm")
         self.assertEqual(d.reason_code, "expired_no_proof")
 
     def test_expired_does_not_fire_when_proof_arrived(self):
@@ -201,7 +226,7 @@ class RankOrderTests(unittest.TestCase):
         db = snapshot([row(1, created_at="2026-01-01T00:00:00Z",
                            asked_at="2026-09-01T00:00:00Z")])
         d = sd.plan(db, now=NOW)[0]
-        self.assertEqual((d.rule, d.outcome), ("expired", "queue_tier2"))
+        self.assertEqual((d.rule, d.outcome), ("expired", "cannot_confirm"))
 
     def test_ask_is_the_fallthrough(self):
         db = snapshot([row(1)])
@@ -451,19 +476,31 @@ class ToldOnceTests(unittest.TestCase):
             # a different reason code is a different telling
             self.assertTrue(sd.mark_told(db, rid(1), "proof_verdict_refuse", NOW))
 
-    def test_apply_marks_every_refusal_told_exactly_once(self):
+    def test_apply_records_a_row_it_cannot_confirm_and_marks_nobody_told(self):
+        """What apply does today for a row that ends without an approval: one ledger row,
+        no API write, no message, and no ``told`` mark. The mark this replaced was written
+        for rows no message was ever sent to, so it said "told" about customers who were
+        not. This pins the gap as it stands; it is not the behaviour to keep."""
         with tempfile.TemporaryDirectory() as td:
             db = sd.open_ledger(str(Path(td) / "l.sqlite"))
             decisions = sd.plan(snapshot([row(1, expires_at="2026-10-01T00:00:00Z", asked_at="2026-09-01T00:00:00Z"),
                                           row(2, proof_verdict="refuse")]), now=NOW)
-            stats = sd.apply(decisions, db, shards=2, write_pool=1, now=NOW)
-            self.assertEqual(stats["told"], 2)
-            again = sd.apply(decisions, db, shards=2, write_pool=1, now=NOW)
-            self.assertEqual(again["told"], 0)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM told").fetchone()[0], 2)
+            calls = []
+            stats = sd.apply(decisions, db, shards=2, write_pool=1, writer=calls.append, now=NOW)
+            self.assertEqual((stats["applied"], stats["told"], calls), (2, 0, []))
+            again = sd.apply(decisions, db, shards=2, write_pool=1, writer=calls.append, now=NOW)
+            self.assertEqual((again["applied"], again["skipped"], again["told"], calls), (0, 2, 0, []))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM told").fetchone()[0], 0)
+            self.assertEqual(
+                db.execute("SELECT request_id, outcome, reason_code FROM applied"
+                           " ORDER BY request_id").fetchall(),
+                [(rid(1), "cannot_confirm", "expired_no_proof"),
+                 (rid(2), "ask", "proof_verdict_refuse")])
 
-    def test_the_tier2_queue_lists_every_queued_refusal(self):
-        """A refusal the drain will not make is still a row a human can pick up."""
+    def test_the_tier2_queue_lists_no_row(self):
+        """No outcome is a person, so the list a person read is empty whatever the ledger
+        holds: a row the ladder cannot confirm, a refused document, and a row recorded as
+        ``queue_tier2`` by an earlier version of the ladder."""
         with tempfile.TemporaryDirectory() as td:
             ledger = str(Path(td) / "l.sqlite")
             db = sd.open_ledger(ledger)
@@ -473,15 +510,18 @@ class ToldOnceTests(unittest.TestCase):
                 row(3),
             ]), now=NOW)
             sd.apply(decisions, db, shards=2, write_pool=1, now=NOW)
+            db.execute("INSERT INTO applied (decision_key, request_id, rule, outcome,"
+                       " reason_code, shard, applied_at) VALUES (?,?,?,?,?,?,?)",
+                       ("k" * 64, rid(4), "precedent", "queue_tier2", "precedent_refuse", 0,
+                        "2026-11-11T18:41:01Z"))
+            db.commit()
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM applied").fetchone()[0], 4)
             out = Path(td) / "queue.jsonl"
             proc = subprocess.run(cli("tier2-queue", "--ledger", ledger, "--out", str(out)),
                                   cwd=SCRIPTS, capture_output=True, text=True, check=False)
             self.assertEqual(proc.returncode, 0, proc.stderr)
-            rows = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
-            self.assertEqual([r["request_id"] for r in rows], [rid(1), rid(2)])
-            self.assertEqual({r["reason_code"] for r in rows},
-                             {"expired_no_proof", "proof_verdict_refuse"})
-            self.assertIn('"queued": 2', proc.stderr)
+            self.assertEqual(out.read_text(), "")
+            self.assertIn('"queued": 0', proc.stderr)
 
 
 class ScaleTests(unittest.TestCase):
@@ -522,8 +562,8 @@ class ScaleTests(unittest.TestCase):
 class UnaskedIsAskedTests(unittest.TestCase):
     """Firstmate decision: ask comes before expiry for a request that was never asked.
 
-    The 23,247 OPEN_UNASKED rows are the drain's population, not its refuse pile.
-    Refusing a customer we never asked is a customer-facing denial we do not do.
+    The 23,247 OPEN_UNASKED rows are the drain's population, not its expiry pile: an
+    expiry is the record of a window the customer was given and did not answer.
     """
 
     def test_an_unasked_request_past_its_window_is_asked_not_expired(self):
@@ -537,7 +577,7 @@ class UnaskedIsAskedTests(unittest.TestCase):
         db = snapshot([row(1, expires_at="2026-10-01T00:00:00Z", asked_at="2026-09-01T00:00:00Z")])
         d = sd.plan(db, now=NOW)[0]
         self.assertEqual(d.rule, "expired")
-        self.assertEqual(d.outcome, "queue_tier2")
+        self.assertEqual(d.outcome, "cannot_confirm")
         self.assertEqual(d.reason_code, "expired_no_proof")
 
     def test_an_unasked_request_inside_its_window_is_asked(self):
@@ -555,14 +595,15 @@ class UnaskedIsAskedTests(unittest.TestCase):
 
 
 class PrecedentOutcomeTests(unittest.TestCase):
-    """A precedent carries its own outcome: a refuse precedent must refuse."""
+    """A precedent carries its own outcome, and a refuse precedent is not a refusal:
+    another claimant holding the credit is no evidence against this one."""
 
-    def test_refuse_precedent_is_queued_for_a_tier2_approver(self):
+    def test_refuse_precedent_is_a_row_the_ladder_cannot_confirm(self):
         db = snapshot([row(1, precedent_key="k")],
                       precedent=[{"precedent_key": "k", "outcome": "refuse"}])
         d = sd.plan(db, now=NOW)[0]
         self.assertEqual(d.rule, "precedent")
-        self.assertEqual(d.outcome, "queue_tier2")
+        self.assertEqual(d.outcome, "cannot_confirm")
         self.assertEqual(d.reason_code, "precedent_refuse")
 
     def test_approve_precedent_approves(self):
@@ -678,7 +719,8 @@ class HeldRowTests(unittest.TestCase):
             self.assertEqual(sd.refused_asks(db), [])
 
     def test_the_hold_changes_only_an_approve(self):
-        """A refusal queue, a duplicate close and an ask are not approvals: unchanged."""
+        """A row that cannot be confirmed, a duplicate close and an ask are not approvals:
+        unchanged."""
         held = {"uncovered_holds": ["track_pending_capture"]}
         db = snapshot(
             [row(1, precedent_key="no", **held), row(2, duplicate_of=rid(8), **held),
@@ -686,7 +728,7 @@ class HeldRowTests(unittest.TestCase):
             decided=[{"request_id": rid(8), "decision": "approved"}],
             precedent=[{"precedent_key": "no", "outcome": "refuse"}])
         self.assertEqual([d.outcome for d in sd.plan(db, now=NOW)],
-                         ["queue_tier2", "close_duplicate", "ask"])
+                         ["cannot_confirm", "close_duplicate", "ask"])
 
     def test_a_snapshot_made_before_the_column_gains_it(self):
         with tempfile.TemporaryDirectory() as td:
@@ -928,11 +970,11 @@ class ReviewedWritePathTests(unittest.TestCase):
                           sd.decision_key(rid(1), "ask", "ask"), evidence_anchor=rid(9)))
         self.assertEqual(calls, [])
 
-    def test_a_queued_refusal_performs_no_write(self):
-        """The drain never rejects autonomously: a refusal is a named human's call."""
+    def test_a_row_that_cannot_be_confirmed_performs_no_write(self):
+        """``cannot_confirm`` has no status in core: the writer sends nothing for it."""
         w, calls = self._writer()
-        w(sd.Decision(rid(1), "expired", "queue_tier2", "expired_no_proof",
-                      sd.decision_key(rid(1), "expired", "queue_tier2")))
+        w(sd.Decision(rid(1), "expired", "cannot_confirm", "expired_no_proof",
+                      sd.decision_key(rid(1), "expired", "cannot_confirm")))
         self.assertEqual(calls, [])
 
     def test_close_duplicate_goes_through_the_conditional_close_route(self):
@@ -997,7 +1039,7 @@ class ReviewedWritePathTests(unittest.TestCase):
                           sd.decision_key(rid(1), "precedent", "approve")))
 
     def test_apply_calls_the_writer_only_for_writing_outcomes(self):
-        """ask belongs to need_asks.py and queue_tier2 to a human: neither is a write."""
+        """An ask belongs to need_asks.py, and a refused document is an ask: no write."""
         decisions = sd.plan(snapshot([row(1, precedent_key="k"), row(2), row(3, proof_verdict="refuse")],
                                      precedent=[{"precedent_key": "k", "outcome": "approve", "request_id": rid(9)}]),
                             now=NOW)
@@ -1059,6 +1101,7 @@ class ReplicaSnapshotTests(unittest.TestCase):
         db = sqlite3.connect(path)
         db.execute("CREATE TABLE verdicts (id INTEGER PRIMARY KEY AUTOINCREMENT,"
                    " proof_id TEXT, request_id TEXT, verdict TEXT, created_at TEXT)")
+        db.execute(INTAKE_DDL)
         db.executemany("INSERT INTO verdicts (proof_id, request_id, verdict, created_at)"
                        " VALUES (?,?,?,?)", rows)
         db.commit()
@@ -1253,7 +1296,7 @@ class ReplicaSnapshotTests(unittest.TestCase):
             # an ask row carries them too: the ask path must not ask about a cause no
             # document clears (split_asks)
             ("ask", ("review_held_submitter",)),
-            ("queue_tier2", None),  # a row that ends in no message carries none
+            ("cannot_confirm", None),  # a row that ends in no message carries none
         ])
         again = sd.parse_plan(sd.serialize(decisions))
         self.assertEqual([d.hold_causes for d in again], [d.hold_causes for d in decisions])
@@ -1639,6 +1682,7 @@ class RealSourcesTests(unittest.TestCase):
         db = sqlite3.connect(path)
         db.execute("CREATE TABLE verdicts (id INTEGER PRIMARY KEY AUTOINCREMENT,"
                    " proof_id TEXT, request_id TEXT, verdict TEXT, created_at TEXT)")
+        db.execute(INTAKE_DDL)
         db.executemany("INSERT INTO verdicts (proof_id, request_id, verdict, created_at)"
                        " VALUES (?,?,?,?)", rows)
         db.commit()
@@ -1686,7 +1730,7 @@ class RealSourcesTests(unittest.TestCase):
         self.assertEqual(decisions[rid(1)].outcome, "close_duplicate")
         self.assertEqual(decisions[rid(2)].outcome, "approve")
         self.assertEqual(decisions[rid(2)].reason_code, "precedent_match")
-        self.assertEqual(decisions[rid(3)].outcome, "queue_tier2")
+        self.assertEqual(decisions[rid(3)].outcome, "cannot_confirm")
         self.assertEqual(decisions[rid(3)].reason_code, "precedent_refuse")
         self.assertEqual(decisions[rid(4)].outcome, "approve")
         self.assertEqual(decisions[rid(4)].reason_code, "proof_verdict_approve")
@@ -2539,6 +2583,7 @@ class RealDataShapeTests(unittest.TestCase):
         db = sqlite3.connect(path)
         db.execute("CREATE TABLE verdicts (id INTEGER PRIMARY KEY AUTOINCREMENT,"
                    " proof_id TEXT, request_id TEXT, verdict TEXT, created_at TEXT)")
+        db.execute(INTAKE_DDL)
         db.executemany("INSERT INTO verdicts (proof_id, request_id, verdict, created_at)"
                        " VALUES (?,?,?,?)", rows)
         db.commit()
@@ -2722,7 +2767,7 @@ class RealDataShapeTests(unittest.TestCase):
     def test_a_document_on_file_is_never_expired_no_proof(self):
         """The harm the wrong key did quietly: asked 40 days ago, answered with a document
         the analyzer has not decided on. Read as "no proof received", this row was headed
-        for ``expired_no_proof`` - a refusal queue entry saying the customer sent nothing."""
+        for ``expired_no_proof`` - a row saying the customer sent nothing."""
         ledger_rows = [("verify-live", "sent", "1001", "2026-10-01T00:00:00Z", json.dumps([rid(1)]))]
         with tempfile.TemporaryDirectory() as td:
             ledger = str(Path(td) / "ledger.sqlite")
@@ -2733,7 +2778,7 @@ class RealDataShapeTests(unittest.TestCase):
             ldb.commit()
             ldb.close()
             for rows, expected in (
-                    ([], ("expired", "queue_tier2", "expired_no_proof")),
+                    ([], ("expired", "cannot_confirm", "expired_no_proof")),
                     ([("a" * 64, f"{rid(1)}#Composer", "SUSPECT", "2026-10-20T00:00:00Z"),
                       ("a" * 64, f"{rid(1)}#Producer", "SUSPECT", "2026-10-20T00:00:00Z")],
                      ("ask", "ask", "proof_on_file_undecided"))):
@@ -3499,6 +3544,7 @@ class RealEntrypointTests(unittest.TestCase):
         db = sqlite3.connect(store)
         db.execute("CREATE TABLE verdicts (id INTEGER PRIMARY KEY AUTOINCREMENT,"
                    " proof_id TEXT, request_id TEXT, verdict TEXT, created_at TEXT)")
+        db.execute(INTAKE_DDL)
         db.executemany("INSERT INTO verdicts (proof_id, request_id, verdict, created_at)"
                        " VALUES (?,?,?,?)", verdicts)
         db.commit()
@@ -5075,6 +5121,352 @@ class WriteFailureTests(unittest.TestCase):
         first, second = (json.loads(ln) for ln in out.getvalue().splitlines())
         self.assertEqual((first["applied"], first["stop_reason"], second["applied"]),
                          (2, "max_writes", 1))
+
+
+class RefusePrecedentIsNotFinalTests(unittest.TestCase):
+    """A refuse precedent is the same account's earlier refusal of the same claim. It holds
+    a request at ``cannot_confirm`` only while nothing on file is newer than that refusal:
+    a later document, DSP anchor or proof verdict takes the request out of the rule, and
+    the ladder decides it on that evidence."""
+
+    REFUSED = "2026-10-12T05:13:28Z"
+    BEFORE = "2026-10-01T00:00:00Z"
+    AFTER = "2026-11-02T00:00:00Z"
+
+    def _one(self, request, precedent=None):
+        precedent = precedent or {"precedent_key": "k", "outcome": "refuse",
+                                  "request_id": rid(9), "decided_at": self.REFUSED}
+        return sd.plan(snapshot([request], precedent=[precedent]), now=NOW)[0]
+
+    # ── the ladder ───────────────────────────────────────────────────────────
+    def test_evidence_after_the_refusal_takes_the_request_out_of_the_rule(self):
+        d = self._one(row(1, precedent_key="k", evidence_at=self.AFTER))
+        self.assertEqual((d.rule, d.outcome, d.reason_code),
+                         ("ask", "ask", "proof_on_file_undecided"))
+        self.assertEqual(d.superseded_precedent, rid(9))
+
+    def test_evidence_before_the_refusal_leaves_it_standing(self):
+        d = self._one(row(1, precedent_key="k", evidence_at=self.BEFORE))
+        self.assertEqual((d.rule, d.outcome, d.reason_code),
+                         ("precedent", "cannot_confirm", "precedent_refuse"))
+        self.assertIsNone(d.superseded_precedent)
+
+    def test_evidence_at_the_refusals_own_second_is_not_after_it(self):
+        d = self._one(row(1, precedent_key="k", evidence_at=self.REFUSED))
+        self.assertEqual((d.rule, d.outcome), ("precedent", "cannot_confirm"))
+
+    def test_no_evidence_leaves_it_standing(self):
+        d = self._one(row(1, precedent_key="k"))
+        self.assertEqual((d.rule, d.outcome), ("precedent", "cannot_confirm"))
+        self.assertIsNone(d.superseded_precedent)
+
+    def test_a_refusal_with_no_measured_time_does_not_stand_over_evidence(self):
+        unmeasured = {"precedent_key": "k", "outcome": "refuse", "request_id": rid(9)}
+        with_evidence = self._one(row(1, precedent_key="k", evidence_at=self.BEFORE), unmeasured)
+        self.assertEqual((with_evidence.rule, with_evidence.superseded_precedent), ("ask", rid(9)))
+        without = self._one(row(1, precedent_key="k"), unmeasured)
+        self.assertEqual((without.rule, without.outcome), ("precedent", "cannot_confirm"))
+
+    def test_an_unreadable_refusal_time_is_unmeasured(self):
+        garbled = {"precedent_key": "k", "outcome": "refuse", "request_id": rid(9),
+                   "decided_at": "last tuesday"}
+        d = self._one(row(1, precedent_key="k", evidence_at=self.BEFORE), garbled)
+        self.assertEqual(d.rule, "ask")
+
+    def test_the_replicas_time_format_orders_against_the_stores(self):
+        """The replica casts ``updatedat`` as ``YYYY-MM-DD HH:MM:SS.ffffff UTC``; the
+        stores write ``...Z``. Compared as text the space sorts below every ``T``."""
+        replica = {"precedent_key": "k", "outcome": "refuse", "request_id": rid(9),
+                   "decided_at": "2026-10-12 05:13:28.100333 UTC"}
+        earlier = self._one(row(1, precedent_key="k", evidence_at="2026-10-12T05:13:27Z"), replica)
+        later = self._one(row(1, precedent_key="k", evidence_at="2026-10-12T05:13:29Z"), replica)
+        self.assertEqual((earlier.rule, later.rule), ("precedent", "ask"))
+
+    def test_an_approve_precedent_is_never_set_aside(self):
+        approve = {"precedent_key": "k", "outcome": "approve", "request_id": rid(9)}
+        d = self._one(row(1, precedent_key="k", evidence_at=self.AFTER), approve)
+        self.assertEqual((d.rule, d.outcome), ("precedent", "approve"))
+        self.assertIsNone(d.superseded_precedent)
+
+    def test_a_later_approve_verdict_decides_the_request(self):
+        d = self._one(row(1, precedent_key="k", proof_verdict="approve", proof_id="a" * 64,
+                          proof_received_at=self.AFTER, evidence_at=self.AFTER))
+        self.assertEqual((d.rule, d.outcome, d.reason_code),
+                         ("proof_verdict", "approve", "proof_verdict_approve"))
+        self.assertEqual(d.superseded_precedent, rid(9))
+
+    def test_a_later_refuse_verdict_is_an_ask_not_a_dead_end(self):
+        d = self._one(row(1, precedent_key="k", proof_verdict="refuse",
+                          proof_received_at=self.AFTER, evidence_at=self.AFTER))
+        self.assertEqual((d.rule, d.outcome, d.reason_code),
+                         ("proof_verdict", "ask", "proof_verdict_refuse"))
+
+    def test_an_approve_verdict_older_than_the_refusal_does_not_approve(self):
+        d = self._one(row(1, precedent_key="k", proof_verdict="approve", proof_id="a" * 64,
+                          proof_received_at=self.BEFORE, evidence_at=self.BEFORE))
+        self.assertEqual((d.rule, d.outcome), ("precedent", "cannot_confirm"))
+
+    def test_a_snapshot_row_with_only_a_verdict_time_still_has_evidence(self):
+        """A snapshot written before ``evidence_at`` existed carries ``proof_received_at``
+        only. That time is evidence, so such a row is not read as having none."""
+        d = self._one(row(1, precedent_key="k", proof_received_at=self.AFTER))
+        self.assertEqual((d.rule, d.superseded_precedent), ("ask", rid(9)))
+
+    def test_an_unreadable_evidence_time_stops_the_snapshot(self):
+        with self.assertRaises(sd.DrainError):
+            snapshot([row(1, precedent_key="k", evidence_at="soon")])
+
+    def test_a_filed_document_stops_an_asked_request_expiring(self):
+        asked = dict(expires_at="2026-10-01T00:00:00Z", asked_at="2026-09-01T00:00:00Z")
+        bare = sd.plan(snapshot([row(1, **asked)]), now=NOW)[0]
+        filed = sd.plan(snapshot([row(1, evidence_at="2026-09-15T00:00:00Z", **asked)]), now=NOW)[0]
+        self.assertEqual((bare.rule, bare.outcome), ("expired", "cannot_confirm"))
+        self.assertEqual((filed.rule, filed.outcome, filed.reason_code),
+                         ("ask", "ask", "proof_on_file_undecided"))
+
+    def test_a_filed_document_with_no_verdict_is_an_ask_under_the_same_ledger_key(self):
+        """A request with a filed document and no verdict says so in its reason. The rule
+        and the outcome do not change, so the ledger key does not: a row already applied
+        as ``no_rule_matched`` is skipped, not applied a second time."""
+        bare = sd.plan(snapshot([row(1)]), now=NOW)[0]
+        filed = sd.plan(snapshot([row(1, evidence_at=self.AFTER)]), now=NOW)[0]
+        self.assertEqual((bare.rule, bare.outcome, bare.reason_code),
+                         ("ask", "ask", "no_rule_matched"))
+        self.assertEqual((filed.rule, filed.outcome, filed.reason_code),
+                         ("ask", "ask", "proof_on_file_undecided"))
+        self.assertEqual(bare.decision_key, filed.decision_key)
+        self.assertIsNone(filed.superseded_precedent)
+
+    # ── the plan file and the ledger ─────────────────────────────────────────
+    def test_the_plan_row_names_the_refusal_it_set_aside(self):
+        d = self._one(row(1, precedent_key="k", evidence_at=self.AFTER))
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "plan.jsonl"
+            path.write_bytes(sd.serialize([d]))
+            line = json.loads(path.read_text().splitlines()[0])
+            self.assertEqual(line["superseded_precedent"], rid(9))
+            self.assertEqual(sd.parse_plan(path.read_bytes())[0], d)
+
+    def test_new_evidence_reopens_a_request_already_recorded_as_cannot_confirm(self):
+        """The ledger skips a decision it already holds. The reopened request has another
+        rule and outcome, so another key: it is applied, not skipped."""
+        precedent = [{"precedent_key": "k", "outcome": "refuse", "request_id": rid(9),
+                      "decided_at": self.REFUSED}]
+        before = sd.plan(snapshot([row(1, precedent_key="k")], precedent=precedent), now=NOW)
+        after = sd.plan(snapshot([row(1, precedent_key="k", evidence_at=self.AFTER)],
+                                 precedent=precedent), now=NOW)
+        calls = []
+        with tempfile.TemporaryDirectory() as td:
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            first = sd.apply(before, db, shards=1, write_pool=1, writer=calls.append, now=NOW)
+            same = sd.apply(before, db, shards=1, write_pool=1, writer=calls.append, now=NOW)
+            reopened = sd.apply(after, db, shards=1, write_pool=1, writer=calls.append, now=NOW)
+            again = sd.apply(after, db, shards=1, write_pool=1, writer=calls.append, now=NOW)
+            self.assertEqual((first["applied"], same["applied"], same["skipped"]), (1, 0, 1))
+            self.assertEqual((reopened["applied"], reopened["skipped"]), (1, 0))
+            self.assertEqual((again["applied"], again["skipped"]), (0, 1))
+            self.assertEqual(
+                db.execute("SELECT rule, outcome, reason_code FROM applied"
+                           " ORDER BY rowid").fetchall(),
+                [("precedent", "cannot_confirm", "precedent_refuse"),
+                 ("ask", "ask", "proof_on_file_undecided")])
+        self.assertEqual(calls, [], "neither row is a status write")
+
+    # ── the snapshot builder, from the stores ────────────────────────────────
+    USER = "1001"
+    ROLES = "{Producer}"
+
+    def _stores(self, td, *, verdicts=(), intake=(), anchors=None):
+        proofs = str(Path(td) / "proof.sqlite")
+        db = sqlite3.connect(proofs)
+        db.execute("CREATE TABLE verdicts (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                   " proof_id TEXT, request_id TEXT, verdict TEXT, created_at TEXT)")
+        db.execute(INTAKE_DDL)
+        db.executemany("INSERT INTO verdicts (proof_id, request_id, verdict, created_at)"
+                       " VALUES (?,?,?,?)", list(verdicts))
+        db.executemany("INSERT INTO proof_intake VALUES (?,?,?)",
+                       [(f"i{n}", json.dumps(ids), at) for n, (ids, at) in enumerate(intake)])
+        db.commit()
+        db.close()
+        dsp = str(Path(td) / "dsp.sqlite")
+        if anchors is not None:
+            db = sqlite3.connect(dsp)
+            db.execute("CREATE TABLE dsp_anchors (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                       " run_id TEXT, at TEXT, request_id TEXT, kind TEXT, outcome TEXT)")
+            db.executemany("INSERT INTO dsp_anchors (run_id, at, request_id, kind, outcome)"
+                           " VALUES ('run', ?, ?, 'dsp_anchor', ?)", list(anchors))
+            db.commit()
+            db.close()
+        return proofs, dsp
+
+    def _replica(self, numbers, refused_at="2026-10-12 05:13:28.100333 UTC"):
+        pending = [(rid(n), self.USER, "p1", "user_verification_needed", "2026-11-01T00:00:00Z",
+                    "{}", "{}", f"{n:08x}-1111-4111-8111-111111111111", self.ROLES)
+                   for n in numbers]
+        decided = [(rid(100 + n), "rejected", self.USER,
+                    f"{n:08x}-1111-4111-8111-111111111111", self.ROLES, refused_at)
+                   for n in numbers]
+
+        def q(sql):
+            return list(decided) if "status IN ('approved', 'rejected')" in sql else list(pending)
+        return q
+
+    def _decisions(self, td, numbers, **stores):
+        proofs, dsp = self._stores(td, **stores)
+        rows = sd.replica_snapshot_rows(self._replica(numbers), proof_store_path=proofs,
+                                        dsp_store_path=dsp)
+        path = Path(td) / "snap.jsonl"
+        path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+        return {d.request_id: d for d in
+                sd.plan(sd._build_snapshot(_args(snapshot=str(path))), now=NOW)}
+
+    def test_each_kind_of_later_evidence_reopens_its_request(self):
+        """One request per kind, each with the same account's earlier refusal of the same
+        claim, read through the real queries and a snapshot file."""
+        with tempfile.TemporaryDirectory() as td:
+            by_id = self._decisions(
+                td, [1, 2, 3, 4, 5, 6, 7],
+                # 1: a document filed after the refusal; 5: one filed before it
+                intake=[([rid(1)], self.AFTER), ([rid(5)], self.BEFORE)],
+                # 2: an anchor built after the refusal; 6: an anchor that was refused
+                anchors=[(self.AFTER, rid(2), "built"), (self.AFTER, rid(6), "refused")],
+                # 3: a proof verdict that decides nothing, recorded after the refusal;
+                # 7: one that approves the claimed role
+                verdicts=[("c" * 64, f"{rid(3)}#Producer", "SUSPECT", self.AFTER),
+                          ("d" * 64, f"{rid(7)}#Producer", "GENUINE", self.AFTER)])
+        got = {n: (by_id[rid(n)].rule, by_id[rid(n)].outcome, by_id[rid(n)].reason_code,
+                   by_id[rid(n)].superseded_precedent) for n in range(1, 8)}
+        still = ("precedent", "cannot_confirm", "precedent_refuse", None)
+        self.assertEqual(got[1], ("ask", "ask", "proof_on_file_undecided", rid(101)))
+        self.assertEqual(got[2], ("ask", "ask", "proof_on_file_undecided", rid(102)))
+        self.assertEqual(got[3], ("ask", "ask", "proof_on_file_undecided", rid(103)))
+        self.assertEqual(got[7], ("proof_verdict", "approve", "proof_verdict_approve", rid(107)))
+        self.assertEqual(by_id[rid(7)].evidence_anchor, "d" * 64)
+        self.assertEqual(got[4], still, "nothing on file")
+        self.assertEqual(got[5], still, "a document older than the refusal")
+        self.assertEqual(got[6], still, "a refused anchor is the record of no anchor")
+
+    def test_a_written_anchor_counts_as_a_built_one_does(self):
+        with tempfile.TemporaryDirectory() as td:
+            by_id = self._decisions(td, [1], anchors=[(self.AFTER, rid(1), "written")])
+        self.assertEqual(by_id[rid(1)].superseded_precedent, rid(101))
+
+    def test_the_newest_refusal_of_a_claim_is_the_one_evidence_must_postdate(self):
+        decided = [("d1", "rejected", "u1", "trk-1", "{Producer}", "2026-01-05 00:00:00.000000 UTC"),
+                   ("d2", "rejected", "u1", "trk-1", "{Producer}", "2026-10-12 05:13:28.100333 UTC"),
+                   ("d3", "rejected", "u1", "trk-1", "{Producer}", "2026-03-01 00:00:00.000000 UTC")]
+        _rows, precedent = sd.decided_facts(lambda _sql: decided)
+        self.assertEqual([(p["outcome"], p["request_id"], p["decided_at"]) for p in precedent],
+                         [("refuse", "d1", "2026-10-12T05:13:28Z")])
+
+    def test_one_unreadable_refusal_time_leaves_the_claims_time_unmeasured(self):
+        for bad in (None, "", "not a time"):
+            with self.subTest(bad=bad):
+                decided = [("d1", "rejected", "u1", "trk-1", "{Producer}", "2026-10-12 05:13:28 UTC"),
+                           ("d2", "rejected", "u1", "trk-1", "{Producer}", bad),
+                           ("d3", "rejected", "u1", "trk-1", "{Producer}", "2026-11-01 00:00:00 UTC")]
+                _rows, precedent = sd.decided_facts(lambda _sql: decided)
+                self.assertIsNone(precedent[0]["decided_at"])
+
+    def test_an_approved_claim_carries_no_refusal_time(self):
+        decided = [("d1", "rejected", "u1", "trk-1", "{Producer}", "2026-10-12 05:13:28 UTC"),
+                   ("d2", "approved", "u1", "trk-1", "{Producer}", "2026-10-13 05:13:28 UTC")]
+        _rows, precedent = sd.decided_facts(lambda _sql: decided)
+        self.assertEqual(precedent, [{"precedent_key": precedent[0]["precedent_key"],
+                                      "outcome": "approve", "request_id": "d2"}])
+
+    #: The replica statements name a Trino table and Trino ``UUID`` literals. sqlite
+    #: resolves neither, so exactly those two tokens are adapted for execution: the select
+    #: list in the order it is written, the filter and the time cast run as written.
+    TRACK = "33333333-3333-4333-8333-333333333333"
+    D1 = "11111111-1111-4111-8111-111111111111"
+    D2 = "22222222-2222-4222-8222-222222222222"
+
+    @classmethod
+    def _runnable(cls, statement):
+        return (statement.replace("postgresql_core.public.", "")
+                .replace("UUID '", "'"))
+
+    def _decided_replica(self, statement=None):
+        """A query function over a sqlite ``credit_requests`` shaped like the replica's,
+        holding two rejections of one claim, run against ``statement`` when given."""
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE credit_requests (id TEXT, status TEXT, userid TEXT,"
+                   " trackid TEXT, credits TEXT, updatedat TEXT, deletedat TEXT)")
+        db.executemany("INSERT INTO credit_requests VALUES (?,?,?,?,?,?,NULL)",
+                       [(self.D1, "rejected", "u1", self.TRACK, self.ROLES,
+                         "2026-10-12 05:13:28.100333 UTC"),
+                        (self.D2, "rejected", "u1", self.TRACK, self.ROLES,
+                         "2026-03-01 00:00:00.000000 UTC")])
+
+        def q(sql):
+            return [list(r) for r in db.execute(self._runnable(statement or sql))]
+        return q
+
+    def test_the_decided_read_maps_each_rows_refusal_time(self):
+        """``DECIDED_SQL`` is executed, not read: the time in its sixth select expression
+        is the ``decided_at`` the refuse precedent carries."""
+        _rows, precedent = sd.decided_facts(self._decided_replica())
+        self.assertEqual([(p["outcome"], p["request_id"], p["decided_at"]) for p in precedent],
+                         [("refuse", self.D1, "2026-10-12T05:13:28Z")])
+
+    def test_the_bounded_decided_reads_carry_the_same_refusal_time(self):
+        for label, pending in (("by track", {"track_id": self.TRACK}),
+                               ("by both reads", {"track_id": self.TRACK,
+                                                  "duplicate_of": self.D2})):
+            with self.subTest(label):
+                _rows, precedent = sd.decided_facts(self._decided_replica(), pending=[pending])
+                self.assertEqual([(p["outcome"], p["request_id"], p["decided_at"])
+                                  for p in precedent],
+                                 [("refuse", self.D1, "2026-10-12T05:13:28Z")])
+
+    def test_a_decided_read_without_the_time_in_place_reads_it_unmeasured(self):
+        """The mutation the two tests above must catch: with the time replaced by another
+        column, the refusal's ``decided_at`` is unmeasured rather than wrong."""
+        moved = sd.DECIDED_SQL.replace("CAST(updatedat AS varchar)", "credits")
+        _rows, precedent = sd.decided_facts(self._decided_replica(moved))
+        self.assertIsNone(precedent[0]["decided_at"])
+
+    def test_a_filing_names_every_request_it_was_filed_against(self):
+        with tempfile.TemporaryDirectory() as td:
+            proofs, dsp = self._stores(td, intake=[([rid(1), rid(2).upper()], self.BEFORE),
+                                                   ([rid(1)], self.AFTER), ([], self.AFTER)])
+            self.assertEqual(sd.evidence_times(proofs, dsp),
+                             {rid(1): self.AFTER, rid(2): self.BEFORE})
+
+    def test_a_store_that_cannot_be_read_stops_the_snapshot(self):
+        with tempfile.TemporaryDirectory() as td:
+            proofs, dsp = self._stores(td, anchors=[])
+            cases = {"a proof store with no filings table": ("DROP TABLE proof_intake", proofs),
+                     "a DSP store with no anchors table": ("DROP TABLE dsp_anchors", dsp)}
+            for name, (statement, path) in cases.items():
+                with self.subTest(name):
+                    db = sqlite3.connect(path)
+                    db.execute(statement)
+                    db.commit()
+                    db.close()
+                    with self.assertRaises(sd.DrainError):
+                        sd.evidence_times(proofs, dsp)
+                    db = sqlite3.connect(path)
+                    db.execute(INTAKE_DDL if "intake" in statement else
+                               "CREATE TABLE dsp_anchors (at TEXT, request_id TEXT, outcome TEXT)")
+                    db.commit()
+                    db.close()
+
+    def test_a_filing_with_an_unreadable_time_or_id_list_stops_the_snapshot(self):
+        for ids, at in ((json.dumps([rid(1)]), "yesterday"), ('{"a": 1}', self.AFTER),
+                        ("not json", self.AFTER)):
+            with self.subTest(ids=ids, at=at), tempfile.TemporaryDirectory() as td:
+                proofs, dsp = self._stores(td)
+                db = sqlite3.connect(proofs)
+                db.execute("INSERT INTO proof_intake VALUES ('i', ?, ?)", (ids, at))
+                db.commit()
+                db.close()
+                with self.assertRaises(sd.DrainError):
+                    sd.evidence_times(proofs, dsp)
+
+    def test_a_missing_store_is_no_evidence_of_that_kind(self):
+        self.assertEqual(sd.evidence_times("/nonexistent/proof.sqlite", NO_DSP_STORE), {})
 
 
 if __name__ == "__main__":

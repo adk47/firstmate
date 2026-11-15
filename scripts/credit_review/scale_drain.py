@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# Reviewed baseline: deploy overwrites - 2026-11-14 (nohumans-drain-n1). node-8's copy of this file was edited
+# by hand more than once between 2026-11-14 19:14Z and 2026-11-15 01:45Z (the copies and their sha256 are in
+# data/nohumans-drain-n1/item0-landing.md), so the server's bytes match neither the deployed baseline nor this
+# file, and without the marker the deploy stops on it. This file is the ladder edit those copies carried, in
+# git, on the reviewed filter form of the snapshot bound. The marker makes every deploy write these bytes over
+# the server copy for as long as it stays here.
 """The verification scale drain: a deterministic, sharded, idempotent decision pass.
 
 Design of record: ``data/verification-scale-plan.md``. Captain 2026-11-11: "we need to
@@ -27,18 +33,21 @@ fix is not a faster loop, it is to stop paying per-user cost at all:
 
 The rank order (stop at the first match):
 
-  | # | rule            | outcome                          | share of the 92,861 |
-  |---|-----------------|----------------------------------|---------------------|
-  | 1 | duplicate       | close DUPLICATE                  | 6,631               |
-  | 2 | precedent       | approve / queue for tier-2       | ~9,465              |
-  | 3 | proof_verdict   | approve / queue on the verdict   | 1,755               |
-  | 4 | expired         | queue once, with a reason code   | the aged tail       |
-  | 5 | ask             | ask once                         | 23,247              |
+  | # | rule            | outcome                            | share of the 92,861 |
+  |---|-----------------|------------------------------------|---------------------|
+  | 1 | duplicate       | close DUPLICATE                    | 6,631               |
+  | 2 | precedent       | approve / cannot_confirm           | ~9,465              |
+  | 3 | proof_verdict   | approve / ask on the verdict       | 1,755               |
+  | 4 | expired         | cannot_confirm, with a reason code | the aged tail       |
+  | 5 | ask             | ask once                           | 23,247              |
 
-Expiry may only refuse a request we actually ASKED (``asked_at IS NOT NULL``). A
-never-asked request falls through to ``ask``: the 23,247 OPEN_UNASKED rows are the
-drain's population, not its refuse pile, and refusing a customer we never asked is a
-customer-facing denial we do not do.
+``cannot_confirm`` is a ledger row only: no API write, no message, and the customer is
+told nothing. A refuse precedent reaches it only while nothing on file is newer than
+that refusal (``SET_ASIDE_SQL``): later evidence takes the request out of the rule.
+Expiry reaches it only for a request we actually ASKED (``asked_at IS NOT
+NULL``). A never-asked request falls through to ``ask``: the 23,247 OPEN_UNASKED rows are
+the drain's population, not its expiry pile, and an expiry is the record of a window the
+customer was given and did not answer.
 
 Two invariants are code, not prose:
 
@@ -104,23 +113,28 @@ RULES: tuple[str, ...] = ("duplicate", "precedent", "proof_verdict", "expired", 
 
 #: rule -> the outcome it produces. `proof_verdict` is resolved from the verdict itself.
 #:
-#: ``queue_tier2`` is the outcome for every row the ladder would REFUSE. A refusal is a
-#: customer-facing denial, so it is not ours to make autonomously: the wrapper's reject
-#: gate demands a tier-2 approver and it is right to. The drain writes nothing for these
-#: rows, records them with their reason code, and lists them for a named human
-#: (``tier2-queue``). A duplicate close is different and IS autonomous - deduplication is
-#: not a new decision, the original decision stands, and the customer's outcome is
-#: unchanged (captain decision 2026-11-11).
+#: NO OUTCOME IS A PERSON (captain 2026-11-14: "there should be no humans involved except
+#: the customers giving proof and their statements"). This ladder emits ``approve``,
+#: ``ask``, ``cannot_confirm`` and ``close_duplicate``, and a wait is only ever on the
+#: customer. It does NOT emit ``reject``: the vocabulary has one, but no rule below
+#: produces it yet, and this module sends nothing to a customer - ``apply`` writes the API
+#: statuses in WRITE_STATUS and posts no message. A refusal becomes an autonomous outcome
+#: in a separate change, once the refusal guard exists. A duplicate close is
+#: autonomous - deduplication is not a new decision, the original decision stands, and the
+#: customer's outcome is unchanged (captain decision 2026-11-11).
 OUTCOME_OF: dict[str, str] = {
     "duplicate": "close_duplicate",
     "precedent": "approve",
-    "proof_verdict": "verdict",     # approve | queue_tier2, from the computed verdict
-    "expired": "queue_tier2",
+    "proof_verdict": "verdict",     # approve | ask, from the computed verdict
+    # An expiry is the clearest case for a definitive answer, not a queue: the customer
+    # was asked, the deadline passed, so the honest outcome is "we could not confirm".
+    "expired": "cannot_confirm",
     "ask": "ask",
 }
 
-#: Outcomes that perform an API write. ``ask`` belongs to need_asks.py and
-#: ``queue_tier2`` belongs to a named human, so neither is a drain write.
+#: Outcomes that perform an API write. ``ask`` belongs to need_asks.py, and
+#: ``cannot_confirm`` is recorded here but not written yet: a refusal becomes an
+#: autonomous API write only once the refusal guard exists.
 WRITING_OUTCOMES: tuple[str, ...] = ("approve", "close_duplicate")
 
 #: The reason code a refusal names. A refusal without a code is not a refusal we can
@@ -133,8 +147,9 @@ REASON_CODES: dict[str, str] = {
     "precedent_refuse": "precedent_refuse",
     "expired": "expired_no_proof",
     "ask": "no_rule_matched",
-    # The ladder wanted to approve but the row carries no row-specific evidence anchor,
-    # so the wrapper's approve gate would refuse it. Ask instead of approving blind.
+    # Not emitted by any rule below: a row the ladder wanted to approve but that carries
+    # no row-specific evidence anchor is ``unmatched`` (``unmatched_precedent`` /
+    # ``unmatched_proof_verdict``), never asked. The name stays in the vocabulary only.
     "no_evidence_anchor": "no_evidence_anchor",
     # A row that CARRIES a decision fact (a duplicate target, a precedent key, a proof
     # verdict) that could not be resolved against its source. It is neither written nor
@@ -170,9 +185,10 @@ UNMATCHED: str = "unmatched"
 #: or not ours to touch.
 PENDING_STATUSES: tuple[str, ...] = ("user_verification_needed", "unverified")
 
-#: Default window after which an unanswered ask expires and is refused once. The plan
-#: requires `expires_at` to exist; when core does not carry one we derive it from
-#: createdAt so the expired rule is always evaluable.
+#: Default window after which an unanswered ask expires and becomes ``cannot_confirm``:
+#: a ledger row only, no API write and no message, and a new document, anchor or verdict
+#: reopens it on the next plan. The plan requires `expires_at` to exist; when core does
+#: not carry one we derive it from createdAt so the expired rule is always evaluable.
 ASK_WINDOW_DAYS = 30
 
 #: Read pool: the decision pass is read-only, so it is safe to run wide.
@@ -313,9 +329,9 @@ def decision_key(request_id: str, rule: str, outcome: str,
     """``sha256(request_id || rule || outcome || version)``.
 
     The plan specifies ``sha256(request_id || rule || version)``; the OUTCOME is added
-    because without it a decision that CHANGES keeps its key and ``apply`` skips it. A
-    refusal queued for a tier-2 approver that later becomes an approval would be silently
-    dropped (QA review 2 of hydra#1883). With the outcome in the key, a changed decision is
+    because without it a decision that CHANGES keeps its key and ``apply`` skips it. A row
+    asked on one plan that is approved on a later one would be silently dropped (QA review
+    2 of hydra#1883). With the outcome in the key, a changed decision is
     a new key and gets applied; an unchanged one is still byte-identical, so a re-run
     cannot double-apply.
 
@@ -389,11 +405,15 @@ CREATE TABLE IF NOT EXISTS requests (
   precedent_key     TEXT,          -- the precedent class this request falls in
   proof_verdict     TEXT,          -- approve | refuse | NULL (no verdict computed)
   proof_received_at TEXT,
+  -- The newest evidence on THIS request, whatever its kind (a proof verdict, a document
+  -- filed against it, a DSP anchor), as a UTC stamp. NULL = nothing is on file. It is what
+  -- sets a refuse precedent aside and what keeps a request from expiring "with no proof".
+  evidence_at       TEXT,
   proof_id          TEXT,
   asked_at          TEXT,          -- when we last asked about THIS request; NULL = never asked
   -- The row-specific anchor an approve must cite. A precedent approve cites the
   -- request that set the precedent; a proof-verdict approve cites the proof. Without
-  -- one the row is NOT auto-approvable and falls through to ask.
+  -- one the row is NOT auto-approvable: it is ``unmatched``, never written and never asked.
   precedent_request_id TEXT,
   track_id          TEXT,
   claimed_roles     TEXT,          -- JSON array, the claim the precedent key is built from
@@ -411,7 +431,10 @@ CREATE TABLE IF NOT EXISTS precedent (
   outcome       TEXT NOT NULL,     -- approve | refuse
   -- The request that SET the precedent. An approve must cite it: the wrapper's approve
   -- gate checks a row-specific anchor, so a precedent with no request id cannot approve.
-  request_id    TEXT
+  request_id    TEXT,
+  -- On a refuse precedent: the newest refusal of that claim, as a UTC stamp (core's
+  -- ``updatedat``: it has no decided-at column). NULL = not measured.
+  decided_at    TEXT
 );
 """
 
@@ -451,6 +474,21 @@ def utc(ts: datetime | None = None) -> str:
     return (ts or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def utc_stamp(value: Any) -> str | None:
+    """``value`` as the ledger's UTC stamp, or ``None`` when it is absent or unreadable.
+
+    Two times are only ever compared here as stamps of this one fixed-width form, so a
+    string comparison is a time comparison. The replica casts a timestamp as
+    ``2026-10-12 05:13:28.100333 UTC``, which ``fromisoformat`` does not read; the stores
+    write ``2026-10-12T05:13:28Z``.
+    """
+    text = str(value).strip() if isinstance(value, str) else ""
+    if text.endswith(" UTC"):
+        text = text[:-4] + "+00:00"
+    ts = parse_ts(text)
+    return utc(ts) if ts else None
+
+
 def open_snapshot(path: str | None = None) -> sqlite3.Connection:
     db = sqlite3.connect(path or ":memory:")
     db.executescript(SNAPSHOT_SCHEMA)
@@ -463,6 +501,11 @@ def open_snapshot(path: str | None = None) -> sqlite3.Connection:
     # ... and one made before ``uncovered_holds`` existed gains that one.
     if "uncovered_holds" not in {r[1] for r in db.execute("PRAGMA table_info(requests)")}:
         db.execute("ALTER TABLE requests ADD COLUMN uncovered_holds TEXT")
+    # ... and one made before a refuse precedent could be set aside gains its two times.
+    if "evidence_at" not in {r[1] for r in db.execute("PRAGMA table_info(requests)")}:
+        db.execute("ALTER TABLE requests ADD COLUMN evidence_at TEXT")
+    if "decided_at" not in {r[1] for r in db.execute("PRAGMA table_info(precedent)")}:
+        db.execute("ALTER TABLE precedent ADD COLUMN decided_at TEXT")
     return db
 
 
@@ -533,12 +576,28 @@ def load_snapshot(db: sqlite3.Connection, rows: Iterable[dict[str, Any]], *,
     ``rows`` are the batched reads' output (``batch_admin``), one dict per request. The
     only field this function invents is ``expires_at``, and only when the row carries
     none - see ``derive_expires_at``.
+
+    ``evidence_at`` is stored as a stamp, and it is never older than ``proof_received_at``:
+    a proof verdict is evidence, so a snapshot row that carries only the older field (one
+    built before ``evidence_at`` existed) still has its evidence. A time that is there and
+    cannot be read stops the load: it cannot be ordered against a refusal, and reading it
+    as "no evidence" would leave the customer's document unread behind an old refusal.
     """
     n = 0
     for r in rows:
         rid = str(r.get("request_id") or r.get("id") or "")
         if not rid:
             raise DrainError("snapshot row has no request_id")
+        times = []
+        for field in ("evidence_at", "proof_received_at"):
+            raw = r.get(field)
+            if raw is None or raw == "":
+                continue
+            at = utc_stamp(raw)
+            if at is None:
+                raise DrainError(f"{rid}: {field} {raw!r} is not a time")
+            times.append(at)
+        evidence_at = max(times) if times else None
         expires = r.get("expires_at") or derive_expires_at(r.get("created_at") or r.get("createdAt"), window_days)
         duplicate_of, duplicate_kind = classify_duplicate(r.get("duplicate_of"))
         uncovered = sorted({str(c) for c in (r.get("uncovered_holds") or [])})
@@ -546,8 +605,8 @@ def load_snapshot(db: sqlite3.Connection, rows: Iterable[dict[str, Any]], *,
             "INSERT INTO requests (request_id, profile_id, user_id, status, created_at, expires_at,"
             " duplicate_of, duplicate_kind, precedent_key, proof_verdict, proof_received_at, proof_id,"
             " asked_at, precedent_request_id, track_id, claimed_roles, hold_causes,"
-            " uncovered_holds)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            " uncovered_holds, evidence_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(request_id) DO UPDATE SET profile_id=excluded.profile_id, user_id=excluded.user_id,"
             " status=excluded.status, created_at=excluded.created_at, expires_at=excluded.expires_at,"
             " duplicate_of=excluded.duplicate_of, duplicate_kind=excluded.duplicate_kind,"
@@ -556,7 +615,7 @@ def load_snapshot(db: sqlite3.Connection, rows: Iterable[dict[str, Any]], *,
             " proof_id=excluded.proof_id, asked_at=excluded.asked_at,"
             " precedent_request_id=excluded.precedent_request_id, track_id=excluded.track_id,"
             " claimed_roles=excluded.claimed_roles, hold_causes=excluded.hold_causes,"
-            " uncovered_holds=excluded.uncovered_holds",
+            " uncovered_holds=excluded.uncovered_holds, evidence_at=excluded.evidence_at",
             (rid, r.get("profile_id"), r.get("user_id"), str(r.get("status") or ""),
              r.get("created_at") or r.get("createdAt"), expires,
              duplicate_of, duplicate_kind, r.get("precedent_key"), r.get("proof_verdict"),
@@ -566,7 +625,8 @@ def load_snapshot(db: sqlite3.Connection, rows: Iterable[dict[str, Any]], *,
              r.get("track_id") or r.get("trackId"),
              json.dumps(list(r.get("claimed_roles") or []), sort_keys=True),
              _causes_json(r.get("hold_causes")),
-             json.dumps(uncovered) if uncovered else None))
+             json.dumps(uncovered) if uncovered else None,
+             evidence_at))
         n += 1
     db.commit()
     return n
@@ -611,11 +671,15 @@ def load_precedent(db: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> in
         key = str(r.get("precedent_key") or r.get("key") or "")
         if not key:
             continue
-        db.execute("INSERT INTO precedent (precedent_key, outcome, request_id) VALUES (?,?,?)"
+        db.execute("INSERT INTO precedent (precedent_key, outcome, request_id, decided_at)"
+                   " VALUES (?,?,?,?)"
                    " ON CONFLICT(precedent_key) DO UPDATE SET outcome=excluded.outcome,"
-                   " request_id=excluded.request_id",
+                   " request_id=excluded.request_id, decided_at=excluded.decided_at",
                    (key, str(r.get("outcome") or ""),
-                    r.get("request_id") or r.get("precedent_request_id")))
+                    r.get("request_id") or r.get("precedent_request_id"),
+                    # unreadable is unmeasured: the refusal then cannot be shown to postdate
+                    # any evidence, so it does not stand over evidence (see LADDER_SQL)
+                    utc_stamp(r.get("decided_at"))))
         n += 1
     db.commit()
     return n
@@ -628,6 +692,13 @@ def load_precedent(db: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> in
 #: `:now` is the only parameter, and it is passed in - never read from the clock here -
 #: so a plan is reproducible from (snapshot, now). The one interpolation is the ask window,
 #: a module constant rather than a parameter so the SQL cannot be shaped by input.
+#:
+#: ``{set_aside}`` is SET_ASIDE_SQL, the one statement of when a refuse precedent does not
+#: bind. It is used twice below (the rule, and the column that names what was set aside),
+#: so the two cannot disagree.
+SET_ASIDE_SQL = """(lower(trim(p.outcome)) = 'refuse' AND r.evidence_at IS NOT NULL
+          AND (p.decided_at IS NULL OR r.evidence_at > p.decided_at))"""
+
 LADDER_SQL = """
 SELECT
   r.request_id,
@@ -641,20 +712,30 @@ SELECT
     -- request (core's map of credits already on the profile). It still takes rank 1: it
     -- must not slide down to an ask.
     WHEN r.duplicate_of IS NOT NULL OR r.duplicate_kind IS NOT NULL THEN 'duplicate'
-    WHEN p.precedent_key IS NOT NULL THEN 'precedent'
+    -- A REFUSE precedent is this claimant's own earlier refusal of the same claim. It
+    -- binds only while nothing on file is newer than it. Evidence dated after the refusal
+    -- (a proof verdict, a document filed against this request, a DSP anchor) is something
+    -- that refusal never read, so the row leaves this rule and is decided on the evidence
+    -- by the rules below: new evidence reopens (captain 2026-11-14). A refusal whose time
+    -- was not measured cannot be shown to postdate the evidence, so it does not stand over
+    -- it either. An APPROVE precedent is never set aside.
+    WHEN p.precedent_key IS NOT NULL AND NOT {set_aside} THEN 'precedent'
     WHEN r.proof_verdict IS NOT NULL THEN 'proof_verdict'
-    -- Expiry may only refuse a request we actually ASKED. A never-asked request falls
-    -- through to 'ask' (rule 5, "ask, once"): refusing a customer we never asked is a
-    -- customer-facing denial we do not do. The 23,247 OPEN_UNASKED rows are the drain's
-    -- population, not its refuse pile.
+    -- An expiry may only reach a request we actually ASKED. A never-asked request falls
+    -- through to 'ask' (rule 5, "ask, once"): an expiry is the record of a window the
+    -- customer was given and did not answer, and one we never asked has no such window.
+    -- The 23,247 OPEN_UNASKED rows are the drain's population, not its expiry pile.
     --
     -- The window runs from the ASK, not from creation. Derived from `created_at`, a
     -- request created in January and asked yesterday would be expired today - one day
     -- after the customer was asked for documents, which is not a window at all (QA review
     -- 3 of hydra#1883).
+    --
+    -- Evidence of any kind on file is not "no proof": a document filed and not yet read,
+    -- or a DSP anchor, keeps the request out of this rule the way a verdict always did.
     WHEN r.asked_at IS NOT NULL
          AND datetime(r.asked_at, '+{window} days') <= datetime(:now)
-         AND r.proof_received_at IS NULL THEN 'expired'
+         AND r.proof_received_at IS NULL AND r.evidence_at IS NULL THEN 'expired'
     ELSE 'ask'
   END AS rule,
   d.decision AS duplicate_decision,
@@ -666,13 +747,17 @@ SELECT
   r.proof_received_at,
   r.hold_causes,
   r.claimed_roles,
-  r.uncovered_holds
+  r.uncovered_holds,
+  r.evidence_at,
+  -- the refusal a row's evidence set aside: its request, or its key when it names none
+  CASE WHEN p.precedent_key IS NOT NULL AND {set_aside}
+       THEN COALESCE(p.request_id, p.precedent_key) END AS superseded_precedent
 FROM requests r
 LEFT JOIN decided   d ON d.request_id = r.duplicate_of
 LEFT JOIN precedent p ON p.precedent_key = r.precedent_key
 WHERE r.status IN ('user_verification_needed', 'unverified')
 ORDER BY r.request_id
-""".format(window=int(ASK_WINDOW_DAYS))
+""".format(window=int(ASK_WINDOW_DAYS), set_aside=SET_ASIDE_SQL)
 
 
 
@@ -704,6 +789,10 @@ class Decision:
     #: editing role (the bands' band B case)? ``None`` = the roles could not be read,
     #: which holds, and nothing for a row with no velocity cause.
     editing_burst: bool | None = None
+    #: The refuse precedent this row's evidence set aside: the refused request (or the
+    #: precedent key when it names none). ``None`` on every other row. It is the record of
+    #: why a claimant whose same claim was refused before is being decided again.
+    superseded_precedent: str | None = None
 
     def as_row(self) -> dict[str, Any]:
         """The canonical plan row. Sorted keys, no clock, no run id -> byte-identical."""
@@ -721,6 +810,7 @@ class Decision:
             "request_id": self.request_id,
             "rule": self.rule,
             "status": self.status,
+            "superseded_precedent": self.superseded_precedent,
             "user_id": self.user_id,
         }
 
@@ -730,18 +820,24 @@ def _resolve(rule: str, proof_verdict: str | None,
              evidence_anchor: str | None = None,
              duplicate_decision: str | None = None,
              duplicate_kind: str | None = None,
-             proof_received_at: str | None = None) -> tuple[str, str]:
+             proof_received_at: str | None = None,
+             evidence_at: str | None = None) -> tuple[str, str]:
     """(outcome, reason_code) for a matched rule.
 
-    A precedent carries its own outcome: a ``refuse`` precedent queues the row for a
-    named tier-2 approver, never an autonomous reject. The ladder selects the row; this
-    function is what makes the row's verdict binding.
+    A precedent carries its own outcome: a ``refuse`` precedent is ``cannot_confirm`` - a
+    ledger row with no API write and no message - never an autonomous reject and never the
+    word refused. It reaches this function only while no evidence on file is newer than
+    the refusal (``SET_ASIDE_SQL``): once there is, the ladder selects another rule and the
+    row is decided on that evidence. The ladder selects the row; this function is what
+    makes the row's verdict binding.
 
     An APPROVE must cite a row-specific anchor (the precedent request, or the proof).
     The wrapper's approve gate checks that anchor, so a row that cannot produce one is
-    not auto-approvable: it falls through to ``ask`` with ``no_evidence_anchor`` rather
-    than approving on a rule name alone. A REFUSE needs no anchor - the approve gate is
-    the gate that exists, and refusing is not the direction that needs evidence.
+    not auto-approvable: it is UNMATCHED with ``unmatched_precedent`` or
+    ``unmatched_proof_verdict`` rather than approving on a rule name alone, and an
+    unmatched row is never written and never offered as an ask. A REFUSE needs no anchor -
+    the approve gate is the gate that exists, and refusing is not the direction that needs
+    evidence.
     """
     if rule == "duplicate":
         if duplicate_kind == DUP_PROFILE_CREDIT:
@@ -752,7 +848,14 @@ def _resolve(rule: str, proof_verdict: str | None,
     if rule == "precedent":
         outcome = (precedent_outcome or "").strip().lower()
         if outcome == "refuse":
-            return "queue_tier2", REASON_CODES["precedent_refuse"]
+            # The precedent key holds the CLAIMANT (``claim_key``), so this is the same
+            # account's earlier request for the same track and roles, refused, with none
+            # approved. That is not evidence against this request: it says what was decided
+            # on what was on file then. With nothing newer on file there is no basis to
+            # confirm, which is cannot_confirm, never a refusal (Fable review 2026-11-14
+            # R2). It is not a final state: evidence dated after the refusal takes the row
+            # out of this rule on the next plan.
+            return "cannot_confirm", REASON_CODES["precedent_refuse"]
         if outcome == "approve":
             if not evidence_anchor:
                 return UNMATCHED, REASON_CODES["unmatched_precedent"]
@@ -765,11 +868,15 @@ def _resolve(rule: str, proof_verdict: str | None,
                 return UNMATCHED, REASON_CODES["unmatched_proof_verdict"]
             return "approve", REASON_CODES["proof_verdict_approve"]
         if verdict == "refuse":
-            # A refusal is a customer-facing denial. Queue it for a tier-2 approver
-            # rather than rejecting autonomously; the reason code still names why.
-            return "queue_tier2", REASON_CODES["proof_verdict_refuse"]
+            # A refusal can only be sent once a guard exists: split insufficient from
+            # contradicted, cite the proof id on THIS request, require a second blind read
+            # to agree, and require the verdict to postdate the newest upload. None of that
+            # is in place, so the interim outcome is ASK with the specific item named. The
+            # reason code keeps the refusal evidence so the guard can be built and the rows
+            # re-planned (Fable review 2026-11-14 R3).
+            return "ask", REASON_CODES["proof_verdict_refuse"]
         return UNMATCHED, REASON_CODES["unmatched_proof_verdict"]
-    if rule == "ask" and (proof_received_at or "").strip():
+    if rule == "ask" and ((proof_received_at or "").strip() or (evidence_at or "").strip()):
         return "ask", REASON_CODES["proof_on_file_undecided"]
     return OUTCOME_OF[rule], REASON_CODES[rule]
 
@@ -785,11 +892,12 @@ def plan(db: sqlite3.Connection, *, now: datetime | None = None) -> list[Decisio
     for (rid, profile_id, user_id, _status, expires_at, proof_verdict,
          rule, duplicate_decision, duplicate_of, precedent_outcome, precedent_request_id,
          proof_id, duplicate_kind, proof_received_at, causes, roles,
-         uncovered) in db.execute(LADDER_SQL, {"now": stamp}):
+         uncovered, evidence_at, superseded) in db.execute(LADDER_SQL, {"now": stamp}):
         anchor = precedent_request_id if rule == "precedent" else (
             proof_id if rule == "proof_verdict" else None)
         outcome, reason = _resolve(rule, proof_verdict, precedent_outcome, anchor,
-                                   duplicate_decision, duplicate_kind, proof_received_at)
+                                   duplicate_decision, duplicate_kind, proof_received_at,
+                                   evidence_at)
         if outcome == "approve" and uncovered:
             # On hold, and core's guard would not stop it: never approved here, whichever
             # rule found the approve. A hold the guard covers is left to core, below.
@@ -815,6 +923,7 @@ def plan(db: sqlite3.Connection, *, now: datetime | None = None) -> list[Decisio
             duplicate_of=duplicate_of if rule == "duplicate" else None,
             hold_causes=held,
             editing_burst=burst,
+            superseded_precedent=superseded,
         ))
     out.sort(key=lambda d: d.request_id)
     return out
@@ -847,7 +956,8 @@ def parse_plan(data: bytes | str) -> list[Decision]:
             evidence_anchor=row.get("evidence_anchor"),
             duplicate_of=row.get("duplicate_of"),
             hold_causes=_causes_tuple(row.get("hold_causes")),
-            editing_burst=row.get("editing_burst") if isinstance(row.get("editing_burst"), bool) else None))
+            editing_burst=row.get("editing_burst") if isinstance(row.get("editing_burst"), bool) else None,
+            superseded_precedent=row.get("superseded_precedent")))
     return out
 
 
@@ -1420,9 +1530,10 @@ DRAIN_TOKEN_FILE = "/etc/hydra/scale-drain.token"
 DRAIN_TOKEN_FILE_ENV = "SCALE_DRAIN_TOKEN_FILE"
 
 #: outcome -> the status the reviewed path writes. ``ask`` is not a write: it is a send,
-#: and the send belongs to ``need_asks.py`` (the one reviewed ask path). ``queue_tier2``
-#: is not a write either: a refusal is a customer-facing denial and belongs to a named
-#: tier-2 approver, so the drain only records it.
+#: and the send belongs to ``need_asks.py`` (the one reviewed ask path). ``reject``
+#: is not a write either: this ladder does not emit it (a refusal becomes an autonomous
+#: outcome only once the refusal guard exists), and a refuse proof verdict is emitted as
+#: ``ask`` instead.
 WRITE_STATUS = {"approve": "approved", "close_duplicate": "rejected"}
 
 #: The duplicate-close route. A close is a reject at the API, but it is NOT the reject
@@ -1655,7 +1766,7 @@ def admin_writer(script: str | None = None, *, timeout: int = 120,
     def write(d: Decision) -> None:
         status = WRITE_STATUS.get(d.outcome)
         if status is None:
-            return  # ask / queue_tier2: not a drain write
+            return  # ask / reject / cannot_confirm: not a drain write (yet)
         env = dict(os.environ)
         env.pop("CV_APPROVE_GATE_DISABLED", None)
         env["OPS_DRY_RUN"] = "0"
@@ -2190,8 +2301,23 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
                     if side_effect:
                         tell(d, "written_unread" if readback is None
                              else "granted" if d.outcome == "approve" else "closed")
-                    if d.outcome == "queue_tier2" and mark_told(db, d.request_id, d.reason_code, stamp):
-                        stats["told"] += 1
+                    # KNOWN GAP (Fable review 2026-11-14 item 3). The line that lived here
+                    # called mark_told() for every refusal the ladder then queued for a
+                    # person, and it ran: the production ledger holds 1,324 `told` rows
+                    # from 2026-11-11T18:41:01Z, one per such row of that run (1,165
+                    # precedent_refuse, 159 proof_verdict_refuse; the outcome those rows
+                    # carry in `applied` is named in docs/credit-verification/
+                    # scale-drain.md). This module sent nothing for any of them, so
+                    # `told` there records a mark, not a message. Those rows stay: `told`
+                    # is keyed (request_id, reason_code), so a later sender that marks the
+                    # same pair gets False and must not read that as "already heard".
+                    # Nothing is marked told here now. A row outside WRITE_STATUS gets no
+                    # status write, no customer message and no mark. A `cannot_confirm`
+                    # row leaves that state only through the next plan, when evidence
+                    # newer than it is on file (SET_ASIDE_SQL, the expiry rule); nothing
+                    # here tells the customer that. Delivery belongs at
+                    # the send site (after Intercom returns a message id), in one reviewed
+                    # path like need_asks.py - not behind WRITE_STATUS here.
                 else:
                     stats["skipped"] += 1
 
@@ -2243,8 +2369,8 @@ def verify(decisions: Sequence[Decision], db: sqlite3.Connection) -> dict[str, A
         "SELECT request_id FROM intents WHERE state = ?", (PLANNED,)))
     missing = sorted(set(planned) - set(applied) - set(abandoned))
     orphan = sorted(set(applied) - set(planned))
-    # A request may legitimately have more than one row: a refusal queued for a tier-2
-    # approver and then an approval are two different decisions. A DOUBLE-APPLY is the
+    # A request may legitimately have more than one row: an ``ask`` recorded on one plan
+    # and an approval on a later one are two different decisions. A DOUBLE-APPLY is the
     # same request applied twice for the same outcome, which is what this counts.
     dupes = [r[0] for r in db.execute(
         "SELECT request_id FROM applied GROUP BY request_id, outcome HAVING COUNT(*) > 1")]
@@ -2281,7 +2407,8 @@ WHERE status IN ('user_verification_needed', 'unverified') AND deletedat IS NULL
 #: precedent table in core) and of the duplicate closes' standing decisions. Read from
 #: the same replica as the pending rows, so one snapshot carries both halves.
 DECIDED_SQL = """
-SELECT CAST(id AS varchar), status, CAST(userid AS varchar), CAST(trackid AS varchar), credits
+SELECT CAST(id AS varchar), status, CAST(userid AS varchar), CAST(trackid AS varchar), credits,
+       CAST(updatedat AS varchar)
 FROM postgresql_core.public.credit_requests
 WHERE status IN ('approved', 'rejected') AND deletedat IS NULL
 """
@@ -2416,7 +2543,9 @@ def proof_fact(claims: dict[str, tuple[str, str, str]] | None,
     request:
 
     * **refuse** - any claim's newest verdict is a refusal. One forged role is a forged
-      document; a human decides (``queue_tier2``), and the proof named is the refusing one.
+      document; the ladder ASKS about it, naming the specific item, and the proof named is
+      the refusing one. It is never rejected here: a refusal becomes one only once the
+      refusal guard exists.
     * **approve** - EVERY claim on file is an approval, they all rest on ONE proof (the
       digest carries one anchor, and the gate checks every claim against it), and every
       role the request claims is covered by its OWN claim (a verdict keyed by the bare
@@ -2455,6 +2584,76 @@ def proof_facts(store_path: str | None = None) -> dict[str, dict[str, Any]]:
     ``snapshot_from_replica`` does know them, and joins ``proof_claims`` itself.
     """
     return {rid: proof_fact(claims) for rid, claims in proof_claims(store_path).items()}
+
+
+#: The evidence on a request that is not a proof verdict: a document the customer filed
+#: against it, and a DSP anchor record. Both are read the way the proof verdicts are.
+#: A link reply (``proof_link_intake``) is not read, so a link filed after a refusal
+#: neither sets it aside nor stops an expiry; whoever turns link filing on adds that read
+#: here and to ``evidence_times`` in the same change.
+INTAKE_SQL = "SELECT candidate_request_ids_json, received_at FROM proof_intake"
+#: An anchor that exists. A ``refused`` row is the record of an anchor that was NOT built.
+DSP_ANCHOR_OUTCOMES = ("built", "written")
+DSP_ANCHOR_SQL = ("SELECT request_id, at FROM dsp_anchors WHERE outcome IN (%s)"
+                  % ", ".join("'%s'" % o for o in DSP_ANCHOR_OUTCOMES))
+
+
+def _newest(out: dict[str, str], request_id: Any, raw: Any, source: str) -> None:
+    rid = str(request_id or "").strip().lower()
+    if not rid:
+        return
+    at = utc_stamp(raw)
+    if at is None:
+        # A time that cannot be read cannot be ordered against a refusal. Dropping the row
+        # would read a document on file as no evidence; guessing would date it.
+        raise DrainError(f"{source}: the time {raw!r} on request {rid} is not readable")
+    if at > out.get(rid, ""):
+        out[rid] = at
+
+
+def evidence_times(proof_store_path: str | None = None,
+                   dsp_store_path: str | None = None) -> dict[str, str]:
+    """``{request id: newest evidence time}`` for the evidence that is not a proof verdict.
+
+    * a **document** filed against the request: ``proof_intake.received_at`` for every
+      request the filing names (``candidate_request_ids_json``), read or not;
+    * a **DSP anchor**: a ``dsp_anchors`` row that was built or written, at its ``at``.
+
+    The proof verdicts' own times come from ``proof_claims`` and are joined by the caller.
+    A missing store means that kind of evidence was never recorded. A store that exists
+    and cannot be read - a missing table included - is a hard error, for the reason
+    ``proof_claims`` gives: read as empty, every document on file becomes "no evidence",
+    and a refusal the customer already answered would stand.
+    """
+    from credit_verify.dspverify import store as dsp_store  # noqa: PLC0415 - sibling package
+    from credit_verify.proof import store as proof_store  # noqa: PLC0415 - sibling package
+
+    out: dict[str, str] = {}
+    proofs = proof_store_path or proof_store.DEFAULT_PATH
+    if os.path.exists(proofs):
+        db = sqlite3.connect(f"file:{proofs}?mode=ro", uri=True)
+        try:
+            for candidates, received in db.execute(INTAKE_SQL):
+                ids = json.loads(candidates or "[]")
+                if not isinstance(ids, list):
+                    raise ValueError("candidate_request_ids_json is not a list")
+                for rid in ids:
+                    _newest(out, rid, received, "proof_intake")
+        except (sqlite3.Error, ValueError) as exc:
+            raise DrainError(f"the proof store {proofs} could not be read for filed documents") from exc
+        finally:
+            db.close()
+    anchors = dsp_store_path or dsp_store.DEFAULT_PATH
+    if os.path.exists(anchors):
+        db = sqlite3.connect(f"file:{anchors}?mode=ro", uri=True)
+        try:
+            for rid, at in db.execute(DSP_ANCHOR_SQL):
+                _newest(out, rid, at, "dsp_anchors")
+        except sqlite3.Error as exc:
+            raise DrainError(f"the DSP store {anchors} could not be read for anchors") from exc
+        finally:
+            db.close()
+    return out
 
 
 def _decided_rows(query: Callable[[str], list[list[Any]]],
@@ -2498,6 +2697,14 @@ def decided_facts(query: Callable[[str], list[list[Any]]], *,
     no ordering here, so the lowest id is used: the choice is stable across runs, which is
     what the byte-identical plan needs).
 
+    A REFUSE precedent also carries ``decided_at``: the newest ``updatedat`` among that
+    claim's rejected requests, which is what evidence has to postdate to set the refusal
+    aside. Core has no decided-at column; ``updatedat`` is never earlier than the decision,
+    so it can only make a refusal look newer than it is, never older. If any of those
+    requests has no readable time the field is ``None`` (not measured), never the newest
+    of the ones that could be read. An approve precedent carries no time: nothing sets it
+    aside.
+
     ``pending`` is given by a bounded snapshot (``snapshot --max-rows``): the pending rows
     it keeps. The read is then FILTERED to those rows' tracks and duplicate targets
     (``_decided_rows``), never cut: every decided request on those tracks is read, so each
@@ -2514,7 +2721,8 @@ def decided_facts(query: Callable[[str], list[list[Any]]], *,
     decided: list[dict[str, Any]] = []
     approved: dict[str, str] = {}
     rejected: dict[str, str] = {}
-    for rid, status, user_id, track_id, credits in source:
+    refused_at: dict[str, str | None] = {}
+    for rid, status, user_id, track_id, credits, *rest in source:
         rid = str(rid)
         state = str(status or "").strip().lower()
         decided.append({"request_id": rid, "decision": state})
@@ -2529,6 +2737,9 @@ def decided_facts(query: Callable[[str], list[list[Any]]], *,
         elif state == "rejected":
             if key not in rejected or rid < rejected[key]:
                 rejected[key] = rid
+            at = utc_stamp(rest[0]) if rest else None
+            known = refused_at.get(key, "")
+            refused_at[key] = None if at is None or known is None else max(at, known)
     precedent: list[dict[str, Any]] = []
     for key in sorted(set(approved) | set(rejected)):
         if key in approved:
@@ -2536,14 +2747,16 @@ def decided_facts(query: Callable[[str], list[list[Any]]], *,
                               "request_id": approved[key]})
         else:
             precedent.append({"precedent_key": key, "outcome": "refuse",
-                              "request_id": rejected[key]})
+                              "request_id": rejected[key],
+                              "decided_at": refused_at[key]})
     return decided, precedent
 
 
 def snapshot_from_replica(query: Callable[[str], list[list[Any]]], *,
                           ledger_path: str | None = None,
                           proof_store_path: str | None = None,
-                          limit: int | None = None) -> list[dict[str, Any]]:
+                          limit: int | None = None,
+                          dsp_store_path: str | None = None) -> list[dict[str, Any]]:
     """Build snapshot rows from the core replica, joined to the real facts.
 
     ``limit`` asks the replica for at most that many pending rows (a bounded snapshot).
@@ -2556,11 +2769,16 @@ def snapshot_from_replica(query: Callable[[str], list[list[Any]]], *,
     the snapshot is loaded); precedent keys are derived from the decided population; proof
     verdicts are joined from the proof store per CLAIM (``proof_claims``), against the
     roles this request claims.
+
+    ``evidence_at`` is the newest evidence of any kind on the request: its newest proof
+    verdict, a document filed against it, a DSP anchor (``evidence_times``). It is what
+    the ladder orders against a refuse precedent's ``decided_at``.
     """
     from . import verify_anchor as va  # noqa: PLC0415 - the one home of uncovered_holds
 
     asked = asked_at_by_request(ledger_path)
     proofs = proof_claims(proof_store_path)
+    other = evidence_times(proof_store_path, dsp_store_path)
     rows: list[dict[str, Any]] = []
     sql = SNAPSHOT_SQL if not limit else SNAPSHOT_SQL.rstrip("\n") + "\nLIMIT %d\n" % limit
     for rid, uid, pid, status, created, vd_json, _meta, track_id, credits in query(sql):
@@ -2579,6 +2797,10 @@ def snapshot_from_replica(query: Callable[[str], list[list[Any]]], *,
         rid = str(rid)
         roles = _roles(credits)
         fact = proof_fact(proofs.get(rid.strip().lower()), roles)
+        received = fact.get("proof_received_at")
+        if received and utc_stamp(received) is None:
+            raise DrainError(f"proof store: the verdict time {received!r} on request {rid} is not readable")
+        evidence = [t for t in (utc_stamp(received), other.get(rid.strip().lower())) if t]
         rows.append({
             "request_id": rid,
             "user_id": int(uid) if str(uid).isdigit() else None,
@@ -2591,7 +2813,8 @@ def snapshot_from_replica(query: Callable[[str], list[list[Any]]], *,
             "uncovered_holds": uncovered,
             "precedent_key": claim_key(uid, track_id, roles),
             "proof_verdict": fact.get("proof_verdict"),
-            "proof_received_at": fact.get("proof_received_at"),
+            "proof_received_at": received,
+            "evidence_at": max(evidence) if evidence else None,
             "proof_id": fact.get("proof_id"),
             "asked_at": asked.get(rid),
             "hold_causes": causes,
@@ -2626,7 +2849,8 @@ def _read_jsonl(path: str) -> list[dict[str, Any]]:
 def replica_snapshot_rows(query: Callable[[str], list[list[Any]]], *,
                           ledger_path: str | None = None,
                           proof_store_path: str | None = None,
-                          limit: int | None = None) -> list[dict[str, Any]]:
+                          limit: int | None = None,
+                          dsp_store_path: str | None = None) -> list[dict[str, Any]]:
     """The snapshot file's rows: pending requests plus the decided and precedent rows.
 
     One document, so the documented ``snapshot`` then ``plan --snapshot`` contract carries
@@ -2641,7 +2865,8 @@ def replica_snapshot_rows(query: Callable[[str], list[list[Any]]], *,
     """
     limit = int(limit) if limit and int(limit) > 0 else None
     requests = snapshot_from_replica(query, ledger_path=ledger_path,
-                                     proof_store_path=proof_store_path, limit=limit)
+                                     proof_store_path=proof_store_path, limit=limit,
+                                     dsp_store_path=dsp_store_path)
     decided, precedent = decided_facts(query, pending=requests if limit else None)
     return ([{**r, "__kind": "request"} for r in requests]
             + [{**r, "__kind": "decided"} for r in decided]
@@ -2910,20 +3135,22 @@ def _cmd_snapshot(args: argparse.Namespace) -> int:
 
 
 def _cmd_tier2_queue(args: argparse.Namespace) -> int:
-    """Print the rows the ladder would REFUSE, for a named tier-2 approver.
+    """Print any rows left in the ledger under a removed outcome, and the wrapper call to
+    refuse one.
 
-    A refusal is a customer-facing denial, so the drain does not make it. These rows are
-    recorded in the ledger with their reason code and nothing is written to the API; this
-    command is how a human picks them up. It prints the exact wrapper invocation, with
-    ``--confirmed-by`` and ``--approval-msg-id`` left as placeholders a human fills in -
-    the drain never supplies them, because supplying them would be the bypass.
+    The ladder no longer queues anything for a tier-2 approver: an expiry or a refuse
+    precedent is ``cannot_confirm`` (a ledger row, no API write, no message) and a refuse
+    proof verdict is ``ask``. No outcome this code emits is on this query, so it prints no
+    rows by construction. The command stays, unchanged, until the follow-up that deletes
+    ``tier2-queue`` by name; its printed invocation leaves ``--confirmed-by`` and
+    ``--approval-msg-id`` as placeholders precisely because the drain supplies neither.
     """
     db = open_ledger(args.ledger)
     rows = [
         {"request_id": rid, "reason_code": reason, "queued_at": at}
         for rid, reason, at in db.execute(
             "SELECT request_id, reason_code, applied_at FROM applied"
-            " WHERE outcome = 'queue_tier2' ORDER BY request_id")
+            " WHERE outcome = '__removed__' ORDER BY request_id")
     ]
     payload = "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
     if args.out:
@@ -3036,7 +3263,7 @@ def _main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=_cmd_snapshot)
 
     p = sub.add_parser("tier2-queue",
-                       help="list the rows the drain will NOT refuse: a named human decides")
+                       help="retired: prints no row (the ladder emits no outcome it lists)")
     p.add_argument("--ledger", default=DEFAULT_LEDGER)
     p.add_argument("--out", default=None, help="write the queue as JSONL (default stdout)")
     common(p)

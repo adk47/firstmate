@@ -29,7 +29,11 @@ the verify ledger and the proof store, the plan over all 96,703 pending requests
 | `expired` | | | 0 | |
 | `duplicate` | `close_duplicate` | | 0 | |
 
-**So this pass approves 3,294 requests, queues 1,324 for a named human, and leaves 91,229
+`queue_tier2` is the outcome name the ladder had on 2026-11-11; it no longer emits it (see
+"No outcome is a person" below). The 1,324 rows applied under that name are still in the
+ledger's `applied` table, each with a `told` row and no message behind it.
+
+**So this pass approved 3,294 requests, queued 1,324 for a named human, and left 91,229
 as asks. It is not a pass that decides the backlog**, and an `ask` row is not a decision:
 `apply` writes nothing for it. Two rules are zero for different reasons:
 
@@ -92,14 +96,17 @@ The snapshot is one document carrying **all** the ladder's facts, so the documen
   fire and 10,559 pending requests with a document on file read as "nothing on file".
   `proof_claims` splits the key; `proof_fact` then decides the REQUEST, because the
   write approves a whole request:
-  - any role whose newest verdict is a refusal → `refuse` (queued for a human);
+  - any role whose newest verdict is a refusal → `refuse`, which `_resolve` turns into an
+    `ask` with reason `proof_verdict_refuse`: a refusal waits on the customer, and nothing
+    queues it for a person (a refusal may only become a `reject` behind the guard item 3
+    builds, which this PR does not);
   - every claimed role's newest verdict an approval, all on ONE proof → `approve`,
     anchored on that proof. Each claimed role needs its **own** claim: a verdict keyed by
     the bare request id names no role and does not stand in for one (production has no
     such row; honouring one would make it the single row that approves any role set);
   - anything else → no verdict, but **`proof_received_at` is still set**. That row stays
     an `ask` with reason `proof_on_file_undecided`, and can never become
-    `expired_no_proof`: a user who sent a document is not refused for sending none.
+    `expired_no_proof`: a user who sent a document is never recorded as having sent none.
 
   An `ask` row sends nothing by itself. `need_asks.py --from-drain` asks only a user
   whose latest doc-verify outcome names a specific sendable document, and lists everyone
@@ -151,10 +158,10 @@ Stop at the first match. Every rule is a SQL predicate (`scale_drain.LADDER_SQL`
 | Rank | Rule | Condition | Outcome | Reason code |
 |---|---|---|---|---|
 | 1 | `duplicate` | `duplicate_of` names a request that is already decided | close | `duplicate_of_decided` |
-| 2 | `precedent` | `precedent_key` has a recorded outcome | approve / **queue for tier-2** | `precedent_match` / `precedent_refuse` |
-| 3 | `proof_verdict` | a readable verdict (`approve`/`refuse`) exists | approve / **queue for tier-2** | `proof_verdict_approve` / `proof_verdict_refuse` |
-| 4 | `expired` | **asked** (`asked_at` set), `expires_at <= now`, no proof received | **queue for tier-2** | `expired_no_proof` |
-| 5 | `ask` | nothing matched | ask | `no_rule_matched` |
+| 2 | `precedent` | `precedent_key` has a recorded outcome, and for a `refuse` outcome nothing on file is newer than that refusal | approve / **cannot confirm** | `precedent_match` / `precedent_refuse` |
+| 3 | `proof_verdict` | a readable verdict (`approve`/`refuse`) exists | approve / **ask** | `proof_verdict_approve` / `proof_verdict_refuse` |
+| 4 | `expired` | **asked** (`asked_at` set), `expires_at <= now`, no evidence on file (`evidence_at` empty) | **cannot confirm** | `expired_no_proof` |
+| 5 | `ask` | nothing matched | ask | `no_rule_matched`, or `proof_on_file_undecided` when evidence is on file |
 | — | `unmatched` | a row carries a fact the ladder cannot resolve (an undecided duplicate original, an unmapped proof verdict, a precedent row with no outcome, an approve with no anchor) | **none: counted, never written, never asked** | `unmatched_duplicate` / `unmatched_precedent` / `unmatched_proof_verdict` |
 
 A model reviews a sample and proposes rule changes; it never decides a single row
@@ -163,7 +170,8 @@ not an ask either**: a row that was already decided by precedent must never be t
 into a fresh "please verify" ask to that user. Such a row gets the `unmatched` outcome,
 `apply` does not write or commit it, `verify` lists it, and the CLI prints the count.
 The two rules are separate on purpose: `ask` means "no fact, and asking is the right
-action"; `unmatched` means "a fact is present but unreadable, so this needs a human".
+action"; `unmatched` means "a fact is present but unreadable, so it is counted and left to
+the next pass": not written, not asked, and not a human's queue.
 
 **An approve for a request on a hold core's guard does not act on is `unmatched` /
 `held_by_validator`.** Core's guard holds an agent approval on three facts of the
@@ -189,21 +197,47 @@ reads the guard's three facts itself; `GuardReaderTests` holds that reader to
 `policy.validator_conflict`. `snapshot --source admin` does not carry `uncovered_holds`,
 so a plan built from it has the gate's stop only.
 
-**Expiry may only refuse a request we actually asked.** A never-asked request falls
+**An expiry may only reach a request we actually asked.** A never-asked request falls
 through to `ask`, because the 23,247 OPEN_UNASKED rows are the drain's population, not
-its refuse pile, and refusing a customer we never asked is a customer-facing denial we
-do not do. `expired_no_proof` is the reason code for the asked-and-expired case only.
+its expiry pile: an expiry is the record of a window the customer was given and did not
+answer, and an unasked request has no such window. `expired_no_proof` is the reason code
+for the asked-and-expired case only.
 
 A precedent carries its own outcome: an `approve` precedent approves, and a `refuse`
-precedent is queued for a named tier-2 approver (`precedent_refuse`) rather than being
-rejected autonomously. The ladder selects the row; `_resolve` makes the row's verdict
-binding. `queue_tier2` rows are committed to the ledger and listed by `tier2-queue`; they
-are not asks, so `need_asks.py` never sends to them.
+precedent is `cannot_confirm` (`precedent_refuse`), never a rejection. The ladder selects
+the row; `_resolve` makes the row's verdict binding. `cannot_confirm` rows are committed to
+the ledger; they are not asks, so `need_asks.py` never sends to them.
 
-### The split: duplicate closes are autonomous, refusals are not
+**A refuse precedent is not final** (decision 2026-11-15, `SET_ASIDE_SQL`). The precedent
+key holds the claimant, so a refuse precedent is the same account's earlier refusal of the
+same claim. It holds a request only while nothing on file is newer than that refusal:
 
-These two outcomes look alike at the API — both write `status:"rejected"` — and they are
-**not** the same thing (captain decision 2026-11-11).
+- `requests.evidence_at` is the newest evidence on the request whatever its kind: a proof
+  verdict (`proof_received_at`), a filed document (`proof_intake`, every request the
+  filing names), or a DSP anchor (`dsp_anchors` with outcome `built` or `written`; a
+  `refused` anchor is the record of no anchor). `evidence_times` reads the two stores.
+- A link reply (`proof_link_intake`) is **not** read, so a link filed after a refusal
+  neither sets the refusal aside nor stops an expiry. Measured 2026-11-15 02:11Z: the
+  production proof store held 0 `proof_link_intake` rows, and no enabled proof cron passes
+  `--links`. Whoever turns link filing on must add that read to `evidence_times` in the
+  same change.
+- `precedent.decided_at` is the newest `updatedat` among that claim's rejected requests.
+  Core has no decided-at column, and `updatedat` is never earlier than the decision, so
+  it can only make a refusal look newer than it is. A time that cannot be read is not
+  measured, and an unmeasured refusal does not stand over evidence.
+- Evidence strictly newer than the refusal takes the request out of the `precedent` rule.
+  The lower rules then decide it: an approve verdict approves, anything else is an `ask`
+  (`proof_on_file_undecided`), and the plan row names the refusal it set aside in
+  `superseded_precedent`. An `approve` precedent is never set aside.
+- A store that exists and cannot be read, or holds a time that cannot be read, stops the
+  snapshot. A store that does not exist is no evidence of that kind.
+
+The same `evidence_at` is what stops an expiry, so a filed document with no verdict yet
+keeps an asked request out of `expired_no_proof`.
+
+### The split: a duplicate close is a write, a row the ladder cannot confirm is not
+
+A duplicate close writes `status:"rejected"`; no other negative outcome writes anything.
 
 **A duplicate close is autonomous.** A duplicate of an already-decided request is not a
 new decision: the original decision stands and the customer's outcome is unchanged, so
@@ -216,18 +250,53 @@ already decided, so the original is provable, and the ledger row carries `duplic
 The close is audited exactly like a human reject, with the original request id as the
 approval reference.
 
-**A refusal is not autonomous.** Expired-with-no-proof, a `refuse` proof verdict and a
-`refuse` precedent are customer-facing denials, and the wrapper is right to demand a tier-2 approver for them.
-The drain does not add a bypass: those rows get the `queue_tier2` outcome, no API write
-happens, and the ledger records the reason code. `tier2-queue` lists them for a named
-human, who runs the wrapper with `--confirmed-by` and `--approval-msg-id` — the drain
-never supplies those, because supplying them would be the bypass.
+**No outcome is a person** (captain 2026-11-14: "there should be no humans involved
+except the customers giving proof and their statements"). The ladder no longer emits
+`queue_tier2`. What it emits instead is an interim state, and this section says what that
+state does and does not do:
 
-```bash
-python3 -m credit_review.scale_drain tier2-queue --ledger /var/lib/hydra/credit-review/ledger.sqlite3
-```
+| was `queue_tier2` for | now | what `apply` does with it |
+|---|---|---|
+| asked, expired, no proof (`expired_no_proof`) | `cannot_confirm` | a ledger row; no API write, no message |
+| a `refuse` precedent (`precedent_refuse`) | `cannot_confirm` | a ledger row; no API write, no message |
+| a `refuse` proof verdict (`proof_verdict_refuse`) | `ask` | a ledger row; the row is in the `asks` audience like any other ask |
 
-Never lower a served number, and never deny a customer autonomously.
+**`cannot_confirm` is recorded and nothing else.** The customer is told nothing and core
+still holds the request as pending, so the next plan decides the row again from that
+snapshot. New evidence reopens both reasons:
+
+- `expired_no_proof` requires no evidence on file (`evidence_at IS NULL`), so a document,
+  anchor or verdict that arrives later moves the row to `proof_verdict` or `ask` on the
+  next plan.
+- `precedent_refuse` holds only while nothing on file is newer than the refusal, so
+  evidence that arrives later moves the row the same way.
+
+The rule and the outcome are in the ledger key, so a reopened row gets a new key and is
+applied again; the old `cannot_confirm` row stays in `applied`.
+
+**What is still missing: nothing tells the customer.** No message goes out for a
+`cannot_confirm` row, so the customer does not learn that sending evidence would reopen
+it. Measured on the production replica 2026-11-15 01:23Z (102,432 pending requests), of
+the 1,172 requests with a refuse precedent:
+
+| | requests | users |
+|---|---|---|
+| set aside by later evidence, now `ask` / `proof_on_file_undecided` | 178 | 44 |
+| still `cannot_confirm` / `precedent_refuse` | 994 | 176 |
+
+Of the 994, 984 have no evidence on file at all (734 of them were never asked, 250 were)
+and 10 have evidence that is not newer than the refusal. Of the 178 set aside, `asks`
+offers 57 (28 users) to the ask path and holds 121 (17 users) for a cause no document
+clears (`ask_hold`: 76 fraud, 40 band C, 4 impersonation, 1 velocity). The DSP anchor
+store held no `built` or `written` row on that date, so the anchor branch has run on
+fixtures only. The same plan moved 15,292 `ask` rows from reason `no_rule_matched` to
+`proof_on_file_undecided`: each is named by a filed document and has no verdict. Their
+rule, outcome and ledger key are unchanged, and the approve set is the same 3,365
+requests. Do not report `cannot_confirm` rows as decided or as told.
+
+`tier2-queue` still parses and exits 0, and lists no row whatever the ledger holds.
+
+Never lower a served number.
 
 `expires_at` does not exist on credit requests in core, so the snapshot derives it from
 `asked_at` + `ASK_WINDOW_DAYS` (30), keeps a core-supplied value when one appears, and
@@ -247,7 +316,7 @@ the ledger's `applied` table, so a re-run cannot double-apply and a restarted wo
 every row already in the ledger.
 
 The **outcome** is in the key, which the original sketch did not have. Without it a decision
-that CHANGES keeps its key and `apply` skips it: a refusal queued for a tier-2 approver that
+that CHANGES keeps its key and `apply` skips it: a row recorded as `cannot_confirm` that
 later becomes an approval would be silently dropped (QA review 2 of hydra#1883). With it, a
 changed decision is a new key and gets applied, while an unchanged one is byte-identical. A
 request may therefore hold more than one ledger row over its life; `verify` counts a
@@ -270,7 +339,7 @@ full gate chain still runs. No new endpoint, no direct HTTP client.
 |---|---|
 | `approve` | `approved`, with `--evidence-excerpt` set to a `drain-signal:` digest |
 | `close_duplicate` | `rejected` via `conditional-status`, with a `drain-dup:` digest naming the decided original |
-| `queue_tier2` | **no write** — a refusal belongs to a named tier-2 approver (`tier2-queue`) |
+| `cannot_confirm` | **no write**, and no message: recorded in the ledger only |
 | `ask` | **no write** — the send belongs to `need_asks.py` |
 
 #### The drain does not disable the approve gate
@@ -810,7 +879,16 @@ python3 -m credit_review.scale_drain apply --plan plan.jsonl \
 # what is still not written, and why (layer / HTTP status / API error code / reasons)
 python3 -m credit_review.scale_drain failures --ledger /var/lib/hydra/credit-review/drain.sqlite
 
-# prove it: zero duplicates, zero orphans
+# prove it: duplicates and orphans. `verify` counts as an orphan EVERY applied key the
+# plan it is given does not name, so its count is meaningful only for the plan that was
+# applied. On the production ledger that set includes at least the 1,324 queue_tier2 rows
+# applied on 2026-11-11 and the 3 proof_verdict / reject rows applied on 2026-11-14: no plan
+# this code makes can name them (the ladder emits cannot_confirm for an expiry or a refuse
+# precedent and ask for a refuse verdict, and the outcome is part of the decision key), so
+# the drain's own rows have to leave it. That is a FLOOR, not an expected count - any other
+# applied key absent from the plan you replay from is in it too. `verify` has not been run
+# on the production ledger, so the real count is not measured. On a scratch ledger built
+# and applied by the same pass, expect zero.
 python3 -m credit_review.scale_drain verify --plan plan.jsonl --ledger …
 
 # kill -9 every worker mid-pass, restart, prove identical final state
@@ -843,8 +921,9 @@ node-8. `--max-rows N` bounds it:
 There is no `LIMIT` on a decided read, and there must never be one (pinned by
 `ReplicaSnapshotTests` in `scripts/tests/test_scale_drain.py`). A decided population
 cut short does not only lose approvals: a claim rejected once and approved later reads as
-**refused** when the cut falls between the two, and the plan queues it for refusal. A
-decided request read only as a duplicate target sits on a track whose other decisions
+**refused** when the cut falls between the two, and the plan records it as
+`cannot_confirm` (`precedent_refuse`) instead of approving it. A decided request
+read only as a duplicate target sits on a track whose other decisions
 were not read, so it is carried as a decided row and sets no precedent. A track id that
 is not a UUID stops the run when its statement is built, before that statement is sent;
 a duplicate target that is not a UUID names no request and is simply not read.
@@ -916,10 +995,10 @@ jq -r 'select(.outcome=="close_duplicate") | .request_id' plan.jsonl | wc -l
 # what the pass actually does, by outcome and reason (`plan` prints the same as by_reason)
 jq -r '"\(.outcome)/\(.reason_code)"' plan.jsonl | sort | uniq -c
 
-# how many rows go to a tier-2 approver instead of being refused autonomously
-jq -r 'select(.outcome=="queue_tier2") | .reason_code' plan.jsonl | sort | uniq -c
+# how many rows the ladder cannot confirm (recorded only: no write, no message)
+jq -r 'select(.outcome=="cannot_confirm") | .reason_code' plan.jsonl | sort | uniq -c
 
-# how many rows carry a fact the ladder could not resolve (needs a human, never asked)
+# how many rows carry a fact the ladder could not resolve (counted, never written, never asked)
 jq -r 'select(.outcome=="unmatched") | .request_id' plan.jsonl | wc -l
 ```
 
@@ -962,7 +1041,8 @@ no second sender.
 ## Guardrails
 
 - **Never lower a served number.** The ladder only closes duplicates, approves on
-  precedent or a verdict, queues an expiry or refusal for a named human, or asks. It
+  precedent or a verdict, records an expiry or a refuse precedent with nothing newer on file as
+  `cannot_confirm`, or asks. It
   never reduces a credit.
 - **The idempotency key is the proof against a duplicate send.**
 - Major-label/publisher check before any removal or ban; no legal letters; a GDPR reply

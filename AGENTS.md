@@ -1268,27 +1268,28 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
 
 - **`scripts/credit_review/scale_drain.py`** is the decider: a single SQL ladder
   (`LADDER_SQL`) in rank order — duplicate of a decided request → close; precedent →
-  approve on a per-claimant prior approval, or queue a refusal for a named human; a
-  readable proof verdict → approve, or queue a refusal; **asked** and expired with no
-  proof → queue for tier-2; else ask. **No model in the hot path** (Aaron's 2026-10-29
+  approve on a per-claimant prior approval, or `cannot_confirm` on a refuse precedent
+  that nothing on file postdates; a
+  readable proof verdict → approve, or ask on a refuse; **asked** and expired with no
+  proof → `cannot_confirm`; else ask. **No model in the hot path** (Aaron's 2026-10-29
   ruling: a model reviews a sample and proposes rule changes, it never decides a row).
   `decision_key = sha256(request_id || rule || outcome || version)` is the ledger primary
   key, so a re-run cannot double-apply and a killed worker re-reads its shard and skips
   every row already in the ledger (there is no cursor to lose or trust). The **outcome** is
   in the key on purpose: without it a decision that changes keeps its key and `apply` skips
-  it, so a queued refusal that later becomes an approval would be silently dropped. The plan JSONL is
-  canonical (sorted, no clock, no run id) — that is what makes "run it twice, diff the
-  bytes" a real test.
-- **Expiry may only refuse a request we actually ASKED** (`asked_at IS NOT NULL`). A
+  it, so a row recorded as `cannot_confirm` that later becomes an approval would be
+  silently dropped. The plan JSONL is canonical (sorted, no clock, no run id) — that is
+  what makes "run it twice, diff the bytes" a real test.
+- **An expiry may only reach a request we actually ASKED** (`asked_at IS NOT NULL`). A
   never-asked request falls through to `ask`: the 23,247 OPEN_UNASKED rows are the
-  drain's population, not its refuse pile, and refusing a customer we never asked is a
-  customer-facing denial we do not do (captain decision 2026-11-11).
+  drain's population, not its expiry pile, and an expiry is the record of a window the
+  customer was given and did not answer (captain decision 2026-11-11).
 - **`apply` performs a real API side effect** through the one reviewed path
   `muso-admin-api.sh` already exposes: `PUT /admin/credit-requests
   {"requestIds":[…],"status":…}` through the wrapper, so the full gate chain still runs.
   `approve` → `approved`, `close_duplicate` → `rejected` via `conditional-status`,
-  `ask` → no write (the send is `need_asks.py`'s), `queue_tier2` → no write (a refusal is
-  a named human's). **Intent, write, confirm**: `apply` commits an `intents` row BEFORE
+  `ask` → no write (the send is `need_asks.py`'s), `cannot_confirm` → no write and no
+  message. **Intent, write, confirm**: `apply` commits an `intents` row BEFORE
   the API call and confirms it after. An intent left open (a kill between the two, or a
   write that failed or timed out) is never retried blind: the next run reads the live
   request (`verify_anchor.reconcile`) and records `reconciled`, retries a still-pending
@@ -1362,25 +1363,32 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   `policy.never_ask` and gets a test; why this exists: 26 of 480 impersonation-flagged
   users were sent a verify message 10-14 November, 22 of them by uvn-status.
 - **The pass is small, and an `ask` is not a decision.** Measured on the live snapshot
-  2026-11-11: 3,294 approve, 1,324 queued for a human, 856 `already_on_profile`
-  (unmatched), 91,229 ask of 96,703. Never describe it as deciding the backlog; the table
-  and the reasons two rules are zero are in the operator doc.
+  2026-11-11: 3,294 approve, 1,324 under the since-removed `queue_tier2`, 856
+  `already_on_profile` (unmatched), 91,229 ask of 96,703. Never describe it as deciding
+  the backlog; the table and the reasons two rules are zero are in the operator doc.
 - **The proof store keys a verdict by CLAIM (`<request uuid>#<Role>`), and core's
   `duplicate_of` is a map of credits, not a request id.** Keyed by bare request id the
   proof rule matched none of 326,611 verdicts, and the map crashed the plan. A document
   on file with no decisive verdict keeps `proof_received_at`, so it is
   `ask`/`proof_on_file_undecided` and never `expired_no_proof`. Run a ladder change
   against a real snapshot before believing a fixture.
-- **Duplicate closes are autonomous; refusals are not** (captain decision 2026-11-11).
+- **A duplicate close is a write; no outcome is a person** (captain 2026-11-14).
   A duplicate of an already-decided request is deduplication, not a new decision, so it
   closes through `is_scale_drain_duplicate_close` with
   `EVIDENCE_EXCERPT=drain-dup:<original-uuid>;<reason>;v<n>;<profile-uuid>` and is audited like a human
-  reject with the original as the approval reference. Expired-with-no-proof and a
-  `refuse` verdict are customer-facing denials: they get `queue_tier2`, write nothing, and
-  `tier2-queue` lists them for a human who supplies `--confirmed-by`/`--approval-msg-id`.
-  That queue is for the ladder's own refusals only, never for a row core refused.
-  The drain never supplies those. Never lower a served number, never deny a customer
-  autonomously.
+  reject with the original as the approval reference. The ladder no longer emits
+  `queue_tier2`: expired-with-no-proof and a refuse precedent are `cannot_confirm`, a
+  refuse proof verdict is `ask`, and `tier2-queue` lists no row. **`cannot_confirm` is
+  interim and is not a decision**: a ledger row, no write, no message. The request stays
+  pending and the next plan decides it again. **A refuse precedent is not final**
+  (`SET_ASIDE_SQL`): evidence newer than the refusal (`requests.evidence_at`: a filed
+  document, a `built`/`written` DSP anchor or a proof verdict, against
+  `precedent.decided_at`, core's `updatedat`) takes the request out of the rule, and an
+  unmeasured refusal time does not stand over evidence. Nothing tells the customer that,
+  so never count a `cannot_confirm` row as decided or told (994 of 1,172 refuse-precedent
+  rows had nothing newer on file, 2026-11-15). The 1,324 `queue_tier2` rows of 2026-11-11
+  are still in `applied`, each with a `told` row that no message backs. Never lower a
+  served number.
 - **The drain never sets `CV_APPROVE_GATE_DISABLED`.** That variable skips every evidence
   requirement and must not be set by an agent. The wrapper instead carries a fifth
   registered predicate, `is_scale_drain_approval`, which admits only

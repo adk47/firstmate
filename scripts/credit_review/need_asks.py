@@ -299,11 +299,12 @@ def drain_asks(plan_path: str) -> set[tuple[int, str]]:
     """The (user, request) pairs the drain decided to ASK.
 
     The drain (scripts/credit_review/scale_drain.py) is the deterministic decider: duplicate -> close, precedent ->
-    approve or tier-2 queue, proof verdict -> approve or tier-2 queue, expired -> tier-2 queue, otherwise ask. The
-    audience is every row whose OUTCOME is `ask` - including a rule that wanted to approve but had no evidence anchor
-    and was downgraded to ask, and a row core refused back onto the ask path (`scale_drain.py asks --plan P --out
-    FILE` emits both) - so this module never re-decides it. A row with no user id cannot be asked by the
-    reviewed path and is refused loudly rather than silently dropped.
+    approve or ask, proof verdict -> approve or ask, expired -> cannot_confirm (a ledger row only, never asked), a
+    refuse precedent that nothing on file postdates -> cannot_confirm, otherwise ask. The audience is every row whose OUTCOME is `ask` - including a
+    row core refused back onto the ask path (`scale_drain.py asks --plan P --out FILE` emits those) - so this module
+    never re-decides it. A rule that wanted to approve but had no evidence anchor is `unmatched` in the plan, not an
+    `ask` row, so it is never offered here: a user already decided is never sent a fresh "please verify" ask. A row
+    with no user id cannot be asked by the reviewed path and is refused loudly rather than silently dropped.
     """
     out: set[tuple[int, str]] = set()
     try:
