@@ -71,6 +71,14 @@
 # the hourly relaunch budget and the rung is tried again, and a spent budget
 # wakes firstmate once with the lane named.
 #
+# WHOSE TASK IT IS NOT. A task the captain holds, and a task the captain
+# ordered left stopped (state/<id>.stopped, written by
+# bin/fm-leave-stopped.sh), are skipped by every pass below, because their
+# endpoint being down is the state the captain chose rather than a fault to
+# repair. Measured 2026-11-15 00:37Z: 43 stopped lanes were re-paged "endpoint
+# dead and its hourly relaunch budget is spent" every hour, filling the wake
+# queue to 45.
+#
 # THE STALL LADDER. A live worker whose pane keeps one SHAPE for
 # no_progress_secs while it reads busy is stalled. Shape means printable ASCII
 # with digits folded and non-ASCII dropped, so a ticking timer, a spinner glyph,
@@ -877,6 +885,22 @@ task_is_held() {  # <id>
   [ -n "$HELD_IDS" ] && printf '%s\n' "$HELD_IDS" | grep -qxF "$1"
 }
 
+# task_is_left_stopped <id>: true when the captain ordered this task left
+# stopped. bin/fm-leave-stopped.sh writes state/<id>.stopped for exactly that,
+# and bin/fm-watch.sh already skips the marker's endpoint; the watchdog has to
+# skip it too, or every pass keeps reporting a decision the captain has made.
+# Measured 2026-11-15 00:37Z: 43 stopped lanes were re-paged "endpoint dead and
+# its hourly relaunch budget is spent" every hour, filling the wake queue to 45.
+task_is_left_stopped() {  # <id>
+  [ -f "$STATE/$1.stopped" ]
+}
+
+# task_is_skipped <id>: true when no pass may act on this task. A held or
+# stopped task is the captain's, not a fault for the watchdog to repair.
+task_is_skipped() {  # <id>
+  task_is_held "$1" || task_is_left_stopped "$1"
+}
+
 # --- boot pass --------------------------------------------------------------
 
 # chair_ensure: make sure the chair's own unit runs, without ever starting a
@@ -929,7 +953,7 @@ boot_pass() {  # <boot>
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
     [ -n "$(fm_meta_get "$meta" window)" ] || continue
-    task_is_held "$id" && continue
+    task_is_skipped "$id" && continue
     if [ "$(now_epoch)" -ge "$deadline" ]; then
       printf 'watchdog: boot pass ran out of budget before it reached every task; the task pass continues from here\n'
       break
@@ -1095,7 +1119,7 @@ task_pass() {
     [ -n "$window" ] || continue
     # The boot pass already acted on this task in this pass.
     [ -e "$WORK/touched.$id" ] && continue
-    task_is_held "$id" && continue
+    task_is_skipped "$id" && continue
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
@@ -1537,7 +1561,7 @@ inbox_pass() {
     case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
-    task_is_held "$id" && continue
+    task_is_skipped "$id" && continue
     [ -d "$STATE/$id.inbox" ] || continue
     oldest=$(inbox_oldest "$id") || continue
     base=${oldest##*/}

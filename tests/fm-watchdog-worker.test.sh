@@ -381,6 +381,30 @@ test_lifecycle_lock_contention_is_retried_not_recorded() {
   pass "lifecycle lock contention stays retryable instead of becoming a 6h refusal"
 }
 
+test_a_task_left_stopped_is_never_relaunched_or_paged() {
+  local home now out
+  home=$(make_home left-stopped); fake_tools "$home"
+  worker "$home" w1 dead
+  worker "$home" w2 dead
+  # The captain's own order, written by bin/fm-leave-stopped.sh.
+  printf 'schema=fm-leave-stopped.v1\nat=2026-11-15T00:37:55Z\nreason=left stopped\n' \
+    > "$home/state/w1.stopped"
+  now=$(start_clock)
+  out=$(tick "$home" "$now")
+  assert_eq "$(counter "$home" '^control w1 .* relaunch')" "0" \
+    "a task the captain left stopped was relaunched"
+  assert_eq "$(counter "$home" '^control w2 .* relaunch')" "1" \
+    "an ordinary dead task stopped being relaunched alongside a stopped one"
+  [ -z "$(wakes "$home")" ] || fail "a stopped task woke firstmate: $(wakes "$home")"
+  out=$(tick "$home" "$((now + 300))" FM_WATCHDOG_BOOT_ID=boot-a)
+  assert_contains "$out" "relaunched 1 of 1 task(s)" "the boot pass counted a task the captain left stopped"
+  assert_eq "$(counter "$home" '^control w1 .* relaunch')" "0" \
+    "the boot pass relaunched a task the captain left stopped"
+  assert_eq "$(wakes "$home" | grep -c 'w1 endpoint')" "0" \
+    "a stopped task was paged about its endpoint"
+  pass "a task the captain left stopped is skipped by every pass, exactly like a held one"
+}
+
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake() {
   local home now out
   home=$(make_home dead); fake_tools "$home"
@@ -1149,6 +1173,7 @@ test_an_orca_replacement_names_a_note_it_could_not_deliver
 test_a_spawn_preflight_refusal_spends_no_budget_and_retries_once
 test_a_transient_spawn_failure_is_not_a_refusal
 test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn
+test_a_task_left_stopped_is_never_relaunched_or_paged
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake
 test_an_unread_steer_is_interrupted_then_relaunched_once_each
 test_a_transient_inbox_relaunch_failure_is_not_announced_as_done
