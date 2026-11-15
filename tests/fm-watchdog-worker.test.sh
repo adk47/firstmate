@@ -345,10 +345,19 @@ test_a_transient_spawn_failure_is_not_a_refusal() {
   : > "$home/units/spawn-transient"
   worker "$home" w1 missing ship pi orca
   now=$(start_clock)
+  jq -n --argjson now "$now" \
+    '{schema: 1, boot_identity: "", units: {}, backlog: {},
+      tasks: { w1: { sig: "abc", since: $now, stage: 0, stage_at: 0,
+        rings: [], relaunches: [], steers: [], woke: false,
+        istage: 0, istage_at: 0, ibase: "", strikes: [$now],
+        refusal: "", refusal_at: 0 } }}' \
+    > "$home/state/.watchdog-worker.json"
   tick "$home" "$now" >/dev/null
   tick "$home" "$((now + 600))" >/dev/null
   assert_eq "$(counter "$home" '^spawn w1 --relaunch')" "2" \
     "a transient spawn failure was treated as a structural refusal"
+  assert_eq "$(jq -r '.tasks.w1.strikes | length' "$home/state/.watchdog-worker.json")" "1" \
+    "a transient spawn failure was recorded as a completed relaunch"
   [ -z "$(wakes "$home" | grep 'cannot relaunch w1')" ] \
     || fail "a transient spawn failure escalated as a refusal: $(wakes "$home")"
   pass "a transient spawn failure is retried on the ordinary budget"

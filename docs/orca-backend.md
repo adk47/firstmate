@@ -62,7 +62,7 @@ Orca keeps a terminal's `agentIdentity` and agent title after the agent exits ba
 `orca terminal show` names the terminal's pty, Orca's own host process sweep (`orca diagnostics memory`) names that pty's root pid, and the shared harness-name classifier reads every process below it: a harness is `alive`, only shells is `dead`, anything else is `ambiguous`, and Orca's stale-handle answer is `missing` (`bin/backends/orca.sh` owns the mechanics).
 A terminal Orca itself reports gone is also `missing`: one whose record carries a terminal `exitCause` (an `operator_close`, a signal, or an observed exit code) or reports itself neither connected nor writable, while the pty it names has left the host sweep.
 That is the shape a closed Orca tab leaves behind, and reading it as `unreadable` left the endpoint permanently unreplaceable.
-A stop Orca could not verify, whether an `unknown` cause or its negative sentinel exit code, stays `unreadable`, and a pty the sweep still names keeps the process-tree verdict, because a living process outranks a record.
+A stop Orca could not verify, whether an `unknown` cause or its negative sentinel exit code, stays `unreadable` unless the record also reports itself neither connected nor writable, and a pty the sweep still names keeps the process-tree verdict, because a living process outranks a record.
 In-place `relaunch` stays refused on Orca until a replacement launch into the same terminal is proven.
 When Orca reports a task's terminal gone (`missing`, as after an Orca or host restart), `bin/fm-spawn.sh <id> --relaunch` launches the replacement in a new terminal in the task's recorded Orca worktree and republishes the record with it; a live or shell-only terminal still refuses.
 

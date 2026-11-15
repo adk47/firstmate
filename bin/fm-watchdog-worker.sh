@@ -1108,6 +1108,10 @@ task_pass() {
             continue
           fi
           relaunches=$(csv_append "$relaunches" "$now")
+          if [ "$rc" -ne 0 ]; then
+            task_store "$id"
+            continue
+          fi
           task_reset "$id" "$relaunches"
           continue
         fi
