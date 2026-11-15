@@ -36,6 +36,10 @@
 #   (u) a null pending qa-review conclusion is not overwritten by a success
 #   (v) prose around develop/beta is not read as a twin reference
 #   (w) a skipped or neutral duplicate cannot outrank an earlier success
+#   (x) a Muso-AI repository without a qa-review check still refuses
+#   (y) declared no-QA coverage needs a green no-mistakes attestation
+#   (z) an undeclared repository refuses until a recorded override
+#   (aa) a red check whose name contains the old field delimiter still refuses
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -49,7 +53,7 @@ TMP_ROOT=$(fm_test_tmproot fm-merge-gate-tests)
 
 JQ_BIN=$(command -v jq) || fail "these tests read fixtures with the real jq, which was not found"
 
-REPO=example/repo
+REPO=Muso-AI/repo
 HEAD=1111111111111111111111111111111111111111
 OLD_HEAD=2222222222222222222222222222222222222222
 
@@ -184,12 +188,24 @@ write_pr_list() {
 JSON
 }
 
+# write_no_qa_repos <case_dir> <owner/repo>...: declare the local no-QA list.
+write_no_qa_repos() {
+  local case_dir=$1 repo
+  shift
+  mkdir -p "$case_dir/config"
+  {
+    printf '# local no-QA coverage declarations\n\n'
+    for repo in "$@"; do printf '%s\n' "$repo"; done
+  } > "$case_dir/config/merge-gate-no-qa-repos"
+}
+
 # run_gate <case_dir> [args...]: run the gate in check-only mode.
 run_gate() {
   local case_dir=$1 rc
   shift
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_FIXTURES="$case_dir/fixtures" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$GATE" "$@" >"$case_dir/out" 2>"$case_dir/err"
   rc=$?
@@ -579,6 +595,151 @@ test_gate_skipped_or_neutral_qa_outranks_success() {
   pass "a skipped or neutral duplicate cannot outrank an earlier success"
 }
 
+# --- (x) Muso-AI remains qa-review-covered without any workflow inference ---
+
+test_gate_muso_ai_without_qa_check_refuses() {
+  local case_dir rc
+  case_dir=$(make_case muso-ai-no-qa-check)
+  write_pr_view "$case_dir" checks='unit-tests:SUCCESS'
+
+  set +e
+  run_refusal_via_merge "$case_dir" -- --squash
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a Muso-AI repository without a qa-review check must refuse"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
+  assert_contains "$(cat "$case_dir/err")" "no qa-review verdict exists on head $HEAD" \
+    "the refusal must apply the declared Muso-AI class, not an absent workflow"
+  pass "a Muso-AI repository without a qa-review check still refuses"
+}
+
+test_gate_muso_ai_with_qa_go_passes_without_workflow_fixture() {
+  local case_dir rc
+  case_dir=$(make_case muso-ai-qa-go)
+  write_pr_view "$case_dir" checks='qa-review:SUCCESS,unit-tests:SUCCESS'
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a Muso-AI qa-review GO must pass even with no workflow fixture"
+  assert_contains "$(cat "$case_dir/out")" "qa-review=SUCCESS" \
+    "the pass must report the declared class's verdict"
+  pass "a Muso-AI repository with a current qa-review GO passes"
+}
+
+# --- (y) declared no-QA coverage uses the no-mistakes attestation ----------
+
+test_gate_declared_no_qa_attestation_green_passes() {
+  local case_dir rc
+  case_dir=$(make_case no-qa-attested)
+  write_no_qa_repos "$case_dir" Acme/widgets
+  write_pr_view "$case_dir" checks='PR must be raised via no-mistakes:SUCCESS,unit-tests:SUCCESS'
+
+  set +e
+  run_gate "$case_dir" Acme/widgets 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a declared no-QA repository with a green attestation must pass"
+  assert_contains "$(cat "$case_dir/out")" "no-mistakes-attestation=SUCCESS" \
+    "the pass must report the attestation it verified"
+  pass "a declared no-QA repository with a green attestation passes"
+}
+
+test_gate_declared_no_qa_attestation_absent_refuses() {
+  local case_dir rc
+  case_dir=$(make_case no-qa-attestation-absent)
+  write_no_qa_repos "$case_dir" Acme/widgets
+  write_pr_view "$case_dir" checks='unit-tests:SUCCESS'
+
+  set +e
+  run_gate "$case_dir" Acme/widgets 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a declared no-QA repository without the attestation must refuse"
+  assert_contains "$(cat "$case_dir/err")" "no no-mistakes attestation named 'PR must be raised via no-mistakes' exists on head $HEAD" \
+    "the refusal must name the absent attestation"
+  pass "a declared no-QA repository without the attestation refuses"
+}
+
+test_gate_declared_no_qa_attestation_red_refuses() {
+  local case_dir rc
+  case_dir=$(make_case no-qa-attestation-red)
+  write_no_qa_repos "$case_dir" 'Acme/widgets  # local declaration'
+  write_pr_view "$case_dir" checks='PR must be raised via no-mistakes:FAILURE,unit-tests:SUCCESS'
+
+  set +e
+  run_gate "$case_dir" Acme/widgets 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a red no-mistakes attestation must refuse"
+  assert_contains "$(cat "$case_dir/err")" "the no-mistakes attestation on head $HEAD is FAILURE, not SUCCESS" \
+    "the refusal must name the attestation and its conclusion"
+  pass "a declared no-QA repository with a red attestation refuses"
+}
+
+# --- (z) an undeclared repository refuses until a recorded override --------
+
+test_gate_undeclared_repository_refuses() {
+  local case_dir rc
+  case_dir=$(make_case undeclared-repo)
+  write_no_qa_repos "$case_dir" Acme/other
+  write_pr_view "$case_dir" checks='qa-review:SUCCESS,unit-tests:SUCCESS'
+
+  set +e
+  run_gate "$case_dir" Acme/widgets 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "an undeclared repository must refuse"
+  assert_contains "$(cat "$case_dir/err")" "QA coverage unknown for Acme/widgets" \
+    "the refusal must say coverage is unknown, not silently allow"
+  pass "an undeclared repository refuses with QA coverage unknown"
+}
+
+test_pr_merge_undeclared_repository_override_passes_and_records() {
+  local case_dir rc meta
+  case_dir=$(make_case undeclared-override)
+  write_no_qa_repos "$case_dir" Acme/other
+  write_pr_view "$case_dir" checks='unit-tests:SUCCESS'
+  write_gh_axi_mock "$case_dir"
+  extend_gh_mock_for_outcome "$case_dir"
+  printf '%s\n' 'state=MERGED' 'merged=true' 'queued=false' 'base=develop' \
+    > "$case_dir/github-outcome"
+  : > "$case_dir/gh-axi.log"
+  meta="$case_dir/state/task-x1.meta"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "https://github.com/Acme/widgets/pull/9" \
+    --override-gate "captain accepted unknown coverage" -- --squash
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "an explicit recorded override must authorize an undeclared repository"
+  assert_grep "pr merge" "$case_dir/gh-axi.log" "the overridden merge call must be made"
+  assert_grep "merge_gate_override=captain accepted unknown coverage" "$meta" \
+    "the override reason must be recorded"
+  assert_grep "merge_gate_override_by=" "$meta" "the override operator must be recorded"
+  assert_grep "merge_gate_override_at=" "$meta" "the override time must be recorded"
+  pass "an undeclared repository merges only through a recorded override"
+}
+
+# --- (aa) a check name carrying the old delimiter still refuses ------------
+
+test_gate_red_check_name_with_pipe_refuses() {
+  local case_dir rc
+  case_dir=$(make_case red-check-pipe)
+  write_pr_view "$case_dir" checks='qa-review:SUCCESS,build | linux:FAILURE'
+
+  set +e
+  run_refusal_via_merge "$case_dir" -- --squash
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a red check whose name contains | must still refuse"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
+  assert_contains "$(cat "$case_dir/err")" "the check build | linux is FAILURE on head $HEAD" \
+    "the refusal must preserve the whole check name and its conclusion"
+  pass "a red check whose name contains the old delimiter still refuses"
+}
+
 # A backfill over past merges needs the verdict of a pull request that already
 # merged, so --check-only evaluates it instead of short-circuiting.
 test_gate_check_only_audits_a_merged_pull_request() {
@@ -680,6 +841,7 @@ run_pr_merge() {
   FM_TEST_GH_FIXTURES="$case_dir/fixtures" \
   FM_TEST_GH_HEAD="$HEAD" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@" >"$case_dir/out" 2>"$case_dir/err"
   rc=$?
@@ -761,6 +923,7 @@ test_go_queue_refuses_row_and_continues() {
   FM_TEST_GH_FIXTURES="$case_dir/fixtures" \
   FM_TEST_GH_HEAD="$HEAD" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$QUEUE_RUN" "$queue" >"$case_dir/out" 2>"$case_dir/err"
   rc=$?
@@ -796,6 +959,7 @@ test_go_queue_dry_run_merges_nothing() {
   FM_TEST_GH_FIXTURES="$case_dir/fixtures" \
   FM_TEST_GH_HEAD="$HEAD" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$QUEUE_RUN" "$queue" --dry-run >"$case_dir/out" 2>"$case_dir/err"
   rc=$?
@@ -837,6 +1001,14 @@ test_gate_ignores_unrelated_issue_reference
 test_gate_null_pending_qa_before_success_refuses
 test_gate_ignores_develop_beta_prose
 test_gate_skipped_or_neutral_qa_outranks_success
+test_gate_muso_ai_without_qa_check_refuses
+test_gate_muso_ai_with_qa_go_passes_without_workflow_fixture
+test_gate_declared_no_qa_attestation_green_passes
+test_gate_declared_no_qa_attestation_absent_refuses
+test_gate_declared_no_qa_attestation_red_refuses
+test_gate_undeclared_repository_refuses
+test_pr_merge_undeclared_repository_override_passes_and_records
+test_gate_red_check_name_with_pipe_refuses
 test_pr_merge_refuses_before_merge_call
 test_pr_merge_override_records_and_merges
 test_go_queue_refuses_row_and_continues

@@ -9,16 +9,25 @@
 #   - the live head differs from the head the caller expected, or from the head
 #     recorded in the task's metadata (a GO on an older commit never authorizes
 #     a newer head);
-#   - the repository runs a qa-review check and the latest qa-review conclusion
-#     on the current head is not success - a NO-GO, a pending review, a review
-#     that never ran, and a review left on an older head all refuse, because
-#     absent is not GO;
+#   - a Muso-AI repository has no successful qa-review conclusion on the current
+#     head - a NO-GO, a pending review, a review that never ran, and a review
+#     left on an older head all refuse, because absent is not GO;
+#   - a repository declared no-QA has no successful no-mistakes attestation
+#     named "PR must be raised via no-mistakes" on the current head;
+#   - the repository is in neither declared class, so QA coverage is unknown;
 #   - any check on the current head is red, except credit-approval-guard when
 #     the pull request author is adk47 (the by-design self-authorship check);
 #   - the pull request is a master/main twin whose develop/beta counterpart is
 #     not merged.
-# It passes otherwise and prints the head, the qa-review conclusion, and the
-# standing allowed red, so the merge record carries what was actually verified.
+# It passes otherwise and prints the head, the verdict it verified, and the
+# standing allowed red, so the merge record carries what was actually checked.
+#
+# QA coverage is declared, never inferred from the head. The owner Muso-AI is
+# qa-review-covered. The no-QA class is adk47/firstmate plus each owner/repo on
+# one line of config/merge-gate-no-qa-repos, where blank lines and # comments
+# are ignored. That file is local and gitignored in this repo, so its absence is
+# normal; the built-in default and the Muso-AI rule still decide coverage. A
+# repository on neither list is refused rather than treated as unrequired.
 #
 # Silence means refuse: a read that cannot be completed, a missing gh, and an
 # unparseable payload are all refusals, never a pass. There is no environment
@@ -95,7 +104,7 @@ fm_merge_gate_read_pr() {
         ("state=" + (.state // "")),
         ("merged_at=" + ((.mergedAt // "") | tostring)),
         ("body=" + ((.body // "") | gsub("[\r\n]+"; " "))),
-        ((.statusCheckRollup // [])[] | ("check=" + ((.name // .context) // "") + "|" + ((.conclusion // .state) // "")))
+        ((.statusCheckRollup // [])[] | ("check=" + ((.name // .context) // "") + "\u001f" + ((.conclusion // .state) // "")))
       )' 2>/dev/null) || [ -z "$fields" ]; then
     return 1
   fi
@@ -159,8 +168,8 @@ fm_merge_gate_check_conclusion() {
   local want=$1 line name conclusion found='' found_set=false
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    name=${line%%|*}
-    conclusion=${line#*|}
+    name=${line%%$'\x1f'*}
+    conclusion=${line#*$'\x1f'}
     [ "$name" = "$want" ] || continue
     [ -n "$conclusion" ] || conclusion=PENDING
     if [ "$found_set" != true ]; then
@@ -175,24 +184,28 @@ CHECKS
   printf '%s' "$found"
 }
 
-# Whether the repository runs a qa-review workflow. Returns 0 when it does, 1
-# when it provably does not, and 2 when the workflow list cannot be read - which
-# the caller treats as a refusal, because an unreadable list cannot rule QA in
-# or out.
-fm_merge_gate_has_qa_workflow() {
-  local repo=$1 names
-  # stderr is folded into the capture so a failed read can be told apart from a
-  # repository that simply has no workflows directory, without a temp file.
-  if names=$(gh api "repos/$repo/contents/.github/workflows" --jq '.[].name' 2>&1); then
-    printf '%s\n' "$names" | grep -qi 'qa' && return 0
-    return 1
-  fi
-  # A repository with no workflows directory has no qa-review workflow; any
-  # other failure leaves the question open.
-  if printf '%s' "$names" | grep -qiE 'not found|404'; then
-    return 1
-  fi
-  return 2
+# The local, gitignored config file that declares the no-QA repositories.
+fm_merge_gate_no_qa_config() {
+  local home
+  home=${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}
+  printf '%s/merge-gate-no-qa-repos' "${FM_CONFIG_OVERRIDE:-$home/config}"
+}
+
+# Whether the repository is declared no-QA. adk47/firstmate is the built-in
+# default so this repo merges correctly when the local config file is absent.
+fm_merge_gate_is_no_qa_repo() {
+  local repo=$1 file line declared
+  repo=$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')
+  [ "$repo" = adk47/firstmate ] && return 0
+  file=$(fm_merge_gate_no_qa_config)
+  [ -r "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%%#*}
+    line=$(printf '%s' "$line" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+    [ -n "$line" ] || continue
+    [ "$line" = "$repo" ] && return 0
+  done < "$file"
+  return 1
 }
 
 # Print a description of an unmerged develop/beta twin of this master/main pull
@@ -269,8 +282,8 @@ ROWS
 fm_merge_gate() {
   local repo='' number='' expected='' recorded='' forge=github
   local arg
-  local refusals='' allowed='' qa='' qa_required=0 qa_rc=0
-  local line name conclusion twin='' check_only=false
+  local refusals='' allowed='' qa='' attestation='' coverage='' verdict_label='' verdict_value=''
+  local line name conclusion twin='' check_only=false owner='' 
 
   if [ "$#" -lt 3 ]; then
     echo "error: merge gate needs <owner/repo> <pr-number> <expected-head>" >&2
@@ -356,36 +369,50 @@ fm_merge_gate() {
 "
   fi
 
-  # QA: required when the repository runs a qa-review workflow, and also when a
-  # qa-review check exists on this head even if the workflow list says nothing.
-  fm_merge_gate_has_qa_workflow "$repo"
-  qa_rc=$?
-  case "$qa_rc" in
-    0) qa_required=1 ;;
-    1) qa_required=0 ;;
-    *)
-      refusals="$refusals  - the repository's workflow list could not be read, so whether a qa-review verdict is required cannot be determined
+  # QA coverage is declared. The owner Muso-AI is qa-review-covered; each
+  # no-QA repository needs a green no-mistakes attestation instead; anything
+  # else is unknown, and silence is not a GO.
+  owner=$(printf '%s' "${repo%%/*}" | tr '[:upper:]' '[:lower:]')
+  if [ "$owner" = muso-ai ]; then
+    coverage=qa
+  elif fm_merge_gate_is_no_qa_repo "$repo"; then
+    coverage=no-qa
+  else
+    refusals="$refusals  - QA coverage unknown for $repo: it is not a Muso-AI repository and is not declared in config/merge-gate-no-qa-repos
 "
-      qa_required=1
+  fi
+  case "$coverage" in
+    qa)
+      qa=$(fm_merge_gate_check_conclusion qa-review)
+      if [ -z "$qa" ]; then
+        refusals="$refusals  - no qa-review verdict exists on head $FM_MERGE_GATE_HEAD, and an absent verdict is not a GO
+"
+      elif [ "$qa" != SUCCESS ]; then
+        refusals="$refusals  - the qa-review verdict on head $FM_MERGE_GATE_HEAD is $qa, not SUCCESS
+"
+      fi
+      verdict_label=qa-review
+      verdict_value=$qa
+      ;;
+    no-qa)
+      attestation=$(fm_merge_gate_check_conclusion 'PR must be raised via no-mistakes')
+      if [ -z "$attestation" ]; then
+        refusals="$refusals  - no no-mistakes attestation named 'PR must be raised via no-mistakes' exists on head $FM_MERGE_GATE_HEAD, and an absent attestation is not a GO
+"
+      elif [ "$attestation" != SUCCESS ]; then
+        refusals="$refusals  - the no-mistakes attestation on head $FM_MERGE_GATE_HEAD is $attestation, not SUCCESS
+"
+      fi
+      verdict_label=no-mistakes-attestation
+      verdict_value=$attestation
       ;;
   esac
-  qa=$(fm_merge_gate_check_conclusion qa-review)
-  [ -z "$qa" ] || qa_required=1
-  if [ "$qa_required" -eq 1 ]; then
-    if [ -z "$qa" ]; then
-      refusals="$refusals  - no qa-review verdict exists on head $FM_MERGE_GATE_HEAD, and an absent verdict is not a GO
-"
-    elif [ "$qa" != SUCCESS ]; then
-      refusals="$refusals  - the qa-review verdict on head $FM_MERGE_GATE_HEAD is $qa, not SUCCESS
-"
-    fi
-  fi
 
   # Red checks, with only the standing adk47 self-authorship allow.
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    name=${line%%|*}
-    conclusion=${line#*|}
+    name=${line%%$'\x1f'*}
+    conclusion=${line#*$'\x1f'}
     fm_merge_gate_is_red "$conclusion" || continue
     if [ "$name" = "$FM_MERGE_GATE_STANDING_ALLOW" ] \
       && [ "$FM_MERGE_GATE_AUTHOR" = "$FM_MERGE_GATE_STANDING_ALLOW_AUTHOR" ]; then
@@ -417,8 +444,8 @@ CHECKS
     return 1
   fi
 
-  printf 'merge gate: %s#%s authorized at head %s (qa-review=%s, allowed reds=%s)\n' \
-    "$repo" "$number" "$FM_MERGE_GATE_HEAD" "${qa:-not-required}" \
+  printf 'merge gate: %s#%s authorized at head %s (%s=%s, allowed reds=%s)\n' \
+    "$repo" "$number" "$FM_MERGE_GATE_HEAD" "$verdict_label" "${verdict_value:-not-required}" \
     "$(printf '%s' "$allowed" | tr '\n' ',' | sed 's/,$//')"
   return 0
 }
