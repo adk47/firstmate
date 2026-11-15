@@ -1,0 +1,33 @@
+=== 260-task supervisor digest (full sweep) ===
+fleet digest: 260 task(s), 78 exception(s), 0 orphan status log(s), generated 2026-11-15T19:38:31Z
+task-102 | paused | ship | 0s | paused [key=await-tick]: idle until 2026-11-16 08:10Z (next scheduled tick)
+task-103 | blocked | ship | 0s | blocked: https://github.com/Muso-AI/hydra/pull/20103 has an unanswered qa-review finding on head deadbeef
+task-104 | needs-decision | ship | 0s | needs-decision [key=nm-01M7FAKH3YGPRQ6TH8H1RAM72E-review3]: ask-user findings=f1 file=/tmp/findings.txt
+task-112 | paused | ship | 0s | paused [key=await-tick]: idle until 2026-11-16 08:10Z (next scheduled tick)
+task-113 | blocked | ship | 0s | blocked: https://github.com/Muso-AI/hydra/pull/20113 has an unanswered qa-review finding on head deadbeef
+...
+task-99 | working | ship | 0s | working: step 99
+ledger: /tmp/fm-digest-ev.t1ZB3d/state/fleet-ledger.md
+
+digest bytes=21432 estimated_tokens=5358 (4 bytes/token; budget 15000)
+ledger task rows=260
+
+=== first --since run (establishes cursor) ===
+fleet digest: 260 task(s), 78 exception(s), 0 orphan status log(s), generated 2026-11-15T19:39:13Z, delta since the beginning
+routine task rows printed: 260
+
+=== no-change --since run (cursor now set) ===
+fleet digest: 260 task(s), 78 exception(s), 0 orphan status log(s), generated 2026-11-15T19:40:13Z, delta since 1794771553
+exception task rows printed: 78 (no routine rows)
+
+ledger task rows after the no-change --since run=260 (unchanged)
+
+=== session-start --compact reads the same ledger ===
+Work under way (fleet ledger: state/fleet-ledger.md, written by bin/fm-fleet-digest.sh; <id> | <state> | <kind> | <age> | <newest status event> - wake-EVENT history, not current state; full log state/<id>.status)
+--------------------------------------------------------------------------------
+ledger: /tmp/fm-digest-ev.t1ZB3d/state/fleet-ledger.md - one line per task (<id> | <state> | <kind> | <age> | <newest status line>); state is the newest status EVENT, not a live pane read, so run bin/fm-crew-state.sh <id> before acting on one task.
+generated: 2026-11-15T19:40:31Z (epoch 1794771631)
+tasks: 260
+...
+task-1 | done | ship | 2m
+(79 routine task row(s) omitted by the 12288-byte post-compaction budget - read /tmp/fm-digest-ev.t1ZB3d/state/fleet-ledger.md, or bin/fm-fleet-digest.sh --drill <id> for one task)
