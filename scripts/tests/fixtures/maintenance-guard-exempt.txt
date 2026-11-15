@@ -19,3 +19,4 @@ ghl-api-watchdog.sh                  # GHL CRM key/Cloudflare health for CMO out
 refund-credit-overlap-watchdog.sh    # Stripe duplicate cash-refund+credit concession; finance state, unrelated to gateway health
 intercom-data-complaint-watchdog.py  # agent-invoked systemic-data-issue pipeline (compliance); not schedule-fired fleet-health
 intercom-legal-unanswered-watchdog.py  # unanswered GDPR/legal requests -> #cs_priority (Jan); Intercom-sourced, GDPR clock runs during a fleet window
+intercom-unanswered-reply-watchdog.py  # customers waiting 24h+ on a human -> #cs_priority (Jan); Intercom-sourced, a customer's wait runs during a fleet window

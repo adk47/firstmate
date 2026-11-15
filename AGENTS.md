@@ -1024,6 +1024,27 @@ ONE place that says what Caroline did: `scripts/caroline_monitor/rules.py` holds
   ledger which thread carries the promise. Turning those lines on is a captain decision on the exact copy.
 - `waiting_on_us` is 1,554 with 1,394 older than 90 days, so never alarm on `> 0`; use `waiting_on_us_by_wait`.
 
+## A customer waiting on a person is paged, and a bot hand-off is not an answer
+
+`scripts/intercom-unanswered-reply-watchdog.py` (hourly `intercom-unanswered-reply-watchdog.timer`,
+read-only, no model) pages `#cs_priority`, paid first, for open Intercom threads waiting 24 h+ on a
+person. Doc: `docs/support/unanswered-reply-watchdog.md`.
+
+- **"Did the customer write last?" is the wrong question.** The thread it was built for ended on
+  Caroline saying "I'm pulling in a teammate", twice, with no person for 13 days. Only a HUMAN admin
+  reply keeps a hand-off promise; her later replies never restart that clock. Decide from the thread,
+  never from `statistics.last_admin_reply_at` alone (1,705 by statistics vs 607 on reading, 11-11).
+- **Never close a conversation to make the count fall.** A thread that leaves the open set while
+  owed is re-read and reported as "closed without an answer".
+- Paid is the house paying list (`decide.paying_users()`); no usable list, or a list only partly
+  mapped to Intercom identities, makes every unmatched thread **paid status unverified**, never
+  free (it is listed and repaged on the paid cadence).
+- **It is not `caroline_monitor/`.** That job pages `#clio_devops` on a WEEKLY aggregate that
+  regressed (hand-offs with nobody assigned); it never names a thread, so a customer can wait
+  forever with its numbers looking fine. This one decides per thread who is owed an answer RIGHT
+  NOW. The other Intercom checks (`intercom-backlog/count.py`, `cs-needs-human-digest.py`,
+  `cs-sla-report.py`, `reply_due_scan.py`) count or report; they do not page.
+
 ## The Ops bot's staff asks are routed, not answered by an agent turn
 
 Every message on the `operations` Slack account is intercepted by

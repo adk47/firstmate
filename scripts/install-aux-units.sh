@@ -477,6 +477,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/caroline-monitor.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/caroline_coach.py" ]] \
   || fail "$HYDRA_ROOT/scripts/caroline_coach.py missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/intercom-unanswered-reply-watchdog.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/intercom-unanswered-reply-watchdog.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/legal-intake.py" ]] \
   || fail "$HYDRA_ROOT/scripts/legal-intake.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh" ]] \
@@ -1019,6 +1021,48 @@ cc=caroline-coach.timer
 systemctl enable "$cc" >/dev/null 2>&1 || log "WARN: could not enable $cc"
 systemctl start "$cc" >/dev/null 2>&1 || log "WARN: could not start $cc"
 log "  $cc: $(systemctl is-active "$cc" 2>/dev/null || echo unknown)"
+
+# ─── Intercom unanswered-reply watchdog (paid first) ───────────────────────
+# Hourly. Pages #cs_priority (Jan) with every open thread a customer is still waiting on
+# after 24 h: the customer wrote last, or Caroline said a teammate would follow up and no
+# human has. Paid threads first (the house paying list); every page carries the whole
+# class count. READ-ONLY on Intercom. Born 2026-11-11 (conversation 215476618428402 ended
+# on Caroline's hand-off line for 13 days and nothing noticed). HOME is set because the
+# paying accounts' ids come from the replica through trino-query.sh (kubectl). The first
+# tick reads every open thread (about 10 min measured); later ticks only what changed.
+# See scripts/intercom-unanswered-reply-watchdog.py and docs/support/unanswered-reply-watchdog.md.
+cat > /etc/systemd/system/intercom-unanswered-reply-watchdog.service << UNANSWEREDREPLYSVC
+[Unit]
+Description=Intercom unanswered-reply watchdog, paid first (alerts #cs_priority)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+TimeoutStartSec=2400
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/intercom-unanswered-reply-watchdog.py
+UNANSWEREDREPLYSVC
+
+cat > /etc/systemd/system/intercom-unanswered-reply-watchdog.timer << UNANSWEREDREPLYTMR
+[Unit]
+Description=Run the Intercom unanswered-reply watchdog hourly
+
+[Timer]
+OnBootSec=20min
+OnUnitActiveSec=60min
+Unit=intercom-unanswered-reply-watchdog.service
+
+[Install]
+WantedBy=timers.target
+UNANSWEREDREPLYTMR
+
+systemctl daemon-reload
+wd=intercom-unanswered-reply-watchdog.timer
+systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
+systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
+log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
 
 # ─── GDPR erasure pipeline (register + identity + 410 read-back + due-date watchdog) ─
 # Hourly. scripts/gdpr-pipeline.py tick: intake (open data-deletion / data-export tickets
@@ -5035,6 +5079,7 @@ AUX_ONFAILURE_UNITS=(
   intercom-intake-watchdog.service
   model-chain-watchdog.service
   intercom-legal-unanswered-watchdog.service
+  intercom-unanswered-reply-watchdog.service
   intercom-webhook.service
   intercom-rights-holder-watchdog.service
   merge-outcome-notify.service

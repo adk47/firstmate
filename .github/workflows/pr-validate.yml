@@ -2355,6 +2355,17 @@ jobs:
           # Intercom reads and never restates them; these hold its message walk to the monitor's, its
           # output to ids and signal names (no message text), and "could not read" to NOT MEASURED.
           python3 -m unittest -v tests.test_caroline_coach
+      - name: Run unanswered-reply watchdog tests
+        # scripts/intercom-unanswered-reply-watchdog.py PAGES #cs_priority (Jan), paid first,
+        # when a customer has waited 24h+ on a human: they wrote last, or Caroline said a
+        # teammate would follow up and none has. These lock the three classes (a thread that
+        # ENDS on Caroline's hand-off line is still owed), human-reply-only promise keeping,
+        # the paid match (no paying list, or a partial one, = unverified, never free), 24h/72h paging, the
+        # closed-without-an-answer report and the read-only guarantee (one search POST, then
+        # GETs only, and no conversation changed). Targeted by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_intercom_unanswered_reply_watchdog
       - name: Run Ops summarize/resolve surface tests
         # scripts/ops_intake/ is the first coded path for the Ops bot's 112 "summarize + suggest a
         # resolution" asks per 14 days, each followed by "do resolution then update the user". The
