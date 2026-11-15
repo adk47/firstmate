@@ -2003,7 +2003,9 @@ print(count)
 # LIVE QUERY (forge) - the mapped deploy workflow's run created at or after the
 # merge: 1 when the earliest such run completed successfully, 0 when it failed,
 # and nothing while no run exists or one is still in flight (both are awaiting
-# the deploy, never health).
+# the deploy, never health). With no merge sha to check carriers against, no run
+# can be attributed to this release, so none is scored: an unrelated run is
+# neither this release's success nor its regression.
 cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch> [<merge-sha>]
   local repo=$1 workflow=$2 since=$3 sha=${4:-}
   local gh_cmd=${FM_CW_GH:-gh} out rc=0 cands created runsha status conclusion checked=0 carried=''
@@ -2062,13 +2064,17 @@ for run in candidates:
     printf 'awaiting the deploy: no %s run since the merge\n' "$workflow"
     return 1
   fi
+  if [ -z "$sha" ]; then
+    printf 'awaiting the deploy: merge sha unreadable, so no %s run can be proven to carry it\n' "$workflow"
+    return 1
+  fi
   while IFS=$'\t' read -r created runsha status conclusion; do
     [ -n "$created" ] || continue
     # "-" is the reader's placeholder for a field the run does not carry.
     if [ "$runsha" = "-" ]; then runsha=''; fi
     if [ "$status" = "-" ]; then status=''; fi
     if [ "$conclusion" = "-" ]; then conclusion=''; fi
-    if [ -n "$sha" ] && [ "$runsha" != "$sha" ]; then
+    if [ "$runsha" != "$sha" ]; then
       # Bounded: the containment lookup is one more forge read per run, so a long
       # list of unrelated runs cannot spend the sample's budget proving nothing.
       [ "$checked" -lt 5 ] || continue
@@ -2081,11 +2087,7 @@ for run in candidates:
 $cands
 CANDIDATES
   if [ -z "$carried" ]; then
-    if [ -n "$sha" ]; then
-      printf 'awaiting the deploy: no %s run carrying %s yet\n' "$workflow" "${sha:0:8}"
-    else
-      printf 'awaiting the deploy: no %s run since the merge\n' "$workflow"
-    fi
+    printf 'awaiting the deploy: no %s run carrying %s yet\n' "$workflow" "${sha:0:8}"
     return 1
   fi
   # A run still going is a deploy that has not landed yet, not a measurement gap:

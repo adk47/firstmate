@@ -1364,10 +1364,15 @@ printf '%s\n' '[{"conclusion":"failure","status":"completed","createdAt":"2026-0
 CW_CLUSTER_DIR='' FM_CW_GH_DIR="$HOME_R/gh" FM_CW_SENTRY_DIR="$HOME_R/sentry" \
   FM_CW_CONFIG_DIR="$HOME_R/config" PATH="$HOME_R/bin:$PATH" \
   run_cw "$HOME_R" 1790000900 sample r1-1383 900 >/dev/null || true
+grep -q 'awaiting the deploy: merge sha unreadable' "$HOME_R/state/change-watch/r1-1383/read-failures" \
+  || fail "a run that cannot be tied to the merge was scored anyway: $(cat "$HOME_R/state/change-watch/r1-1383/read-failures" 2>/dev/null)"
+[ -z "$(awk -F'\t' '$2 == 900 { print $4 }' "$HOME_R/state/change-watch/r1-1383/samples.log" 2>/dev/null | tail -1)" ] \
+  || fail "a failed run of a commit the forge cannot name was read as this release's deploy"
 line=$(run_cw "$HOME_R" 1790000900 verdict r1-1383)
-[ "$line" = "change-watch regressed at +15m on deploy_run (0 vs baseline unmeasured)" ] \
-  || fail "a failed deploy run did not regress the watch: $line"
-pass "a failed deploy-workflow run regresses the release and a missing run is awaiting it"
+case "$line" in
+  *regressed*) fail "a run that cannot be proven to carry the merge regressed the release: $line" ;;
+esac
+pass "a deploy run the forge cannot tie to the merge is awaiting it, never a regression"
 
 # A home's own map line for a workflow-deployed repository keeps its workflow
 # path: a `run:` spec uses `#` as its separator, which the comment strip must not
@@ -1454,9 +1459,10 @@ pass "an OOMKilled termination after the merge regresses the watch"
 # is genuinely spent says so instead of "read exited 1 with no value".
 HOME_FB=$(cluster_world fb)
 seed_app_pr "$HOME_FB"
+printf '%s\n' deadbeef > "$HOME_FB/forge/merge-sha"
 cat > "$HOME_FB/bin/gh" <<'STUB'
 #!/usr/bin/env bash
-printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":7,"url":"https://github.com/Muso-AI/hydra/actions/runs/7"}]'
+printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":7,"headSha":"deadbeef","url":"https://github.com/Muso-AI/hydra/actions/runs/7"}]'
 STUB
 chmod +x "$HOME_FB/bin/gh"
 FM_CW_GH="$HOME_FB/bin/gh" CW_CLUSTER_DIR='' FM_CW_SENTRY_DIR="$HOME_FB/sentry" \
@@ -1486,6 +1492,7 @@ mkdir -p "$HOME_RS/gh/runs-Muso-AI" "$HOME_RS/config" "$HOME_RS/sentry"
 printf 'src/hydra.py\n' > "$HOME_RS/forge/files.txt"
 printf '%s\n' 1790000000 > "$HOME_RS/forge/merge-epoch"
 printf '%s\n' deadbeef > "$HOME_RS/forge/head-ref"
+printf '%s\n' deadbeef > "$HOME_RS/forge/merge-sha"
 printf 'hydra sentry:hydra run:Muso-AI/hydra#.github/workflows/deploy.yml\n' \
   > "$HOME_RS/config/change-watch-repos"
 printf '[]\n' > "$HOME_RS/sentry/issues-hydra.json"
@@ -1503,7 +1510,7 @@ awk -F'\t' '$1 == "sentry_new_issues@sentry/hydra" && $2 ~ /awaiting the deploy/
 [ "$(awk -F'\t' '$3 == "sentry_new_issues@sentry/hydra" { print $7 }' \
   "$HOME_RS/state/change-watch/rs1-1383/samples.log")" = "0" ] \
   || fail "a Sentry read before the deploy run was scored: $(cat "$HOME_RS/state/change-watch/rs1-1383/samples.log" 2>/dev/null)"
-printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":9,"url":"https://github.com/Muso-AI/hydra/actions/runs/9"}]' \
+printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":9,"headSha":"deadbeef","url":"https://github.com/Muso-AI/hydra/actions/runs/9"}]' \
   > "$HOME_RS/gh/runs-Muso-AI/hydra-.github_workflows_deploy.yml.json"
 CW_CLUSTER_DIR='' FM_CW_GH_DIR="$HOME_RS/gh" FM_CW_SENTRY_DIR="$HOME_RS/sentry" \
   FM_CW_CONFIG_DIR="$HOME_RS/config" PATH="$HOME_RS/bin:$PATH" \
@@ -1672,6 +1679,7 @@ chmod +x "$HOME_WN/bin/wiki-retro"
 printf 'src/hydra.py\n' > "$HOME_WN/forge/files.txt"
 printf '%s\n' 1790000000 > "$HOME_WN/forge/merge-epoch"
 printf '%s\n' deadbeef > "$HOME_WN/forge/head-ref"
+printf '%s\n' deadbeef > "$HOME_WN/forge/merge-sha"
 env FM_HOME="$HOME_WN" FM_STATE_OVERRIDE="$HOME_WN/state" FM_CW_NOW=1790000000 \
   FM_CW_FORGE_DIR="$HOME_WN/forge" FM_CW_CLUSTER_DIR='' FM_CW_WORKLOADS_DIR='' \
   FM_CW_GH_DIR="$HOME_WN/gh" FM_CW_SENTRY_DIR="$HOME_WN/sentry" \
@@ -1681,7 +1689,7 @@ env FM_HOME="$HOME_WN" FM_STATE_OVERRIDE="$HOME_WN/state" FM_CW_NOW=1790000000 \
   "$CW" register wn1 'https://github.com/Muso-AI/hydra/pull/1383' >/dev/null \
   || fail "hydra register failed"
 printf 'kind=crewmate\n' > "$HOME_WN/state/wn1.meta"
-printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":9,"url":"https://github.com/Muso-AI/hydra/actions/runs/9"}]' \
+printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":9,"headSha":"deadbeef","url":"https://github.com/Muso-AI/hydra/actions/runs/9"}]' \
   > "$HOME_WN/gh/runs-Muso-AI/hydra-.github_workflows_deploy.yml.json"
 FM_CW_WIKI_LOG="$HOME_WN/wiki.log" env FM_HOME="$HOME_WN" FM_STATE_OVERRIDE="$HOME_WN/state" \
   FM_CW_NOW=1790044000 FM_CW_FORGE_DIR="$HOME_WN/forge" FM_CW_CLUSTER_DIR='' \
@@ -2419,6 +2427,24 @@ deploy_run_value() {  # <home> <watch-id> <offset>
 
 MERGED='aaaa1111bbbb'
 OLDER='cccc2222dddd'
+
+# A merge the forge cannot name has no provable carrier, so no candidate run is
+# scored: an unrelated failed run in the window is neither this release's
+# regression nor its success, only a deploy that cannot be attributed yet.
+HOME_NS=$(hydra_world ns)
+out=$(run_hydra_cw "$HOME_NS" 1790000000 register ns1 'https://github.com/Muso-AI/hydra/pull/1961') \
+  || fail "hydra register failed: $out"
+hydra_runs "$HOME_NS" "[$(hydra_run 2026-09-21T15:00:00Z completed failure "$OLDER")]"
+run_hydra_cw "$HOME_NS" 1790000900 sample ns1-1961 900 >/dev/null || fail "sample failed"
+grep -q 'awaiting the deploy: merge sha unreadable' "$HOME_NS/state/change-watch/ns1-1961/read-failures" \
+  || fail "an unreadable merge sha was not stated as the reason nothing was measured: $(cat "$HOME_NS/state/change-watch/ns1-1961/read-failures" 2>/dev/null)"
+[ -z "$(deploy_run_value "$HOME_NS" ns1-1961 900)" ] \
+  || fail "a failed run that carries nothing provable about the merge was scored: $(cat "$HOME_NS/state/change-watch/ns1-1961/samples.log" 2>/dev/null)"
+line=$(run_hydra_cw "$HOME_NS" 1790000900 verdict ns1-1961)
+case "$line" in
+  *regressed*) fail "an unrelated failed run regressed a release the forge cannot tie to a commit: $line" ;;
+esac
+pass "an unreadable merge sha leaves the deploy unmeasured instead of scoring a run"
 HOME_DS=$(hydra_world ds "$MERGED")
 out=$(run_hydra_cw "$HOME_DS" 1790000000 register ds1 'https://github.com/Muso-AI/hydra/pull/1957') \
   || fail "hydra register failed: $out"
