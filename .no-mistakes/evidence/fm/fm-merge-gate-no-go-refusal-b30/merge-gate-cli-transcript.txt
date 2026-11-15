@@ -1,0 +1,46 @@
+--- GitHub Muso-AI/core-backend, qa-review=FAILURE on current head
+$ bin/fm-merge-gate-lib.sh Muso-AI/core-backend 9 1111111111111111111111111111111111111111 --check-only
+error: refusing to merge Muso-AI/core-backend#9
+  - the qa-review verdict on head 1111111111111111111111111111111111111111 is FAILURE, not SUCCESS
+  - the check qa-review is FAILURE on head 1111111111111111111111111111111111111111
+exit=1
+
+--- GitHub Muso-AI/core-backend, no qa-review check on current head
+$ bin/fm-merge-gate-lib.sh Muso-AI/core-backend 9 1111111111111111111111111111111111111111 --check-only
+error: refusing to merge Muso-AI/core-backend#9
+  - no qa-review verdict exists on head 1111111111111111111111111111111111111111, and an absent verdict is not a GO
+exit=1
+
+--- GitHub Muso-AI/core-backend, GO recorded on an older head
+$ bin/fm-merge-gate-lib.sh Muso-AI/core-backend 9 1111111111111111111111111111111111111111 --recorded-head 2222222222222222222222222222222222222222 --check-only
+error: refusing to merge Muso-AI/core-backend#9
+  - the recorded head 2222222222222222222222222222222222222222 is not the current head 1111111111111111111111111111111111111111, so any verdict recorded against it is stale
+exit=1
+
+--- GitHub Acme/undeclared, repository on neither coverage list
+$ bin/fm-merge-gate-lib.sh Acme/undeclared 9 1111111111111111111111111111111111111111 --check-only
+error: refusing to merge Acme/undeclared#9: QA coverage unknown
+exit=1
+
+--- GitLab Muso-AI/core-backend, no verdict source on forge
+$ bin/fm-merge-gate-lib.sh Muso-AI/core-backend 7 1111111111111111111111111111111111111111 --forge gitlab --check-only
+error: refusing to merge Muso-AI/core-backend#7: QA-covered repo, no verdict source on this forge
+exit=1
+
+--- GitLab declared no-QA repo, green attestation, main target
+$ bin/fm-merge-gate-lib.sh Acme/widgets 7 1111111111111111111111111111111111111111 --forge gitlab --check-only
+merge gate: twin check skipped for Acme/widgets#7: the develop/beta twin rule is GitHub-only
+merge gate: Acme/widgets#7 authorized at head 1111111111111111111111111111111111111111 (no-mistakes-attestation=SUCCESS, allowed reds=)
+exit=0
+
+--- GitHub Muso-AI/core-backend, main twin whose develop PR is unmerged
+$ bin/fm-merge-gate-lib.sh Muso-AI/core-backend 9 1111111111111111111111111111111111111111 --check-only
+error: refusing to merge Muso-AI/core-backend#9
+  - this is a main twin and its develop/beta counterpart is unmerged: pull request #12 targets develop and is not merged
+exit=1
+
+--- GitHub Muso-AI/core-backend, qa-review=SUCCESS on current head
+$ bin/fm-merge-gate-lib.sh Muso-AI/core-backend 9 1111111111111111111111111111111111111111 --recorded-head 1111111111111111111111111111111111111111 --check-only
+merge gate: Muso-AI/core-backend#9 authorized at head 1111111111111111111111111111111111111111 (qa-review=SUCCESS, allowed reds=)
+exit=0
+
