@@ -322,6 +322,32 @@ test_an_orca_replacement_names_a_note_it_could_not_deliver() {
   pass "an Orca replacement whose carry-over note cannot be delivered is escalated"
 }
 
+test_a_tmux_lane_whose_window_is_gone_relaunches_through_spawn() {
+  local home now
+  home=$(make_home tmux-window-gone); fake_tools "$home"
+  worker "$home" w1 missing
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  assert_eq "$(counter "$home" '^spawn w1 --relaunch')" "1" \
+    "a tmux lane whose window is gone did not relaunch through fm-spawn"
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "0" \
+    "a tmux lane whose window is gone went to fm-control, which dies on that state"
+  pass "a tmux lane reading missing relaunches through fm-spawn --relaunch"
+}
+
+test_a_tmux_lane_reading_dead_still_relaunches_through_control() {
+  local home now
+  home=$(make_home tmux-dead); fake_tools "$home"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "1" \
+    "a tmux lane reading dead stopped taking the control relaunch"
+  assert_eq "$(counter "$home" '^spawn w1 --relaunch')" "0" \
+    "a tmux lane reading dead was rerouted to fm-spawn"
+  pass "a tmux lane reading dead still relaunches through fm-control"
+}
+
 test_a_spawn_preflight_refusal_spends_no_budget_and_retries_once() {
   local home now
   home=$(make_home orca-spawn-refuses); fake_tools "$home"
@@ -429,9 +455,10 @@ test_a_reboot_rebuilds_the_fleet_and_starts_the_chair_last() {
   out=$(tick "$home" "$now" FM_WATCHDOG_BOOT_ID=boot-a)
   assert_contains "$out" "watchdog: boot recovery: relaunched 2 of 3 task(s), chair started" \
     "the boot pass did not relaunch exactly the two dead endpoints and start the chair"
-  assert_eq "$(counter "$home" '^control .* relaunch')" "2" "a boot relaunched the wrong number of tasks"
+  assert_eq "$(counter "$home" '^control .* relaunch')" "1" "a boot relaunched a dead endpoint through the wrong path"
+  assert_eq "$(counter "$home" '^spawn .* --relaunch')" "1" "a boot relaunched a missing endpoint outside fm-spawn"
   chair_line=$(grep -n 'systemctl --user restart fm-chair.service' "$home/calls" | head -1 | cut -d: -f1)
-  relaunch_line=$(grep -n '^control .* relaunch' "$home/calls" | tail -1 | cut -d: -f1)
+  relaunch_line=$(grep -n -e '^control .* relaunch' -e '^spawn .* --relaunch' "$home/calls" | tail -1 | cut -d: -f1)
   [ -n "$chair_line" ] || fail "the boot pass never started the chair"
   [ "$relaunch_line" -lt "$chair_line" ] \
     || fail "the chair was started before the fleet was relaunched (relaunch $relaunch_line, chair $chair_line)"
@@ -1212,6 +1239,8 @@ test_a_boot_transient_failure_keeps_the_lane_relaunch_history
 test_a_boot_refusal_keeps_the_lane_relaunch_history
 test_lifecycle_lock_contention_is_retried_not_recorded
 test_an_orca_replacement_names_a_note_it_could_not_deliver
+test_a_tmux_lane_whose_window_is_gone_relaunches_through_spawn
+test_a_tmux_lane_reading_dead_still_relaunches_through_control
 test_a_spawn_preflight_refusal_spends_no_budget_and_retries_once
 test_a_transient_spawn_failure_is_not_a_refusal
 test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn

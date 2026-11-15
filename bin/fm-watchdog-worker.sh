@@ -635,21 +635,17 @@ task_relaunch() {  # <id> <reason> <note> [model]
   local -a model_args=()
   [ -z "$model" ] || model_args=(--model "$model")
   backend=$(fm_backend_of_meta "$STATE/$id.meta" 2>/dev/null || true)
-  if [ "$backend" = orca ]; then
-    state=$(task_agent_state "$id" "$STATE/$id.meta")
-  else
-    state=''
-  fi
-  # Orca's in-place relaunch is unproven (bin/fm-control-lib.sh owns that
-  # table), but a terminal that provably hosts no agent is replaceable through
-  # bin/fm-spawn.sh --relaunch, which launches the replacement into a NEW
-  # terminal in the task's own recorded Orca worktree. Two read states prove
-  # it: `missing` (a stale handle) and `dead` (Orca still lists the terminal,
-  # and a live scan below its pty found only shells - measured 2026-11-15 on
-  # six stopped lanes sitting at an empty prompt). Every other Orca endpoint
-  # still goes through fm-control, whose refusal is then recorded and escalated
-  # instead of retried.
-  if [ "$backend" = orca ] && { [ "$state" = missing ] || [ "$state" = dead ]; }; then
+  state=$(task_agent_state "$id" "$STATE/$id.meta")
+  # A `missing` endpoint cannot be relaunched through fm-control, whose stop
+  # step dies before touching anything in that state, so every backend's
+  # `missing` relaunches through bin/fm-spawn.sh --relaunch: a tmux window that
+  # is gone is recreated in the recorded session and worktree, an Orca terminal
+  # is replaced with a new one in the task's recorded Orca worktree. Orca's
+  # `dead` joins them because Orca still lists that terminal, and a live scan
+  # below its pty found only shells - measured 2026-11-15 on six stopped lanes
+  # sitting at an empty prompt. Every other read still goes through fm-control,
+  # whose refusal is then recorded and escalated instead of retried.
+  if [ "$state" = missing ] || { [ "$backend" = orca ] && [ "$state" = dead ]; }; then
     out=$(fm_run_timed "$RELAUNCH_TIMEOUT_SECS" "$SPAWN_BIN" "$id" --relaunch \
       ${model_args[@]+"${model_args[@]}"} 2>&1)
     rc=$?
