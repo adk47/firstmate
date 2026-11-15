@@ -2263,3 +2263,98 @@ out=$(run_cw "$HOME_MS3" 1790000000 register ms3 \
 [ "$(cat "$HOME_MS3/state/change-watch/ms3-92/targets")" = "$(printf 'messaging\tnotify-gateway')" ] \
   || fail "a one-service diff did not scope to that one Deployment: $(cat "$HOME_MS3/state/change-watch/ms3-92/targets" 2>/dev/null)"
 pass "a monorepo diff is scoped to the one service it touches"
+
+# --- a deploy run has to carry the merged commit -------------------------------
+# hydra deploys from a daily schedule and a manual dispatch, never a push, so the
+# earliest run created after a merge can belong to an older branch tip. Reading
+# that run as failed reported six healthy releases as regressions on 2026-11-14,
+# and a run still in flight is a deploy that has not landed yet rather than a
+# measurement gap that ends the watch.
+
+HYDRA_WF='.github/workflows/deploy.yml'
+hydra_runs() {  # <home> <json>
+  mkdir -p "$1/gh/runs-Muso-AI"
+  printf '%s\n' "$2" > "$1/gh/runs-Muso-AI/hydra-.github_workflows_deploy.yml.json"
+}
+hydra_world() {  # <name> [<merge-sha>]
+  local home
+  home=$(new_world "$1")
+  mkdir -p "$home/gh/runs-Muso-AI" "$home/sentry" "$home/config" "$home/bin" "$home/state"
+  printf 'src/hydra.py\n' > "$home/forge/files.txt"
+  printf '%s\n' 1790000000 > "$home/forge/merge-epoch"
+  printf '%s\n' deadbeef > "$home/forge/head-ref"
+  [ -z "${2:-}" ] || printf '%s\n' "$2" > "$home/forge/merge-sha"
+  printf '%s\n' "$home"
+}
+# hydra_run <created> <state> <conclusion> <sha>: one entry of the run list.
+hydra_run() {  # <created> <status> <conclusion> <head-sha>
+  printf '{"conclusion":%s,"status":"%s","createdAt":"%s","databaseId":9,"headSha":"%s","url":"https://github.com/Muso-AI/hydra/actions/runs/9"}' \
+    "$(printf '%s' "$3" | sed 's/^/"/; s/$/"/; s/^"null"$/null/')" "$2" "$1" "$4"
+}
+# run_hydra_cw <home> <now> <args...>: hydra reads its run list from the stubbed
+# forge, so every call in this section carries the stub directory. Without it the
+# reader would reach the live forge, which a test must never do. The cluster stub
+# directory is empty here for the same reason: a run target is a forge read, and a
+# set cluster dir makes every metric read a stubbed series file instead.
+run_hydra_cw() {  # <home> <now> <args...>
+  local home=$1 now=$2
+  shift 2
+  CW_CLUSTER_DIR='' FM_CW_GH_DIR="$home/gh" run_cw "$home" "$now" "$@"
+}
+
+deploy_run_value() {  # <home> <watch-id> <offset>
+  awk -F'\t' '$2 == "'"$3"'" { print $4 }' "$1/state/change-watch/$2/samples.log" 2>/dev/null | tail -1
+}
+
+MERGED='aaaa1111bbbb'
+OLDER='cccc2222dddd'
+HOME_DS=$(hydra_world ds "$MERGED")
+out=$(run_hydra_cw "$HOME_DS" 1790000000 register ds1 'https://github.com/Muso-AI/hydra/pull/1957') \
+  || fail "hydra register failed: $out"
+hydra_runs "$HOME_DS" "[$(hydra_run 2026-09-21T15:00:00Z completed failure "$OLDER"),$(hydra_run 2026-09-21T15:30:00Z completed success "$MERGED")]"
+run_hydra_cw "$HOME_DS" 1790000900 sample ds1-1957 900 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_DS" ds1-1957 900)" = 1 ] \
+  || fail "a deploy run carrying the merged commit was not measured: $(cat "$HOME_DS/state/change-watch/ds1-1957/samples.log" 2>/dev/null)"
+line=$(run_hydra_cw "$HOME_DS" 1790000900 verdict ds1-1957)
+case "$line" in
+  *regressed*) fail "a failed run of an older tip regressed a healthy release: $line" ;;
+esac
+
+# The same older-tip run is the release's once the forge proves its tree carries
+# the merged commit, and a failed run that genuinely carries it still regresses.
+hydra_runs "$HOME_DS" "[$(hydra_run 2026-09-21T15:00:00Z completed failure "$OLDER")]"
+printf '%s\n' "$MERGED" > "$HOME_DS/gh/contains-$OLDER"
+run_hydra_cw "$HOME_DS" 1790003600 sample ds1-1957 3600 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_DS" ds1-1957 3600)" = 0 ] \
+  || fail "a failed run whose tree carries the merge was not read as a failed deploy: $(deploy_run_value "$HOME_DS" ds1-1957 3600)"
+
+# A run of an unrelated tip with no proof it carries the merge is awaited, never
+# read as a failure.
+rm -f "$HOME_DS/gh/contains-$OLDER"
+run_hydra_cw "$HOME_DS" 1790007200 sample ds1-1957 7200 >/dev/null || fail "sample failed"
+[ -z "$(deploy_run_value "$HOME_DS" ds1-1957 7200)" ] \
+  || fail "an unrelated run was read as this release's deploy"
+grep -q 'carrying aaaa1111 yet' "$HOME_DS/state/change-watch/ds1-1957/read-failures" \
+  || fail "an unrelated run was not stated as awaiting a run that carries the merge: $(cat "$HOME_DS/state/change-watch/ds1-1957/read-failures" 2>/dev/null)"
+pass "a deploy run is the one whose tree carries the merged commit"
+
+# A run still in flight is the deploy not having landed yet: the reading waits,
+# it is not a gap, and the watch still reaches proven once the deploy succeeds.
+HOME_IF=$(hydra_world if "$MERGED")
+run_hydra_cw "$HOME_IF" 1790000000 register if1 'https://github.com/Muso-AI/hydra/pull/1970' >/dev/null \
+  || fail "hydra register failed"
+hydra_runs "$HOME_IF" "[$(hydra_run 2026-09-21T14:30:00Z in_progress '-' "$MERGED")]"
+run_hydra_cw "$HOME_IF" 1790000900 sample if1-1970 900 >/dev/null || fail "sample failed"
+grep -q 'awaiting the deploy: the .github/workflows/deploy.yml run is in_progress' \
+  "$HOME_IF/state/change-watch/if1-1970/read-failures" \
+  || fail "a run in flight was not recorded as awaiting the deploy: $(cat "$HOME_IF/state/change-watch/if1-1970/read-failures" 2>/dev/null)"
+[ "$(awk -F'\t' '$2 == 900 { print $8 }' "$HOME_IF/state/change-watch/if1-1970/samples.log" | tail -1)" = 1 ] \
+  || fail "a run in flight was counted as a measurement gap"
+hydra_runs "$HOME_IF" "[$(hydra_run 2026-09-21T14:30:00Z completed success "$MERGED")]"
+run_hydra_cw "$HOME_IF" 1790044000 drive if1-1970 >/dev/null || fail "resumed drive failed"
+ROW_IF="$HOME_IF/state/change-watch/rows/if1-1970.json"
+grep -q '"900": {[^}]*"measured": true' "$ROW_IF" \
+  || fail "a +15m reading that was only awaiting the deploy was not measured: $(cat "$ROW_IF" 2>/dev/null)"
+grep -q '"terminal_state": "proven"' "$ROW_IF" \
+  || fail "a watch whose scheduled deploy landed after +15m was not proven: $(cat "$ROW_IF" 2>/dev/null)"
+pass "a deploy still in flight at +15m waits instead of ending the watch unmeasurable"

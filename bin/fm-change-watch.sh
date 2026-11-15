@@ -498,6 +498,7 @@ cw_budget_start() {
   CW_POD_FACTS_CACHE=''
   CW_WORKLOADS_CACHE=''
   CW_SELECTOR_CACHE=''
+  CW_MERGE_SHA_CACHE=''
   [ -z "$CW_POOL_BAD_HOSTS_FILE" ] || : > "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
 }
 cw_within_budget() { [ $(( $(cw_now) - CW_BUDGET_START )) -lt "$SAMPLE_DEADLINE_SECONDS" ]; }
@@ -693,6 +694,67 @@ cw_forge_head_ref() {  # <url>
   fi
   command -v gh >/dev/null 2>&1 || return 1
   cw_forge_run gh pr view "$1" --json headRefOid -q .headRefOid || return 1
+}
+
+# LIVE QUERY (forge) - the commit the merged change landed as, the sha a deploy
+# run has to carry before it says anything about this release.
+cw_forge_merge_sha() {  # <url>
+  if [ -n "${FM_CW_FORGE_DIR:-}" ]; then
+    [ -f "$FM_CW_FORGE_DIR/merge-sha" ] || return 1
+    cat "$FM_CW_FORGE_DIR/merge-sha"
+    return 0
+  fi
+  local sha
+  # A stubbed run list means a stubbed forge: never reach the live gh from a test.
+  [ -z "${FM_CW_GH_DIR:-}" ] || return 1
+  command -v gh >/dev/null 2>&1 || return 1
+  sha=$(cw_forge_run gh pr view "$1" --json mergeCommit -q '.mergeCommit.oid // empty') || return 1
+  [ -n "$sha" ] || return 1
+  printf '%s\n' "$sha"
+}
+
+# LIVE QUERY (forge) - success when <head-sha>'s history contains <base-sha>: the
+# run built a tree that carries the merged change. A run of an older branch tip
+# carries it too, and a run of a tag or a side branch does not.
+cw_forge_run_carries() {  # <owner/repo> <base-sha> <head-sha>
+  local repo=$1 base=$2 head=$3 status
+  [ -n "$base" ] && [ -n "$head" ] || return 1
+  if [ -n "${FM_CW_GH_DIR:-}" ]; then
+    # A stubbed forge lists the shas each run's tree carries, one per line.
+    [ -f "$FM_CW_GH_DIR/contains-$head" ] || return 1
+    grep -qxF -- "$base" "$FM_CW_GH_DIR/contains-$head"
+    return $?
+  fi
+  command -v gh >/dev/null 2>&1 || return 1
+  status=$(cw_forge_run gh api "repos/$repo/compare/$base...$head" --jq .status) || return 1
+  case "$status" in ahead|identical) return 0 ;; esac
+  return 1
+}
+
+# The commit a watched merge landed as, or nothing when the forge cannot name it.
+# Memoized for the sample: a watch reads it once and every deploy-workflow read
+# that sample reuses it, so the sha never costs more than one forge call.
+CW_MERGE_SHA_CACHE=''
+cw_merge_sha() {  # <watch-id>
+  local id=$1 url sha key
+  [ -n "$id" ] || return 0
+  key="w${id#w}"
+  while IFS=$'\t' read -r k v; do
+    [ "$k" = "$key" ] || continue
+    printf '%s\n' "$v"
+    return 0
+  done <<CACHE
+$CW_MERGE_SHA_CACHE
+CACHE
+  url=$(cw_meta_get "$id" pr_url 2>/dev/null || true)
+  sha=''
+  if [ -n "$url" ]; then
+    sha=$(cw_forge_merge_sha "$url" 2>/dev/null || true)
+  fi
+  CW_MERGE_SHA_CACHE="$CW_MERGE_SHA_CACHE$key\t$sha
+"
+  [ -n "$sha" ] || return 0
+  printf '%s\n' "$sha"
 }
 
 # --- deployment derivation ----------------------------------------------------
@@ -1857,19 +1919,25 @@ print(count)
 # merge: 1 when the earliest such run completed successfully, 0 when it failed,
 # and nothing while no run exists or one is still in flight (both are awaiting
 # the deploy, never health).
-cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch>
-  local repo=$1 workflow=$2 since=$3 gh_cmd=${FM_CW_GH:-gh} out rc=0
+cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch> [<merge-sha>]
+  local repo=$1 workflow=$2 since=$3 sha=${4:-}
+  local gh_cmd=${FM_CW_GH:-gh} out rc=0 cands created runsha status conclusion checked=0 carried=''
   if [ -n "${FM_CW_GH_DIR:-}" ]; then
     local safe=${workflow//[\/ ]/_}
     [ -f "$FM_CW_GH_DIR/runs-$repo-$safe.json" ] || {
-      printf 'no %s run since the merge\n' "$workflow"
+      printf 'awaiting the deploy: no %s run since the merge\n' "$workflow"
       return 1
     }
     out=$(cat "$FM_CW_GH_DIR/runs-$repo-$safe.json")
   else
     command -v "$gh_cmd" >/dev/null 2>&1 || return 1
+    # headSha is asked for by name: the run that says anything about this release
+    # is the one whose tree carries the merged commit. hydra deploys from its own
+    # daily schedule and a manual dispatch, never a push, so the earliest run
+    # created after a merge can belong to an older tip - reading that one as 0
+    # reported six healthy releases as regressions.
     out=$(cw_forge_run "$gh_cmd" run list -R "$repo" --workflow "$workflow" --limit 20 \
-      --json conclusion,status,createdAt,databaseId,url) || rc=$?
+      --json conclusion,status,createdAt,databaseId,url,headSha) || rc=$?
     if [ "${rc:-0}" -ne 0 ]; then
       # A spent budget is stated as itself: "read exited 124 with no value" told
       # nobody why the deploy target stayed unmeasured.
@@ -1877,15 +1945,15 @@ cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch>
       return 1
     fi
   fi
-  printf '%s' "$out" | python3 -c '
+  cands=$(printf '%s' "$out" | python3 -c '
 import datetime, json, sys
 since = int(sys.argv[1] or 0)
 try:
     runs = json.load(sys.stdin)
 except Exception:
-    sys.exit(1)
+    sys.exit(2)
 if not isinstance(runs, list):
-    sys.exit(1)
+    sys.exit(2)
 candidates = []
 for run in runs:
     created = run.get("createdAt") or ""
@@ -1895,21 +1963,59 @@ for run in runs:
         continue
     if int(t.replace(tzinfo=datetime.timezone.utc).timestamp()) >= since:
         candidates.append(run)
-if not candidates:
-    print("no run created at or after the merge")
-    sys.exit(1)
 candidates.sort(key=lambda r: r.get("createdAt") or "")
-run = candidates[0]
-status = (run.get("status") or "")
-conclusion = (run.get("conclusion") or "")
-if status != "completed" or not conclusion:
-    print("run in flight: status %s" % (status or "unknown"))
-    sys.exit(1)
-if conclusion == "success":
-    print("1")
-    sys.exit(0)
-print("0")
-' "$since"
+for run in candidates:
+    print("\t".join([
+        run.get("createdAt") or "-",
+        # A placeholder, never an empty field: read(1) collapses adjacent tabs.
+        run.get("headSha") or "-",
+        run.get("status") or "-",
+        run.get("conclusion") or "-",
+    ]))
+' "$since") || return 1
+  if [ -z "$cands" ]; then
+    printf 'awaiting the deploy: no %s run since the merge\n' "$workflow"
+    return 1
+  fi
+  while IFS=$'\t' read -r created runsha status conclusion; do
+    [ -n "$created" ] || continue
+    # "-" is the reader's placeholder for a field the run does not carry.
+    if [ "$runsha" = "-" ]; then runsha=''; fi
+    if [ "$status" = "-" ]; then status=''; fi
+    if [ "$conclusion" = "-" ]; then conclusion=''; fi
+    if [ -n "$sha" ] && [ "$runsha" != "$sha" ]; then
+      # Bounded: the containment lookup is one more forge read per run, so a long
+      # list of unrelated runs cannot spend the sample's budget proving nothing.
+      [ "$checked" -lt 5 ] || continue
+      checked=$((checked + 1))
+      cw_forge_run_carries "$repo" "$sha" "$runsha" || continue
+    fi
+    carried=1
+    break
+  done <<CANDIDATES
+$cands
+CANDIDATES
+  if [ -z "$carried" ]; then
+    if [ -n "$sha" ]; then
+      printf 'awaiting the deploy: no %s run carrying %s yet\n' "$workflow" "${sha:0:8}"
+    else
+      printf 'awaiting the deploy: no %s run since the merge\n' "$workflow"
+    fi
+    return 1
+  fi
+  # A run still going is a deploy that has not landed yet, not a measurement gap:
+  # hydra's deploy takes 17-20 minutes, so the +15m reading of every merge only
+  # ever sees it in flight.
+  if [ "$status" != completed ] || [ -z "$conclusion" ]; then
+    printf 'awaiting the deploy: the %s run is %s\n' "$workflow" "${status:-unknown}"
+    return 1
+  fi
+  if [ "$conclusion" = success ]; then
+    printf '1\n'
+    return 0
+  fi
+  printf '0\n'
+  return 0
 }
 
 # LIVE QUERY (cluster) - the Deployment's own pgbouncer pool as
@@ -2065,7 +2171,7 @@ cw_metric_read() {  # <watch-id> <metric> <target> <window> [<baseline-epoch>]
       ;;
     deploy_run)
       local run_target=${target#run/}
-      cw_live_deploy_run "${run_target%%#*}" "${run_target#*#}" "$since"
+      cw_live_deploy_run "${run_target%%#*}" "${run_target#*#}" "$since" "$(cw_merge_sha "$id")"
       return $?
       ;;
   esac
@@ -2223,11 +2329,13 @@ cw_runs_awaiting_deploy() {  # <watch-id> <since-epoch>
     [ -n "${workflow:-}" ] || continue
     seen=1
     rc=0
-    out=$(cw_live_deploy_run "$run_repo" "$workflow" "$since" 2>&1) || rc=$?
+    out=$(cw_live_deploy_run "$run_repo" "$workflow" "$since" "$(cw_merge_sha "$id")" 2>&1) || rc=$?
     [ "$rc" -eq 0 ] && continue
     case "$out" in
-      no\ *|'run in flight'*) awaiting=${out:-no run has been read} ;;
-      '') awaiting='no run has been read' ;;
+      # The run reader states its own wait, so the gate reuses that sentence
+      # instead of wrapping a second "awaiting the deploy:" around it.
+      awaiting\ the\ deploy:*) awaiting=$out ;;
+      '') awaiting='awaiting the deploy: no run has been read' ;;
       *) unreadable=$out ;;
     esac
   done < "$(cw_runs_path "$id")"
@@ -2238,7 +2346,7 @@ cw_runs_awaiting_deploy() {  # <watch-id> <since-epoch>
     return 0
   fi
   [ -n "$awaiting" ] || return 1
-  printf 'awaiting the deploy: %s\n' "$awaiting"
+  printf '%s\n' "$awaiting"
   return 0
 }
 
@@ -3641,13 +3749,14 @@ cmd_doctor() {
     while IFS=$'\t' read -r run_repo workflow; do
       [ -n "${run_repo:-}" ] || continue
       cw_budget_start
-      if value=$(cw_live_deploy_run "$run_repo" "$workflow" "$(cw_meta_get "$id" t0 || true)" 2>&1) \
+      if value=$(cw_live_deploy_run "$run_repo" "$workflow" "$(cw_meta_get "$id" t0 || true)" \
+        "$(cw_merge_sha "$id")" 2>&1) \
         && printf '%s' "$value" | grep -qE '^[01]$'; then
         printf 'doctor: ok run/%s#%s read %s\n' "$run_repo" "$workflow" "$value"
       else
         last=$(printf '%s' "$value" | tail -1)
         case "$last" in
-          "no "*run*|*"in flight"*)
+          "awaiting the deploy:"*|"no "*run*|*"in flight"*)
             printf 'doctor: awaiting run/%s#%s: %s\n' "$run_repo" "$workflow" "$last" ;;
           *)
             printf 'doctor: FAIL run/%s#%s unreadable: %s\n' "$run_repo" "$workflow" "$last"
