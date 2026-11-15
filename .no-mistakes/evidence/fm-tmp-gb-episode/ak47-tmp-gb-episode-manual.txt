@@ -1,0 +1,16 @@
+=== Episode 1: two consecutive stale ticks (slow du, 2s budget) ===
+tick 1: tmp-gb-stale findings so far = 1; episode key present = yes
+tick 2: tmp-gb-stale findings so far = 1; episode key present = yes
+
+=== Episode ends: tree measurable again (fresh tmp_gb_ok) ===
+after measurable tick: episode key present = no
+
+=== Partial walk: 30 top-level entries, whole-tree du hangs, batched du 1s/batch, 1s budget ===
+tmp_gb_partial = 25/30
+tmp_gb_ok stamped = no
+
+=== Health beat: delivered finding keyed under keys/health, tick key survives ===
+health key keys/health/devops-absent = present
+tick key keys/tmp-gb-stale = survived
+stale health key keys/health/old-finding = pruned
+tick key after second beat = survived
