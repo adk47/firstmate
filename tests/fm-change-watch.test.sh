@@ -2311,6 +2311,23 @@ out=$(run_cw "$HOME_MS5" 1790000000 register ms5 \
   || fail "a root-shared path concluded clean instead of watching the Deployments that consume it: $(cat "$HOME_MS5/state/change-watch/ms5-94/targets" 2>/dev/null)"
 pass "a root-shared path keeps every Deployment that consumes it in scope"
 
+# A deployable path no service owns is shared build input, not nothing: every
+# Deployment of the repository consumes a library or an internal package, so the
+# diff stays in scope instead of concluding that it deploys nothing.
+HOME_SH1=$(new_world sh1)
+seed_files "$HOME_SH1" 'lib/delivery.ts'
+out=$(run_cw "$HOME_SH1" 1790000000 register sh1 \
+  'https://github.com/Muso-AI/muso-messaging/pull/105') || fail "shared-lib register failed: $out"
+[ "$(printf '%s\n' "$(cat "$HOME_SH1/state/change-watch/sh1-105/targets" 2>/dev/null)" | grep -c '^messaging	')" = 3 ] \
+  || fail "a shared library path concluded clean instead of watching the Deployments that consume it: $(cat "$HOME_SH1/state/change-watch/sh1-105/targets" 2>/dev/null)"
+HOME_SH2=$(new_world sh2)
+seed_files "$HOME_SH2" 'internal/notify/retry.ts'
+out=$(run_cw "$HOME_SH2" 1790000000 register sh2 \
+  'https://github.com/Muso-AI/muso-messaging/pull/106') || fail "shared-internal register failed: $out"
+[ "$(printf '%s\n' "$(cat "$HOME_SH2/state/change-watch/sh2-106/targets" 2>/dev/null)" | grep -c '^messaging	')" = 3 ] \
+  || fail "an unmatched internal path concluded clean instead of watching the Deployments that consume it: $(cat "$HOME_SH2/state/change-watch/sh2-106/targets" 2>/dev/null)"
+pass "a deployable path no service owns keeps every Deployment in scope"
+
 # The map's path: prefix says where the services and their shared build inputs
 # live. A path under it that names a service scopes to that service; one that
 # names none is shared by all of them.
@@ -2405,6 +2422,12 @@ OLDER='cccc2222dddd'
 HOME_DS=$(hydra_world ds "$MERGED")
 out=$(run_hydra_cw "$HOME_DS" 1790000000 register ds1 'https://github.com/Muso-AI/hydra/pull/1957') \
   || fail "hydra register failed: $out"
+case "$out" in
+  *"deploys nothing"*) fail "a repository watched through its deploy workflow claimed the change deploys nothing: $out" ;;
+  *"1 target(s)"*) ;;
+  *) fail "the deploy workflow target was not registered: $out" ;;
+esac
+pass "a repository watched through its deploy workflow measures the change"
 hydra_runs "$HOME_DS" "[$(hydra_run 2026-09-21T15:00:00Z completed failure "$OLDER"),$(hydra_run 2026-09-21T15:30:00Z completed success "$MERGED")]"
 run_hydra_cw "$HOME_DS" 1790000900 sample ds1-1957 900 >/dev/null || fail "sample failed"
 [ "$(deploy_run_value "$HOME_DS" ds1-1957 900)" = 1 ] \
