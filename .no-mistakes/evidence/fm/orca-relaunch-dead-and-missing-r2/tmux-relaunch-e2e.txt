@@ -1,0 +1,58 @@
+
+$ real git worktrees
+/tmp/fm-e2e-tmux.nJP7Ns/proj  89c1479 [master]
+/tmp/fm-e2e-tmux.nJP7Ns/wt    89c1479 [task-evt1]
+
+$ tmux list-windows -t fmses  (the lane's real window before it is lost)
+keepalive cwd=/tmp cmd=bash
+fm-evt1 cwd=/tmp/fm-e2e-tmux.nJP7Ns/wt cmd=bash
+
+$ fm_backend_agent_state tmux fmses:fm-evt1  (window present, idle shell)
+dead
+
+$ after tmux kill-window -t fmses:fm-evt1
+keepalive
+
+$ fm_backend_agent_state tmux fmses:fm-evt1  (recorded window gone)
+missing
+
+$ real process 3982189 with cwd=/tmp/fm-e2e-tmux.nJP7Ns/wt (comm: sleep)
+
+$ fm_backend_tmux_worktree_occupants fmses /tmp/fm-e2e-tmux.nJP7Ns/wt
+pid 3982189 (sleep) is working in /tmp/fm-e2e-tmux.nJP7Ns/wt
+status=0
+
+$ same scan with a failing lsof first on PATH (Linux reads /proc)
+pid 3982189 (sleep) is working in /tmp/fm-e2e-tmux.nJP7Ns/wt
+status=0
+
+$ bin/fm-spawn.sh evt1 --relaunch --harness claude   (occupant present)
+warning: /tmp/fm-e2e-tmux.nJP7Ns/home/data/evt1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+error: task evt1's recorded window fmses:fm-evt1 is absent, but its worktree /tmp/fm-e2e-tmux.nJP7Ns/wt is not free: pid 3982189 (sleep) is working in /tmp/fm-e2e-tmux.nJP7Ns/wt; refusing to create a second endpoint beside a live copy - stop the listed process(es) before retrying
+exit=2
+
+$ tmux windows after the refused relaunch (must still have no fm-evt1)
+keepalive
+
+$ bin/fm-spawn.sh evt1 --relaunch --harness claude   (worktree free)
+warning: /tmp/fm-e2e-tmux.nJP7Ns/home/data/evt1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned evt1 harness=claude kind=ship mode=no-mistakes yolo=off window=fmses:fm-evt1 worktree=/tmp/fm-e2e-tmux.nJP7Ns/wt
+exit=0
+
+$ tmux list-windows after the relaunch (real window recreated in the recorded worktree)
+@0 keepalive cwd=/tmp cmd=bash
+@2 fm-evt1 cwd=/tmp/fm-e2e-tmux.nJP7Ns/wt cmd=claude
+
+$ recorded meta window= / worktree=
+window=fmses:fm-evt1
+worktree=/tmp/fm-e2e-tmux.nJP7Ns/wt
+
+$ processes below the recreated pane
+3986020 3980052 bash            -bash
+3988036 3986020 claude          claude --dangerously-skip-permissions --settings {"feedbackDrafts":"off"} ⁣FIRSTMATE_OP: v1 launch-brief: Read the brief at /tmp/fm-e2e-tmux.nJP7Ns/home/data/evt1/launch-brief.md and follow it exactly.
+
+$ fm_backend_agent_state tmux fmses:fm-evt1  (after replacement launch)
+alive
+
+$ cleanup
+done

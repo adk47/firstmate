@@ -1,0 +1,19 @@
+ok - fm_backend_orca_capture: fails closed on Orca read error JSON
+ok - fm_backend_orca_runtime_check: fails closed when runtime is not ready
+ok - fm_backend_orca_send_text_submit: reports send-failed when Orca send fails
+ok - Orca send helpers: fail closed on ok:false JSON
+ok - fm_backend_orca_remove_worktree: fails closed on ok:false JSON
+ok - fm-spawn.sh --backend orca: preserves metadata when pathless cleanup fails
+ok - fm-spawn --relaunch on Orca: a gone terminal is replaced by a new one in the recorded worktree
+ok - fm-spawn --relaunch on Orca: a shell-only terminal is replaced by a new one in the recorded worktree
+ok - fm-spawn --relaunch on Orca: a terminal holding a live agent is still refused
+ok - fm-spawn --relaunch on Orca: a terminal Orca still has is refused and left untouched
+ok - fm-spawn.sh --backend orca: removes worktree when terminal creation fails
+ok - fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails
+●  repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e /tmp/fm-backend-orca-tests.FzNwwz/io-path/neutral/root/.pi/extensions/fm-primary-turnend-guard.ts -e /tmp/fm-backend-orca-tests.FzNwwz/io-path/neutral/root/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+ok - fm-peek/fm-crew-state: Orca read error JSON fails closed
+ok - fm-teardown.sh backend=orca: failed worktree removal keeps the task branch and worktree
+ok - fm-teardown.sh backend=orca: ship teardown fails closed when worktree path is missing
+ok - fm-teardown.sh backend=orca: ship teardown fails closed when id resolution fails
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=28838
+FM_TEST_SUMMARY_FAMILY family=orca count=1 duration_ms=28800 failed=0
