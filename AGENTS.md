@@ -1547,7 +1547,8 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
 
 `scripts/credit_review/established_claimant.py` (policy `policies/established-claimant.json`, doc and the
 production count `docs/credit-verification/established-claimant.md`) reads the core replica and writes
-`decisions.jsonl` + `funnel.json`. It has no writer, no timer and no registry row. A request is established when
+`decisions.jsonl` + `funnel.json`. It has no writer and no registry row. `established-claimant.timer` runs it once a
+day (03:20 UTC) and publishes to `/var/lib/hydra/established-claimant/latest`. A request is established when
 its profile has 100+ approved and 1% or less rejected and the same user holds an approved credit in every claimed
 role with an artist of the same track.
 
@@ -1560,7 +1561,11 @@ role with an artist of the same track.
 - **Core's guard would refuse all 2,078 measured approves** (`proof_required`; `core_guard` on each row). Arming it
   is a new approval automation: a recorded captain decision, a registry row, a registration in core and a write
   gate that re-reads each row. The policy file's `mode` accepts `shadow` only.
-- The reads are five statements, 200 ids each, no self-join. Run it under `systemd-run --scope -p MemoryMax=2G`.
+- **A pass publishes whole or not at all.** A read that did not finish publishes nothing, fails the unit (which
+  pages) and leaves `latest` on the last complete pass. The stop switch `/etc/hydra/established-claimant.disabled`
+  ships absent: nothing has to be removed for the next pass to run.
+- The reads are five statements, 200 ids each, no self-join. The unit is capped at 2 GB; a scratch `run --out DIR`
+  goes under `systemd-run --scope -p MemoryMax=2G`.
 
 ## A replica question costs ~2 s whatever it asks: ask once per person
 

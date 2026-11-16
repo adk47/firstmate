@@ -1,10 +1,11 @@
 # The established-claimant rule (shadow)
 
 `scripts/credit_review/established_claimant.py`, policy `policies/established-claimant.json`.
-Tests: `scripts/tests/test_established_claimant.py`.
+Tests: `scripts/tests/test_established_claimant.py` (the rule and the scheduled pass) and
+`scripts/tests/install-aux-units-established-claimant.bats` (the timer).
 
 It reads the core replica, decides, and writes two files. It approves nothing, asks nobody and
-calls no API. Nothing schedules it.
+calls no API. `established-claimant.timer` runs it once a day on node-8; nobody starts it.
 
 ## The rule
 
@@ -40,9 +41,30 @@ case no approver here acts on: a request whose `metadata` carries `fraudRemoval`
 not act on (`verify_anchor.uncovered_holds`; the drain's `held_by_validator`), and a verdict
 that is absent or unreadable.
 
+## The scheduled pass
+
+`established-claimant.timer` (03:20 UTC, `Persistent=true`) starts `scripts/established-claimant.py`,
+which runs `tick`. The unit is installed, enabled and started by `scripts/install-aux-units.sh`
+on every deploy, and it is in the `OnFailure` table, so a failed pass pages `#clio_devops`.
+
+- A pass whose reads all finished is published as
+  `/var/lib/hydra/established-claimant/runs/<UTC time>/` and `latest` is moved to it. The two
+  files are written to a hidden directory and renamed into place, so a pass exists whole or
+  not at all.
+- A pass that could not finish (the replica did not answer, or the verdict read did not
+  return a row it asked for) publishes nothing and exits non-zero. `latest` stays on the last
+  complete pass. Read `latest/funnel.json` for the count, never a pass's directory by name.
+- The 14 newest passes are kept.
+- Nothing has to be done between two passes. The stop switch is
+  `/etc/hydra/established-claimant.disabled`: while it is present a pass reads nothing and
+  exits 0. Nothing in the repo creates it, so a pass never waits on it being removed.
+- The unit is capped at 2 GB and one CPU. A pass is about 210 statements over about 20
+  minutes.
+
 ## What it writes
 
-`run --out DIR` writes `DIR/decisions.jsonl` and `DIR/funnel.json` and prints the funnel.
+A pass writes `decisions.jsonl` and `funnel.json` and prints the funnel. `run --out DIR`
+writes the same two files into `DIR` and publishes nothing.
 
 - `decisions.jsonl`: one row per established request, sorted by request id, sorted keys, no
   clock and no run id, so two runs over the same data are byte-identical. A row carries the
@@ -59,13 +81,16 @@ Exit 0 when every read finished, 1 when the verdict read did not return a row it
 (`verdict_row_not_returned`, which a deleted row is not), 2 when the policy cannot be read
 or asks for a mode other than `shadow`.
 
+To read the newest answer:
+
 ```bash
-cd /opt/hydra/scripts
-systemd-run --scope -p MemoryMax=2G -p CPUQuota=100% \
-  python3 -m credit_review.established_claimant run --out /root/established-claimant-$(date -u +%m%d)
+cat /var/lib/hydra/established-claimant/latest/funnel.json
+systemctl list-timers established-claimant.timer
 ```
 
-Run it memory-capped, as every ad-hoc replica read on node-8 is. It takes about 20 minutes.
+A pass outside the schedule is `systemctl start established-claimant.service`, which keeps the
+unit's memory cap. `run --out DIR` is for a scratch copy and must be run capped
+(`systemd-run --scope -p MemoryMax=2G -p CPUQuota=100%`).
 
 ## How it reads
 

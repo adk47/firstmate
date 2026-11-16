@@ -518,6 +518,9 @@ install -d -m 700 /var/lib/hydra-dr
    && -f "$HYDRA_ROOT/scripts/claim_verify/doc_sources.py" && -f "$HYDRA_ROOT/scripts/lib/page_identity.py" \
    && -f "$HYDRA_ROOT/policies/claim-doc-ladder.json" ]] \
   || fail "$HYDRA_ROOT/scripts/claim-doc-ladder.py, its claim_verify modules or its policy are missing"
+[[ -f "$HYDRA_ROOT/scripts/established-claimant.py" && -f "$HYDRA_ROOT/scripts/credit_review/established_claimant.py" \
+   && -f "$HYDRA_ROOT/policies/established-claimant.json" ]] \
+  || fail "$HYDRA_ROOT/scripts/established-claimant.py, its credit_review module or its policy is missing"
 [[ -f "$HYDRA_ROOT/scripts/credit_review/precedent_ledger.py" && -f "$HYDRA_ROOT/scripts/credit_review/reconcile_approved.py" ]] \
   || fail "$HYDRA_ROOT/scripts/credit_review/precedent_ledger.py or reconcile_approved.py is missing"
 [[ -f "$HYDRA_ROOT/scripts/resolution-matcher.py" ]] \
@@ -3309,6 +3312,61 @@ systemctl start "$mon" >/dev/null 2>&1 || fail "could not start $mon: claim docu
 [[ "$(systemctl is-active "$mon" 2>/dev/null)" == active ]] || fail "$mon is not active after start: claim documents would not be read"
 log "  $mon: active"
 
+# ─── Established-claimant rule: one recorded decision per established request, in shadow ───
+# The rule was measured by hand twice and nothing ran it again: a count that is only true on the
+# day someone runs it. established-claimant.py reads the core replica once a day, decides every
+# pending request an established claimant filed (approve / ask / barred, with the bars) and
+# publishes the answer. READ-ONLY against prod: it approves nothing, asks nobody, calls no admin
+# API and sends nothing. Its only writes are under /var/lib/hydra/established-claimant (NOT
+# /opt/hydra, which the deploy rsync overwrites): runs/<UTC time>/ per pass, `latest` -> the newest.
+# A pass publishes whole or not at all: a read that does not finish is exit 1 with nothing
+# published, `latest` stays on the last complete pass, and OnFailure (the table below) pages
+# #clio_devops. The reads are about 210 statements over about 20 minutes, so the unit is
+# memory-capped (2026-11-13: an uncapped replica read took node-8 into a global OOM) and runs at
+# 03:20 UTC, clear of the 02:30, 04:30 and 05:xx jobs.
+# Stop switch: /etc/hydra/established-claimant.disabled (exit 0, nothing read). Nothing creates it.
+# docs/credit-verification/established-claimant.md.
+install -d -m 700 /var/lib/hydra/established-claimant
+
+cat > /etc/systemd/system/established-claimant.service << ESTCLAIMSVC
+[Unit]
+Description=HYDRA established-claimant rule: decide and record, in shadow, every request an established claimant filed
+
+[Service]
+Type=oneshot
+TimeoutStartSec=5400
+Nice=10
+CPUQuota=100%
+MemoryMax=2G
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/established-claimant.py
+ESTCLAIMSVC
+
+cat > /etc/systemd/system/established-claimant.timer << ESTCLAIMTMR
+[Unit]
+Description=HYDRA established-claimant rule, once a day
+
+[Timer]
+OnCalendar=*-*-* 03:20:00 UTC
+Persistent=true
+Unit=established-claimant.service
+
+[Install]
+WantedBy=timers.target
+ESTCLAIMTMR
+
+systemctl daemon-reload
+# FATAL, not a WARN: with the timer down the rule is back to being run by hand, and the service's
+# OnFailure cannot page because the service never starts.
+mon=established-claimant.timer
+systemctl enable "$mon" >/dev/null 2>&1 || fail "could not enable $mon: the established-claimant rule would not run"
+systemctl start "$mon" >/dev/null 2>&1 || fail "could not start $mon: the established-claimant rule would not run"
+[[ "$(systemctl is-active "$mon" 2>/dev/null)" == active ]] || fail "$mon is not active after start: the established-claimant rule would not run"
+log "  $mon: active"
+
 # ─── Precedent approvals: their decision rows in the credit-review ledger ───
 # precedent_v1 approves in core's Postgres from inside a core-backend pod, which cannot open the
 # node-8 ledger, and it wrote no `decisions` / `decision_outcomes` row: every approval count read
@@ -5047,6 +5105,7 @@ AUX_ONFAILURE_UNITS=(
   caroline-safety-daily.service
   claim-list-build.service
   claim-doc-ladder.service
+  established-claimant.service
   precedent-ledger-reconcile.service
   support-resolution-daily.service
   ops-intake-digest.service

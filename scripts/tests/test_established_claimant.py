@@ -567,5 +567,185 @@ class NoWriterTests(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in Path(td).iterdir()), ["p.json"])
 
 
+class TickTests(unittest.TestCase):
+    """The scheduled pass: it publishes a whole answer or none, and nobody has to start it."""
+
+    def setUp(self):
+        from credit_review import verify_notify
+        self._td = tempfile.TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        self.state = Path(self._td.name) / "state"
+        self.kill = Path(self._td.name) / "established-claimant.disabled"
+        self.replica = Replica([*history(), req(1), req(2, vd=DECLINED)])
+        self.stamps = iter(f"202611{d:02d}T032000Z" for d in range(1, 29))
+        for target, name, value in ((ec, "STATE_DIR", str(self.state)), (ec, "KILL_FILE", str(self.kill)),
+                                    (ec, "_stamp", lambda: next(self.stamps)),
+                                    (verify_notify, "trino", lambda sql: self.replica(sql))):
+            patcher = unittest.mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _tick(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ec._main(["tick"])
+        return code, out.getvalue(), err.getvalue()
+
+    def _latest(self):
+        return os.readlink(self.state / "latest")
+
+    def test_a_pass_publishes_its_two_files_and_points_latest_at_them(self):
+        code, out, _ = self._tick()
+        self.assertEqual(code, 0)
+        self.assertEqual(ec.published(), ["20261101T032000Z"])
+        self.assertEqual(self._latest(), "runs/20261101T032000Z")
+        run_dir = self.state / "latest"
+        self.assertEqual(sorted(p.name for p in run_dir.iterdir()), ["decisions.jsonl", "funnel.json"])
+        rows = [json.loads(line) for line in (run_dir / "decisions.jsonl").read_text().splitlines()]
+        self.assertEqual([r["outcome"] for r in rows], ["approve", "ask"])
+        printed = json.loads(out)
+        self.assertEqual(printed["published"], "20261101T032000Z")
+        self.assertEqual(printed["funnel"], json.loads((run_dir / "funnel.json").read_text()))
+        self.assertEqual(sorted(p.name for p in self.state.iterdir()), ["latest", "runs"])
+
+    def test_the_next_pass_needs_nothing_done_between_them(self):
+        """Two passes in a row, nothing touched in between: the second sees the new data."""
+        self.assertEqual(self._tick()[0], 0)
+        self.replica.requests.append(req(3))
+        self.assertEqual(self._tick()[0], 0)
+        self.assertEqual(ec.published(), ["20261101T032000Z", "20261102T032000Z"])
+        self.assertEqual(self._latest(), "runs/20261102T032000Z")
+        first = (self.state / "runs/20261101T032000Z/decisions.jsonl").read_text().splitlines()
+        second = (self.state / "latest/decisions.jsonl").read_text().splitlines()
+        self.assertEqual((len(first), len(second)), (2, 3))
+
+    def test_a_pass_whose_read_did_not_finish_publishes_nothing_and_fails(self):
+        self.assertEqual(self._tick()[0], 0)
+        self.replica.missing = {rid(1)}
+        code, out, err = self._tick()
+        self.assertEqual(code, 1)
+        self.assertIn("nothing published", err)
+        self.assertIsNone(json.loads(out)["published"])
+        self.assertEqual(ec.published(), ["20261101T032000Z"])
+        self.assertEqual(self._latest(), "runs/20261101T032000Z")
+        self.assertEqual(sorted(p.name for p in (self.state / "runs").iterdir()), ["20261101T032000Z"])
+
+    def test_a_replica_that_does_not_answer_publishes_nothing_and_fails(self):
+        self.assertEqual(self._tick()[0], 0)
+
+        class Down(Exception):
+            pass
+
+        def down(sql):
+            raise Down("replica unreachable")
+        self.replica = down
+        with self.assertRaises(Down):
+            self._tick()
+        self.assertEqual(ec.published(), ["20261101T032000Z"])
+        self.assertEqual(self._latest(), "runs/20261101T032000Z")
+        self.assertEqual(sorted(p.name for p in (self.state / "runs").iterdir()), ["20261101T032000Z"])
+
+    def test_the_first_pass_ever_that_fails_leaves_no_latest(self):
+        self.replica.missing = {rid(1)}
+        self.assertEqual(self._tick()[0], 1)
+        self.assertFalse((self.state / "latest").exists())
+        self.assertEqual(ec.published(), [])
+
+    def test_the_stop_switch_reads_nothing_and_is_not_a_failure(self):
+        self.kill.write_text("")
+        code, out, err = self._tick()
+        self.assertEqual((code, out), (0, ""))
+        self.assertIn("nothing read", err)
+        self.assertEqual(self.replica.calls, [])
+        self.assertFalse(self.state.exists())
+        self.assertEqual(ec.tick(self.replica, POLICY), (0, {"skipped": f"{self.kill} is present",
+                                                              "published": None}))
+        self.kill.unlink()                       # gone again: the next pass runs by itself
+        self.assertEqual(self._tick()[0], 0)
+        self.assertEqual(ec.published(), ["20261101T032000Z"])
+
+    def test_old_passes_are_pruned_and_the_newest_are_kept(self):
+        for _ in range(ec.KEEP_RUNS + 3):
+            self.assertEqual(self._tick()[0], 0)
+        kept = ec.published()
+        self.assertEqual(len(kept), ec.KEEP_RUNS)
+        self.assertEqual(kept[-1], f"202611{ec.KEEP_RUNS + 3:02d}T032000Z")
+        self.assertEqual(kept[0], "20261104T032000Z")
+        self.assertEqual(self._latest(), "runs/" + kept[-1])
+
+    def test_what_a_killed_pass_left_behind_is_cleared_and_never_read_as_a_pass(self):
+        left = self.state / "runs" / ".tmp-20261030T032000Z"
+        left.mkdir(parents=True)
+        (left / "decisions.jsonl").write_text("half a file")
+        self.assertEqual(ec.published(), [])
+        self.assertEqual(self._tick()[0], 0)
+        self.assertFalse(left.exists())
+        self.assertEqual(ec.published(), ["20261101T032000Z"])
+
+    def test_a_pass_never_overwrites_one_already_published(self):
+        self.assertEqual(self._tick()[0], 0)
+        self.stamps = iter(["20261101T032000Z"])
+        code, _, err = self._tick()
+        self.assertEqual(code, 2)
+        self.assertIn("already published", err)
+
+    def test_the_scheduled_pass_reaches_no_client_that_can_write(self):
+        called: list[str] = []
+
+        def boom(name):
+            def fail(*args, **kwargs):
+                called.append(name)
+                raise AssertionError(f"the pass reached {name}")
+            return fail
+
+        with unittest.mock.patch.object(subprocess, "run", boom("subprocess.run")), \
+                unittest.mock.patch.object(subprocess, "Popen", boom("subprocess.Popen")), \
+                unittest.mock.patch.object(os, "system", boom("os.system")), \
+                unittest.mock.patch.object(sqlite3, "connect", boom("sqlite3.connect")), \
+                unittest.mock.patch.object(urllib.request, "urlopen", boom("urllib.request.urlopen")):
+            self.assertEqual(self._tick()[0], 0)
+        self.assertEqual(called, [])
+
+    def test_a_policy_that_is_not_shadow_stops_the_pass_before_any_read(self):
+        policy = Path(self._td.name) / "p.json"
+        policy.write_text(json.dumps({**POLICY, "mode": "live"}))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ec._main(["tick", "--policy", str(policy)]), 2)
+        self.assertEqual(self.replica.calls, [])
+        self.assertFalse(self.state.exists())
+
+
+class EntryScriptTests(unittest.TestCase):
+    """What the timer runs is a file, so it is run as one."""
+
+    SCRIPT = ROOT / "scripts" / "established-claimant.py"
+
+    def _run(self, *argv):
+        return subprocess.run([sys.executable, "-I", str(self.SCRIPT), *argv],
+                              capture_output=True, text=True, timeout=60, check=False)
+
+    def test_it_loads_as_a_file_and_says_what_it_is(self):
+        done = self._run("--help")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("established-claimant.timer", done.stdout)
+
+    def test_an_argument_it_does_not_know_runs_nothing(self):
+        done = self._run("--apply")
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("unknown argument", done.stderr)
+
+    def test_with_no_argument_it_runs_the_scheduled_pass(self):
+        text = self.SCRIPT.read_text()
+        namespace: dict = {"__name__": "not_main", "__file__": str(self.SCRIPT)}
+        exec(compile(text, str(self.SCRIPT), "exec"), namespace)  # noqa: S102 - our own entry script
+        seen: list[list[str]] = []
+        with unittest.mock.patch.object(ec, "_main", lambda argv: seen.append(argv) or 0), \
+                unittest.mock.patch.object(sys, "argv", [str(self.SCRIPT)]):
+            namespace["__name__"] = "__main__"
+            with self.assertRaises(SystemExit) as stop:
+                exec(compile(text, str(self.SCRIPT), "exec"), namespace)  # noqa: S102
+        self.assertEqual((stop.exception.code, seen), (0, [["tick"]]))
+
+
 if __name__ == "__main__":
     unittest.main()

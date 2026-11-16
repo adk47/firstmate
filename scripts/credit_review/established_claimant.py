@@ -17,11 +17,16 @@ The rule (firstmate 2026-11-14, ruled 2026-11-15):
 What this module is, and is not:
 
   * It has NO writer. There is no admin API call, no customer message and no ledger of
-    record in it. ``run`` reads the core replica, and writes two files into the directory
-    it is given: the decisions (canonical JSONL, one row per established request) and
-    the funnel (counts per step and per bar). Turning any row of that file into an
-    approval is a new approval automation: a ``policies/credit-approval-automation.json``
-    row and a recorded captain decision, in another change.
+    record in it. A pass reads the core replica and writes two files: the decisions
+    (canonical JSONL, one row per established request) and the funnel (counts per step
+    and per bar). Turning any row of that file into an approval is a new approval
+    automation: a ``policies/credit-approval-automation.json`` row and a recorded captain
+    decision, in another change.
+  * It runs by itself. ``established-claimant.timer`` runs ``tick`` once a day; nobody
+    has to start it, and nothing has to be removed first. A pass whose reads all finished
+    is published under ``STATE_DIR/runs/<UTC time>/`` and ``STATE_DIR/latest`` points at
+    it. A pass that could not finish publishes nothing and fails, so ``latest`` is always
+    the last complete answer and never a partial one.
   * It is not a rung of ``scale_drain.py`` yet. It is measured here first.
   * Every read is bounded: profiles in one grouped statement, then pending rows, held
     credits and verdicts by id list, ``CHUNK`` ids a statement. No statement joins the
@@ -31,14 +36,18 @@ Unmeasured is never a pass. A verdict that cannot be read, a hold table that can
 read and a request whose status changed between two reads are each counted under their
 own name and approve nothing.
 
-CLI (from ``scripts/``):
-  python3 -m credit_review.established_claimant run --out DIR
+CLI (``scripts/established-claimant.py``, what the timer runs, or from ``scripts/``):
+  python3 -m credit_review.established_claimant tick            the scheduled pass
+  python3 -m credit_review.established_claimant run --out DIR   one pass into DIR
 """
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
+import os
 import re
+import shutil
 import sys
 from collections import Counter
 from pathlib import Path
@@ -463,6 +472,80 @@ def serialize(rows: Sequence[dict[str, Any]]) -> bytes:
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
+# ── the scheduled pass ──────────────────────────────────────────────────────
+
+#: Where the scheduled pass publishes. Under /var/lib, not /opt/hydra: the deploy rsync
+#: overwrites the tree.
+STATE_DIR = "/var/lib/hydra/established-claimant"
+#: The stop switch. Absent unless someone places it; present, a pass reads nothing.
+KILL_FILE = "/etc/hydra/established-claimant.disabled"
+#: Published passes kept. One a day, about 7 MB each.
+KEEP_RUNS = 14
+
+_RUN_NAME = re.compile(r"^\d{8}T\d{6}Z$")
+
+
+def _stamp() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def published(state_dir: Path | str | None = None) -> list[str]:
+    """The published passes, oldest first."""
+    runs = Path(state_dir or STATE_DIR) / "runs"
+    if not runs.is_dir():
+        return []
+    return sorted(p.name for p in runs.iterdir() if p.is_dir() and _RUN_NAME.match(p.name))
+
+
+def tick(query: Query, policy: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """One scheduled pass. Returns (exit code, what to print).
+
+    0: published, or the stop switch is present and nothing was read.
+    1: a read did not finish. Nothing is published and ``latest`` stays where it was.
+    A replica error is not caught: it ends the pass with nothing published either.
+    """
+    if os.path.exists(KILL_FILE):
+        return 0, {"skipped": f"{KILL_FILE} is present", "published": None}
+    rows, funnel = run(query, policy)
+    if funnel["verdict_row_not_returned"]:
+        return 1, {"published": None, "funnel": funnel,
+                   "error": "the verdict read did not return every row it asked for"}
+    state = Path(STATE_DIR)
+    runs = state / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    for stale in runs.glob(".tmp-*"):          # a pass killed before it published
+        shutil.rmtree(stale, ignore_errors=True)
+    name = _stamp()
+    if (runs / name).exists():
+        raise EstablishedClaimantError(f"a pass named {name} is already published")
+    tmp = runs / f".tmp-{name}"
+    tmp.mkdir()
+    (tmp / "decisions.jsonl").write_bytes(serialize(rows))
+    (tmp / "funnel.json").write_text(json.dumps(funnel, indent=1, sort_keys=True) + "\n")
+    os.rename(tmp, runs / name)                # the pass exists whole, or not at all
+    link = state / ".latest.tmp"
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    os.symlink(os.path.join("runs", name), link)
+    os.replace(link, state / "latest")
+    for old in published(state)[:-KEEP_RUNS]:
+        shutil.rmtree(runs / old, ignore_errors=True)
+    return 0, {"published": name, "funnel": funnel}
+
+
+def _cmd_tick(args: argparse.Namespace) -> int:
+    from . import verify_notify  # noqa: PLC0415 - the replica client, only for a real run
+
+    if os.path.exists(KILL_FILE):              # before the policy: a stopped pass reads nothing
+        print(f"established_claimant: {KILL_FILE} is present; nothing read", file=sys.stderr)
+        return 0
+    code, out = tick(verify_notify.trino, load_policy(args.policy))
+    print(json.dumps(out, sort_keys=True))
+    if code:
+        print(f"established_claimant: {out['error']}; nothing published", file=sys.stderr)
+    return code
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     from . import verify_notify  # noqa: PLC0415 - the replica client, only for a real run
 
@@ -483,6 +566,9 @@ def _main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", required=True, help="directory for the two files (created if absent)")
     p.add_argument("--policy", default=None, help="policy file (default: policies/established-claimant.json)")
     p.set_defaults(fn=_cmd_run)
+    p = sub.add_parser("tick", help="the scheduled pass: publish under STATE_DIR, move `latest`")
+    p.add_argument("--policy", default=None, help=argparse.SUPPRESS)
+    p.set_defaults(fn=_cmd_tick)
     args = ap.parse_args(argv)
     try:
         return args.fn(args)
