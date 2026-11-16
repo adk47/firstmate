@@ -43,6 +43,47 @@ pad_large() { python3 -c "import sys; open(sys.argv[1],'a').write(('filler line 
   [[ "$output" == *"hear back within 5 business days"* ]]
 }
 
+@test "CAN FAIL: the missing-credit paragraph mapped to every empty read is caught" {
+  # The claim-error case QA asked for on #2020: a rejected claim whose own-request read came
+  # back empty must get the claim paragraph, not "add a credit / open a source-discrepancy
+  # ticket". Re-broadening the fallback to every kind is the regression this catches.
+  CV_MD="$FAKE/workspaces/support/skills/verification-handoff/SKILL.md"
+  python3 - "$CV_MD" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = "on a missing-credit or display question"
+assert old in text, "the scoped fallback is not in the doctrine"
+open(path, "w").write(text.replace(old, "for every kind of question", 1))
+PYEOF
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q15 the missing-credit paragraph is scoped"* ]]
+}
+
+@test "CAN FAIL: a paragraph test that outranks the kind of question is caught" {
+  # QA round 3 on #2020: the scope was right, but a later rule ("if the paragraph you are about
+  # to send contains no action ... use the missing-credit one") re-broadened it, so a rejected
+  # claim with an empty read was still told to add a credit. The kind decides; the paragraph's
+  # own actions never do. This plants the old override back and expects the gate to refuse it.
+  CV_MD="$FAKE/workspaces/support/skills/verification-handoff/SKILL.md"
+  python3 - "$CV_MD" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = "On any other question the matching how-it-works paragraph is the answer even when it names no action of its own"
+assert old in text, "the scoped paragraph test is not in the doctrine"
+open(path, "w").write(text.replace(
+    old,
+    "If the approved paragraph you are about to send contains no action and the customer has no "
+    "open request, you have the wrong paragraph: use the missing-credit one",
+    1))
+PYEOF
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q15 no rule sends a non-credit question to the missing-credit paragraph"* ]]
+}
+
 @test "CAN FAIL: forbid is case- and wrap-insensitive" {
   printf '\nThis needs a MANUAL REVIEW\nBY OUR TEAM, sorry.\n' >> "$CI_MD"
   run_gate

@@ -233,6 +233,25 @@ require "$CI" "Q7 credit: hand off only, the one read is the only look-up" "**Ha
 forbid "$AGENTS" "Q7 no credit-status look-up" '-> `profile_credits_status` first'
 forbid "$CI" "Q7 no business-day promise on credit errors" "what the correct credit should be. SLA: 2 business days"
 
+# --- Q15 "My page is empty" / a claim whose read came back empty (2026-11-15) ---------
+# The "never a dead end" rule replaced "I can't tell from here" with an approved paragraph, and
+# its first cut mapped EVERY false/null/error read to the missing-credit paragraph. That answers
+# a question the customer did not ask: a rejected claim was told to add a credit and open a
+# source-discrepancy ticket, and got nothing about the claim (QA on #2020). The paragraph is
+# chosen by the KIND of question; the read's outcome only decides whether the status paragraph
+# is allowed. These anchors keep the scope, and the forbid keeps the unconditional mapping out.
+require "$CV" "Q15 the fallback paragraph is chosen by the kind of question" "The paragraph is chosen by the KIND of question, and the read's outcome only decides whether the status paragraph is allowed."
+require "$CV" "Q15 the missing-credit paragraph is scoped to missing-credit and display questions" "on a missing-credit or display question"
+require "$CV" "Q15 a claim with no readable request gets the claim paragraph" "on any other question (a profile claim, a merge, a removal, a decline, GDPR): the matching how-it-works paragraph from step 3"
+require "$CV" "Q15 the missing-credit paragraph is not the fallback for every kind" "The missing-credit paragraph is NOT the fallback for these"
+forbid "$CV" "Q15 the unconditional missing-credit fallback is gone" "found: false or an error: the approved \"Why are some of my credits missing?\" paragraph"
+# The scope above is only worth anything if nothing later re-broadens it. The first cut of the
+# "test is the paragraph" rule did exactly that: any approved paragraph with no action of its own
+# sent the customer to the missing-credit one, so a rejected claim with an empty read was told to
+# add a credit (QA round 3 on #2020). The kind decides; the paragraph's own actions never do.
+require "$CV" "Q15 the paragraph test never outranks the kind of question" "On any other question the matching how-it-works paragraph is the answer even when it names no action of its own"
+forbid "$CV" "Q15 no rule sends a non-credit question to the missing-credit paragraph" "you have the wrong paragraph: use the missing-credit one"
+
 # --- Q8 "What proof do I need for my pending credit?" -------------------------------
 require "$CV" "Q8 Caroline never asks for proof" "Never ask for proof and never list proof types"
 require "$CI" "Q8 Caroline never asks for proof" "Caroline does not ask for proof and does not list proof types beyond the approved credit"
