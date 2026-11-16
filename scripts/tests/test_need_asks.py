@@ -1141,6 +1141,42 @@ class DistributorIssueOrderTest(unittest.TestCase):
                     issuer=lambda rid, uid: events.append(f"issue:{uid}") or {"code": "MUSO-AB12", "expires_at": "2099-01-01T00:00:00Z"})
         self.assertEqual(events, ["check:1", "issue:1", "send:1", "check:2", "issue:2", "send:2"])
 
+    def test_a_dry_run_check_reads_every_distributor_identity_once_and_issues_no_code(self):
+        """A recipient check (dry run) mints no code, so its distributor asks go through ONE send_all: one identity read
+        for the page and the gate calls on the check workers. One call per payload cost each user its own replica round
+        trips and a gate call alone: 20 users took 277 s on node-8 (2026-11-16) and the ask tick's check was killed."""
+        from unittest import mock
+        d = Path(tempfile.mkdtemp())
+        lst = d / "l.json"
+        users = (1, 2, 3, 4)
+        lst.write_text(json.dumps({"users": [{"user_id": str(u), "paid": True, "asks": [{"request_id": f"r{u}"}]}
+                                             for u in users]}))
+        ps = [{"user": {"id": str(u)}, "credits": [{"request_id": f"r{u}"}], "need": {"code": na.DISTRIBUTOR}}
+              for u in users]
+        lookups, issued, checked = [], [], []
+
+        def lookup(ids):
+            lookups.append(sorted(str(i) for i in ids))
+            return {str(i): {"professional_id": f"p{i}", "auth_id": ""} for i in ids}
+
+        def gate(argv):
+            body = json.load(open(argv[argv.index("--credits-file") + 1]))
+            checked.append((body["user"]["id"], body["need"]["verify_code"], "--check-recipient" in argv))
+            return type("R", (), {"returncode": 0, "stdout": "RECIPIENT OK contact=c\n", "stderr": ""})()
+        with mock.patch.object(na, "payloads", lambda users_, q, asked, held=None, filtered=None: ps), \
+                mock.patch.object(na.verify_notify, "IDENTITY_LOOKUP", lookup), \
+                mock.patch.object(na.verify_notify, "_with_presented", lambda ps_: ps_), \
+                mock.patch.object(na.verify_notify.time, "sleep", lambda s: None):
+            rep = na.send(list_path=str(lst), segment="paid", mode="dry-run", check_recipients=True,
+                          query=lambda sql: [], runner=gate, ledger_path=str(d / "ledger.sqlite3"), max_users=4,
+                          issuer=lambda rid, uid: issued.append(uid) or {"code": "MUSO-AB12"})
+        self.assertEqual(lookups, [["1", "2", "3", "4"]])          # one identity read for the whole page
+        self.assertEqual(issued, [])                                   # a check mints nothing
+        self.assertEqual(sorted(c[0] for c in checked), ["1", "2", "3", "4"])
+        self.assertTrue(all(c[2] and c[1] == na.CODE_PLACEHOLDER for c in checked))
+        self.assertEqual(rep.recipient_ok, 4)                          # every one checked, none lost in the batch
+        self.assertEqual(rep.page["end"], 4)
+
     def test_a_distributor_user_the_budget_deferred_gets_no_code_and_the_cursor_stops_at_them(self):
         """QA #1756 Important (carried): the budget clamp ran between the plain batch and the distributor phase, and
         with_codes() minted an F9 code BEFORE the send loop's budget guard. So a distributor user reaching the loop

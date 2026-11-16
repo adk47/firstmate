@@ -981,6 +981,21 @@ def _send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int
     verify_notify.send_all(plain, report, mode=mode, wrapper=wrapper, runner=runner, extra=["--campaign", CAMPAIGN],
                            pace_seconds=1.0, preview_dir=preview_dir,
                            check_recipients=check_recipients and mode != "apply")
+    # A dry run (the tick's recipient check included) mints no code: with_codes hands every distributor ask the masked
+    # placeholder. Nothing then ties a distributor payload to its own send_all, so they go in ONE call, which reads the
+    # replica identities once for the page and runs the gate calls on verify_notify's check workers. One call per payload
+    # cost each user its own identity reads (3-4 trino-query.sh round trips, ~2 s each) and a gate call alone: measured
+    # on node-8 2026-11-16 06:41Z, a 20-user proof-need-ask check took 277 s, 183 s of it in 83 replica round trips run
+    # between gate calls, and that is why the ask tick's check was killed at 130 s. The apply below keeps one payload
+    # per call: there each code is minted immediately before its own gate call (QA #1513).
+    if mode != "apply":
+        dist = [p for p in ps if p["need"]["code"] == DISTRIBUTOR]
+        if dist:
+            verify_notify.send_all(with_codes(dist, mode, report, issuer), report, mode=mode, wrapper=wrapper,
+                                   runner=runner, extra=["--campaign", CAMPAIGN], pace_seconds=1.0,
+                                   preview_dir=preview_dir, check_recipients=check_recipients)
+        _page_ends_at_budget_stop(report, page_users)
+        return report
     for j, p in enumerate(ps):
         if p["need"]["code"] != DISTRIBUTOR:
             continue
