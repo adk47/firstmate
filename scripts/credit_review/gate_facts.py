@@ -56,16 +56,18 @@ def nothing_else(campaign: str, copy: str) -> bool:
 
 
 # --- core_notice.reasons_by_user([uid]) -----------------------------------------------------------------------------
-def core_notice_statements(uid: int) -> list[str]:
-    lst = str(int(uid))
-    return [("SELECT CAST(userid AS varchar), "
-             "coalesce(json_format(json_extract(metadata, '$.approvedNotice')), ''), "
-             "coalesce(json_format(json_extract(metadata, '$.proofRequest')), ''), "
-             "coalesce(json_format(json_extract(metadata, '$.infoRequest')), ''), "
-             "CAST(updatedat AS varchar) FROM postgresql_core.public.credit_requests "
-             f"WHERE deletedat IS NULL AND userid IN ({lst})"),
-            ("SELECT CAST(userid AS varchar), CAST(updatedat AS varchar), CAST(createdat AS varchar) "
-             f"FROM postgresql_core.public.claiming WHERE userid IN ({lst}) AND updatedat >= current_timestamp - INTERVAL '8' DAY")]
+# The gate passes core_notice --window-hours 24 for proof-need-ask (its RECONTACT_S; pinned to
+# verify_ledger.RECONTACT_HOURS by test_verify_ledger_proof_need.py) and the module's default for everyone else. The
+# claim read's lookback follows the window (QA on #2132), so the statement text does too.
+NEED_ASK_WINDOW = ("proof-need-ask", 24)
+
+
+def core_notice_statements(uid: int, campaign: str = "") -> list[str]:
+    from datetime import timedelta  # noqa: PLC0415
+
+    from credit_review import core_notice  # noqa: PLC0415
+    window = timedelta(hours=NEED_ASK_WINDOW[1]) if campaign == NEED_ASK_WINDOW[0] else core_notice.WINDOW
+    return core_notice.statements(str(int(uid)), window)
 
 
 # --- comm_state.core_facts(uid, keys) -------------------------------------------------------------------------------
@@ -123,7 +125,7 @@ def comm_state_statements(campaign: str, copy: str, uid: int, keys: list[str], r
 def plan(campaign: str, copy: str, uid: int, keys: list[str], reply_due_part: str = "") -> list[str]:
     """Every statement of this gate call, each once. A reply-due answer skips the core-notice cooldown in the gate,
     so its statements are not read."""
-    stmts = [] if reply_due_part else core_notice_statements(uid)
+    stmts = [] if reply_due_part else core_notice_statements(uid, campaign)
     return replica_batch.unique(stmts + comm_state_statements(campaign, copy, uid, keys, reply_due_part))
 
 

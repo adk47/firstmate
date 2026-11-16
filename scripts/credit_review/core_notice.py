@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Reviewed baseline: deploy overwrites - 2026-11-16 (ask-pass-durable-f1, firstmate 045). node-8 held a hand-edited copy
+# (sha256 df578da26ec8, written 2026-11-10 16:45Z) with one hunk the repo did not have: WINDOW from
+# CORE_NOTICE_WINDOW_DAYS, default 3 days instead of 7. This file carries it as it ran, under #2111's --window-hours.
 """Has core itself told this user something lately? (Fable sender map 2026-10-27, item 2: the one
 structural fix; firstmate inbox 045.)
 
@@ -9,8 +12,8 @@ on top of one of those is a second message the ledger cannot see. So every hydra
 first and holds the user when, on the core replica:
 
   - any ISO timestamp inside metadata.approvedNotice / proofRequest / infoRequest of any of the user's
-    credit requests is within the last 7 days;
-  - any of the user's claims (claiming) was updated within the last 7 days - a claim never touched since it was
+    credit requests is within the window (WINDOW: CORE_NOTICE_WINDOW_DAYS, default 3 days; the gate passes 24 hours for proof-need-ask);
+  - any of the user's claims (claiming) was updated within the window - a claim never touched since it was
     filed (updatedat == createdat) is the user's own filing, not a notice, and does not count (p1 180);
   - any of the user's credit requests changed today (updatedat on the current UTC day).
 
@@ -40,7 +43,47 @@ from typing import Callable, Iterable
 
 TRINO = os.environ.get("CORE_NOTICE_TRINO", "/opt/hydra/scripts/trino-query.sh")
 REASON = "core_notice_within_7d"
-WINDOW = timedelta(days=7)
+# 7 days deferred almost every candidate: we approve ~10k credits/day, so nearly every
+# user had a core notice inside the window and the verification ask never went out.
+# 3 days matches the per-recipient frequency cap (1 notification email / 72h).
+# The window is 1 hour to 7 days, the same bound as --window-hours 1..168 (QA on #2132). A value outside it, or one
+# that is not a number, is not clamped and not replaced by a default: WINDOW_ERROR is set and every read refuses
+# (Unreadable: the check exits 2, the gate holds the note as unmeasured), so a bad env is loud, never a wrong window.
+MIN_WINDOW, MAX_WINDOW = timedelta(hours=1), timedelta(days=7)
+
+
+def _window_from_env() -> tuple[timedelta, str]:
+    raw = os.environ.get("CORE_NOTICE_WINDOW_DAYS", "3")
+    try:
+        w = timedelta(days=float(raw))
+    except (ValueError, OverflowError):
+        return timedelta(days=3), f"CORE_NOTICE_WINDOW_DAYS={raw!r} is not a number of days; nothing is read"
+    if not MIN_WINDOW <= w <= MAX_WINDOW:
+        return timedelta(days=3), f"CORE_NOTICE_WINDOW_DAYS={raw!r} is outside 1 hour..7 days; nothing is read"
+    return w, ""
+
+
+WINDOW, WINDOW_ERROR = _window_from_env()
+
+
+def claim_lookback_days(window: timedelta) -> int:
+    """The claim read's pushed-down lookback: the window plus one day, whole days (7 days -> 8, as before). The
+    window filter itself runs here on the rows; the lookback only has to cover it (QA on #2132: a fixed 8 days
+    missed every claim older than that under a longer window)."""
+    return -(-int(window.total_seconds()) // 86400) + 1
+
+
+def statements(lst: str, window: timedelta) -> list[str]:
+    """The two replica reads for a comma-separated id list, ONE text: gate_facts bundles exactly these."""
+    return [("SELECT CAST(userid AS varchar), "
+             "coalesce(json_format(json_extract(metadata, '$.approvedNotice')), ''), "
+             "coalesce(json_format(json_extract(metadata, '$.proofRequest')), ''), "
+             "coalesce(json_format(json_extract(metadata, '$.infoRequest')), ''), "
+             "CAST(updatedat AS varchar) FROM postgresql_core.public.credit_requests "
+             f"WHERE deletedat IS NULL AND userid IN ({lst})"),
+            ("SELECT CAST(userid AS varchar), CAST(updatedat AS varchar), CAST(createdat AS varchar) "
+             f"FROM postgresql_core.public.claiming WHERE userid IN ({lst}) "
+             f"AND updatedat >= current_timestamp - INTERVAL '{claim_lookback_days(window)}' DAY")]
 CHUNK = 400
 # The FULL ISO 8601 value, offset included (QA + Fable on #1397: a prefix-only match read
 # 2026-10-20T14:30:00-02:00 as 14:30 UTC, two hours older than it is, and cleared a user inside the window).
@@ -139,6 +182,10 @@ def reasons_by_user(user_ids: Iterable[int], *, query: Query = trino,
     """{user id: [why...]} for the users core told something lately (empty list = clear). Unreadable raises.
     A marker that is present but carries no readable timestamp is UNKNOWN for that user ("unknown: ..."):
     the caller holds them, never clears them."""
+    if WINDOW_ERROR:
+        raise Unreadable(WINDOW_ERROR)
+    if not MIN_WINDOW <= window <= MAX_WINDOW:
+        raise Unreadable(f"window {window} is outside 1 hour..7 days; nothing is read")
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     since, today = now - window, now.date()
     span = "7d" if window == timedelta(days=7) else f"{int(window.total_seconds() // 3600)}h"   # the reasons name it
@@ -154,13 +201,8 @@ def reasons_by_user(user_ids: Iterable[int], *, query: Query = trino,
     out: dict[int, list[str]] = {u: [] for u in ids}
     for i in range(0, len(ids), CHUNK):
         lst = ",".join(map(str, ids[i:i + CHUNK]))
-        for uid, ap, pr, ir, upd in _rows(query, 
-                "SELECT CAST(userid AS varchar), "
-                "coalesce(json_format(json_extract(metadata, '$.approvedNotice')), ''), "
-                "coalesce(json_format(json_extract(metadata, '$.proofRequest')), ''), "
-                "coalesce(json_format(json_extract(metadata, '$.infoRequest')), ''), "
-                "CAST(updatedat AS varchar) FROM postgresql_core.public.credit_requests "
-                f"WHERE deletedat IS NULL AND userid IN ({lst})", 5):
+        requests_sql, claims_sql = statements(lst, window)
+        for uid, ap, pr, ir, upd in _rows(query, requests_sql, 5):
             u = int(uid)
             if u not in out:
                 continue
@@ -169,9 +211,7 @@ def reasons_by_user(user_ids: Iterable[int], *, query: Query = trino,
             within(u, "credit request changed today", upd, lambda t: t.date() == today)
         # p1 180: a claim never touched since it was filed (updatedat == createdat) is the user's own filing, not
         # something core told them - it never holds. Any later update (a decision, a code check) still does.
-        for uid, upd, created in _rows(query,
-                "SELECT CAST(userid AS varchar), CAST(updatedat AS varchar), CAST(createdat AS varchar) "
-                f"FROM postgresql_core.public.claiming WHERE userid IN ({lst}) AND updatedat >= current_timestamp - INTERVAL '8' DAY", 3):
+        for uid, upd, created in _rows(query, claims_sql, 3):
             u = int(uid)
             if u in out and not (upd and upd == created):
                 within(u, f"claim updated within {span}", upd, lambda t: t >= since)
@@ -190,7 +230,7 @@ def user_ids_for_email(email: str, *, query: Query = trino) -> list[int]:
 
 
 def _main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="core notices within 7 days (read-only)")
+    ap = argparse.ArgumentParser(description="core notices within the window (read-only)")
     sub = ap.add_subparsers(dest="op", required=True)
     c = sub.add_parser("check")
     who = c.add_mutually_exclusive_group(required=True)

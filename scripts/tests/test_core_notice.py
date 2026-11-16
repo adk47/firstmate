@@ -28,7 +28,9 @@ def fake(requests, claims=()):
 
 class ReasonsTest(unittest.TestCase):
     def why(self, requests, claims=(), ids=(1,)):
-        return cn.reasons_by_user(ids, query=fake(requests, claims), now=NOW)
+        # the boundary and parsing rules below are written against a 7-day window; the module's DEFAULT window is
+        # node-8's (CORE_NOTICE_WINDOW_DAYS, 3 days: DefaultWindowTest), so these pass the week explicitly
+        return cn.reasons_by_user(ids, query=fake(requests, claims), now=NOW, window=timedelta(days=7))
 
     def test_each_core_marker_within_7_days_holds(self):
         old = "2026-09-01 00:00:00.000"
@@ -152,15 +154,60 @@ class ReasonsTest(unittest.TestCase):
             cn.reasons_by_user([1], query=broken, now=NOW)
 
 
+class DefaultWindowTest(unittest.TestCase):
+    def test_the_module_reads_core_notice_window_days_default_three(self):
+        code = ("import importlib.util,sys; s=importlib.util.spec_from_file_location('m', sys.argv[1]); "
+                "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.WINDOW.total_seconds())")
+        for env, want in (({}, 3 * 86400), ({"CORE_NOTICE_WINDOW_DAYS": "7"}, 7 * 86400),
+                          ({"CORE_NOTICE_WINDOW_DAYS": "1.5"}, 1.5 * 86400)):
+            e = {k: v for k, v in os.environ.items() if k != "CORE_NOTICE_WINDOW_DAYS"}
+            e.update(env)
+            out = subprocess.run([sys.executable, "-c", code, PATH], env=e, capture_output=True, text=True)
+            self.assertEqual(float(out.stdout), want, out.stderr)
+
+    def test_the_claim_lookback_covers_the_window_plus_a_day(self):
+        """QA on #2132: the claim read looked back a fixed 8 days, so a longer window never saw an older claim update.
+        The lookback is now the window + 1 day (whole days); a week keeps the old 8."""
+        for window, days in ((timedelta(days=7), 8), (timedelta(days=3), 4), (timedelta(hours=24), 2),
+                             (timedelta(hours=36), 3), (timedelta(hours=1), 2)):
+            self.assertEqual(cn.claim_lookback_days(window), days, window)
+            self.assertIn(f"INTERVAL '{days}' DAY", cn.statements("1", window)[1])
+        # the read reasons_by_user sends is the statement for ITS window, and a claim updated inside it holds
+        asked: list[str] = []
+        upd = (NOW - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S.000 UTC")
+
+        def q(sql):
+            asked.append(sql)
+            return [["1", upd, "2026-01-01 00:00:00.000 UTC"]] if "claiming" in sql else []
+        got = cn.reasons_by_user([1], query=q, now=NOW, window=timedelta(days=7))[1]
+        self.assertEqual(got, ["claim updated within 7d"])
+        self.assertIn("INTERVAL '8' DAY", [s for s in asked if "claiming" in s][0])
+        asked.clear()
+        self.assertEqual(cn.reasons_by_user([1], query=q, now=NOW, window=timedelta(days=3))[1], [])
+        self.assertIn("INTERVAL '4' DAY", [s for s in asked if "claiming" in s][0])
+
+    def test_a_window_outside_one_hour_to_seven_days_is_refused(self):
+        for bad in (timedelta(days=8), timedelta(minutes=30)):
+            with self.assertRaises(cn.Unreadable):
+                cn.reasons_by_user([1], query=fake([]), now=NOW, window=bad)
+
+    def test_the_default_window_names_itself_in_the_reasons(self):
+        r = (1, '{"noticeSentAt":"2026-10-26T15:00:00Z"}', "", "", "2026-01-01 00:00:00.000")
+        got = cn.reasons_by_user([1], query=fake([r]), now=NOW, window=timedelta(days=3))[1]
+        self.assertEqual(got, ["approvedNotice within 72h"])
+
+
 class CliTest(unittest.TestCase):
     """The CLI exit contract the gate relies on: 0 clear, 3 hold, 2 unknown (never clear)."""
 
-    def run_cli(self, trino_body, *args):
+    def run_cli(self, trino_body, *args, extra_env=None):
         t = tempfile.mkdtemp()
         stub = os.path.join(t, "trino")
         open(stub, "w").write("#!/usr/bin/env bash\n" + trino_body + "\n")
         os.chmod(stub, 0o755)
         env = dict(os.environ, CORE_NOTICE_TRINO=stub)
+        env.pop("CORE_NOTICE_WINDOW_DAYS", None)
+        env.update(extra_env or {})
         return subprocess.run([sys.executable, "-I", PATH, *args], env=env, capture_output=True, text=True), t
 
     def test_the_cli_takes_the_window_in_hours_and_refuses_one_outside_a_week(self):
@@ -168,12 +215,45 @@ class CliTest(unittest.TestCase):
         body = ('grep -q claiming && exit 0; '
                 f'echo \'"7","{{""noticeSentAt"":""{two_days}""}}","","","2020-01-01 00:00:00.000"\'')
         p, _ = self.run_cli(body, "check", "--user-id", "7")
-        self.assertEqual(p.returncode, 3, p.stdout + p.stderr)                  # 7 days: held
+        self.assertEqual(p.returncode, 3, p.stdout + p.stderr)                  # the default 3 days: held
         p, _ = self.run_cli(body, "check", "--user-id", "7", "--window-hours", "24")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)                  # 24 hours: clear
         for bad in ("0", "169"):
             p, _ = self.run_cli(body, "check", "--user-id", "7", "--window-hours", bad)
             self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+
+    def test_the_default_window_is_node8s_three_days_and_follows_core_notice_window_days(self):
+        """firstmate 045: node-8 ran a hand edit from 2026-11-10 16:45Z (WINDOW from CORE_NOTICE_WINDOW_DAYS, default 3
+        days; 7 days deferred almost every candidate). Every caller that passes no --window-hours gets it; the flag's
+        default follows the env. An env outside 1 hour..7 days (QA on #2132) refuses every read: exit 2, never a
+        wrong window and never a silent default."""
+        four_days = (datetime.now(timezone.utc) - timedelta(hours=96)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body = ('grep -q claiming && exit 0; '
+                f'echo \'"7","{{""noticeSentAt"":""{four_days}""}}","","","2020-01-01 00:00:00.000"\'')
+        p, _ = self.run_cli(body, "check", "--user-id", "7")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)                  # 4 days ago, default 3 days: clear
+        p, _ = self.run_cli(body, "check", "--user-id", "7", extra_env={"CORE_NOTICE_WINDOW_DAYS": "7"})
+        self.assertEqual(p.returncode, 3, p.stdout + p.stderr)                  # the env's 7 days: held
+        self.assertIn("approvedNotice within 7d", json.loads(p.stdout)["reasons"])
+        p, _ = self.run_cli(body, "check", "--user-id", "7", "--window-hours", "24",
+                            extra_env={"CORE_NOTICE_WINDOW_DAYS": "7"})
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)                  # the gate's 24 h still wins
+
+    def test_an_env_window_outside_one_hour_to_seven_days_refuses_loudly(self):
+        """QA on #2132: CORE_NOTICE_WINDOW_DAYS has the same bound as --window-hours (1..168 hours). Out of range or
+        not a number: exit 2 with the reason, whatever --window-hours says - the config is wrong, so nothing is read."""
+        body = 'grep -q claiming && exit 0; echo \'"7","","","","2020-01-01 00:00:00.000"\''
+        for bad in ("10", "8", "0", "-1", "0.01", "three", "nan"):
+            for extra in ((), ("--window-hours", "24")):
+                p, _ = self.run_cli(body, "check", "--user-id", "7", *extra,
+                                    extra_env={"CORE_NOTICE_WINDOW_DAYS": bad})
+                self.assertEqual(p.returncode, 2, (bad, extra, p.stdout + p.stderr))
+                out = json.loads(p.stdout)
+                self.assertIsNone(out["hold"])
+                self.assertIn("CORE_NOTICE_WINDOW_DAYS", out["reasons"][0])
+        for edge in ("7", str(1 / 24)):                                         # the bounds themselves are taken
+            p, _ = self.run_cli(body, "check", "--user-id", "7", extra_env={"CORE_NOTICE_WINDOW_DAYS": edge})
+            self.assertEqual(p.returncode, 0, (edge, p.stdout + p.stderr))
 
     def test_exit_codes(self):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

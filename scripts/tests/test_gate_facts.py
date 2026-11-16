@@ -388,6 +388,18 @@ class PlanIsCompleteTests(unittest.TestCase):
         self.assertTrue(set(gate_facts.core_facts_statements(UID, [REQ])) <= planned)
         self.assertTrue(set(gate_facts.owes_statements(UID)) <= planned)
 
+    def test_the_core_notice_claim_read_is_planned_for_the_window_the_gate_asks(self):
+        """QA on #2132: the claim read's lookback follows the window, so the planned text must too - proof-need-ask's
+        24 hours (the gate's RECONTACT_S, verify_ledger.RECONTACT_HOURS) and the module default for everyone else."""
+        from credit_review import verify_ledger as vl
+        self.assertEqual(gate_facts.NEED_ASK_WINDOW[1], vl.recontact_hours("proof-need-ask"))
+        need = gate_facts.core_notice_statements(UID, "proof-need-ask")
+        self.assertEqual(need, core_notice.statements(str(UID), timedelta(hours=24)))
+        self.assertIn("INTERVAL '2' DAY", need[1])
+        self.assertTrue(set(need) <= set(gate_facts.plan("proof-need-ask", "proofneed", UID, [REQ])))
+        other = gate_facts.core_notice_statements(UID, "uvn-status")
+        self.assertEqual(other, core_notice.statements(str(UID), core_notice.WINDOW))
+
     def test_the_copied_rules_equal_comm_states(self):
         self.assertEqual(gate_facts.REVIEW_FIRED, cs.REVIEW_FIRED)
         self.assertEqual(gate_facts.RECEIPT, cs.RECEIPT)
@@ -467,7 +479,9 @@ class SameAnswerTests(unittest.TestCase):
         def world(sql):
             return [[str(UID), json.dumps({"noticeSentAt": recent}), "", "", OLD]] if sql == stmts[0] else []
         live = core_notice.reasons_by_user([UID], query=world)
-        self.assertEqual(live[UID], ["approvedNotice within 7d"])
+        # the reason names the module's default window (CORE_NOTICE_WINDOW_DAYS, default 3 days: firstmate 045)
+        span = "7d" if core_notice.WINDOW == timedelta(days=7) else f"{int(core_notice.WINDOW.total_seconds() // 3600)}h"
+        self.assertEqual(live[UID], [f"approvedNotice within {span}"])
         facts = rb.load(rb.dumps(rb.bundle(stmts, [world(s) for s in stmts], time.time())))
         self.assertEqual(core_notice.reasons_by_user([UID], query=through(facts, lambda sql: 1 / 0)), live)
 
