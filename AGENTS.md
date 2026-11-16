@@ -768,7 +768,10 @@ against sources the user does not control; UNKNOWN never approves:
 `docs/credit-verification/doc-verify.md`.
 The DSP evidence verifier (shadow, `scripts/credit-dsp-verify.py`) is the same posture for credit requests: approve-verdicts
 only on a same-run Spotify AND Tidal by-id anchor; it runs as its own job, never in Caroline:
-`docs/credit-verification/dsp-evidence-verifier.md`. A missing contributor id on the presented profile is only
+`docs/credit-verification/dsp-evidence-verifier.md`. Its built anchor records reach core by the `credit-anchors-push`
+cron (upload only, approves nothing; a run with nothing built is a clean `nothing_pending`); whether the scheduler ran
+it is `credit-anchors-push.py --scheduler-runs`, never a hand-run: `docs/credit-verification/dsp-anchor-record.md`
+§"The scheduled upload". A missing contributor id on the presented profile is only
 ever PROPOSED, in shadow, in `link_proposals`. That table is never the decider's `decisions`, whose readers treat
 every row as a credit decision. Code never links on a name alone and never relinks:
 `docs/credit-verification/profile-link-proposals.md`.

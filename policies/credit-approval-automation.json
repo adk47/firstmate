@@ -107,8 +107,22 @@
       "approved": true,
       "approved_by": "fable-delegated-1030 l1+v1",
       "approval_ref": "data/verify-program-lead-fable-l1/switch-on-plan-1030.md item 1 (l1+v1 GO); firstmate doc-verify-build-b1.inbox 206 + 208: register credit-dsp-verify-d5b as capture-only (approves nothing, writes only its own shadow ledger); live approval use is a reviewed switch-on change of its own, never a go-ahead to wait for (the r5 GO gate is retired, captain 2026-11-14)",
-      "status_note": "SHADOW only: captures + local dsp-anchor/1 records for doc-verify's verified requests, written to dsp-verify.sqlite; it approves nothing and writes no core state (anchor upload stays manual, credit-anchors-push.py). Kill switches /etc/hydra/credit-dsp-verify.disabled and /etc/hydra/credit-verify.disabled. Any LIVE approval use is a reviewed switch-on change of its own, never a go-ahead to wait for: the r5 GO gate is retired (captain 2026-11-14).",
+      "status_note": "SHADOW only: captures + local dsp-anchor/1 records for doc-verify's verified requests, written to dsp-verify.sqlite; it approves nothing and writes no core state (the upload is the `credit-anchors-push` entry below, a job of its own). Kill switches /etc/hydra/credit-dsp-verify.disabled and /etc/hydra/credit-verify.disabled. Any LIVE approval use is a reviewed switch-on change of its own, never a go-ahead to wait for: the r5 GO gate is retired (captain 2026-11-14).",
       "scope": "capture-only"
+    },
+    "credit-anchors-push": {
+      "description": "scripts/credit-anchors-push.py --pending --apply (cron credit-anchors-push, every 15 min): uploads the dsp-anchor/1 records the DSP verifier has built and that have not landed in core yet to POST /admin/credit-anchors, as dsp-evidence-verifier on the credit-decider login. It APPROVES NOTHING and writes no credit status: an anchor row is evidence, and core admits an approval on it only through the L12 executor's ANCHORED scope under Fable's own login (the fable-decider entry, never scheduled). Registered because it is the scheduled writer of the approve-grade fact that executor reads.",
+      "entrypoints": [
+        "credit-anchors-push.py"
+      ],
+      "cron_names": [
+        "credit-anchors-push"
+      ],
+      "approved": true,
+      "approved_by": "captain (Aaron), order 2026-11-15 15:2xZ, #8 of 12",
+      "approval_ref": "firstmate task anchors-push-driver-1115 (creds backlog 'Order #8'), captain verbatim: \"ACCEPT: the anchors push runs twice from the scheduler with no manual invocation - two consecutive scheduler-triggered runs, both succeeding, with the run records to show it. Not a hand-run, not a dry run, not one run and an assumption.\" The order schedules the UPLOAD only; it approves no credit and arms no executor.",
+      "status_note": "Upload only. With nothing built and unlanded a run posts nothing and exits 0 (measured 2026-11-15 15:4xZ: dsp_anchors held 556 rows, all `refused`, 0 `built`, and the verifier had recorded no APPROVE verdict, so the first scheduled runs push 0 rows; no record had ever been posted to core's endpoint from node-8). Run records: /var/lib/hydra/credit-anchors-push/runs.jsonl; `credit-anchors-push.py --scheduler-runs` pairs them with the gateway's receipts. Kill switches /etc/hydra/credit-anchors-push.disabled and /etc/hydra/credit-verify.disabled. The manual --tray / --ids path is otherwise unchanged; it shares the same no-split packing rule, so a request over the 100-row cap is reported as a convert error and the apply exits 1.",
+      "scope": "anchor-upload-only"
     },
     "credit-verify-outbound": {
       "description": "scripts/credit-verify-outbound.sh (cron /etc/cron.d/credit-verify-outbound, hourly since 2026-11-13, every 2 h before): the server-side OUTBOUND tick for credit verification (captain 2026-10-30 14:4xZ). Sends approved notes (uvn-status ask, R1 receipt; more families as their PRs land) through the deployed gate; it APPROVES NOTHING. Registered for visibility (p1 plan unattended-1030).",

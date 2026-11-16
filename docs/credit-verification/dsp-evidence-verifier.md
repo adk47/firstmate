@@ -169,4 +169,4 @@ what a looser rule would act on, so their labelled precision is what the captain
 For an approve tray, `credit-dsp-verify.py anchors --tray <tray.json>` builds the server-side anchor
 record per row from the verifier's own verdict (Fable `l12-approvals-core` = A):
 [`dsp-anchor-record.md`](./dsp-anchor-record.md). That subcommand writes nothing to core; built records are
-posted by `scripts/credit-anchors-push.py`.
+posted by the `credit-anchors-push` cron (`scripts/credit-anchors-push.py --pending --apply`).

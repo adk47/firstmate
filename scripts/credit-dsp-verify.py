@@ -208,7 +208,7 @@ def cmd_anchors(args: argparse.Namespace) -> int:
         return 0
     if args.write:
         log("--write refused: this subcommand builds anchor records and logs them locally only. Posting built "
-            "records to core (POST /admin/credit-anchors) is scripts/credit-anchors-push.py, per approve tray.")
+            "records to core (POST /admin/credit-anchors) is scripts/credit-anchors-push.py (cron credit-anchors-push).")
         return 2
     _, out = runner.build_anchors(Store(args.store), json.loads(Path(args.tray).read_text(encoding="utf-8")), log=log)
     for o in out:

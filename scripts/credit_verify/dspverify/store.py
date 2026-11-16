@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS dsp_anchors (
   at TEXT NOT NULL,
   request_id TEXT NOT NULL,
   kind TEXT,                             -- dsp_anchor | dsp_label_line | NULL when refused
-  outcome TEXT NOT NULL,                 -- built | refused | written | write_refused | write_error
+  outcome TEXT NOT NULL,                 -- built | refused | written | write_refused | write_error | retry_granted
   reason TEXT,
   ruling_id TEXT,                        -- metadata only
   verdict_id INTEGER,                    -- the dsp_verdicts row it was built from
@@ -278,6 +278,15 @@ class Store:
             return [dict(r) for r in self.db.execute(sql + " ORDER BY id", args).fetchall()]
         finally:
             self.db.row_factory = None
+
+    def anchor_outcomes(self) -> list[dict[str, Any]]:
+        """Every dsp_anchors row in id order WITHOUT its record or core's answer: what the scheduled upload reads
+        to find the built records that have not landed (credit_review/anchor_upload.pending). `at` and `reason`
+        are what it needs to say when a record ran out of upload attempts and whether core was ever asked."""
+        return [{"id": r[0], "request_id": r[1], "outcome": r[2], "has_record": bool(r[3]), "at": r[4],
+                 "reason": r[5]}
+                for r in self.db.execute("SELECT id, request_id, outcome, record_json IS NOT NULL, at, reason"
+                                         " FROM dsp_anchors ORDER BY id")]
 
     def latest_for(self, request_id: str) -> dict[str, Any] | None:
         """The latest verdict for this request under this version, from ANY run (reports)."""

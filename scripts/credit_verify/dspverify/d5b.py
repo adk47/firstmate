@@ -13,7 +13,7 @@ is corroboration, the DSP anchor is the approve-grade fact. Roles DSPs never sho
 are never anchored here; they approve only via F9 (dashboard code) or option A (label line).
 
 Writes only this verifier's store (dsp-verify.sqlite). Nothing goes to core: anchor upload is credit-anchors-push.py
-(manual, per approve tray).
+(the `credit-anchors-push` cron, a job of its own).
 """
 from __future__ import annotations
 

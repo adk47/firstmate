@@ -11,7 +11,7 @@
 | 1. capture | `credit-dsp-verify.py submit --tray <tray.json>` (own job, credit-decider identity) | node-8 / cluster job; `kubectl exec` into an IDP `industry-proc-catalog-admin` pod | an instant-priority Spotify + Tidal capture per tray row, tagged with OUR request id |
 | 2. verdict | `credit-dsp-verify.py verify` | same job | `dsp_verdicts`: verdict + complete packet (shadow store) |
 | 3. anchor record | `credit-dsp-verify.py anchors --tray <tray.json>` | same job | `dsp_anchors` (local, append-only); writes nothing to core |
-| 4. upload | `scripts/credit-anchors-push.py --tray <tray.json> [--apply]` | manual, per approve tray | core's `credit_anchor_records` (`POST /admin/credit-anchors`), one row per role and source (`credit_review/anchor_upload.py` owns the conversion) |
+| 4. upload | `scripts/credit-anchors-push.py --pending --apply` | cron `credit-anchors-push`, every 15 min (`--tray <tray.json> [--apply]` is the operator's per-tray path) | core's `credit_anchor_records` (`POST /admin/credit-anchors`), one row per role and source (`credit_review/anchor_upload.py` owns the conversion) |
 | 5. approve | the L12 executor (credit-refresh-t01b, `credit-fable-execute.py`) | its own job | approves ONLY through the proof-backed path that reads the server-written record |
 
 The record is built from the verifier's **own** standing verdict and packet for that request, and only from a
@@ -128,4 +128,58 @@ overlapping the request's server-held ISRC, every approved role in `roles`, `cre
 `written_by` = the capture job's account. The executor never sends the record.
 
 `anchors --write` exits 2: the subcommand only builds records into `dsp_anchors`. Posting built records to
-core (`POST /admin/credit-anchors`) is `scripts/credit-anchors-push.py`, per approve tray.
+core (`POST /admin/credit-anchors`) is `scripts/credit-anchors-push.py`. Its operator paths (`--tray`,
+`--ids`) pack POSTs on request boundaries by the same rule as the schedule: a request is never split, and one
+whose rows exceed the 100-row cap is reported as a convert error, so the apply stops and exits 1.
+
+## The scheduled upload
+
+The cron `credit-anchors-push` (`7,22,37,52 * * * *` UTC, main gateway) runs
+`credit-anchors-push.py --pending --apply`. Rules and exit codes: `scripts/credit_review/anchor_push_run.py`.
+
+- **What it uploads**: every request whose latest build outcome is `built` and whose record has no `written` row
+  after that build (`anchor_upload.pending`), oldest build first, 200 requests per run, whole requests packed
+  into POSTs of at most 100 core rows. A request is never split across POSTs: one whose core rows exceed 100 is
+  not posted at all, is recorded as a `write_error` naming its row count and the cap, and fails the run. A later
+  `refused` build withdraws a record; a newer build is owed again. A run whose every taken record was withdrawn
+  before its POST posted nothing, so it records the idle outcome (`nothing_pending` or `deferred_exhausted`), never
+  `pushed`.
+- **What it never does**: approve, decline, message, or write a credit status. Core re-decides the claimant match
+  and freshness on every row; the approve step stays the L12 executor's and is never scheduled.
+- **Nothing built is a clean run.** It posts nothing, records `nothing_pending` and exits 0. That was the state
+  on 2026-11-15: `dsp_anchors` held 556 rows, all `refused`, because the verifier had recorded no APPROVE verdict.
+  A run whose only outstanding records are exhausted is different: a built anchor is unlanded, so it records
+  `deferred_exhausted` and exits 0, with `retry_owed`: how many of those records this job still owes core an
+  upload of (the ones in an upload cooldown).
+- **A record core will not admit stops being retried**: 3 core refusals of one built record make it `exhausted`,
+  named on every run record until the verifier builds a newer one. Nothing hands a refused record back.
+- **A failed upload is a cooldown, not a tombstone**: 12 failed uploads of one built record make it `exhausted`,
+  the run that reaches the cap pages `#clio_devops` (an undelivered page is recorded `paged: false` and the run
+  still exits 1), and the run record names when (`exhausted_at`). One hour later (`RETRY_COOLDOWN_S`) a run asks
+  core ONE read-only question first (`anchor_upload.admin_probe`: an admin GET on the same wrapper and login, never
+  a POST). If core answers, the record gets a `retry_granted` row, a new budget of 12, and is uploaded in that
+  same run. If core does not answer it stays exhausted, nobody is paged again for it, and the next run asks
+  again. The retry never depends on an upload having worked. Not handed back: a record that failed before any
+  POST (it could not be converted, or its request exceeds 100 rows), because a reachable core changes nothing
+  about it.
+- **Exit 1** when an upload failed, core's answer did not account for every submitted row, or a built record
+  could not be converted. A core refusal with a reason is recorded per request and is exit 0.
+- **Run record**: one line per run in `/var/lib/hydra/credit-anchors-push/runs.jsonl` (start, end, exit code,
+  outcome, counts, the request ids that landed). Once the state directory is usable every path writes one, a
+  failure, a kill file and a busy lock included; an unusable state directory raises before any record exists.
+- **Did the scheduler run it**: `credit-anchors-push.py --scheduler-runs 2` (on node-8) reads the gateway's
+  `cron_run_receipts` read-only and pairs each finished receipt with the run record written inside its window.
+  Exit 0 only when the two newest finished runs are `ok` receipts that started within five minutes after a
+  scheduled minute (the window is the measured gateway start latency: 96.1% of 745 measured scheduled starts
+  landed within 300 s), each with
+  exactly one applied run record that exited 0 with a success outcome (`pushed`, `pushed_with_refusals` or
+  `nothing_pending`). A run whose every pending record core refused also exits 0, but it is not counted as a
+  success here. A `deferred_exhausted` run counts only when its `retry_owed` is 0: every exhausted record is
+  then terminal (core refused it, or it failed before any POST), and no later run can do more for it. Inside
+  an upload cooldown `retry_owed` is above 0 and the run does not count, because this job still owes core that
+  anchor; a run record with no `retry_owed` does not count either. The gateway keeps no field that tells a scheduled start from an
+  operator's forced `cron run`, so the scheduled-window check is evidence, not a signature.
+- **Stop it**: `/etc/hydra/credit-anchors-push.disabled` (this job alone) or `/etc/hydra/credit-verify.disabled`.
+  A killed run still writes its record (`killed`, exit 0). Undo of the schedule itself: set the cron
+  `enabled: false` in `cron-jobs.json`. An uploaded anchor row approves nothing by itself and is replaced by a
+  fresher upload; core holds no delete for it.

@@ -1795,7 +1795,7 @@
       },
       "enabled": true,
       "name": "credit-dsp-verify-d5b",
-      "description": "D5b (Fable 171, 2026-10-29): a same-run Spotify + Tidal capture for every credit request the doc-verify reader reads `verified` (doc-verify store read-only), then the verifier reads it and builds the dsp-anchor/1 record LOCALLY for an APPROVE verdict. SHADOW: writes only /var/lib/hydra-credit-verify/dsp-verify.sqlite; never writes core, never approves, declines or messages (anchor upload is credit-anchors-push.py, manual). A document never upgrades a V9 WAIT. Every admin GET goes through the host-wide 1/s admin pacer. Hourly at :35 (after the reader's :50 of the previous hour has settled, clear of the :15 intake). ENABLED as SHADOW (firstmate 206, captain delegation Fable-first): registry approved:true scope=shadow; live approval use is a reviewed switch-on change of its own, never a go-ahead to wait for (the r5 GO gate is retired, captain 2026-11-14), and no such change is on this path. Kill switches: /etc/hydra/credit-dsp-verify.disabled, /etc/hydra/credit-verify.disabled.",
+      "description": "D5b (Fable 171, 2026-10-29): a same-run Spotify + Tidal capture for every credit request the doc-verify reader reads `verified` (doc-verify store read-only), then the verifier reads it and builds the dsp-anchor/1 record LOCALLY for an APPROVE verdict. SHADOW: writes only /var/lib/hydra-credit-verify/dsp-verify.sqlite; never writes core, never approves, declines or messages (anchor upload is the credit-anchors-push cron, a job of its own). A document never upgrades a V9 WAIT. Every admin GET goes through the host-wide 1/s admin pacer. Hourly at :35 (after the reader's :50 of the previous hour has settled, clear of the :15 intake). ENABLED as SHADOW (firstmate 206, captain delegation Fable-first): registry approved:true scope=shadow; live approval use is a reviewed switch-on change of its own, never a go-ahead to wait for (the r5 GO gate is retired, captain 2026-11-14), and no such change is on this path. Kill switches: /etc/hydra/credit-dsp-verify.disabled, /etc/hydra/credit-verify.disabled.",
       "schedule": {
         "kind": "cron",
         "expr": "35 * * * *",
@@ -1810,6 +1810,36 @@
         ],
         "cwd": "/opt/hydra",
         "timeoutSeconds": 3000
+      }
+    },
+    {
+      "id": "bd5a83b0-c077-5486-989a-324a2d8e4ae9",
+      "agentId": "operations",
+      "createdAtMs": 1794757969000,
+      "updatedAtMs": 1794757969000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": true,
+      "name": "credit-anchors-push",
+      "description": "The scheduled anchors push (captain order 2026-11-15, #8 of 12): uploads every dsp-anchor/1 record the DSP verifier has BUILT and that has not landed in core yet (POST /admin/credit-anchors as dsp-evidence-verifier on the credit-decider login), in whole-request batches of at most 100 core rows, oldest build first, 200 requests per run. It takes no list: the verifier store's latest build outcome per request is the selection (credit_review/anchor_upload.pending). It APPROVES NOTHING and writes no credit status: core re-decides the role, the claimant match and freshness. With nothing built and unlanded it posts nothing and exits 0 (nothing_pending). A request is never split across POSTs: one whose core rows exceed 100 is not posted and is recorded as a write_error naming its row count and the cap. One record is tried 3 times against a core refusal, then named as exhausted on every run until a newer build. 12 failed uploads of one record exhaust it too and page #clio_devops, but that is a cooldown: an hour later a run asks core one read-only question (an admin GET, never a POST) and, when core answers, hands the record a new budget of 12 and uploads it in the same run; an unreachable core leaves it exhausted with no second page. Every run appends one line (start, end, exit code, what it pushed) to /var/lib/hydra/credit-anchors-push/runs.jsonl; `credit-anchors-push.py --scheduler-runs` pairs those lines with this job's gateway receipts. Exit 1 = an upload failed or core's answer did not account for every row. Every 15 min at :07/:22/:37/:52. Kill switches: /etc/hydra/credit-anchors-push.disabled, /etc/hydra/credit-verify.disabled.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "7,22,37,52 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-anchors-push.py",
+          "--pending",
+          "--apply"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 900
       }
     },
     {
