@@ -1,0 +1,31 @@
+{
+  "schema": "refund-machine-approval.v1",
+  "approver": "firstmate",
+  "decision_ref": "firstmate inbox legal-threat-refund-corredor-r1/001, 2026-11-12T02:32:51Z: 'refund the $25.00 now' (refund 2 of 2); legal threat inside the caps on the machine path: firstmate inbox legal-threat-refund-corredor-r1/006, 2026-11-12T20:01:14Z",
+  "customer": "cus_PHXvDGrGNsLYe1",
+  "charge": "ch_3TC2WJLsjTo3Ar3l2Td1Wvbl",
+  "amount_cents": 1250,
+  "currency": "usd",
+  "keep_subscription": true,
+  "legal_settlement": false,
+  "formal_claim": false,
+  "legal_threat": true,
+  "legal_threat_ref": "Intercom conversation 215474146713878, customer message of 2026-05-17T19:26:03Z; ClickUp 869da8wkd",
+  "staged_reason": "awaiting captain refund ruling - inbox legal-threat-refund-corredor-r1/011 (2026-11-15T07:52:41Z) and /014 (2026-11-15T09:51:45Z): the record stays staged, not applied and not deleted, until Aaron confirms the class",
+  "staged_at": "2026-11-15T10:20:00Z",
+  "evidence": {
+    "subscription_state": "sub_1ToxJ5LsjTo3Ar3lpisLa296 active, $12.50/month, period 2026-11-03 to 2026-12-03, not set to cancel (stripe subscriptions list, 2026-11-12)",
+    "prior_refunds": "none: no charge on cus_PHXvDGrGNsLYe1 has amount_refunded > 0; no disputes, balance transactions or credit notes (stripe charges list, 2026-11-12)",
+    "caps": "$12.50 against $150 per refund; $25.00 for the customer against $300, across ch_3TC2WJLsjTo3Ar3l2Td1Wvbl and ch_3TSNiALsjTo3Ar3l1XZS146e",
+    "charge_paid": "2026-03-17",
+    "charge_covers": "2026-03-17 to 2026-04-17",
+    "service_failure": {
+      "from": "2026-04-02",
+      "to": "2026-05-07",
+      "what": "summed track_daily streams for the profile identical on 04-02 and 04-09 (1,277,659,952), no rows until 05-07; erratic until 06-02; updating since, with gaps (no row 06-11, unchanged 09-13 and 09-14)",
+      "query": "SELECT d.date, count(*), sum(d.streams) FROM postgresql_stats.public.track_daily d WHERE d.track_id IN (SELECT track_id FROM postgresql_stats.public.profile_track WHERE profile_id = 'ebe8dd25-bd90-458e-a643-32b2f0cd2a68') AND d.date >= '2026-03-01' GROUP BY 1 ORDER BY 1",
+      "evidence_file": "data/legal-threat-refund-corredor-r1/track-daily-evidence.csv"
+    },
+    "notes": "Goodwill refund for a service failure, not a settlement. The customer wrote a legal-action sentence on 2026-05-17 (Intercom 215474146713878) and has not repeated it; no letter, claim number or solicitor appears in the thread or the tickets."
+  }
+}

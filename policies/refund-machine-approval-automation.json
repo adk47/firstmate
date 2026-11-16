@@ -1,0 +1,11 @@
+{
+  "_doc": "One row: whether a signed firstmate approval record may spend money on production without a person's Slack id. scripts/muso-stripe-write.sh reads this at run time and REFUSES the machine path unless enabled is true with a non-empty approved_by and approval_ref, so arming is a reviewed diff here, not a `mkdir /etc/hydra/refund-machine-approvals` on the host. scripts/check-refund-machine-approval-automation.py (bats: scripts/tests/check-refund-machine-approval-automation.bats) fails CI on an enabled row without an approval, and on any diff that flips enabled without naming who approved it and where. The caps are duplicated here on purpose: the wrapper refuses to run if these numbers and its own compiled caps disagree, so raising a cap is a diff in both places.",
+  "capability": "refund-machine-approval",
+  "description": "scripts/muso-stripe-write.sh refunds create --machine-approval <record.json>: a record signed by policies/refund-approval-reviewer.allowed_signers stands in for the one-time override (and, when the record says so, the keep-subscription waiver). Caps $150 per refund, $300 per customer per year, charged against the customer's whole refund history read live from Stripe. Refuses a disputed or non-USD charge, and any record whose legal_settlement, formal_claim or legal_threat is not false.",
+  "enabled": false,
+  "approved_by": null,
+  "approval_ref": null,
+  "cap_usd_per_refund": 150,
+  "cap_usd_per_customer_per_year": 300,
+  "status_note": "UNARMED. Two independent switches must both move before a machine approval can spend: this row (enabled true, with approved_by and approval_ref naming the ruling that permits it) and the record directory /etc/hydra/refund-machine-approvals on node-8. Kill switch, always: touch /etc/hydra/refund-machine-approval.disabled. The customer's own case (Andres Corredor) does not depend on this row: he wrote a legal-action sentence, so his two records stay staged and whether to pay them is a decision for Aaron alone."
+}

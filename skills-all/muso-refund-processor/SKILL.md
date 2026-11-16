@@ -197,8 +197,74 @@ Do not execute any refund yet. First classify the blocker:
 
 - **Soft wall** — the *one-time / prior-refund* policy or the *daily-5 throttle*. These are
   limits an authorized person may waive.
-- **Hard wall** — a single refund *over $500*, or a *legal-action / chargeback* threat. These
-  need Aaron specifically.
+- **Hard wall** — a single refund *over $500*, a *chargeback* threat, or a *legal-action* threat
+  (see "Legal-action threat" below). These need Aaron specifically.
+
+#### Legal-action threat
+
+A legal-action or chargeback threat stays Aaron's in this change. The machine path refuses it: a refund
+record must say `legal_threat: false` beside `legal_settlement` and `formal_claim`, and
+`scripts/muso-stripe-write.sh` refuses the record otherwise, so there is no field in which a machine
+refund can carry a threat. The rulings below are quoted from the fleet's captain-orders log,
+`firstmate/data/captain.md`, and they are what a reader should check rather than our summary:
+
+- **Refunds under a cap are AI-decided, in general.** 2026-10-30 21:0xZ: refunds/disputes "taken as
+  option (b) - AI decides under ~$150 with Aaron veto, larger to Aaron". The same line carries his own
+  aside, "(state this back; he may correct)", so as recorded it is firstmate taking option (b) in his
+  presence, not Aaron saying it back to us.
+- **A legal request is a machine path; only a legal position is his.** 2026-11-12 ~01:30Z, STANDING:
+  "Only a genuine legal position (a refusal to comply) comes to Aaron."
+- **Money is nevertheless a reserved class.** 2026-11-14 ~22:0xZ, STANDING: "The reserved classes stay
+  reserved (money, a login only the captain holds, a legal signature, irreversible customer-data
+  destruction, risky security changes): Fable advises there, the captain still says the word."
+
+Read together, the general delegation inside the caps and the reserved class both bear on this refund,
+and neither is Aaron naming the legal-threat wall in his own words. So the wall stays where it is: a
+legal-action or chargeback threat is a hard wall, and the refund is his. Report it to Aaron with
+`report-to-aaron`, tell the customer only that this one needs Aaron, and never say it is queued or
+approved. **He answered on 2026-11-15, and the wall holds.** His instruction for the support path was "never a human", and the
+reviewer condition behind it is that a legal threat beats a refund: a refund paid after a legal threat is a
+settlement, not a refund, and the caps do not authorise it. So a within-caps refund is AI-decided *except* where the
+thread resolves to a legal threat - then it is staged, the customer is acknowledged without a position, a figure or a
+date, and whether to pay it is the one thing that goes to him. Do not read the caps as authorising this class.
+
+**A record is an approval only when the reviewer key signs it.** The wrapper verifies a detached signature
+beside the record (`<record>.json.sig`) against `policies/refund-approval-reviewer.allowed_signers`, in namespace
+`muso-refund-approval-v1`, and refuses an unsigned record, one edited after signing, one signed by another key, or
+one signed for the copy gate instead. The key is the copy gate's reviewer key, which lives on the reviewer host and
+is not on node-8 - so writing a record on node-8 cannot make it an approval. Signing is
+`scripts/sign-refund-approval.sh <record.json>` on that host, never here, and it refuses a record whose
+`legal_settlement` / `formal_claim` / `legal_threat` is not false.
+
+**Two switches, and the second one is a reviewed diff.** The record directory existing on node-8 is not enough:
+`policies/refund-machine-approval-automation.json` must also say `enabled: true` with a non-empty `approved_by` and
+`approval_ref`, and its caps must equal the wrapper's own. So arming this class is a change someone reviews - who
+approved it, and where - not a `mkdir` on the host, and `scripts/check-refund-machine-approval-automation.py` fails CI
+on a diff that flips it without those fields. On the flip, **both** approval fields must be new in that same change: a
+row that was disabled with an old `approval_ref` cannot be armed by setting only `approved_by`, because that would
+inherit an approval nobody gave for this. The row is `false` today. `touch /etc/hydra/refund-machine-approval.disabled`
+still stops a run immediately, with or without a deploy.
+
+**A record is spent once, and no log rotation can unspend it.** The wrapper writes a used marker per record under
+`/var/lib/hydra/refund-machine-approvals/used/` **before** it calls Stripe, with noclobber so two runs cannot both create
+it, and updates that marker to `executed` or `failed` afterwards. It also sends Stripe an idempotency key of
+`machine-approval-<record sha256>`. The audit log may be rotated and the marker directory is what survives; Stripe's own
+dedupe is the second line. **Any marker blocks a retry, whatever state it is in** - `intent` means a run reached the money
+and its outcome was never recorded, `failed` means Stripe refused it, `executed` means it went through - and an ambiguous
+outcome is a person's to settle by reading the charge, never a second write's. A marker directory that cannot be created
+or read refuses the write, and a caller-supplied `-i/--idempotency` is refused because the wrapper's key is what makes a
+replay safe.
+
+What this does not change:
+
+- **You do not write an approval record for a refund you are running.** A record carries firstmate's
+  decision and its `decision_ref`; never sign one in firstmate's name on your own judgement, and never
+  write one for a legal-action case at all - the wrapper refuses it.
+- **No reply to the customer answers, characterises or refers to the legal language**, whichever path
+  the refund takes.
+- **A chargeback threat or an open dispute is a hard wall** on every path; the wrapper refuses a
+  disputed charge, and this class is also the machine path's refusal.
+
 
 **Soft wall + the requester is on the god-mode allowlist** (Aaron `U7RP6HKUZ` / Jan
 `U038BM16T7W` / Nick `U0AL36NADEY`): do NOT silently deny and do NOT fabricate. Name the exact
@@ -225,8 +291,8 @@ template below. They cannot waive it; they may ask an allowlisted requester to.
 the `report-to-aaron` skill to ACTUALLY post a `<@U7RP6HKUZ>` message:
 
 > I can't process this one myself — `<amount>` is over the $500 single-refund limit (or: this
-> looks like a chargeback/legal-threat case), which needs Aaron specifically. Want me to flag
-> it to him directly?
+> is a chargeback case; or: this is a legal-threat case, at any amount), which needs
+> Aaron specifically. Want me to flag it to him directly?
 
 Never invent an "exception request", a "hold for Aaron approval", or an escalation you did not
 actually perform (operations Honesty rules).
@@ -300,13 +366,14 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] | DECISION | email | cus_XXX | ch_XXX | $
 
 Escalate to Aaron (do not auto-process) when:
 - Refund amount > $500
-- Customer is threatening legal action or chargeback
+- Customer is threatening a chargeback, or the charge has an open dispute
+- Customer has threatened legal action (see "Legal-action threat" in Step 3)
 - Edge case not clearly covered by guidelines
 - You're genuinely uncertain
 
 A one-time-policy block is **not** on this Aaron-escalation list. For a non-allowlisted
 requester it is an outright DENY; for an allowlisted requester it is handled by the
 interactive override in Step 3 ("If DENIED"), not by escalating to Aaron. The hard walls above
-(>$500, legal / chargeback) DO need Aaron. Either way, "escalate to Aaron" means actually
+(>$500, chargeback, and a legal-action threat at any amount) DO need Aaron. Either way, "escalate to Aaron" means actually
 posting a `<@U7RP6HKUZ>` message via `report-to-aaron`, never a free-text claim that you
 escalated.

@@ -499,6 +499,19 @@ jobs:
           python3 scripts/check-outbound-copy-gate.py --base "origin/$base"
           echo "::endgroup::"
 
+      - name: Machine refund approvals (the class cannot arm itself)
+        # policies/refund-machine-approval-automation.json is the second switch on the
+        # machine-approval refund path: scripts/muso-stripe-write.sh refuses to spend on a
+        # signed record unless that row says enabled true with a non-empty approved_by and
+        # approval_ref, and its caps agree with the wrapper's compiled constants. --base: a
+        # diff that flips enabled without naming who approved it and where fails here.
+        run: |
+          echo "::group::Machine refund approvals"
+          base="${{ github.event.pull_request.base.ref }}"
+          git rev-parse --verify --quiet "origin/$base" >/dev/null || git fetch --quiet --depth=200 origin "$base"
+          python3 scripts/check-refund-machine-approval-automation.py --base "origin/$base"
+          echo "::endgroup::"
+
       - name: SOUL.md check — all workspaces
         run: |
           echo "::group::Checking SOUL.md in all workspaces"

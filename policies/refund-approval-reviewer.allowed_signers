@@ -1,0 +1,17 @@
+# Who may sign a machine-approved refund record.
+#
+# The signer is the copy gate's reviewer identity: the key that signs outbound-copy
+# verdicts on the reviewer host (policies/outbound-copy-reviewer.allowed_signers).
+# It is the same key and the same host on purpose - that host is the one place a
+# reviewer decision is minted, and node-8 has no copy of the private key, so a root
+# process on node-8 can write an approval record but cannot make it an approval.
+#
+# A DIFFERENT namespace, on purpose: a signature over a copy verdict (namespace
+# `muso-outbound-copy-v1`) must never be replayable as a refund approval, so
+# `scripts/muso-stripe-write.sh` verifies with `-n muso-refund-approval-v1` and
+# `-I outbound-copy-reviewer`. ssh-keygen checks the namespace in this file, so a
+# signature minted for the copy gate fails here even with the identical key.
+#
+# Adding a key to this file is a captain decision: it grants an irreversible
+# money path to whoever holds the private half.
+outbound-copy-reviewer namespaces="muso-refund-approval-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC+xcnHfguQO2VCSYUl6TBC++sz1+0O2Pg8Wxu+grxpe

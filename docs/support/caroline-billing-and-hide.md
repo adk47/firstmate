@@ -77,7 +77,35 @@ The rule that decides a refund is the captain's own (2026-10-30, confirmed as ru
 
 **This rule is not live.** The judge is shadow-only in https://github.com/Muso-AI/hydra/pull/1624 (unmerged), and
 running it live needs a write-scoped Stripe key that only the captain can mint. Until both, every refund is decided by
-a named person in #operations, and the cost is the 89 refund asks above plus about 6 new a week.
+a named person in #operations, except the one machine class below, and the cost is the 89 refund asks above plus about
+6 new a week.
+
+**One machine class exists beside the named person** (the captain's standing refunds order of 2026-10-30 - "refunds/disputes ... taken as option
+(b) - AI decides under ~$150 with Aaron veto, larger to Aaron", with his own aside "(state this back; he may correct)" - read
+together with his 2026-11-12 legal-requests order; firstmate applied it under the caps on 2026-11-12): `scripts/muso-stripe-write.sh
+--machine-approval <record.json>`. A firstmate decision record may stand in for the one-time override and, when it
+says so, the keep-subscription waiver. The wrapper re-reads the charge and the customer's refunds from Stripe and
+refuses anything above $150 per refund or $300 per customer, a disputed or non-USD charge, and any record marked a
+legal settlement, a formal claim or a legal-action threat; those stay a named person's. It never waives the double-concession gate. Each
+refund is one record, written to `/var/lib/hydra/refund-machine-approvals/audit.jsonl` before and after the write.
+It is unarmed until an operator creates `/etc/hydra/refund-machine-approvals/` on node-8, and
+`/etc/hydra/refund-machine-approval.disabled` switches it off.
+
+What it does not do is authenticate the caller. Nothing in the wrapper can tell one root process on node-8 from
+another:
+
+- Caroline (edge) has no Stripe write and no route to it.
+- Any agent with a root shell on node-8 (`operations`, `devops`, `cto`, `ceo`, `cmo`, `clio`, `qa` in
+  `policies/agent-exec-policy.json`) CAN reach it: it can create the record directory, write a record and run the
+  wrapper. No human is required on this path.
+- What bounds it: $150 per refund and $300 per customer, counted against every refund Stripe shows on the customer
+  (stricter than per year); USD only; no disputed charge; a record marked legal settlement or formal claim is refused;
+  one record, one refund; the audit file gets a line before and after the write; runs serialize on one lock held from
+  the used-check through the Stripe call, so a second run waits and then refuses rather than spending against a
+  pre-refund view of the customer; `/etc/hydra/refund-machine-approval.disabled` switches it off; the
+  double-concession gate is never waived.
+- No skill or agent doctrine instructs an agent to use it, and `skills-all/muso-refund-processor` still reserves a
+  legal-action case to Aaron. That is prose, not enforcement.
 
 It is also narrow by measurement: over the 174 tickets of the 2026-11-01 shadow the rule would have approved **one**
 refund ($107.50). Most refund asks do not match a coded class on Stripe's facts. So the cap removes little of the

@@ -73,7 +73,9 @@
       "scripts/qa-pr-approve.sh",
       "CODEOWNERS",
       ".github/CODEOWNERS",
-      "docs/CODEOWNERS"
+      "docs/CODEOWNERS",
+      "policies/refund-approval-reviewer.allowed_signers",
+      "policies/outbound-copy-reviewer.allowed_signers"
     ]
   },
   "require_human_codeowner_repos": [
