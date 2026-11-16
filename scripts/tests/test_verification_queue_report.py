@@ -23,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,6 +31,8 @@ SCRIPT = os.path.join(REPO, "scripts", "verification-queue-report.py")
 spec = importlib.util.spec_from_file_location("vqr", SCRIPT)
 vqr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(vqr)
+sys.path.insert(0, os.path.join(REPO, "scripts"))
+from credit_verify.docverify import VERSION  # noqa: E402
 
 NOW = datetime(2026, 10, 26, 21, 0, tzinfo=timezone.utc)
 
@@ -149,16 +151,111 @@ class CreditBuckets(unittest.TestCase):
         f = facts(asked={4: "2026-10-01"})
         self.assertEqual(vqr.classify_credit(4, f, CREDIT, frozenset({4})), "watch")
 
-    def test_an_undated_document_on_file_is_human_review(self):
-        # Fable 2026-10-27: the proof feed carries no timestamp, so a "proof on file" hold can
-        # never be shown to postdate the request it would serve — an old accepted document. The
-        # decider's own sentence for it is "a document is already on file; human review", so it
-        # is counted with a person, not as "documents back, we owe a look".
+    def test_a_document_on_file_the_reader_dated_after_the_request_is_docs_in(self):
+        # Reason 5's defect: the decider's proof feed carries no timestamp, so this hold used to be
+        # counted with a person. The date is not missing from the box - the returned-document
+        # reader records every date it reads out of the file - so the hold is decided on the
+        # document's own date, exactly like a dated proof tag (5b).
         f = facts(asked={5: "2026-10-01"},
                   latest={5: {"decision": "hold",
                               "reason": "proof on file: human review (a document is already on file)",
-                              "doc_required": 0, "at": ""}})
+                              "doc_required": 0, "at": ""}},
+                  doc_dates={5: {"filed": True, "read": True, "date": date(2026, 10, 20)}})
+        self.assertEqual(vqr.classify_credit(5, f, CREDIT, frozenset()), "docs_in")
+
+    def test_a_document_on_file_the_reader_dated_before_the_request_is_not_proof(self):
+        # 5c's rule, applied to the document the reader actually read: an old document is not
+        # proof of a current credit, so the user is owed an ask for a current one.
+        f = facts(decided={5},
+                  latest={5: {"decision": "hold",
+                              "reason": "proof on file: human review (a document is already on file)",
+                              "doc_required": 0, "at": ""}},
+                  doc_dates={5: {"filed": True, "read": True, "date": date(2025, 12, 1)}})
+        self.assertEqual(vqr.classify_credit(5, f, CREDIT, frozenset()), "not_told")
+
+    def test_an_old_document_does_not_re_ask_a_user_who_was_already_asked(self):
+        # The ask lane is not a licence to ask twice: a user who already got an ask is `told`,
+        # whatever their document says. Returning `not_told` from the document reading would
+        # relabel them "needs documents - user NOT told" and put them back in the ask queue.
+        f = facts(asked={5: "2026-10-01"},
+                  latest={5: {"decision": "hold",
+                              "reason": "proof on file: human review (a document is already on file)",
+                              "doc_required": 0, "at": ""}},
+                  doc_dates={5: {"filed": True, "read": True, "date": date(2025, 12, 1)}})
+        self.assertEqual(vqr.classify_credit(5, f, CREDIT, frozenset()), "told")
+
+    def test_a_document_dated_the_same_day_as_the_request_counts_as_returned(self):
+        # Asking someone for a document they may have just sent is the one error this lane must
+        # never make, so the same day reads as returned, not as an old document.
+        f = facts(asked={5: "2026-10-01"},
+                  latest={5: {"decision": "hold",
+                              "reason": "proof on file: human review (a document is already on file)",
+                              "doc_required": 0, "at": ""}},
+                  doc_dates={5: {"filed": True, "read": True, "date": date(2026, 1, 1)}})
+        self.assertEqual(vqr.classify_credit(5, f, CREDIT, frozenset()), "docs_in")
+
+    def test_a_document_the_reader_read_with_no_date_in_it_is_an_ask_for_a_dated_copy(self):
+        # The captain's order: the AI dates and judges the document; if it truly cannot be dated,
+        # ASK for a dated copy. Read and undated is an ask we owe, never a person.
+        f = facts(decided={5},
+                  latest={5: {"decision": "hold",
+                              "reason": "proof on file: human review (a document is already on file)",
+                              "doc_required": 0, "at": ""}},
+                  doc_dates={5: {"filed": True, "read": True, "date": None}})
+        self.assertEqual(vqr.classify_credit(5, f, CREDIT, frozenset()), "not_told")
+
+    def test_a_document_the_reader_has_not_opened_is_ours_to_look_at(self):
+        # Not read yet is work WE owe: asking a customer for a copy of a document we have not
+        # opened is not an ask.
+        f = facts(asked={5: "2026-10-01"},
+                  latest={5: {"decision": "hold",
+                              "reason": "proof on file: human review (a document is already on file)",
+                              "doc_required": 0, "at": ""}},
+                  doc_dates={5: {"filed": True, "read": False, "date": None}})
+        self.assertEqual(vqr.classify_credit(5, f, CREDIT, frozenset()), "docs_in")
+
+    def test_a_document_the_reader_can_never_look_at_is_the_ask_lane(self):
+        # A proof-on-file hold can rest on a document the returned-document reader will never
+        # select (a core-verification-backed proof, or a filing it does not take). There is no
+        # look to owe, so it is not `docs_in` forever: it is the ask lane.
+        f = facts(decided={5},
+                  latest={5: {"decision": "hold",
+                              "reason": "proof on file: human review (a document is already on file)",
+                              "doc_required": 0, "at": ""}},
+                  doc_dates={5: {"filed": False, "read": False, "date": None}})
+        self.assertEqual(vqr.classify_credit(5, f, CREDIT, frozenset()), "not_told")
+
+    def test_a_stage2_hold_is_not_this_lane(self):
+        # `proof on file: stage 2 judged the document` is a DIFFERENT hold: that user was already
+        # asked through a campaign. Reading it as this lane would either ask them again (old or
+        # undated document) or page a breach nobody owes (current document).
+        f = facts(latest={5: {"decision": "hold",
+                              "reason": "proof on file: stage 2 judged the document",
+                              "doc_required": 0, "at": ""}},
+                  doc_dates={5: {"filed": True, "read": True, "date": date(2025, 12, 1)}})
+        self.assertEqual(vqr.classify_credit(5, f, CREDIT, frozenset()), "untouched")
+
+    def test_an_unmeasured_document_date_keeps_the_hold_with_a_person(self):
+        # The reader's store could not be read: an unmeasured date is never read as "undated"
+        # (that would ask a customer for a copy of a document we simply did not open), and never
+        # as "returned" either. It keeps the old reading.
+        f = facts(asked={5: "2026-10-01"},
+                  latest={5: {"decision": "hold",
+                              "reason": "proof on file: human review (a document is already on file)",
+                              "doc_required": 0, "at": ""}},
+                  doc_dates=None)
         self.assertEqual(vqr.classify_credit(5, f, CREDIT, frozenset()), "human")
+
+    def test_a_support_contact_does_not_outrank_the_document_reading(self):
+        # #2108 (captain 2026-11-16): having emailed support@ is not work either, so it no longer
+        # takes the row off the document reading. The document is read and dated after the
+        # request, so the row is ours to look at - not a person's.
+        f = facts(latest={5: {"decision": "hold",
+                              "reason": "proof on file: human review (a document is already on file)",
+                              "doc_required": 1, "at": ""}},
+                  support_contacts={5}, decided={5},
+                  doc_dates={5: {"filed": True, "read": True, "date": date(2026, 10, 20)}})
+        self.assertEqual(vqr.classify_credit(5, f, CREDIT, frozenset()), "docs_in")
 
     def test_a_per_role_split_with_no_document_is_not_a_document_on_file(self):
         # captain 2026-11-06: a per-role split has NO document at all (the catalog proved some roles,
@@ -169,20 +266,24 @@ class CreditBuckets(unittest.TestCase):
                               "doc_required": 0, "at": "", "proof_id": ""}})
         self.assertEqual(vqr.classify_credit(8, f, CREDIT, frozenset()), "untouched")
 
-    def test_a_per_role_split_held_for_a_document_on_file_is_human_review(self):
+    def test_a_per_role_split_held_for_a_document_on_file_is_dated_like_any_other(self):
         # F4: filter_support holds a PARTIAL row for a document on file by PREPENDING the hold sentence and
-        # keeping the decision, so the row carries no proof_id. It is still a document on file.
+        # keeping the decision, so the row carries no proof_id. It is still a document on file, so it
+        # is dated by the reader's own extraction like every other one.
         f = facts(latest={10: {"decision": "approve_partial",
                                "reason": "proof on file: human review (a document is already on file; never ask again)"
                                          " | per-role split: approved Mixing; pending Mastering",
-                               "doc_required": 0, "at": "", "proof_id": ""}})
-        self.assertEqual(vqr.classify_credit(10, f, CREDIT, frozenset()), "human")
+                               "doc_required": 0, "at": "", "proof_id": ""}},
+                  doc_dates={10: {"filed": True, "read": True, "date": date(2026, 10, 20)}})
+        self.assertEqual(vqr.classify_credit(10, f, CREDIT, frozenset()), "docs_in")
 
-    def test_a_per_role_split_with_a_document_is_human_review(self):
-        f = facts(latest={9: {"decision": "approve_partial",
+    def test_a_per_role_split_with_a_document_is_dated_like_any_other(self):
+        f = facts(decided={9},
+                  latest={9: {"decision": "approve_partial",
                               "reason": "proof on file: dv-4 verified document dv-4:sha:1 proves Mixing",
-                              "doc_required": 0, "at": "", "proof_id": "dv-4:sha:1"}})
-        self.assertEqual(vqr.classify_credit(9, f, CREDIT, frozenset()), "human")
+                              "doc_required": 0, "at": "", "proof_id": "dv-4:sha:1"}},
+                  doc_dates={9: {"filed": True, "read": True, "date": date(2025, 12, 1)}})
+        self.assertEqual(vqr.classify_credit(9, f, CREDIT, frozenset()), "not_told")
 
     def test_a_document_dated_after_the_request_is_docs_in(self):
         f = facts(messaged={6: ""}, proof_waiting={6: "2026-10-27T10:00:00Z"})
@@ -1363,6 +1464,71 @@ class QAecfa985(unittest.TestCase):
         ev = vqr.sentinel_evaluate(found, self.NOW)
         self.assertEqual(len(ev["credits_docs_in"]["breaches"]), 0)   # fresh: not yet due
         self.assertEqual(ev["credits_docs_in"]["legacy"], 0, "it must not be filed as legacy")
+
+    def test_a_document_on_file_is_clocked_from_when_it_arrived(self):
+        # The document is the evidence that put the row in docs_in, so the lane is clocked from
+        # when the customer sent it: a document received 2026-11-15 is not a 2026-10-01 item.
+        c = dict(CREDIT, oldest="2026-10-01 00:00:00.000000 UTC",
+                 newest="2026-10-01 00:00:00.000000 UTC")
+        f = facts(latest={7: {"decision": "hold",
+                              "reason": "proof on file: human review (a document is on file)",
+                              "doc_required": 0, "at": ""}},
+                  doc_dates={7: {"filed": True, "read": True, "date": date(2026, 11, 15),
+                                 "received_at": "2026-11-15T00:00:00Z",
+                                 "docs": [{"read": True, "date": date(2026, 11, 15),
+                                           "received_at": "2026-11-15T00:00:00Z"}]}})
+        found = vqr.sentinel_items({7: c}, {}, f,
+                                   lambda u, i: vqr.classify_credit(u, f, i, frozenset()),
+                                   lambda u, i: "untouched", frozenset(), frozenset(),
+                                   light=False,
+                                   prev_state={"intercom": {"items": {}}, "merges": {"items": {}}},
+                                   now=self.NOW)
+        entered = dict(found["items"]["credits_docs_in"])["user:7"]
+        self.assertEqual(vqr.parse_ts(entered), vqr.parse_ts("2026-11-15T00:00:00Z"))
+
+    def test_an_older_document_does_not_date_a_row_qualified_by_a_newer_reply(self):
+        # The row is docs_in because of the core reply, not the document: an older document date
+        # must not pull the lane clock back into the pre-baseline legacy backlog.
+        c = dict(CREDIT, oldest="2026-10-01 00:00:00.000000 UTC",
+                 newest="2026-10-01 00:00:00.000000 UTC",
+                 reply_at="2026-11-15T00:00:00Z", core_reply=True)
+        f = facts(latest={7: {"decision": "hold",
+                              "reason": "proof on file: human review (a document is on file)",
+                              "doc_required": 0, "at": ""}},
+                  doc_dates={7: {"filed": True, "read": True, "date": date(2025, 12, 1),
+                                 "received_at": "2025-12-01T00:00:00Z"}})
+        found = vqr.sentinel_items({7: c}, {}, f,
+                                   lambda u, i: vqr.classify_credit(u, f, i, frozenset()),
+                                   lambda u, i: "untouched", frozenset(), frozenset(),
+                                   light=False,
+                                   prev_state={"intercom": {"items": {}}, "merges": {"items": {}}},
+                                   now=self.NOW)
+        entered = dict(found["items"]["credits_docs_in"])["user:7"]
+        self.assertEqual(vqr.parse_ts(entered), vqr.parse_ts("2026-11-15T00:00:00Z"))
+
+    def test_an_unopened_document_is_clocked_from_its_own_arrival(self):
+        # One document read and dated 2025-01-05, another never opened and received 2026-11-15:
+        # the look is ours, and the lane is clocked from the unopened document's arrival, never
+        # from the other document's signed date.
+        c = dict(CREDIT, oldest="2026-10-01 00:00:00.000000 UTC",
+                 newest="2026-10-01 00:00:00.000000 UTC")
+        f = facts(latest={7: {"decision": "hold",
+                              "reason": "proof on file: human review (a document is on file)",
+                              "doc_required": 0, "at": ""}},
+                  doc_dates={7: {"filed": True, "read": False, "date": date(2025, 1, 5),
+                                 "received_at": "2026-11-15T00:00:00Z",
+                                 "docs": [{"read": True, "date": date(2025, 1, 5),
+                                           "received_at": "2025-01-05T00:00:00Z"},
+                                          {"read": False, "date": None,
+                                           "received_at": "2026-11-15T00:00:00Z"}]}})
+        found = vqr.sentinel_items({7: c}, {}, f,
+                                   lambda u, i: vqr.classify_credit(u, f, i, frozenset()),
+                                   lambda u, i: "untouched", frozenset(), frozenset(),
+                                   light=False,
+                                   prev_state={"intercom": {"items": {}}, "merges": {"items": {}}},
+                                   now=self.NOW)
+        entered = dict(found["items"]["credits_docs_in"])["user:7"]
+        self.assertEqual(vqr.parse_ts(entered), vqr.parse_ts("2026-11-15T00:00:00Z"))
 
 
 class QAc61de56(unittest.TestCase):
@@ -3066,6 +3232,280 @@ class AskGap(unittest.TestCase):
         vqr.trino = fake
         self.assertEqual(vqr.pending_request_ids(), ["aaaa", "bbbb"])
         self.assertEqual(vqr.intake_1h(), {"requests": 26})
+
+
+class DocDatesTests(unittest.TestCase):
+    """[key=reason5-undated-doc] The document's own date, read from the returned-document reader.
+
+    Reason 5 parked every "a document is on file" hold on a person because the decider's proof
+    feed carries no timestamp. The date is not missing from the box: doc-verify records every date
+    it reads out of the file in its `extract` step, keyed by the document's sha256, which is the
+    same value `proof_intake.file_sha256` holds. These cases pin that join, and pin the two
+    readings that must never be confused: a document nobody has opened is work WE owe (never a
+    reason to ask a customer for a dated copy), and a store we could not read is UNMEASURED
+    (never "undated").
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.docs = os.path.join(self.dir, "doc-verify.sqlite")
+        self.proofs = os.path.join(self.dir, "proof.sqlite")
+        db = sqlite3.connect(self.docs)
+        db.execute("CREATE TABLE dv_steps (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, at TEXT, "
+                   "proof_id TEXT, request_id TEXT, step TEXT, status TEXT, detail_json TEXT, version TEXT)")
+        db.commit()
+        db.close()
+        db = sqlite3.connect(self.proofs)
+        db.execute("CREATE TABLE proof_intake (intake_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, "
+                   "subject TEXT NOT NULL, file_sha256 TEXT, received_at TEXT, "
+                   "candidate_request_ids_json TEXT NOT NULL DEFAULT '[]')")
+        db.commit()
+        db.close()
+
+    def intake(self, user, sha, subject="credit", received_at=None, candidates=("r1",)):
+        # `candidates` is the reader's own eligibility: `intake_read.intake_docs` selects
+        # `candidate_request_ids_json != '[]'`, so a filing with no candidate request is one it
+        # will never open.
+        db = sqlite3.connect(self.proofs)
+        db.execute("INSERT INTO proof_intake (intake_id, user_id, subject, file_sha256, received_at, "
+                   "candidate_request_ids_json) VALUES (?,?,?,?,?,?)",
+                   (f"{user}:{sha[:8]}", user, subject, sha, received_at,
+                    json.dumps(list(candidates))))
+        db.commit()
+        db.close()
+
+    def extract(self, sha, status="ok", dates=None, error=None, version=None):
+        db = sqlite3.connect(self.docs)
+        body = {"dates": dates or []}
+        if error is not None:
+            body["error"] = error
+        db.execute("INSERT INTO dv_steps (run_id, at, proof_id, step, status, detail_json, version) "
+                   "VALUES ('r1','2026-10-26T00:00:00Z',?,'extract',?,?,?)",
+                   (sha, status, json.dumps(body), version or VERSION))
+        db.commit()
+        db.close()
+
+    def agg(self, users):
+        """The per-account reading without the per-document list, which has its own cases."""
+        got = vqr.doc_dates(users, self.docs, self.proofs)
+        if got is None:
+            return None
+        return {u: {k: v for k, v in d.items() if k != "docs"} for u, d in got.items()}
+
+    def test_the_documents_own_date_is_read_through_the_sha256_join(self):
+        self.intake(5, "a" * 64)
+        self.extract("a" * 64, dates=[{"what": "signed", "date": "2026-10-20", "confidence": 0.9}])
+        self.assertEqual(self.agg([5]),
+                         {5: {"filed": True, "read": True, "date": date(2026, 10, 20), "received_at": None}})
+
+    def test_an_extract_from_a_superseded_reader_version_is_not_an_answer(self):
+        # A version bump makes the deployed reader re-read the document, so an answer under the
+        # old version is not an answer under the current one: the look is still ours.
+        self.intake(5, "a" * 64)
+        self.extract("a" * 64, dates=[], version="dv-3")
+        self.assertEqual(self.agg([5]),
+                         {5: {"filed": True, "read": False, "date": None, "received_at": None}})
+        self.extract("a" * 64, dates=[])
+        self.assertEqual(self.agg([5]),
+                         {5: {"filed": True, "read": True, "date": None, "received_at": None}})
+
+    def test_a_document_nobody_opened_is_not_read(self):
+        # No extract step at all: the look is OURS. This must never read as "undated", which
+        # would ask a customer for a copy of a document we have not opened.
+        self.intake(5, "b" * 64)
+        self.assertEqual(self.agg([5]),
+                         {5: {"filed": True, "read": False, "date": None, "received_at": None}})
+
+    def test_a_settled_error_is_read_and_undated(self):
+        # The reader looked and could not read the file: that is an ANSWER, so the user is owed
+        # an ask for a readable/dated copy, not a look no later run will ever make.
+        self.intake(5, "c" * 64)
+        self.extract("c" * 64, status="error", error="unsupported file type")
+        self.assertEqual(self.agg([5]),
+                         {5: {"filed": True, "read": True, "date": None, "received_at": None}})
+
+    def test_a_transient_error_is_still_unread(self):
+        # A provider outage is no answer: a later run will look, so the look stays ours.
+        self.intake(5, "c" * 64)
+        self.extract("c" * 64, status="error", error="transport: connection reset")
+        self.assertEqual(self.agg([5]),
+                         {5: {"filed": True, "read": False, "date": None, "received_at": None}})
+
+    def test_a_transient_error_at_the_attempt_cap_is_read_and_undated(self):
+        self.intake(5, "c" * 64)
+        for _ in range(3):
+            self.extract("c" * 64, status="error", error="transport: connection reset")
+        self.assertEqual(self.agg([5]),
+                         {5: {"filed": True, "read": True, "date": None, "received_at": None}})
+
+    def test_a_read_document_with_no_date_in_it_is_read_and_undated(self):
+        # The one case that is genuinely an ask: the reader opened the file and it carries no
+        # signed/issued/sent date.
+        self.intake(5, "d" * 64)
+        self.extract("d" * 64, dates=[])
+        self.assertEqual(self.agg([5]),
+                         {5: {"filed": True, "read": True, "date": None, "received_at": None}})
+
+    def test_one_unopened_document_keeps_the_whole_account_unread(self):
+        # A read document with no date plus a document nobody opened: the look is still OURS, so
+        # the account is not read and must never be asked for a dated copy.
+        self.intake(5, "d" * 64)
+        self.intake(5, "b" * 64)
+        self.extract("d" * 64, dates=[])
+        self.assertEqual(self.agg([5]),
+                         {5: {"filed": True, "read": False, "date": None, "received_at": None}})
+
+    def test_an_ok_extract_with_unparseable_detail_is_read_and_undated(self):
+        # store.step truncates detail_json at 20,000 chars, so a cut-off body is a read we cannot
+        # interpret: it is still an ANSWER (no later run will look), so it is read with no date.
+        self.intake(5, "a" * 64)
+        db = sqlite3.connect(self.docs)
+        db.execute("INSERT INTO dv_steps (run_id, at, proof_id, step, status, detail_json, version) "
+                   "VALUES ('r1','2026-10-26T00:00:00Z',?,'extract','ok',?,?)",
+                   ("a" * 64, '{"dates": [{"what": "signed", "date": "2026-10-', VERSION))
+        db.commit()
+        db.close()
+        self.assertEqual(self.agg([5]),
+                         {5: {"filed": True, "read": True, "date": None, "received_at": None}})
+
+    def test_the_newest_arrival_among_a_users_documents_wins(self):
+        self.intake(5, "e" * 64, received_at="2025-01-05T00:00:00Z")
+        self.intake(5, "f" * 64, received_at="2026-10-20T00:00:00Z")
+        self.assertEqual(self.agg([5])[5]["received_at"],
+                         "2026-10-20T00:00:00Z")
+
+    def test_the_newest_date_among_a_users_documents_wins(self):
+        # A user with an old document and a fresh one has returned a fresh one: reading the
+        # oldest would ask them for a copy of a document they already sent.
+        self.intake(5, "e" * 64)
+        self.intake(5, "f" * 64)
+        self.extract("e" * 64, dates=[{"what": "signed", "date": "2025-01-05", "confidence": 0.9}])
+        self.extract("f" * 64, dates=[{"what": "issued", "date": "2026-10-20", "confidence": 0.9}])
+        self.assertEqual(self.agg([5])[5]["date"], date(2026, 10, 20))
+
+    def test_only_the_newest_extract_of_a_document_counts(self):
+        # A re-read replaces the earlier reading: the newest extract row is the one that counts.
+        self.intake(5, "a" * 64)
+        self.extract("a" * 64, dates=[{"what": "signed", "date": "2025-01-05", "confidence": 0.9}])
+        self.extract("a" * 64, dates=[{"what": "signed", "date": "2026-10-20", "confidence": 0.9}])
+        self.assertEqual(self.agg([5])[5]["date"], date(2026, 10, 20))
+
+    def test_a_claim_document_is_not_a_credit_document(self):
+        # A claim's document is not the credit's: the user has no credit filing at all, so the
+        # reader will never look at one and there is no look to owe.
+        self.intake(5, "a" * 64, subject="claim")
+        self.extract("a" * 64, dates=[{"what": "signed", "date": "2026-10-20", "confidence": 0.9}])
+        self.assertEqual(self.agg([5]),
+                         {5: {"filed": False, "read": False, "date": None, "received_at": None}})
+
+    def test_a_hold_with_no_reader_eligible_filing_is_not_a_look_we_owe(self):
+        # A proof-on-file hold can rest on a document the reader will never select (a
+        # core-verification-backed proof, or a filing it does not take). `filed` is what tells
+        # that apart from a document nobody has opened yet, so the row reaches the ask lane
+        # instead of sitting in `docs_in` forever with no reader work behind it.
+        self.assertEqual(self.agg([5]),
+                         {5: {"filed": False, "read": False, "date": None, "received_at": None}})
+
+    def test_a_filing_the_reader_will_never_select_is_not_a_look_we_owe(self):
+        # The reader selects `candidate_request_ids_json != '[]'` (intake_read.intake_docs), so a
+        # filing with no candidate request is one it will never open. Counting it as "on file"
+        # would put the row in docs_in forever with no reader work behind it - the exact lane this
+        # change exists to empty.
+        self.intake(5, "a" * 64, candidates=())
+        self.assertEqual(self.agg([5]),
+                         {5: {"filed": False, "read": False, "date": None, "received_at": None}})
+
+    def test_an_unreadable_store_is_unmeasured_never_undated(self):
+        # None, not {}: an unmeasured date must never be read as "undated" (that would ask a
+        # customer for a copy of a document we simply did not open) and never as "returned".
+        self.assertIsNone(vqr.doc_dates([5], os.path.join(self.dir, "nope.sqlite"), self.proofs))
+        self.assertIsNone(vqr.doc_dates([5], self.docs, os.path.join(self.dir, "nope.sqlite")))
+
+    def test_no_users_asks_nothing(self):
+        self.assertEqual(self.agg([]), {})
+
+    def test_the_hold_population_is_the_one_whose_date_is_read(self):
+        # The read is scoped to the users whose LATEST verdict is a "document on file" hold, and
+        # the classifier reads the same predicate, so the two can never disagree about who is in
+        # this lane.
+        f = facts(latest={5: {"decision": "hold", "reason": "proof on file: human review (x)",
+                              "doc_required": 0, "at": ""},
+                           6: {"decision": "hold", "reason": "validator reject rule fired",
+                               "doc_required": 0, "at": ""},
+                           7: {"decision": "approve_partial", "reason": "per-role split: x",
+                               "doc_required": 0, "at": "", "proof_id": ""}})
+        self.assertEqual(vqr.undated_hold_users(f), [5])
+
+    def test_the_per_document_reading_is_kept_because_the_clock_needs_it(self):
+        # A user can have several documents and they are not interchangeable: the lane clock has
+        # to be the arrival of the one that keeps the row in docs_in.
+        self.intake(5, "a" * 64, received_at="2026-10-20T00:00:00Z")
+        self.intake(5, "b" * 64, received_at="2026-11-15T00:00:00Z")
+        self.extract("b" * 64, dates=[{"what": "signed", "date": "2026-11-15", "confidence": 0.9}])
+        docs = vqr.doc_dates([5], self.docs, self.proofs)[5]["docs"]
+        self.assertEqual(sorted((d["read"], d["received_at"]) for d in docs),
+                         [(False, "2026-10-20T00:00:00Z"), (True, "2026-11-15T00:00:00Z")])
+
+    def test_the_lane_clock_is_the_oldest_outstanding_look(self):
+        # The QA case: A arrived 2026-10-20 and nobody opened it; B arrived 2026-11-15 and was
+        # read. The row is docs_in because of A, so the clock is A's arrival - clocking from B
+        # would file A's look as fresh and never page its breach.
+        self.intake(5, "a" * 64, received_at="2026-10-20T00:00:00Z")
+        self.intake(5, "b" * 64, received_at="2026-11-15T00:00:00Z")
+        self.extract("b" * 64, dates=[{"what": "signed", "date": "2026-11-15", "confidence": 0.9}])
+        f = facts(doc_dates=vqr.doc_dates([5], self.docs, self.proofs))
+        self.assertEqual(vqr.doc_lane_arrival(5, f, CREDIT), "2026-10-20T00:00:00Z")
+
+    def test_the_lane_clock_is_the_oldest_qualifying_document_when_all_are_read(self):
+        # Nothing is unopened, so the evidence is the documents dated on/after the request: the
+        # oldest of those, for the same reason.
+        self.intake(5, "a" * 64, received_at="2026-10-20T00:00:00Z")
+        self.intake(5, "b" * 64, received_at="2026-11-15T00:00:00Z")
+        self.extract("a" * 64, dates=[{"what": "signed", "date": "2026-10-20", "confidence": 0.9}])
+        self.extract("b" * 64, dates=[{"what": "signed", "date": "2026-11-15", "confidence": 0.9}])
+        f = facts(doc_dates=vqr.doc_dates([5], self.docs, self.proofs))
+        self.assertEqual(vqr.doc_lane_arrival(5, f, CREDIT), "2026-10-20T00:00:00Z")
+
+    def test_a_document_older_than_the_request_does_not_clock_the_lane(self):
+        # A read document dated before the request is not the evidence that qualified the row,
+        # so its arrival must not pull the clock back.
+        self.intake(5, "a" * 64, received_at="2025-01-05T00:00:00Z")
+        self.intake(5, "b" * 64, received_at="2026-11-15T00:00:00Z")
+        self.extract("a" * 64, dates=[{"what": "signed", "date": "2025-01-05", "confidence": 0.9}])
+        self.extract("b" * 64, dates=[{"what": "signed", "date": "2026-11-15", "confidence": 0.9}])
+        f = facts(doc_dates=vqr.doc_dates([5], self.docs, self.proofs))
+        self.assertEqual(vqr.doc_lane_arrival(5, f, CREDIT), "2026-11-15T00:00:00Z")
+
+    def test_a_qualifying_document_with_no_arrival_does_not_borrow_another_documents(self):
+        # The QA case: the document that qualifies the row (read, dated on/after the request) has
+        # no recorded arrival, and an older document that does NOT qualify has one. Clocking from
+        # the older arrival would file the new work as pre-baseline LEGACY and never page its
+        # breach, so there is nothing to clock from and the caller falls back to the request date.
+        self.intake(5, "a" * 64, received_at="2025-01-05T00:00:00Z")
+        self.intake(5, "b" * 64, received_at=None)
+        self.extract("a" * 64, dates=[{"what": "signed", "date": "2025-01-05", "confidence": 0.9}])
+        self.extract("b" * 64, dates=[{"what": "signed", "date": "2026-11-15", "confidence": 0.9}])
+        f = facts(doc_dates=vqr.doc_dates([5], self.docs, self.proofs))
+        self.assertIsNone(vqr.doc_lane_arrival(5, f, CREDIT))
+
+    def test_the_lane_is_the_deciders_own_document_on_file_sentences(self):
+        # A contract, not a string match: the decider owns the sentences, so a new one must be
+        # classified here deliberately rather than silently joining or leaving this lane. The
+        # stage-2 hold is the one that must stay out - that user was already asked.
+        sys.path.insert(0, os.path.join(REPO, "scripts"))
+        self.addCleanup(sys.path.remove, os.path.join(REPO, "scripts"))
+        from credit_review import decide
+        self.assertIn(decide.DOC_ON_FILE_HOLD, vqr.ON_FILE_HOLD_PREFIXES)
+        self.assertNotIn(decide.STAGE2_ASK_HOLD, vqr.ON_FILE_HOLD_PREFIXES)
+        self.assertFalse(vqr.on_file_hold({"decision": "hold",
+                                           "reason": decide.STAGE2_ASK_HOLD}))
+        self.assertTrue(vqr.on_file_hold({"decision": "hold",
+                                          "reason": decide.DOC_ON_FILE_HOLD}))
+        # The per-role split that carries a verified document is the intended partial variant.
+        self.assertTrue(vqr.on_file_hold({"decision": "approve_partial", "proof_id": "dv-4:sha:1",
+                                          "reason": "proof on file: dv-4 verified document "
+                                                    "dv-4:sha:1 proves Mixing"}))
 
 
 if __name__ == "__main__":

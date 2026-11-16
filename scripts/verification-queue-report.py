@@ -72,8 +72,9 @@ import subprocess
 import sys
 import time
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 TRINO = os.environ.get("VQR_TRINO", "/opt/hydra/scripts/trino-query.sh")
 LEDGER = os.environ.get("VQR_LEDGER", "/var/lib/hydra/credit-review/ledger.sqlite3")
@@ -204,6 +205,13 @@ DOC_READER_WAIT_ROWS = 500
 # them reads as "nobody judged" and the step half decides.
 DOC_READER_TAIL_ROWS = 5000
 DOC_READER_BUSY_S = 1.0     # a busy store must not stall the tick: it reads as unknown
+# The document's own date is read from the reader's own extraction, in chunks of this many
+# user ids / sha256s per statement (the same bound doc_reader_waiting uses).
+DOC_DATE_CHUNK = 500
+# The decider sentences that mean "a document is on file" for THIS lane: the reason-5 hold, and
+# the per-role split that carries a verified document. An allowlist, not a `proof on file` prefix:
+# `proof on file: stage 2 judged the document` is a hold where the user was ALREADY asked.
+ON_FILE_HOLD_PREFIXES = ("proof on file: human review", "proof on file: dv-")
 
 
 def read_held_lanes(path: str = None) -> dict:
@@ -344,6 +352,142 @@ def doc_reader_facts(path: str = None, now: datetime = None, proof_path: str = N
     else:
         state = "caught_up"
     return {"doc_reader_state": state, "doc_reader_last_step": last}
+
+
+def doc_dates(users, path: str = None, proof_path: str = None) -> dict[int, dict] | None:
+    """user id -> {"filed": bool, "read": bool, "date": date | None, "received_at": str |
+    None, "docs": [{"read", "date", "received_at"}]}: whether the
+    returned-document reader has READ a credit document on file for that account, the document's
+    own date when it read one (the earliest signed/issued/sent date at >= 0.6 —
+    `runner.document_date`'s rule, imported rather than restated, because a second copy of that
+    threshold is a second answer to "when was this document signed"), and when the customer sent
+    the newest document on file.
+
+    `docs` is the same reading per document, because a user can have several: the lane clock has
+    to be the arrival of the document that actually keeps the row in `docs_in`, and the newest
+    arrival across the whole set would hide an older document nobody has opened.
+
+    Why this exists: the decider's proof feed carries no timestamp at all, so an undated "proof on
+    file" hold could never be shown to postdate the request it serves and was counted with a
+    person. The date is not missing from the box — doc-verify records every date it reads out of
+    the file in its `extract` step, keyed by the document's sha256, which is `proof_intake`'s
+    `file_sha256`. So the hold is decided on the document's own date, like a dated proof tag.
+
+    `read` is True only when EVERY credit document on file has an extraction ANSWER under the
+    reader's CURRENT version: a document nobody has opened yet (or whose transient failure is
+    still retryable) is work WE owe, never a reason to ask the customer for a dated copy. An
+    answer under a superseded version is not an answer — the deployed reader re-reads it. A
+    settled failure is an answer — the reader looked and could not read it — so it is read with
+    no date, which is the ask lane.
+
+    "On file" is the READER's own eligibility, not every row in `proof_intake`: it selects
+    `subject = 'credit' AND candidate_request_ids_json != '[]'` (`intake_read.intake_docs`), so a
+    filing with no candidate request is one it will never open. Counting it here would put the
+    row in `docs_in` forever with no reader work behind it, which is the lane this whole change
+    exists to empty.
+
+    None when either store cannot be read: an unmeasured date must never be read as "undated"
+    (that would ask a customer for a copy of a document we simply did not open)."""
+    ids = sorted({int(u) for u in users})
+    if not ids:
+        return {}
+    try:
+        proof = sqlite3.connect(f"file:{proof_path or DOC_PROOF_STORE}?mode=ro", uri=True,
+                                timeout=DOC_READER_BUSY_S)
+    except sqlite3.Error:
+        return None
+    try:
+        shas: dict[int, set] = {}
+        arrivals: dict[int, dict] = {}
+        for start in range(0, len(ids), DOC_DATE_CHUNK):
+            chunk = ids[start:start + DOC_DATE_CHUNK]
+            for uid, sha, received in proof.execute(
+                    "select user_id, file_sha256, received_at from proof_intake where subject = 'credit' "
+                    "and file_sha256 is not null and candidate_request_ids_json != '[]' "
+                    "and user_id in (%s)"
+                    % ",".join("?" * len(chunk)), chunk):
+                if str(uid).strip().isdigit() and sha:
+                    shas.setdefault(int(uid), set()).add(sha)
+                    if received:
+                        arrivals.setdefault(int(uid), {})[sha] = received
+    except sqlite3.Error:
+        return None
+    finally:
+        proof.close()
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from credit_verify.docverify import VERSION
+    from credit_verify.docverify.runner import (MAX_EXTRACT_ATTEMPTS, TRANSIENT,
+                                                document_date)
+    try:
+        db = sqlite3.connect(f"file:{path or DOC_VERIFY_STORE}?mode=ro", uri=True,
+                             timeout=DOC_READER_BUSY_S)
+    except sqlite3.Error:
+        return None
+    try:
+        every = sorted({s for v in shas.values() for s in v})
+        reads: dict[str, tuple] = {}
+        for start in range(0, len(every), DOC_DATE_CHUNK):
+            chunk = every[start:start + DOC_DATE_CHUNK]
+            # Every extract answer for each document, oldest first: the last row is the reading
+            # that counts, and the error count is what makes a transient failure settled. A
+            # provider outage is neither an extraction nor a failure, so it is not in the status
+            # list (doc_sources.documents).
+            # `proof_id` and `proof_intake.file_sha256` are both hashlib.hexdigest() output
+            # (lowercase), so they are compared exactly and dv_steps_proof(proof_id, request_id)
+            # serves the lookup; a lower() here would force a full scan of the step table.
+            for sha, status, detail in db.execute(
+                    "select proof_id, status, detail_json from dv_steps where step = 'extract' "
+                    "and status in ('ok','error') and proof_id in (%s) and version = ? order by id"
+                    % ",".join("?" * len(chunk)), list(chunk) + [VERSION]):
+                prev = reads.get(sha)
+                reads[sha] = (status, detail, (prev[2] if prev else 0) + (status == "error"))
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+    out: dict[int, dict] = {}
+    for uid in ids:
+        on_file = shas.get(uid, ())
+        read, unread, dates = bool(on_file), False, []
+        docs = []
+        for sha in on_file:
+            got = reads.get(sha)
+            if got is None:
+                unread = True
+                docs.append({"read": False, "date": None,
+                             "received_at": arrivals.get(uid, {}).get(sha)})
+                continue
+            status, detail, errors = got
+            try:
+                body = json.loads(detail or "{}") or {}
+            except ValueError:
+                body = {}
+            if status == "error":
+                err = str(body.get("error") or "")
+                if err.startswith(TRANSIENT) and errors < MAX_EXTRACT_ATTEMPTS:
+                    unread = True
+                    docs.append({"read": False, "date": None,
+                                 "received_at": arrivals.get(uid, {}).get(sha)})
+                else:
+                    docs.append({"read": True, "date": None,
+                                 "received_at": arrivals.get(uid, {}).get(sha)})
+                continue
+            d = document_date(SimpleNamespace(dates=body.get("dates") or []))
+            if d is not None:
+                dates.append(d)
+            docs.append({"read": True, "date": d,
+                         "received_at": arrivals.get(uid, {}).get(sha)})
+        # The NEWEST date among the documents on file: if any of them postdates the request the
+        # user did send a current document, and that is the reading that never hides work.
+        sent = [(parse_ts(t), t) for t in arrivals.get(uid, {}).values()]
+        sent = [x for x in sent if x[0] is not None]
+        out[uid] = {"filed": bool(on_file), "read": read and not unread,
+                    "date": max(dates) if dates else None,
+                    "received_at": max(sent)[1] if sent else None,
+                    "docs": docs}
+    return out
 
 
 def doc_writeback_approved(path: str = None) -> bool | None:
@@ -869,7 +1013,7 @@ def _EMPTY_FACTS() -> dict:
             "replied": set(), "proof_waiting": {}, "proof_tags": {}, "muted": {}, "flagged": {},
             "claim_notes": {}, "claim_proofs": {}, "claim_replied": set(), "claim_muted": {},
             "claim_flagged": {}, "first_proof_hold": {}, "first_deadend": {},
-            "support_contacts": set()}
+            "support_contacts": set(), "doc_dates": None}
 
 
 def ledger_facts() -> dict:
@@ -1122,6 +1266,104 @@ def proof_newer_than_request(user: int, facts: dict, credit: dict) -> bool:
     return bool(tag_at and req_at and tag_at > req_at)
 
 
+def on_file_hold(lat: dict) -> bool:
+    """Whether the decider's LATEST verdict for this user is a "a document is on file" hold.
+
+    The decider's own sentence for it is "a document is already on file; never ask again; human
+    review". A per-role split carries the same prefix but may have NO document at all (the catalog
+    proved some roles and the rest are owed an ask): only the hold sentence, a hold, or a split
+    with a recorded document is a document on file. The hold sentence is keyed on directly because
+    a PARTIAL row held for a document on file keeps its decision and carries no proof_id.
+
+    An ALLOWLIST of sentences, not a `proof on file` prefix: `proof on file: stage 2 judged the
+    document` (decide.STAGE2_ASK_HOLD) is a different hold — that user has ALREADY been asked
+    through a campaign, so reading it as "not told" would ask them again and reading it as
+    "documents back" would page a breach nobody owes. It is not this lane.
+
+    ONE predicate, read by the classifier and by the population whose document date is looked up,
+    so the two can never disagree about who is in this lane."""
+    reason = lat.get("reason") or ""
+    return reason.startswith(ON_FILE_HOLD_PREFIXES)
+
+
+def undated_hold_users(facts: dict) -> list[int]:
+    """The users whose latest decider verdict is a "document on file" hold: the population whose
+    document date is read, and the one reason 5 used to park on a person."""
+    return sorted(u for u, lat in (facts.get("latest") or {}).items() if on_file_hold(lat))
+
+
+def doc_lane_arrival(user: int, facts: dict, credit: dict) -> str | None:
+    """When the document that keeps this row in `docs_in` arrived.
+
+    The lane clock is the arrival of the EVIDENCE, not of the newest thing in the account: a
+    document received 2026-10-20 that nobody has opened is still outstanding work when a second
+    document arrived 2026-11-15 and was read, and clocking the row from the newer arrival files
+    the older look as fresh and never pages its breach.
+
+    So: the OLDEST arrival among the documents that are themselves the reason the row is here —
+    every unread document (the look is ours), plus every read document dated on or after the
+    request (the evidence that qualifies it).
+
+    None when none of those has a usable arrival, so the caller falls back to the request date.
+    Falling back to the newest arrival on file would clock the row from a document that is NOT the
+    reason it is here — a current dated document with no recorded arrival beside an older
+    non-qualifying one would be filed as pre-baseline LEGACY and its new breach never paged."""
+    seen = (facts.get("doc_dates") or {}).get(user) or {}
+    req_at = parse_ts(credit.get("newest") or credit.get("oldest") or "")
+    stamps = []
+    for doc in seen.get("docs") or ():
+        if not doc.get("read"):
+            stamps.append(doc.get("received_at"))
+        elif doc.get("date") and req_at and doc["date"] >= req_at.date():
+            stamps.append(doc.get("received_at"))
+    parsed = [(parse_ts(t), t) for t in stamps if t]
+    parsed = [x for x in parsed if x[0] is not None]
+    if parsed:
+        return min(parsed)[1]
+    return None
+
+
+def classify_on_file(user: int, facts: dict, credit: dict) -> str | None:
+    """Where a "document on file" hold belongs now that the document can be DATED.
+
+    The decider's proof feed carries no timestamp, so this hold used to be counted with a person
+    ("we cannot date it"). The date is not missing from the box: the returned-document reader
+    records every date it reads out of the file, so the hold is decided on the document's own
+    date, exactly like a dated proof tag (5b/5c):
+
+      - dated AFTER the request  -> docs_in: a returned document we owe a look at
+      - dated ON the request day -> docs_in: it may have just been sent (see below)
+      - dated BEFORE it          -> None: an old document is not proof, so the user is owed an
+                                    ask for a current one
+      - read, but no date in it  -> None: the user is owed an ask for a DATED copy
+      - not read yet             -> docs_in: the look is OURS, and asking a customer for a copy of
+                                    a document we have not opened is not an ask
+      - no reader-eligible file  -> None: the reader will never look at it, so there is no look to
+                                    owe; the ask lane is where it belongs
+
+    None means "not ours to look at": the caller falls through to the ask/told logic, so a user
+    who was ALREADY asked lands in `told` and only a never-asked one in `not_told`. Returning
+    `not_told` from here would relabel an already-asked user as "needs documents - user NOT told".
+
+    A document dated the SAME day as the request counts as returned: asking someone for a document
+    they may have just sent is the one error this lane must never make.
+
+    An unmeasured date (the reader's store could not be read) keeps the old reading — with a
+    person — never a guess in either direction."""
+    seen = (facts.get("doc_dates") or {}).get(user)
+    if seen is None:
+        return "human"
+    if not seen.get("filed"):
+        return None
+    if not seen.get("read"):
+        return "docs_in"
+    doc_at = seen.get("date")
+    req_at = parse_ts(credit.get("newest") or credit.get("oldest") or "")
+    if doc_at is None or req_at is None:
+        return None
+    return "docs_in" if doc_at >= req_at.date() else None
+
+
 def classify_credit(user: int, facts: dict, credit: dict, wz: frozenset) -> str:
     """Which bucket one open-credit user belongs to. First match wins (see module doc)."""
     lat = facts["latest"].get(user) or {}
@@ -1130,39 +1372,34 @@ def classify_credit(user: int, facts: dict, credit: dict, wz: frozenset) -> str:
         return "watch"
     if credit["core_reply"] or proof_newer_than_request(user, facts, credit):
         return "docs_in"
-    # A "proof on file" hold is NOT "documents back, we owe a look" unless the document can be
-    # shown to postdate the request (Fable, 2026-10-27): those holds rest on the proof feed,
-    # which carries no timestamp at all — structurally an old accepted document. The decider's
-    # own sentence for them is "a document is already on file; never ask again; human review",
-    # so they are counted where they belong: with a person. A per-role split carries the same
-    # prefix but may have NO document at all (the catalog proved some roles and the rest are
-    # owed an ask): only the hold sentence, a hold, or a split with a recorded document is a
-    # document on file. The hold sentence is keyed on directly because a PARTIAL row held for a
-    # document on file keeps its decision and carries no proof_id.
-    on_file = (reason.startswith("proof on file: human review")
-               or (reason.startswith("proof on file")
-                   and (lat.get("decision") == "hold" or bool(lat.get("proof_id")))))
-    # Neither a support@ contact nor a `decision == "support"` write is a person (captain
-    # 2026-11-16: "the only people involved should be the requester. our AI should handle
-    # everything else").
-    # - The `support` write is our OWN ask: decide.py's REQUEST SUPPORT moves the row to
-    #   user_verification_needed and Knock sends the "more info needed" notice, so the
-    #   requester is the one who was told and the row carries on down the ask/approve/no
-    #   ladder: `told` once core records that notice, `not_told` while the write has not
-    #   landed. Calling it a support ticket parked every asked row on a person who was never
-    #   working it.
-    # - Having emailed support@ is not work either: the decider stopped parking those users on
-    #   2026-11-14 (#1992) and asks them through the verify notes instead (#2090), and the
-    #   credit classifier reads no contact list at all. The ledger is append-only, so the old
-    #   "emailed support@ … never asked" sentences are still on file; no code treats them as a
-    #   hold, and such a row falls through to muted / told / untouched / not_told.
+    # A person owns the row when a support ticket was raised, the user replied, or a flagged
+    # refusal hold is already posted. This outranks the document-on-file reading: a ticket is a
+    # person's.
+    # NOT `decision == "support"`: that write is our OWN ask, not a ticket and not a person
+    # (captain 2026-11-16, "the only people involved should be the requester"). decide.py's
+    # REQUEST SUPPORT moves the row to user_verification_needed and Knock sends the "more
+    # info needed" notice, so the requester is the one who was told and the row carries on
+    # down the ask/approve/no ladder: `told` once core records that notice, `not_told` while
+    # the write has not landed (the report's own decided-not-closed class). Calling it a
+    # support ticket parked every asked row on a person who was never working it.
+    # NOT having emailed support@ either: the decider stopped parking those users on 2026-11-14
+    # (#1992) and asks them through the verify notes instead (#2090), and the credit classifier
+    # reads no contact list at all (#2108). The ledger is append-only, so the old "emailed
+    # support@ … never asked" sentences are still on file; no code treats them as a hold, and
+    # such a row falls through to muted / told / untouched / not_told.
     # A CLAIM whose claimant emailed support@ is still a person (classify_claim below:
-    # claim_proof_ask still holds those claimants), and only a hold a person must actually
-    # clear stays here.
-    if on_file \
-            or "support already requested" in reason or user in facts["replied"] \
+    # claim_proof_ask still holds those claimants).
+    if "support already requested" in reason or user in facts["replied"] \
             or user in facts["flagged"]:
         return "human"
+    # A "proof on file" hold is NOT "documents back, we owe a look" unless the document can be
+    # shown to postdate the request (Fable, 2026-10-27). It used to be counted with a person
+    # because the proof feed carries no timestamp at all; the reader's own extraction does, so the
+    # hold is now decided on the document's own date (classify_on_file) and never parks on a human.
+    if on_file_hold(lat):
+        where = classify_on_file(user, facts, credit)
+        if where:
+            return where
     if user in facts["muted"]:
         return "muted"
     if user in facts["asked"] or credit["core_ask"]:
@@ -1508,6 +1745,11 @@ def sentinel_items(credits: dict, claims: dict, facts: dict, classify_c, classif
             # the old hold, so the fresh document was filed as pre-baseline legacy and never
             # paged as a new breach (QA @ecfa985).
             qualifying = [c.get("reply_at")] + qualifying_proof_tags(uid, facts, c)
+            if on_file_hold(facts["latest"].get(uid) or {}) \
+                    and not (c.get("core_reply") or proof_newer_than_request(uid, facts, c)):
+                sent_at = doc_lane_arrival(uid, facts, c)
+                if sent_at:
+                    qualifying.append(sent_at)
             entered = earliest(qualifying) or c["oldest"]
             items["credits_docs_in"].append((f"user:{uid}", entered))
     for uid, k in (() if light or "claims_untouched" in failed_pop else claims.items()):
@@ -2350,14 +2592,34 @@ def selftest() -> int:
     facts = {"asked": {1: ""}, "messaged": {1: "", 2: "", 3: "", 15: "", 16: "", 17: ""},
              "latest": {
                  3: {"decision": "support", "reason": "x", "doc_required": 1, "at": ""},
-                 # an UNDATED "proof on file" hold: the feed carries no timestamp, so it cannot
-                 # be shown to postdate the request -> with a person, not "documents back".
+                 # a "proof on file" hold whose document the reader DATED after the request
                  5: {"decision": "hold",
                      "reason": "proof on file: human review (a document is on file)",
                      "doc_required": 0, "at": ""},
+                 # the same hold, and the reader read the document but found NO date in it
+                 30: {"decision": "hold",
+                      "reason": "proof on file: human review (a document is on file)",
+                      "doc_required": 0, "at": ""},
+                 # the same hold, and the reader has not opened the document yet
+                 31: {"decision": "hold",
+                      "reason": "proof on file: human review (a document is on file)",
+                      "doc_required": 0, "at": ""},
+                 # the same hold, one document read with no date and another never opened
+                 32: {"decision": "hold",
+                      "reason": "proof on file: human review (a document is on file)",
+                      "doc_required": 0, "at": ""},
+                 # the same hold, but the document on file is not one the reader can ever look at
+                 33: {"decision": "hold",
+                      "reason": "proof on file: human review (a document is on file)",
+                      "doc_required": 0, "at": ""},
+                 # a STAGE-2 hold: the user was ALREADY asked through a campaign, so this is not
+                 # the reason-5 lane and must not be re-read as "not told" (or as a look we owe)
+                 34: {"decision": "hold",
+                      "reason": "proof on file: stage 2 judged the document",
+                      "doc_required": 0, "at": ""},
                  6: {"decision": "hold", "reason": "emailed support@ in the last 90 days",
                      "doc_required": 0, "at": ""}},
-             "decided": {3, 5, 6}, "replied": set(),
+             "decided": {3, 5, 6, 30, 31, 32, 33, 34}, "replied": set(),
              # 15/16 have a DATED proof reply; 17's is dated but OLDER than its request.
              "proof_waiting": {15: PROOF_NEW, 16: PROOF_NEW, 17: "2026-09-01T10:00:00Z",
                                19: "2026-10-27T10:00:00Z"},
@@ -2366,7 +2628,16 @@ def selftest() -> int:
              "muted": {4: "2030-01-01T00:00:00Z"}, "flagged": {9: "2026-01-01"},
              "claim_notes": {}, "claim_proofs": {}, "claim_replied": set(), "claim_muted": {},
              "claim_flagged": {}, "first_proof_hold": {}, "first_deadend": {},
-             "support_contacts": set()}
+             "support_contacts": set(),
+             # what the returned-document reader read out of each document on file: 5's document
+             # is dated after its request, 20's was read and carries no date, 21's was never read,
+             # 22 has one read document with no date beside one nobody opened, and 23 has no
+             # reader-eligible filing at all (the reader will never look, so it is not our look).
+             "doc_dates": {5: {"filed": True, "read": True, "date": date(2026, 10, 20)},
+                           30: {"filed": True, "read": True, "date": None},
+                           31: {"filed": True, "read": False, "date": None},
+                           32: {"filed": True, "read": False, "date": None},
+                           33: {"filed": False, "read": False, "date": None}}}
 
     def cred(**over) -> dict:
         base = {"paid": False, "n": 1, "oldest": REQ_OLD, "core_ask": False,
@@ -2384,11 +2655,25 @@ def selftest() -> int:
         ("3 our own support ask, never told", 3, "not_told", cred()),
         ("3b our own support ask, told (core notice)", 20, "told", cred(core_ask=True)),
         ("4 muted hold", 4, "muted", cred()),
-        ("5 an UNDATED document on file is human review", 5, "human", cred()),
+        ("5 a document on file the reader DATED after the request is docs_in", 5, "docs_in",
+         cred()),
         ("5b a document dated AFTER the request is docs_in", 15, "docs_in", cred()),
         ("5c a dated document OLDER than the request is not proof", 17, "not_told", cred()),
         ("5d a core response newer than its request is docs_in", 18, "docs_in",
          cred(reply_at="2026-10-26T00:00:00Z", core_reply=True)),
+        # reason 5's defect: an undated document never parks on a person. Read and undated is an
+        # ASK for a dated copy; not read yet is a look WE owe.
+        ("5e a document the reader read with NO date in it is an ask for a dated copy", 30,
+         "not_told", cred()),
+        ("5f a document the reader has not opened is ours to look at", 31, "docs_in", cred()),
+        ("5g a mixed read/unopened document set is ours to look at", 32, "docs_in", cred()),
+        # no reader-eligible filing: the reader will never look, so there is no look to owe and
+        # the row belongs in the ask lane (never asked -> not_told, asked -> told).
+        ("5h a document the reader can never look at is the ask lane", 33, "not_told", cred()),
+        # a STAGE-2 hold is a different hold: that user was already asked, so it is `told` and
+        # never re-read as "needs documents - user NOT told" nor as a look we owe.
+        ("5i a stage-2 hold is not the reason-5 lane", 34, "told",
+         cred(core_ask=True)),
         # A legacy hold row naming the support@ contact is not a person any more: the row was
         # decided (so not untouched) and nobody ever asked (so not told).
         ("6 emailed support@", 6, "not_told", cred()),
@@ -2501,6 +2786,21 @@ def main(argv: list[str]) -> int:
             # read it: without it a claim's human / docs_in split is unknown, so those lanes
             # are unmeasured, never reclassified. The credit lanes read no contact list.
             local_failed |= PROOF_FEED_LANES
+    # The document's own date, for the users whose latest verdict is a "document on file" hold.
+    # Read only for that population: it is the one lane whose bucket depends on it, and the read
+    # is two indexed statements per chunk. An unreadable store leaves those rows with a person
+    # (never a guess) and marks the lanes unmeasured, because docs_in would be under-counted.
+    if not light:
+        try:
+            holds = undated_hold_users(facts)
+            facts["doc_dates"] = doc_dates(holds) if holds else {}
+            if holds and facts["doc_dates"] is None:
+                local_failed |= CLASSIFICATION_LANES
+                errors.append("doc dates: the returned-document reader's store could not be read")
+        except Exception as e:                                 # noqa: BLE001
+            facts["doc_dates"] = None
+            local_failed |= CLASSIFICATION_LANES
+            errors.append(f"doc dates: {type(e).__name__}: {e}")
     if light:
         wz, wz_profiles = frozenset(), frozenset()
     else:

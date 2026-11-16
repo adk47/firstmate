@@ -61,10 +61,9 @@ mismatch instead of printing a total it cannot defend).
    `policies/fraud-watchlist.json`. Both tiers (`fraud`, `review`) hold an approval.
 2. **User sent documents — we owe a look** — ONLY evidence that a document arrived *after*
    the request it serves: core recording a `proofRequest.responseAt` later than that row's
-   `createdat`, or a dated ledger proof reply later than the user's newest open request. An
-   undated `proof on file` hold does **not** count — the proof feed carries no timestamps, so
-   such a hold is structurally an old accepted document and the decider itself files it as
-   "human review" (see the Fable ruling below).
+   `createdat`, a dated ledger proof reply later than the user's newest open request, or a
+   `proof on file` hold whose document the returned-document reader **dated** on or after that
+   request (see "An undated document is dated, not parked" below).
 3. **Sitting with a person** — a never-re-ask hold (`support already requested`), a per-role split
    (`approve_partial`) whose reason carries the `proof on file: human review` sentence or a
    recorded `proof_id` (a catalog-only split has no document, so it is NOT documents on file),
@@ -78,6 +77,9 @@ mismatch instead of printing a total it cannot defend).
    no contact list at all) is counted with a person; both fall through to muted / told /
    untouched / not told, the ask-or-no ladder's own population. A CLAIM whose claimant
    emailed support@ is still bucket 3 (see "Claims are classified..." below).
+   A `proof on file` hold is **not** here any more: it is dated (bucket 2) or owed an ask
+   (bucket 7). A `support` decision is **not** here either: that write is our own ask, not a
+   ticket (captain 2026-11-16).
 4. **Muted — no more messages** — a messaging refusal hold whose `next_recheck_at` is
    still in the future.
 5. **Needs documents — user told** — an ASK note went out (`verify-live`, `retro-past`,
@@ -202,6 +204,17 @@ never the row's birthday. Two consequences that are load-bearing:
 - The decider re-emits the same holds every 15 minutes. Using the LATEST decision time would
   reset the clock forever and the sentinel would never fire, so the ledger keeps the FIRST
   dead-end hold per user (`first_deadend`, `first_proof_hold`).
+- A `docs_in` row clocked by a `proof on file` hold is dated from when the customer SENT the
+  document (`doc_dates`'s per-document `received_at`), not from the historic request and not from
+  the date written on the document: a document received 2026-11-15 is not a 2026-10-01 backlog
+  item, and an unopened document is never clocked from another document's signed date. The clock
+  is the **oldest** arrival among the documents that are themselves the reason the row is here —
+  every unread document, plus every read document dated on or after the request
+  (`doc_lane_arrival`). A user can have several documents and they are not interchangeable: a
+  document received 2026-10-20 that nobody has opened is still outstanding work when a second
+  document arrived 2026-11-15 and was read, so clocking from the newer arrival would file the
+  older look as fresh and never page its breach. A document with no recorded arrival qualifies
+  nothing and keeps the request-date fallback.
 - `decider holds only a person can clear` counts only the marks the machine will never
   finish on its own — `validator reject rule fired` and `server approval guard would
   refuse`. A `score approval not now: …` hold is waiting for data a later run picks up by
@@ -226,11 +239,51 @@ one. It now requires evidence:
 - **ledger** — a tagged proof counts only when `proof_tagged_at` is later than the user's
   **newest** open request. A per-user bound cannot name the request a note served, so the strict
   end is the only safe one: a worse-than-exact rule here makes the lane quieter, never louder;
-- the decider's `proof on file` hold is **not** this lane. Its own sentence is "a document is
-  already on file; never ask again; human review", so those users are counted **with a person**.
+- the decider's `proof on file` hold is **not** this lane on the feed's word alone. Its own
+  sentence is "a document is already on file; never ask again; human review", and the feed
+  carries no timestamp — so it used to be counted **with a person**. It is now decided on the
+  document's own date (next section).
 
 Prod effect: `credits_docs_in` 752 -> 0 and "sitting with a person" 824 -> 1,602, with the open
 total unchanged — the work did not disappear, it moved to the lane that actually owns it.
+
+**An undated document is dated, not parked (reason 5, 2026-11-16).** The Fable ruling above
+left one case with a person: a `proof on file` hold whose document could not be dated. The date
+was never missing from the box — the returned-document reader records every date it reads out of
+the file in its `extract` step, keyed by the document's sha256, which is the same value
+`proof_intake.file_sha256` holds. `doc_dates()` joins the two for the users whose **latest**
+verdict is a `proof on file` hold (`undated_hold_users`, the same predicate the classifier
+reads, so the two cannot disagree about who is in the lane) and returns the **newest** date
+among that user's documents — the reading that never hides work. Then:
+
+| what the reader found | bucket | why |
+|---|---|---|
+| dated on/after the request | `docs_in` | a returned document we owe a look at (5b) |
+| dated before the request | ask lane | an old document is not proof; the user is owed an ask (5c) |
+| read, no date in it | ask lane | the ask is for a **dated copy** — the one genuinely undatable case. A settled extraction failure (the reader looked and could not read the file) is this case too |
+| any document not read yet | `docs_in` | the look is OURS; asking for a copy of a document we have not opened is not an ask. A user is only `read` when **every** document on file has an extraction answer under the reader's **current** version (an answer from a superseded version is not one — the deployed reader re-reads it), so one unopened (or transiently failed) document beside a read undated one is still ours |
+| no reader-eligible filing at all | ask lane | the reader will never select it (a core-verification-backed proof, or a filing it does not take), so there is no look to owe. Without this the row sat in `docs_in` forever with no reader work behind it |
+| store unreadable | `human` | an unmeasured date is never read as "undated" (that would ask a customer for a copy of a document we simply did not open) and never as "returned" |
+
+"Ask lane" is not a bucket: the reading returns "not ours to look at" and the ordinary
+classification continues, so a user who was **already asked** lands in `told` (bucket 5) and only
+a never-asked one in `not_told` (bucket 7). Returning `not_told` from the document reading itself
+would relabel an already-asked user as "needs documents - user NOT told" and put them back in the
+ask queue.
+
+A document dated the **same day** as the request counts as returned: asking someone for a
+document they may have just sent is the one error this lane must never make. A per-role split
+(`approve_partial`) is dated the same way — a catalog-only split has no document at all, so it
+is not in this lane and stays `untouched`.
+
+**This lane is an allowlist of decider sentences, not a `proof on file` prefix.**
+`proof on file: stage 2 judged the document` (`decide.STAGE2_ASK_HOLD`) is a different hold: that
+user was already asked through a campaign, so reading it as this lane would either ask them again
+(an old or undated document) or page a breach nobody owes (a current one). It is not this lane.
+
+The ask itself is not this report's: `not_told` is the lane `verify-ask-wiring-h2` owns
+(`need_asks.py`), and no copy changed here. An unreadable reader store marks the classification
+lanes unmeasured rather than reclassifying anyone.
 
 **Held by captain order is not a backlog.** Four lanes are held by the captain's own order
 (2026-10-27 00:52Z): credit documents back (the reader is live, but nothing writes a doc-verify
