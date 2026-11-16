@@ -15,17 +15,26 @@ The rule (firstmate 2026-11-14, ruled 2026-11-15):
   this module either.
 
   An approval is the ACCOUNT's too. A request the row rule would approve is barred when
-  its user or profile is on the decider's deny list (``decide.Policy``: the deny lists
-  and the fraud watchlist, one file read). Lists that were not read bar it as unmeasured.
+  its user or profile is on the decider's deny lists, or its user is held:
+
+  * the deny lists are ``decide.Policy``'s, read the way the decider reads them: the
+    policy file's two lists with the fraud watchlist unioned into both, two files.
+  * held is ``comm_state.held_user_ids``, the one reader of the fraud lens's hold
+    ledger: a user whose latest ledger row is a hold, or a release the lens's current
+    scan does not confirm.
+
+  Either read that fails stops the pass; a pass given neither, or the deny lists without
+  the hold ledger, bars every approve as unmeasured.
 
   The account gate (``account_gate.py``, the one every approver calls before a write) is
   NOT asked here, and ``approve`` therefore means "before the account gate". Asking it is
   not a read: for an account it holds, the gate appends a hold line to its own ledger
   and, for an account new to it, adds the account to the fraud watch and queues a proof
-  ask. That is right for a job about to approve and wrong for one that only counts.
-  Measured 2026-11-16 on the 2,098 rows the row rule approved: of the 952 the running
-  score-approve job could judge it refused 11 on a deny list, which this stage now bars,
-  and 18 on the fraud watch, which only the gate reads.
+  ask. That is right for a job about to approve and wrong for one that only counts. So the
+  gate's BAND is not read: an approve on an amber (fraud watch) account stays an approve
+  here, and the gate would refuse it. Measured 2026-11-16 09:45Z on the 2,115 rows the row
+  rule approved: 27 on the deny lists (every watchlisted one among them), 348 more of held
+  users, and 376 of the 1,740 left on an amber account (doc: "The account stage").
 
 What this module is, and is not:
 
@@ -72,6 +81,9 @@ from .policy import SERVER_PROOF_REQUEST_MARKER, hold_causes, never_ask, server_
 Query = Callable[[str], list[list[Any]]]
 #: (user id, profile id) -> the bar that stops this account's approvals, or None.
 #: Must be a pure read: the pass asks it about every request the row rule would approve.
+#: A lookup also carries ``deny_lists_read`` and ``hold_ledger_read`` (``account_reader``
+#: sets both), and ``run`` reports them in the funnel; a callable without them reports both
+#: false, which is honest for a caller that supplied no reads.
 Account = Callable[[str, str], "str | None"]
 
 POLICY_PATH = Path(__file__).resolve().parents[2] / "policies" / "established-claimant.json"
@@ -295,23 +307,42 @@ BAR_HOLD = "hold:"
 APPROVE_REASON = "established_claimant"
 
 #: The account stage, applied to a request the row rule would approve. Each one bars.
-BAR_ACCOUNT_DENY = "account:deny_list"            # the decider's deny / fraud / hold list
-BAR_ACCOUNT_UNMEASURED = "account:unmeasured"     # the pass was given no deny lists
+BAR_ACCOUNT_DENY = "account:deny_list"            # decide.Policy: the deny lists + the fraud watchlist
+BAR_ACCOUNT_HELD = "account:held"                 # comm_state.held_user_ids: the fraud lens's hold ledger
+BAR_ACCOUNT_UNMEASURED = "account:unmeasured"     # the pass was given no account reads
 
 
-def deny_reader(deny_users: Iterable[int], deny_profiles: Iterable[str]) -> Account:
-    """The decider's deny lists as the account stage. A pure lookup: no call leaves the process."""
-    denied_users = {int(u) for u in deny_users}
-    denied_profiles = {str(p).strip().lower() for p in deny_profiles}
+def account_reader(lists: Any, held: Iterable[str] | None) -> Account:
+    """The account stage: the decider's deny lists, then the hold ledger. A pure lookup: no call
+    leaves the process.
+
+    ``lists`` is a loaded ``decide.Policy`` (or anything with its two sets), and its sets are
+    used as loaded: ``Policy.load`` is what normalises them, and the match is the decider's
+    own (``decide.py``: ``uid in deny_user_ids``, ``profile_id.lower() in deny_profile_ids``).
+    A second normalisation here would make this stage a different predicate from the one
+    that decides. ``held`` is ``comm_state.held_user_ids()``: user ids as strings, or ``None``
+    when the ledger was not read, which bars every request the deny lists do not already bar
+    as unmeasured rather than reading as "nobody is held".
+
+    The returned lookup carries ``deny_lists_read`` and ``hold_ledger_read``, so a pass can
+    report which reads it actually made."""
+    denied_users, denied_profiles = lists.deny_user_ids, lists.deny_profile_ids
+    held_users = None if held is None else {str(u) for u in held}
 
     def bar(user_id: str, profile_id: str) -> str | None:
-        user = str(user_id).strip()
+        user = str(user_id)
         if user.isdigit() and int(user) in denied_users:
             return BAR_ACCOUNT_DENY
-        if str(profile_id).strip().lower() in denied_profiles:
+        if str(profile_id).lower() in denied_profiles:
             return BAR_ACCOUNT_DENY
+        if held_users is None:
+            return BAR_ACCOUNT_UNMEASURED
+        if user in held_users:
+            return BAR_ACCOUNT_HELD
         return None
 
+    bar.deny_lists_read = True
+    bar.hold_ledger_read = held_users is not None
     return bar
 
 
@@ -384,7 +415,8 @@ def run(query: Query, policy: dict[str, Any] | None = None,
     every such request is barred as unmeasured. The account gate is never asked (module doc)."""
     policy = policy or load_policy()
     funnel: dict[str, Any] = {"mode": SHADOW, "policy": {k: policy[k] for k in sorted(policy)},
-                              "deny_lists_read": account is not None,
+                              "deny_lists_read": bool(getattr(account, "deny_lists_read", False)),
+                              "hold_ledger_read": bool(getattr(account, "hold_ledger_read", False)),
                               "account_gate_read": False}
 
     by_status = {str(s): _count(n, "pending count") for s, n in query(COUNT_SQL)}
@@ -582,15 +614,19 @@ def tick(query: Query, policy: dict[str, Any], account: Account | None = None) -
 
 
 def _live_account() -> Account:
-    """The deployed deny lists. Lists that cannot be read stop the pass: an unread list must
-    never read as "nobody is denied"."""
-    from . import decide as decider  # noqa: PLC0415 - only for a real run
+    """The deployed deny lists and hold ledger. Either that cannot be read stops the pass: an
+    unread list must never read as "nobody is denied", nor an unread ledger as "nobody is held"."""
+    from . import comm_state, decide as decider  # noqa: PLC0415 - only for a real run
 
     try:
         lists = decider.Policy.load()
     except (OSError, ValueError) as exc:
         raise EstablishedClaimantError(f"the decider's deny lists cannot be read: {exc}") from exc
-    return deny_reader(lists.deny_user_ids, lists.deny_profile_ids)
+    try:
+        held = comm_state.held_user_ids()
+    except comm_state.Unknown as exc:
+        raise EstablishedClaimantError(f"the hold ledger cannot be read: {exc}") from exc
+    return account_reader(lists, held)
 
 
 def _cmd_tick(args: argparse.Namespace) -> int:

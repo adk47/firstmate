@@ -1584,14 +1584,16 @@ role with an artist of the same track.
   clears is `barred` and nobody is asked; a hold a document clears is an `ask`.
 - **Unmeasured approves nothing**: no verdict, an unreadable part or a verdict row the replica did not return is
   `barred` or a failed run (exit 1), never a pass.
-- **Core's guard would refuse every measured approve** (`proof_required`; `core_guard` on each row; 2,071 on
+- **Core's guard would refuse every measured approve** (`proof_required`; `core_guard` on each row; 1,740 on
   2026-11-16, after the account stage). Arming it is a new approval automation: a recorded captain decision, a
   registry row, a registration in core and a write gate that re-reads each row. The policy file's `mode` accepts
   `shadow` only.
-- **The pass reads the decider's deny lists and never asks the account gate.** `account_gate.py check` is not a
-  read: it appends a hold line for an account it holds and puts a newly held one on the fraud watch (a 2026-11-16
-  trial that asked it wrote 9 lines before it was stopped). So `approve` here means "before the account gate"; a
-  writer asks the gate at its write. Do not call the gate from a job that only counts.
+- **The pass bars an account on the decider's deny lists (`decide.Policy`, matched as the decider matches) or held
+  (`comm_state.held_user_ids`), and never asks the account gate.** An unread list or ledger stops the pass; never
+  normalise the lists a second time. `account_gate.py check` is not a read: it appends a hold line for an account
+  it holds and puts a newly held one on the fraud watch (a 2026-11-16 trial that asked it wrote 9 lines before it
+  was stopped). So `approve` here means "before the account gate"; a writer asks the gate at its
+  write. Do not call the gate from a job that only counts.
 - **A pass publishes whole or not at all.** A read that did not finish publishes nothing, fails the unit (which
   pages) and leaves `latest` on the last complete pass. The stop switch `/etc/hydra/established-claimant.disabled`
   ships absent: nothing has to be removed for the next pass to run.

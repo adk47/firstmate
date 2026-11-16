@@ -4,9 +4,9 @@
 Tests: `scripts/tests/test_established_claimant.py` (the rule and the scheduled pass) and
 `scripts/tests/install-aux-units-established-claimant.bats` (the timer).
 
-It reads the core replica and the decider's deny lists, decides, and writes two files. It
-approves nothing, asks nobody and calls no API. `established-claimant.timer` runs it once a
-day on node-8; nobody starts it.
+It reads the core replica, the decider's deny lists and the hold ledger, decides, and writes
+two files. It approves nothing, asks nobody and calls no API. `established-claimant.timer`
+runs it once a day on node-8; nobody starts it.
 
 ## The rule
 
@@ -23,7 +23,7 @@ An established request then gets one of three outcomes (`decide`):
 |---|---|---|
 | `approve` | the validator's own verdict says approved (`is_approved` is `true`) and nothing below applies | records it |
 | `ask` | the validator declined it, or recorded no decision, or holds it for a cause a document can clear | records it; the ask itself belongs to `need_asks.py` |
-| `barred` | a hold no document clears, an earlier removal or revert, a verdict that is missing or cannot be read, or an account on the decider's deny list | records it; nobody is asked |
+| `barred` | a hold no document clears, an earlier removal or revert, a verdict that is missing or cannot be read, or an account on the decider's deny lists or held | records it; nobody is asked |
 
 Two rulings fix the edges (firstmate, 2026-11-15):
 
@@ -45,11 +45,24 @@ that is absent or unreadable.
 ## The account stage
 
 An approval is the account's as well as the request's. A request the row rule would approve
-is barred as `account:deny_list` when its user or its profile is on the decider's deny lists
-(`decide.Policy.load()`: `deny_user_ids`, `deny_profile_ids` and the fraud watchlist merged
-into them). It is a local file read, two files and no call. Lists that cannot be read stop
-the pass before any statement is sent (exit 2); a pass handed no lists bars every such request
-as `account:unmeasured`.
+is barred, in this order:
+
+- `account:deny_list` when its user or its profile is on the decider's deny lists
+  (`decide.Policy.load()`: `deny_user_ids`, `deny_profile_ids` and the fraud watchlist
+  unioned into both, two files). The match is the decider's own: the sets as `Policy.load`
+  built them (user ids as integers, profile ids stripped and lowercased, the watchlist's by
+  its own loader) and the request's profile id lowercased. The stage normalises nothing a
+  second time, so it is the same predicate as the decider's, not a broader one.
+- `account:held` when its user is held: `comm_state.held_user_ids()`, the one reader of the
+  fraud lens's hold ledger (`account_holds.jsonl`). A user is held when the latest ledger row
+  is a hold, or a release the lens's current scan does not confirm. The ledger keys by user,
+  so a hold bars that user's requests and nobody else's on the same profile.
+
+Both are local file reads and no call. Lists or a ledger that cannot be read (a ledger
+missing, unreadable or older than 72 h is `comm_state.Unknown`) stop the pass before any
+statement is sent (exit 2). A pass handed no account reads bars every such request as
+`account:unmeasured`; so does a pass handed the deny lists but no hold ledger, because an
+unread ledger is not "nobody is held".
 
 **The account gate is not asked, and `approve` means "before the account gate".**
 `account_gate.py check` is the check every approver calls before a write, and calling it is
@@ -62,10 +75,22 @@ every pass (`account_gate_read: false`), and a test fails if a pass reaches the 
 starts any process of its own (the replica read it is handed is the only thing that leaves
 the process).
 
-Measured 2026-11-16 on the 2,098 requests the row rule approved: the running score-approve
-job could judge 952 of them and refused 29 on an account ground, 11 on a deny list (this
-stage now bars those) and 18 on the fraud watch (only the gate reads those; they stay
-`approve` here).
+So the gate's **band** is not read either. An `approve` on an amber (fraud watch) or red
+account stays an `approve` here, and the gate would refuse it at the write: 376 of the
+1,740 approve rows of the 09:45Z pass below are on an amber account (77 users), 1 on a red
+one and 9 on an account the scan does not list.
+
+The earlier count of "29 on an account ground, 11 on a deny list and 18 on the fraud watch"
+(score-approve's reading of the 2,098 approve rows of 2026-11-15) does not add up to the 27
+this stage bars, and neither number is wrong: they count different things.
+
+- The 11 are score-approve's FIRST reason only, among rows that passed its popularity and
+  role checks; the 27 are every approve row on a list, whatever else stops it.
+- The 18 were refused on the account gate's amber band, not on the fraud watchlist file.
+  The watchlist is unioned into the deny lists, and score-approve tests those lists before
+  it asks the gate, so a watchlisted row never reaches the band test. Measured on the 2,105
+  approve rows of the 04:23Z pass: 21 on the watchlist, all 21 also on the policy file's
+  own lists, so the watchlist adds no row this stage did not already bar.
 
 ## The scheduled pass
 
@@ -100,14 +125,15 @@ writes the same two files into `DIR` and publishes nothing.
   guard would answer (`core_guard`, from `policy.server_approval_refusal`).
 - `funnel.json`: the count at each step, each outcome, each reason and each bar.
   `approve_before_deny_lists` is what the row rule approved before the account stage;
-  `deny_lists_read` and `account_gate_read` say which account reads the pass made.
+  `deny_lists_read` and `hold_ledger_read` say which account reads the pass actually made
+  (each is true only when that read happened), and `account_gate_read` is always false.
   `left_pending_between_reads` counts a request that stopped being pending, or was deleted,
   between the pending read and the verdict read: it is not decided, and it is not a failed
   read.
 
 Exit 0 when every read finished, 1 when the verdict read did not return a row it asked for
-(`verdict_row_not_returned`, which a deleted row is not), 2 when the policy or the decider's
-deny lists cannot be read, or the policy asks for a mode other than `shadow`.
+(`verdict_row_not_returned`, which a deleted row is not), 2 when the policy, the decider's
+deny lists or the hold ledger cannot be read, or the policy asks for a mode other than `shadow`.
 
 To read the newest answer:
 
@@ -206,6 +232,29 @@ to a customer, and the pass started no account-gate process.
 Against the pass of 2026-11-15 23:40Z, the only outcome that changed is those 27 requests,
 from `approve` to `barred`. Core's guard would still refuse all 2,071 (`proof_required`).
 
+### With the hold ledger read (2026-11-16 09:45Z)
+
+One pass of the module as changed here, on node-8 against the live replica and the live hold
+ledger, 09:45Z to 09:56Z, under the unit's own caps (59 s of CPU, 189 MB), publishing
+nothing.
+
+| | requests |
+|---|---|
+| pending | 103,266 |
+| established | 13,891 |
+| approve by the row rule, before the account stage | 2,115 |
+| barred: user or profile on the decider's deny lists (5 users) | 27 |
+| barred: user held on the hold ledger (22 users) | 348 |
+| **approve** | **1,740** (455 users) |
+| ask: the validator declined it | 7,952 |
+| barred, all reasons | 4,199 |
+
+Against the 04:23Z pass (deny lists only), every request in both changed in one way only:
+348 from `approve` to `account:held`. Held users with a row on a deny list were already
+barred there (19 rows), and are counted once, under the deny list. The ledger grew by 2
+lines during the pass, both for user 60223 (held about once a day since 11-03, 34 lines),
+not from this pass, which imports no gate code. Core's guard would still refuse all 1,740.
+
 ## What arming it would take
 
 Nothing in this change approves. Before any `approve` row is written:
@@ -229,7 +278,9 @@ Nothing in this change approves. Before any `approve` row is written:
   therefore big; nothing reaches those.
 - **The account gate, asked at the write.** The pass does not ask it (above). A writer asks
   it for each account before its first write, as score-approve does, and writes only on an
-  allow with a green band (`account_gate.watch_refusal`).
+  allow with a green band (`account_gate.watch_refusal`). 377 of the 1,740 `approve` rows of
+  2026-11-16 09:45Z would not get one (376 amber, 1 red), and 9 sit on an account the scan
+  does not list.
 - **A write gate that re-reads each row.** A decision file is a snapshot. The drain's gate
   (`verify_anchor.py`) re-reads the live request before each write; an established-claimant
   write needs the same check of its own facts (still pending, still validator-approved, still
