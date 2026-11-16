@@ -1206,11 +1206,22 @@ A row stamp is not the record of a send: 23 open rows had a `sent` ask and 7 a `
 `erasure_sends` with no stamp on the row, so "was contacted" and "was answered" read the ledger too
 (`dsar.contacted_at`, `dsar.final_response_at`). No message states an answer date code cannot keep
 (`run.answerable_now`).
-An erasure request whose every page is already off the site gets the `final` letter, and only on a read of each
-page made in the same run (`Run.gone_now`: deleted, not merged, public 404); an unread page owes nothing that run.
+An erasure request whose every page is already off the site, or hidden on some pages and gone on the rest, gets the
+`final` letter, and only on a read of each page made in the same run (`Run.gone_now`: a gone page deleted, not
+merged, public 404; a hidden page 410); an unread page owes nothing that run. The hidden-and-gone letter states
+the two facts and no address message for either group: two different messages tell a reader which page is which,
+and the reviewer sent that wording back twice.
 A ladder letter may open a new thread to a support requester with an address and no thread
 (`send.LADDER_NEW_THREAD_CHANNELS`), and one customer event on two open rows gets each letter from one row only
-(`Store.event_twin_send`). Details: `docs/support/gdpr-pipeline.md` §"The final answer for a page already off the site".
+(`Store.event_twin_send`); once one row holds the final answer the other is closed as its `duplicate`
+(`Run.close_answered_twins`).
+A past-date statutory request with nobody to write to is `closed_unreachable` (`Run.close_unreachable`): the clock
+lists it, never as answered, and `Store.upsert` reopens it when a message brings a route. It closes only on a settled
+verdict and only with what it is owed measured that run (a gone or hidden-plus-gone row whose read was unknown waits).
+Never write that status by hand on a row with a page still to hide: the hide batch reads open rows only, and
+`hide_due_rows` is what keeps watching the pages such a row had already hidden. Any reader that filters on
+`status == "open"` skips these rows; one that must see them asks for the status by name.
+Details: `docs/support/gdpr-pipeline.md` §"The final answer for a page already off the site".
 The Art. 15 copy (`gdpr_pipeline/access.py`, manifest `policies/gdpr-access-sources.json`) is built for the account
 the requester controls and sent only when COMPLETE, to the address on the account; an incomplete copy names its gaps
 and is never the answer. Only counts and hashes of a copy may reach a log, the trail or stdout.

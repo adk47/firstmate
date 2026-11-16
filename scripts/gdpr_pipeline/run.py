@@ -196,9 +196,32 @@ def next_hide_tick(now: datetime) -> str:
                                              microsecond=0).strftime("%H:%MZ")
 
 
+def _noted(row: dict, line: str) -> str:
+    """The row's note with `line` added. A close must not erase what was written on the row before it."""
+    old = str(row.get("note") or "").strip()
+    return f"{old} | {line}" if old else line
+
+
+def decided_and_current(row: dict) -> bool:
+    """True when the row's stored verdict is this content, decided under the current rules, and covers every page.
+
+    A close or a hide read is an act on a verdict. A row whose identity read failed (no gate chain), whose pages
+    were written after the decision, or whose pass was decided under narrowed rules has no verdict about what it
+    holds now, and no later pass decides a row that is off `open`."""
+    if not row.get("decided_at") or not (row.get("gates") or {}).get("v"):
+        return False
+    if row["rev"] > row["decided_rev"]:
+        return False
+    detail = row.get("verdict_detail") or []
+    if any(identity.stale_pass(pv) for pv in detail):
+        return False
+    return {p["id"] for p in row.get("pages") or []} <= {d["id"] for d in detail}
+
+
 class Run:
     def __init__(self, store: Store, log=print):
         self.store, self.log, self.errors = store, log, []
+        self.readback_failed: set[int] = set()
 
     def fail(self, what: str, exc: Exception) -> None:
         self.errors.append(f"{what}: {exc}")
@@ -598,6 +621,121 @@ class Run:
             out.append(r["register_no"])
         return sorted(out)
 
+    def close_answered_twins(self) -> list[int]:
+        """Close, as a duplicate, the second row of a customer event whose other row holds the final answer.
+        Returns the register numbers closed.
+
+        One event sometimes stands on two rows (`Store.duplicate_events`: a notice to notices@ / legal@ and the
+        Intercom conversation about the same page, seconds apart). The final answer goes out on one of them and
+        closes only that one, so the other stayed open and was owed "your request is still open" a week later,
+        about a request the same person had just been told is complete (#62 / #63 on 2026-11-15). `dedupe` refuses
+        such a pair once both rows hold a letter, because folding the keys is a person's call; this folds nothing.
+        It is one status write on the unanswered row, and only when the answer provably covers it:
+
+          * the two rows are a pair by the store's own rule (same sender, same moment, a shared page);
+          * exactly one of them has a final response on record;
+          * they are the same class, so the answer is an answer to the same duty;
+          * every page the unanswered row names is a page of the answered one (by `page_prefix`);
+          * no letter from the unanswered row is in flight (`sending` / `unknown`: a person reconciles those).
+
+        The inverse is `status='open'` on the row; the `duplicate` event names the row that holds the answer."""
+        out = []
+        for keep, drop in self.store.duplicate_events():
+            for done, left in ((keep, drop), (drop, keep)):
+                answered = dsar.final_response_at(done, self.store.sends(done["id"]))
+                sends = self.store.sends(left["id"])
+                if not answered or dsar.final_response_at(left, sends) or done["class"] != left["class"]:
+                    continue
+                if any(x.get("state") in ("sending", "unknown") for x in sends):
+                    continue
+                if not self.store._prefixes(left["pages"]) <= self.store._prefixes(done["pages"]):
+                    continue
+                self.store.update(left["id"], "duplicate", status="duplicate",
+                                  note=_noted(left, f"same customer event as register #{done['register_no']}, "
+                                                    f"which holds the final answer sent {answered}: closed as its "
+                                                    f"duplicate by code. Undo: status='open'"))
+                self.log(f"register #{left['register_no']}: closed as a duplicate of #{done['register_no']} "
+                         f"(the final answer is on that row)")
+                out.append(left["register_no"])
+        return sorted(out)
+
+    def close_unreachable(self, now: datetime) -> list[int]:
+        """Close every statutory request that is past its date and has nobody to write to. Returns register numbers.
+
+        Ruling g2-endstates-1115 item 3 (2026-11-15): a request with no conversation, no mail thread this host can
+        ever reply in and no address (`send.nobody_to_write_to`) cannot be answered by any letter, so it stayed
+        "past date" for good and the ladder refused it every hour. It is closed as `closed_unreachable`, and three
+        things keep that from being a quiet way to lose a request:
+
+          * what it was owed at the moment of closing is recorded with the close (kind, variant and the sha256 of
+            the exact body), so the answer is on file for the day a route appears;
+          * the clock lists it on every read (`dsar.clock_rows`: `closed_unreachable`), never as answered;
+          * `Store.upsert` reopens it when a message brings a conversation, an address or a thread.
+
+        Only past its date: until then a route can still arrive in time, and the request belongs in the alarm.
+        Never a request with a page still to hide (a verdict in `identity.HIDE_ELIGIBLE`, or half a hide):
+        the hide batch reads open rows only, so closing that one would leave the page up, and hiding a page
+        needs nobody to write to.
+        And never a request whose verdict is not settled: a row whose identity read failed, or whose pages were
+        added after the decision, would be closed on a verdict that says nothing about its pages, and no later
+        pass decides a closed row (`decided_and_current`).
+        The inverse is `status='open'` on the row."""
+        to_hide = identity.HIDE_ELIGIBLE + (identity.HIDDEN_PENDING,)
+        rows = [r for r in self.store.all("open")
+                if r["class"] in dsar.STATUTORY and now >= dsar.due(r)
+                and letter_send.nobody_to_write_to(r)
+                and decided_and_current(r)
+                and not any(d.get("verdict") in to_hide for d in r["verdict_detail"] or [])
+                and not dsar.final_response_at(r, self.store.sends(r["id"]))]
+        if not rows:
+            return []
+        gone = self.gone_now(rows)
+        try:
+            owed = {x["row"]: x for x in self.dsar_owed(now, gone=gone)}
+        except dsar.CopyError as exc:
+            self.fail("close unreachable: what each request is owed could not be read", exc)
+            return []
+        out = []
+        for r in rows:
+            if any(x.get("state") in ("sending", "unknown") for x in self.store.sends(r["id"])):
+                continue                    # a letter may be out after all: a person reconciles that first
+            why = letter_send.nobody_to_write_to(r)
+            x = owed.get(r["id"])
+            if dsar.gone_candidate(r) and gone.get(r["id"]) is False:
+                self.log(f"register #{r['register_no']}: left open, nobody to write to, but a page it names does "
+                         f"not read off the site this run (live again, merged, or served): the close carries the "
+                         f"answer on the row, so it waits for the page")
+                continue
+            if x is None and dsar.gone_candidate(r):
+                self.log(f"register #{r['register_no']}: left open, nobody to write to, but what it is owed "
+                         f"could not be measured this run (a page read was unknown, or a page is not as its "
+                         f"verdict says): the close carries the answer on the row, so it waits for a read")
+                continue
+            if x is not None and (x.get("problem") or not x.get("text")):
+                self.fail(f"close unreachable #{r['register_no']}: the answer it is owed could not be rendered",
+                          Exception(x.get("problem") or "empty body"))
+                continue
+            kept = (f"{x['kind']} {x['variant']}" if x else "no ladder letter")
+            # The close and the answer it was owed land together or not at all: a row closed without its
+            # `unreachable_owed` record is off every later pass and has no body hash for the answer it could not
+            # send, so a failure between the two writes must leave it open.
+            try:
+                self.store.update(r["id"], "closed_unreachable", commit=False, status=dsar.STATUS_UNREACHABLE,
+                                  note=_noted(r, f"closed with nobody to write to ({why}); owed at closing: "
+                                                 f"{kept}. Reopened by code when a message brings a way to "
+                                                 f"reach the requester. Undo: status='open'"))
+                self.store.event(r["id"], "unreachable_owed", why=why, owed_kind=x["kind"] if x else "",
+                                 owed_variant=x["variant"] if x else "",
+                                 owed_body_sha=letter_send.body_sha(x["text"]) if x and x.get("text") else "",
+                                 due_at=r["due_at"])
+                self.store.db.commit()
+            except BaseException:
+                self.store.db.rollback()
+                raise
+            self.log(f"register #{r['register_no']}: closed, nobody to write to ({why}); owed {kept}")
+            out.append(r["register_no"])
+        return sorted(out)
+
     def decide_rows(self, rows: list[dict], hidden: set[str], conv_reader=None, prefix_resolver=None,
                     half: dict[str, str] | None = None) -> None:
         """Decide exactly these rows (a pushed intake candidate), not the whole open register: an `intake` call must
@@ -749,7 +887,9 @@ class Run:
         is left and a letter still waits for the whole row (`confirmations`)."""
         from gdpr_pipeline import checks
         checker = checker or checks.public_gone
-        for r in self.store.all("open"):
+        for r in self.store.all():
+            if r["status"] not in ("open", dsar.STATUS_UNREACHABLE):
+                continue
             todo = [d["id"] for d in r["verdict_detail"]
                     if d["verdict"] in identity.HIDE_ELIGIBLE + (identity.ALREADY_HIDDEN,)]
             if not todo:
@@ -763,6 +903,7 @@ class Run:
                         done.append(i)
             except sources.Unknown as exc:
                 self.fail(f"P read-back row {r['id']}", exc)
+                self.readback_failed.add(r["id"])
                 continue
             done = sorted(done)
             if done != had:
@@ -962,7 +1103,9 @@ class Run:
         page the guard HOLDS is reported as held, with what the hold needs; a page the guard has never judged names
         the next routine run, which judges only pages in its batch (a legal page only on `hide-batch --include-legal`,
         which no timer runs); a page on both hide lists waits for its read-back. None of those three is a person's
-        queue."""
+        queue. A page on both hide lists that a request closed as `closed_unreachable` had hidden, and whose public
+        address no longer answers page-gone, is reported the same way with what it needs (the serving side, not a
+        hide PR): the read-back watches it after the close, and this line is the alert that says so."""
         from gdpr_pipeline import identity as _id
         from gdpr_pipeline.identity import GONE, IDENTITY_PASS, LEGAL_HIDE_FIRST
         eligible = IDENTITY_PASS + ((LEGAL_HIDE_FIRST,) if include_legal else ())
@@ -1028,6 +1171,24 @@ class Run:
                         f"({shown}{', ...' if len(pending) > 3 else ''}); row identity {r['identity_verdict']}; "
                         f"next: {'; '.join(parts)}",
                         not cannot))
+        for r in self.store.all(dsar.STATUS_UNREACHABLE):
+            if not r["hide_due_at"] or parse_iso(r["hide_due_at"]) > now or r["id"] in self.readback_failed:
+                continue
+            done = set(r.get("hidden_pages") or [])
+            if r["hidden_at"] and not done:
+                done = {d["id"] for d in r["verdict_detail"] if d["verdict"] == _id.ALREADY_HIDDEN}
+            back = [d["id"] for d in r["verdict_detail"]
+                    if d["verdict"] == _id.ALREADY_HIDDEN and d["id"] not in done]
+            if not back:
+                continue
+            shown = ", ".join(i[:8] for i in back[:3]) + (", ..." if len(back) > 3 else "")
+            out.append((r["register_no"],
+                        f"#{r['register_no']} {r['channel']} received {r['received_at'][:10]}: closed as "
+                        f"closed_unreachable (nobody to write to), and {len(back)} page(s) it had hidden no longer "
+                        f"answer page-gone, so the page is being shown ({shown}): each is on both hide lists and its "
+                        f"public address does not answer page-gone. The hide batch does not read this request; "
+                        f"next: the serving side (the deploy that carries the hide lists)",
+                        True))
         return out
 
     def watchdog(self, now: datetime) -> list[str]:
@@ -1052,49 +1213,70 @@ class Run:
                 moved += 1
         return moved
 
-    def gone_now(self, rows: list[dict]) -> dict[int, bool | None]:
-        """{row id: is every page this request names off the site RIGHT NOW} for the rows that could be owed the
+    def gone_now(self, rows: list[dict], hidden_check=None) -> dict[int, bool | None]:
+        """{row id: is every page this request names off the site RIGHT NOW} for the rows that could be owed a
         page-already-off-the-site answer (`dsar.gone_candidate`). Reads only.
 
-        The stored `GONE` verdict is hours or days old and was decided for another purpose (it sends the row to a
-        person). The final letter states the fact to the requester, so the fact is read again in the run that
-        authors or sends it, per page:
+        The stored verdict is hours or days old and was decided for another purpose (it sends the row to a person).
+        The final letter states the fact to the requester, so the fact is read again in the run that authors or
+        sends it, per page and by what the page's verdict says:
 
-          * the admin record says the profile is DELETED and carries no merge (`sources.profiles_deleted`): a merged
-            profile's content lives on under the survivor, so "no page is left" would be false;
-          * the public address answers 404.
+          * a `GONE` page: the admin record says the profile is DELETED and carries no merge
+            (`sources.profiles_deleted`: a merged profile's content lives on under the survivor, so "no page is
+            left" would be false), and the public address answers 404;
+          * an `ALREADY_HIDDEN` page (ruling g2-endstates-1115 item 1): the public address answers page-gone with
+            the instruction not to index it (`checks.public_gone`, the P line of the confirmation letter). Being on
+            the hide list is configuration; this is what a visitor gets.
 
-        True needs both for every page. False is a page that reads otherwise (live again, merged, not a profile, an
-        id the read does not return): the request stays on the ladder. None is a read that could not be made: it is
-        recorded as a run error and the request is owed nothing this run (`dsar.owed`), never an answer nobody
-        measured. One admin read covers all candidates (20 ids a call)."""
+        True needs its read for every page. False is a page that reads otherwise (live again, merged, not a
+        profile, an id the read does not return, a hidden page that is served again): the request stays on the
+        ladder. None is a read that could not be made: it is recorded as a run error and the request is owed nothing
+        this run (`dsar.owed`), never an answer nobody measured. One admin read covers all candidates (20 ids a
+        call)."""
         cands = [r for r in rows if dsar.gone_candidate(r)]
         if not cands:
             return {}
-        pages = {r["id"]: [str(d["id"]).lower() for d in r["verdict_detail"]] for r in cands}
+        if hidden_check is None:
+            from gdpr_pipeline import checks
+            hidden_check = checks.public_gone
+        gone_ids = {r["id"]: [str(d["id"]).lower() for d in r["verdict_detail"] if d.get("verdict") == identity.GONE]
+                    for r in cands}
+        hidden_ids = {r["id"]: [str(d["id"]) for d in r["verdict_detail"] if d.get("verdict") != identity.GONE]
+                      for r in cands}
         try:
-            deleted = sources.profiles_deleted(sorted({i for ids in pages.values() for i in ids}))
+            deleted = sources.profiles_deleted(sorted({i for ids in gone_ids.values() for i in ids}))
         except sources.Unknown as exc:
             self.fail(f"final answer: the deleted-page read for {len(cands)} request(s)", exc)
-            return {rid: None for rid in pages}
+            return {r["id"]: None for r in cands}
         out: dict[int, bool | None] = {}
         status: dict[str, int] = {}
+        hidden: dict[tuple[str, str], bool] = {}
         for r in cands:
-            ids = pages[r["id"]]
+            ids = gone_ids[r["id"]]
             if not all(deleted.get(i) for i in ids):
                 out[r["id"]] = False
                 continue
+            entity = {str(q.get("id")): q.get("entity") or "profile" for q in r["pages"]}
             try:
                 for i in ids:
                     if i not in status:
                         status[i] = sources.public_status("profile", i)
-                out[r["id"]] = all(status[i] == 404 for i in ids)
+                ok = all(status[i] == 404 for i in ids)
+                for i in hidden_ids[r["id"]]:
+                    if not ok:
+                        break
+                    key = (entity.get(i, "profile"), i)
+                    if key not in hidden:
+                        hidden[key] = bool(hidden_check(*key))
+                    ok = hidden[key]
+                out[r["id"]] = ok
             except sources.Unknown as exc:
                 self.fail(f"final answer #{r['register_no']}: the public page read", exc)
                 out[r["id"]] = None
         return out
 
-    def dsar_owed(self, now: datetime, copy_doc: dict | None = None) -> list[dict]:
+    def dsar_owed(self, now: datetime, copy_doc: dict | None = None,
+                  gone: dict[int, bool | None] | None = None) -> list[dict]:
         """The ladder message each open statutory request is owed right now, oldest due date first, with its exact
         body rendered and linted. Reads only; nothing is authored, queued or sent.
 
@@ -1116,15 +1298,17 @@ class Run:
         except access.ManifestError:
             access_ok = False
         # The page-already-off-the-site answer is owed only on a read made in THIS run (`gone_now`). A request that
-        # already has its final response is not read: it is owed nothing either way.
-        gone = self.gone_now([r for r in self.store.all("open")
-                              if not dsar.final_response_at(r, self.store.sends(r["id"]))])
+        # already has its final response is not read: it is owed nothing either way. A caller that already made the
+        # read passes it in, so the close and the letter it records are decided on the same read.
+        if gone is None:
+            gone = self.gone_now([r for r in self.store.all("open")
+                                  if not dsar.final_response_at(r, self.store.sends(r["id"]))])
         for r in self.store.all("open"):
             if r["class"] not in dsar.STATUTORY:
                 continue
             sends = self.store.sends(r["id"])
             want = dsar.owed(r, sends, now, open_from_requester=per_requester.get(who(r), 1),
-                             answerable=answerable_now(r, access_ok), gone=gone.get(r["id"], False))
+                             answerable=answerable_now(r, access_ok), gone=gone.get(r["id"]))
             if not want:
                 continue
             prior = self.store.send_record(r["id"], want["slot"])

@@ -1,0 +1,114 @@
+{
+ "_comment": "Round 7: the two hidden-plus-gone final-answer variants added in v6 of policies/gdpr-dsar-copy.json (final_hidden_gone, final_hidden_gone_late; blocks final_hidden_gone, final_record), and the unchanged final_gone_late body under the rubric as amended in the same commit (rule 6 second form, the gdpr-final duty). Through the gate's own gate.py (check -> pending -> review -> signed statement) in a scratch mirror of this tree. Bodies carry example dates: fixed wording, no personal data. The statements were signed with a THROWAWAY key that exists only in the scratch mirror, so none of these is a verdict the production gate accepts: the verdict a send needs is the one the reviewer host signs on the body node-8 authors after deploy. The mirror differs from the tree in one file, the allowed-signers list. THREE reviewer passes. The rubric did not change between them; the wording did. Passes 1 and 2 are recorded under earlier_wordings because the wording that passed is the third one written.",
+ "round": 7,
+ "at": "2026-11-15T18:07Z",
+ "rulings": [
+  "gdpr-overdue-drive-g2 inbox 027 (2026-11-15T16:07Z), DECISION g2-endstates-1115 item 1"
+ ],
+ "rubric_file_sha256": "bf136115f9668605453ede6e9b478208aa0e8ec8bf8b6fcee194750cbb195c6c",
+ "counts": {
+  "approve": 5,
+  "rewrite": 0,
+  "refuse": 0
+ },
+ "earlier_wordings": [
+  {
+   "pass": 1,
+   "counts": {
+    "approve": 1,
+    "rewrite": 4,
+    "refuse": 0
+   },
+   "final_hidden_gone": "We have checked every page your request names. None of them is shown to the public any more. Some we have hidden from public view: the address of each of those now gives a page-gone message and tells search engines not to list it. The others are no longer on Muso.AI at all: the address of each of those gives a page-not-found message.",
+   "final_record": "We are keeping a restricted internal record of the pages we have hidden. It is not visible to the public.",
+   "reviewer_notes": [
+    "Rule 6 second form allows only the two facts: 'we have hidden' says who did it and 'tells search engines not to list it' describes what was done to the page.",
+    "Subject and opening line are the permitted ones, but rule 6 second form allows only the two facts: 'we have hidden' says who did it and 'tells search engines not to list it' describes what was done to the page.",
+    "Subject is the permitted new-thread subject with no opening line, but rule 6 second form allows only the two facts: 'we have hidden' says who did it and 'tells search engines not to list it' describes what was done to the page."
+   ]
+  },
+  {
+   "pass": 2,
+   "counts": {
+    "approve": 1,
+    "rewrite": 4,
+    "refuse": 0
+   },
+   "final_hidden_gone": "We have checked every page your request names. None of them is shown to the public any more. Some are hidden from public view: the address of each of those now gives a page-gone message. The others are no longer on Muso.AI: the address of each of those gives a page-not-found message.",
+   "final_record": "We are keeping a restricted internal record of the hidden pages. It is not visible to the public.",
+   "reviewer_notes": [
+    "In-time form correctly has no apology, but rule 6 second form: the page-gone versus page-not-found clauses go beyond the two facts and let the reader tell which page is which.",
+    "Rule 6 second form: describing which pages give a page-gone message and which a page-not-found message goes beyond the two facts and lets the reader tell which page is which.",
+    "Subject and notices@muso.ai opening line are the allowed ones, but rule 6 second form: the page-gone versus page-not-found clauses go beyond the two facts and let the reader tell which page is which.",
+    "Subject is the allowed one, but rule 6 second form: the page-gone versus page-not-found clauses go beyond the two facts and let the reader tell which page is which."
+   ]
+  }
+ ],
+ "items": [
+  {
+   "what": "hidden and gone, in time, in the conversation",
+   "variant": "final_hidden_gone",
+   "campaign": "gdpr-final",
+   "subject": "",
+   "body": "Hello,\n\nThis is our answer to the request you made on 1 November 2026.\n\nWe have checked every page your request names. None of them is shown to the public any more. Some are hidden from public view. The others are no longer on Muso.AI.\n\nWe are keeping a restricted internal record of the hidden pages. It is not visible to the public.\n\nIf something about you still shows on Muso.AI, reply here with its link and we will look at it.\n\nMuso.AI Support",
+   "body_sha256": "f436c461a0ed99847cc2968607f0224214f13e3e65d206166efbaaee59327596",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "In-time hidden/gone form: no apology, request date 1 November 2026 is the only date, two facts plus restricted-record sentence, no completion claim, no cause, no article, no personal data.",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "rubric_sha256": "bf136115f9668605453ede6e9b478208aa0e8ec8bf8b6fcee194750cbb195c6c"
+  },
+  {
+   "what": "hidden and gone, late, in the conversation",
+   "variant": "final_hidden_gone_late",
+   "campaign": "gdpr-final",
+   "subject": "",
+   "body": "Hello,\n\nThis is our answer to the request you made on 11 September 2026.\n\nWe are late in giving you this answer, and we are sorry.\n\nWe have checked every page your request names. None of them is shown to the public any more. Some are hidden from public view. The others are no longer on Muso.AI.\n\nWe are keeping a restricted internal record of the hidden pages. It is not visible to the public.\n\nIf something about you still shows on Muso.AI, reply here with its link and we will look at it.\n\nMuso.AI Support",
+   "body_sha256": "c47046036059779f9bfcb0e347cda747618101c510c780f60cefc0274ef54a39",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Same late hidden/gone body as a thread reply: apology once, two facts only, no completion claim, no reason or attribution, no article, no personal data.",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "rubric_sha256": "bf136115f9668605453ede6e9b478208aa0e8ec8bf8b6fcee194750cbb195c6c"
+  },
+  {
+   "what": "hidden and gone, late, new thread to a notices@ requester (lead + subject)",
+   "variant": "final_hidden_gone_late",
+   "campaign": "gdpr-final",
+   "subject": "Your Muso.AI data deletion request",
+   "body": "You wrote to us at notices@muso.ai on 11 September 2026 about your deletion request.\n\nHello,\n\nThis is our answer to the request you made on 11 September 2026.\n\nWe are late in giving you this answer, and we are sorry.\n\nWe have checked every page your request names. None of them is shown to the public any more. Some are hidden from public view. The others are no longer on Muso.AI.\n\nWe are keeping a restricted internal record of the hidden pages. It is not visible to the public.\n\nIf something about you still shows on Muso.AI, reply here with its link and we will look at it.\n\nMuso.AI Support",
+   "body_sha256": "8837e21c559622595fa38f9e24def3e3f40d1d24a6510b810023283a6b7391b1",
+   "subject_sha256": "81cfa3ffe9a7aaa5082419094d85c52c815fb4cca3f0f159463ccbba99a75e2e",
+   "verdict": "approve",
+   "note": "Late hidden/gone form in a new thread: allowed subject and notices@muso.ai opening line, apology once with no reason, only the two facts plus the permitted restricted-record sentence, no completion claim, no cause, no article, no other date.",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "rubric_sha256": "bf136115f9668605453ede6e9b478208aa0e8ec8bf8b6fcee194750cbb195c6c"
+  },
+  {
+   "what": "hidden and gone, late, new thread to a requester with no thread (subject, no lead)",
+   "variant": "final_hidden_gone_late",
+   "campaign": "gdpr-final",
+   "subject": "Your Muso.AI data deletion request",
+   "body": "Hello,\n\nThis is our answer to the request you made on 11 September 2026.\n\nWe are late in giving you this answer, and we are sorry.\n\nWe have checked every page your request names. None of them is shown to the public any more. Some are hidden from public view. The others are no longer on Muso.AI.\n\nWe are keeping a restricted internal record of the hidden pages. It is not visible to the public.\n\nIf something about you still shows on Muso.AI, reply here with its link and we will look at it.\n\nMuso.AI Support",
+   "body_sha256": "c47046036059779f9bfcb0e347cda747618101c510c780f60cefc0274ef54a39",
+   "subject_sha256": "81cfa3ffe9a7aaa5082419094d85c52c815fb4cca3f0f159463ccbba99a75e2e",
+   "verdict": "approve",
+   "note": "Late hidden/gone form to a person with no mail thread: correct deletion subject with no opening line (rule 8), otherwise the same compliant two-facts body.",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "rubric_sha256": "bf136115f9668605453ede6e9b478208aa0e8ec8bf8b6fcee194750cbb195c6c"
+  },
+  {
+   "what": "all gone, late, in the conversation (unchanged v5 text under the changed rubric)",
+   "variant": "final_gone_late",
+   "campaign": "gdpr-final",
+   "subject": "",
+   "body": "Hello,\n\nThis is our answer to the request you made on 11 September 2026.\n\nWe are late in giving you this answer, and we are sorry.\n\nWe have checked every page your request names. None is on Muso.AI any more: the address of each one now shows a page-not-found message, so there is no page left for us to take down.\n\nThat completes this request.\n\nIf something about you still shows on Muso.AI, reply here with its link and we will look at it.\n\nMuso.AI Support",
+   "body_sha256": "3afc313d94a1b4fc53f330502761874f3c80e897e5872d4cc3039a9e07c4d047",
+   "subject_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "verdict": "approve",
+   "note": "Late gone-form final: names the request and its date, apologises once with no reason, states only the site fact (pages gone, nothing left to take down), says it completes the request, gives the reply path, no article, no other date, no personal data.",
+   "reviewer_model": "mac-pool/claude-fable-5-1",
+   "rubric_sha256": "bf136115f9668605453ede6e9b478208aa0e8ec8bf8b6fcee194750cbb195c6c"
+  }
+ ]
+}

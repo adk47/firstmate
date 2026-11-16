@@ -801,6 +801,28 @@ def access_owed_send(run: Run, now) -> None:
           + ", ".join(f"{n} {s}" for s, n in sorted(tally.items())))
 
 
+def dsar_end_states(run: Run, now) -> None:
+    """The two end states that are not a letter (`Run.close_answered_twins`, `Run.close_unreachable`). One line each.
+
+    BEFORE the ladder: a row closed here is owed no letter, so the ladder neither writes "still open" to a person
+    whose other row was answered last tick nor refuses the same unreachable request every hour. Under the ladder's
+    kill switch nothing is closed: an operator who stopped the ladder stopped what it decides."""
+    if os.path.exists(DSAR_KILL):
+        return
+    try:
+        twins = run.close_answered_twins()
+        lost = run.close_unreachable(now)
+    except (sources.Unknown, sqlite3.Error) as exc:
+        run.fail("dsar end states", exc)
+        return
+    if twins:
+        print(f"dsar end states: {len(twins)} second row(s) of an answered request closed as its duplicate: "
+              + ", ".join(f"#{n}" for n in twins))
+    if lost:
+        print(f"dsar end states: {len(lost)} request(s) past their date closed with nobody to write to: "
+              + ", ".join(f"#{n}" for n in lost))
+
+
 def dsar_ladder(run: Run, now, limit: int, send_them: bool) -> None:
     """Author the ladder messages owed and (with `send_them`) send the approved ones. Prints one line per message.
 
@@ -888,12 +910,10 @@ def cmd_dsar(run: Run, a, now) -> int:
             # line goes to the journal every hour, so what the clock said and when can be read back. The page is the
             # one about the reader, and the pipeline kill file silences pages as it does everywhere else; the line
             # firstmate reads is a read, and no kill file stops it.
-            print(dsar.clock_line(clock) or f"GDPR clock: nothing inside {clock['alarm_days']} d of its date "
-                                           f"({clock['open']} open)")
+            print(dsar.clock_line(clock) or dsar.clock_quiet_line(clock))
             clock_reader_watch(run, now, page=not os.path.exists(KILL))
         else:
-            print(dsar.clock_line(clock) or f"GDPR clock: nothing inside {clock['alarm_days']} d "
-                                                             f"of its date ({clock['open']} open)")
+            print(dsar.clock_line(clock) or dsar.clock_quiet_line(clock))
             for x in clock["alarm"]:
                 print(f"  #{x['register_no']} {x['class']} {x['state']} received {x['received_at'][:10]} due "
                       f"{x['due_at'][:10]} ({x['days_left']:+.1f} d) need={x['need']} last message "
@@ -1084,6 +1104,7 @@ def main() -> int:
             if getattr(a, "ladder", False):
                 # BEFORE the ladder: a statutory access answer outranks the ordinary ladder letter, so the answer
                 # takes the person's day and the letter is the one held (and re-offered on the next tick).
+                dsar_end_states(run, now)
                 access_owed_send(run, now)
                 dsar_ladder(run, now, a.ladder_limit, send_them=True)
             run.dsar_states()

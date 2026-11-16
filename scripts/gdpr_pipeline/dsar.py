@@ -38,6 +38,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from gdpr_pipeline import identity
+from gdpr_pipeline.store import STATUS_UNREACHABLE      # a constant only: this module still reads no store
 
 STATUTORY = ("privacy_erasure", "privacy_access")
 ALARM_DAYS = 7              # inside this many days of the date, the request is named to firstmate
@@ -81,6 +82,14 @@ LATE_NO_DATE_VARIANT = "late_none_no_date"       # late, nothing needed, and no 
 KIND_FINAL = "final"
 FINAL_GONE_VARIANT = "final_gone"
 FINAL_GONE_LATE_VARIANT = "final_gone_late"      # the same answer, given after the date: it also says we are late
+# The same answer where some of the pages are hidden by us and the rest are gone (ruling g2-endstates-1115 item 1,
+# 2026-11-15: "only the two facts"). Each fact is read per page in the run that sends it (`Run.gone_now`).
+FINAL_MIX_VARIANT = "final_hidden_gone"
+FINAL_MIX_LATE_VARIANT = "final_hidden_gone_late"
+OFF_SITE_GONE, OFF_SITE_MIX = "gone", "hidden_gone"
+# `STATUS_UNREACHABLE` (imported above): a request with nobody to write to (ruling g2-endstates-1115 item 3) is
+# closed under that status with what it was owed kept on the row, listed by the clock and never counted as answered.
+# It is defined once, in the store, which is what reopens it when a message brings a way to reach the person.
 # Every kind this module can author. `send.deliver` refuses to send any of them without a reviewer verdict.
 GATED_KINDS = (KIND_ACK, KIND_STATUS, KIND_EXTENSION, "denial", KIND_ACCESS, KIND_FINAL)
 
@@ -516,17 +525,32 @@ def lint(body: str, kind: str, facts: dict, row: dict | None = None, late: bool 
 
 def says_late(variant: str) -> bool:
     """Does this variant tell the requester we are late (and so owe the one apology the lint allows and requires)?"""
-    return variant.startswith("late_") or variant == FINAL_GONE_LATE_VARIANT
+    return variant.startswith("late_") or variant in (FINAL_GONE_LATE_VARIANT, FINAL_MIX_LATE_VARIANT)
+
+
+def off_site_answer(row: dict) -> str:
+    """Which page-already-off-the-site answer an erasure request could be owed: '' (none), `OFF_SITE_GONE` (every
+    page was decided `GONE`) or `OFF_SITE_MIX` (every page was decided `GONE` or `ALREADY_HIDDEN`, with at least
+    one of each).
+
+    Only a request that needs nothing from the requester. One page that is undecided, waiting on the requester or
+    in a hide PR nobody has merged (`HIDDEN_PENDING`) makes it a different request, and it stays on the ladder. A
+    request whose every page is hidden is not here either: its answer is the confirmation letter
+    (`Run.confirmations`), which states what was done to a hidden page line by line."""
+    verdicts = [d.get("verdict") for d in row.get("verdict_detail") or []]
+    if row.get("class") != "privacy_erasure" or need_of(row) != NEED_NONE or not verdicts:
+        return ""
+    if all(v == identity.GONE for v in verdicts):
+        return OFF_SITE_GONE
+    if identity.GONE in verdicts and all(v in (identity.GONE, identity.ALREADY_HIDDEN) for v in verdicts):
+        return OFF_SITE_MIX
+    return ""
 
 
 def gone_candidate(row: dict) -> bool:
-    """Is this an erasure request that needs nothing from the requester and whose EVERY page was decided `GONE`?
-
-    Only such a request can be owed the page-already-off-the-site answer. One page that is hidden, undecided or
-    waiting on the requester makes it a different request with a different answer, and it stays on the ladder."""
-    verdicts = [d.get("verdict") for d in row.get("verdict_detail") or []]
-    return (row.get("class") == "privacy_erasure" and need_of(row) == NEED_NONE
-            and bool(verdicts) and all(v == identity.GONE for v in verdicts))
+    """Could this request be owed a page-already-off-the-site answer (`off_site_answer`)? The rows `Run.gone_now`
+    reads."""
+    return bool(off_site_answer(row))
 
 
 def new_thread_subject(copy_doc: dict, cls: str) -> str:
@@ -567,8 +591,8 @@ def owed(row: dict, sends: list[dict], now: datetime, open_from_requester: int =
     answer date for an answer nothing here can produce, and the date is never moved for one it can.
 
     `gone` is the same-run read of a `gone_candidate`'s pages (`Run.gone_now`): True when every page named reads
-    deleted, not merged and not found on the public site NOW; None when that read could not be made; False
-    otherwise. True owes the final answer at once. None owes nothing this run: a request whose answer is one read
+    off the site NOW in the way its verdict says (a `GONE` page deleted, not merged and not found; an
+    `ALREADY_HIDDEN` page answering page-gone); None when that read could not be made; False otherwise. True owes the final answer at once. None owes nothing this run: a request whose answer is one read
     away is not told "still open" because an API was down, and it is never told the page is gone on a read nobody
     made. False leaves the request on the ladder below.
     """
@@ -588,9 +612,13 @@ def owed(row: dict, sends: list[dict], now: datetime, open_from_requester: int =
                          and now - _parse(s["at"]) < timedelta(days=QUIET_DAYS) for s in sends)
         if gone is None or may_be_out:
             return None
+        late = now >= d
+        if off_site_answer(row) == OFF_SITE_MIX:
+            variant = FINAL_MIX_LATE_VARIANT if late else FINAL_MIX_VARIANT
+        else:
+            variant = FINAL_GONE_LATE_VARIANT if late else FINAL_GONE_VARIANT
         return {"kind": KIND_FINAL, "slot": KIND_FINAL, "effects": {}, "next_contact_at": "",
-                "variant": FINAL_GONE_LATE_VARIANT if now >= d else FINAL_GONE_VARIANT,
-                "facts": {"received": received}}
+                "variant": variant, "facts": {"received": received}}
     # A letter that MAY be out (`sending` / `unknown`) keeps the request quiet like one that did go: a status update
     # an hour after an ask nobody can confirm is the double contact the ledger exists to prevent.
     last = max([contacted_at(row, sends)] + [s.get("at") or "" for s in sends
@@ -720,8 +748,10 @@ def clock_rows(rows: list[dict], sends_of, now: datetime, alarm_days: int = ALAR
 
     A register row closed with no recorded response is not dropped: it is listed under `closed_without_response`,
     because a closed status with nothing sent is the state this module exists to make impossible.
+    A request closed because nobody can be written to is listed under `closed_unreachable` and is neither open
+    nor past date: no letter can end it, and `Store.upsert` reopens it when a message brings a route.
     """
-    alarm, open_rows, anomalies = [], [], []
+    alarm, open_rows, anomalies, unreachable = [], [], [], []
     for r in rows:
         if r.get("class") not in STATUTORY:
             continue
@@ -729,6 +759,9 @@ def clock_rows(rows: list[dict], sends_of, now: datetime, alarm_days: int = ALAR
             continue
         sends = sends_of(r["id"])
         if final_response_at(r, sends):
+            continue
+        if r.get("status") == STATUS_UNREACHABLE:
+            unreachable.append(r["register_no"])
             continue
         if r.get("status") == "closed":
             anomalies.append(r["register_no"])
@@ -754,6 +787,9 @@ def clock_rows(rows: list[dict], sends_of, now: datetime, alarm_days: int = ALAR
         "past_due": len(past), "due_within_window": len(alarm) - len(past),
         "oldest_open": open_rows[0] if open_rows else None,
         "alarm": alarm, "closed_without_response": sorted(anomalies),
+        # Closed because there is nobody to write to (`STATUS_UNREACHABLE`). Not open, not past date and not
+        # answered: named here on every read so the number of people we never reached is never out of sight.
+        "closed_unreachable": sorted(unreachable),
         # An answer date WE stated in a late update, now gone with no answer out. Never silent: a date we chose and
         # missed is worse than the statutory one, because the requester was told it by us.
         "promises_missed": [x["register_no"] for x in open_rows
@@ -782,6 +818,13 @@ def _unanswered_hours(received_at: str, now: datetime) -> float:
         return float("inf")          # a receipt time that cannot be read is not a reason to stay quiet
 
 
+def clock_quiet_line(clock: dict) -> str:
+    """What the journal and a person at the command line read when `clock_line` has nothing to page about."""
+    lost = clock.get("closed_unreachable") or []
+    return (f"GDPR clock: nothing inside {clock['alarm_days']} d of its date ({clock['open']} open"
+            + (f"; closed with nobody to write to: {len(lost)}" if lost else "") + ")")
+
+
 def clock_line(clock: dict) -> str:
     """One line for the firstmate page; '' when nothing is inside the window.
 
@@ -790,7 +833,10 @@ def clock_line(clock: dict) -> str:
     does not name is a request waiting for somebody to go and look (QA review of #1908)."""
     alarm = clock["alarm"]
     quiet = clock.get("no_first_message") or []
+    lost = clock.get("closed_unreachable") or []
     if not alarm and not clock["closed_without_response"] and not quiet:
+        # Requests closed with nobody to write to are not a page by themselves: no step of ours can change one, and
+        # a line that is never empty is a page nobody reads. `clock_quiet_line` and the JSON still carry the count.
         return ""
     names = ", ".join(
         f"#{x['register_no']} ({'%d d past' % -int(x['days_left']) if x['days_left'] < 0 else 'due in %d d' % int(x['days_left'])})"
@@ -809,5 +855,8 @@ def clock_line(clock: dict) -> str:
         unheard = (f"; no first message after {clock.get('no_first_message_hours', NO_FIRST_MESSAGE_HOURS)} h: "
                    + (", ".join("#%s" % n for n in fresh) or "none besides")
                    + (f" (and {also} of those named above)" if also else ""))
+    # Counted, not named one by one: no step of ours can change one, so it is not an alarm.
+    nobody = f"; closed with nobody to write to: {len(lost)}" if lost else ""
     return (f"GDPR clock: {clock['past_due']} statutory request(s) past their date, {clock['due_within_window']} due "
-            f"within {clock['alarm_days']} d, of {clock['open']} open. Oldest first: {names or 'none'}{odd}{broke}{unheard}")
+            f"within {clock['alarm_days']} d, of {clock['open']} open. Oldest first: {names or 'none'}{odd}{broke}{unheard}"
+            f"{nobody}")

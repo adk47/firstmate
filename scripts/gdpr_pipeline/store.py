@@ -273,6 +273,14 @@ def is_writer_refusal(detail: str) -> bool:
 PAGE_PREFIX_CHARS = 8
 
 
+# A request closed because there is nobody to write to (ruling g2-endstates-1115 item 3, 2026-11-15): no Intercom
+# conversation, no mail thread this host can ever reply in, and no address. `Run.close_unreachable` writes it,
+# `dsar.clock_rows` lists it on every read, and `upsert` reopens the request when a message brings a way to reach
+# the person. It is not `closed`: `Run.reopen_unanswered` reopens every `closed` request with no answer on record.
+STATUS_UNREACHABLE = "closed_unreachable"
+ROUTE_COLS = ("conversation_id", "requester_email", "gmail_thread")
+
+
 def page_prefix(pid: str) -> str:
     """The identity a page is compared on. The mail ledger keeps 8-char prefixes and Intercom keeps full uuids, so
     the same page arrives spelled two ways: compared verbatim, a notice and the conversation about it never intersect
@@ -510,6 +518,22 @@ class Store:
         if hit is not None and obligation:
             keys = [k for k in keys if not _taken_by_another(k)] or [hit["row_key"]]
         ts = now_iso()
+        if hit is not None and hit["status"] == STATUS_UNREACHABLE:
+            # NOBODY TO WRITE TO, UNTIL NOW. The request was closed because no route existed, so it is not an
+            # answered request and a new message is not "the customer wrote again": it is the same request, and it
+            # is open again the moment the message brings a way to reach the person (a conversation, an address, a
+            # mail thread) or is a later message than the one on file. A replay of the same unreachable source
+            # brings neither and changes nothing, or every tick would reopen what the tick before closed.
+            brings = sorted(c for c in ROUTE_COLS
+                            if str(cand.get(c) or "").strip() and not str(hit.get(c) or "").strip())
+            later = bool(cand.get("received_at")) and cand["received_at"] > hit["received_at"]
+            if not brings and not later:
+                return hit["id"], "unchanged"
+            self.db.execute("UPDATE erasure_requests SET status='open', rev=rev+1, updated_at=? WHERE id=?",
+                            (ts, hit["id"]))
+            self.event(hit["id"], "reopened", status="open", brings=brings, later_message=later,
+                       note="closed with nobody to write to: reopened by a message")
+            hit = self.get(hit["id"])
         if hit is not None and (hit["confirmed_at"] or hit["status"] != "open"):
             # ANSWERED = a written confirmation OR closed for any other reason (a markdown-register row a human closed).
             # Either way every pass filters to open rows, so merging a later page into it registers a request nothing
@@ -517,7 +541,11 @@ class Store:
             # Replaying the SAME unchanged source is not a new request: only something new (a page, a later request
             # time, a more restrictive class) starts one. Without this an unchanged ticket re-ingested by the next
             # tick would open a fresh request for a customer who has already been answered.
-            fresh = {p["id"] for p in pages} - {p["id"] for p in hit["pages"]}
+            # By PREFIX (`page_prefix`), the identity every other merge compares on. Compared verbatim, the mail
+            # reader's 8-character id is "a new page" beside the full id the answered row holds, so the same mail
+            # read one tick after the final answer opened a second request for a person just answered (2026-11-15:
+            # all 6 of the final answers sent by a new mail thread, each reopened within the hour).
+            fresh = self._prefixes(pages) - self._prefixes(hit["pages"])
             escalates = (cand["class"] in CLASS_RANK and hit["class"] in CLASS_RANK
                          and CLASS_RANK.index(cand["class"]) > CLASS_RANK.index(hit["class"]))
             if not fresh and not escalates and cand["received_at"] <= hit["received_at"]:

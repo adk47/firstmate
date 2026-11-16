@@ -310,6 +310,8 @@ class**, not a fourth human: `reply --purpose gdpr-erasure`.
   `--include-legal`, which no timer runs. Only a line whose page the
   guard ADMITTED still says "open/merge the hide batch PR", and only those lines reach the message head that names a
   person; a message made only of held or not-yet-judged lines carries a plain head (no mention, no alarm emoji).
+  A request closed as `closed_unreachable` (below) is read here too, for the pages it had already hidden: a page
+  whose address no longer answers page-gone is paged as an action line, because no hide PR will read that row.
 - **The page shows every due request.** The watchdog packs the lines into as many Slack messages as the length
   limit needs (40 lines maximum each) and nothing is discarded in the packing: a request counts as paged only
   when every message posted, so a 94-request backlog is all on screen — not 40 sent and the rest silently
@@ -484,7 +486,7 @@ Scope: `privacy_erasure` and `privacy_access` only. A `legal_threat` or `dmca_ta
 
 | piece | what it is | where |
 |---|---|---|
-| state | `received -> identity_check -> in_progress -> responded -> closed`, DERIVED from recorded facts on every run and written to `dsar_state` with a `dsar_state` event on each change. Nothing sets it by hand, so it cannot drift from the record. `responded`/`closed` exist only once the final response is recorded: the row's `confirmed_at`, or a `sent` final letter (`confirm`, `access`, `final`) in the send ledger (`dsar.final_response_at`; 7 open requests on the live register had the ledger row and no stamp, and each would have been told "we are late" for an answer it already had). A request cannot close without one. A register row closed by hand with no response is listed by the clock as an anomaly | `dsar.state_of`, `Run.dsar_states` |
+| state | `received -> identity_check -> in_progress -> responded -> closed`, DERIVED from recorded facts on every run and written to `dsar_state` with a `dsar_state` event on each change. Nothing sets it by hand, so it cannot drift from the record. `responded`/`closed` exist only once the final response is recorded: the row's `confirmed_at`, or a `sent` final letter (`confirm`, `access`, `final`) in the send ledger (`dsar.final_response_at`; 7 open requests on the live register had the ledger row and no stamp, and each would have been told "we are late" for an answer it already had). A request cannot close without one. A register row closed by hand with no response is listed by the clock as an anomaly. The one close with no response is `closed_unreachable`, a register STATUS written by code rather than a derived state (see "Closed with nobody to write to" below): the clock lists it separately, never as an anomaly | `dsar.state_of`, `Run.dsar_states` |
 | the date | the EARLIER of one calendar month (clamped to the month's end) and receipt + 30 days, so the stated date is never later than either reading of "one month". `extended_until` moves it, bounded at three calendar months from receipt; only a SENT extension notice writes it (`Store.apply_effects`; see "The three decisions" below). The register's `due_at` column is unchanged | `dsar.statutory_due`, `dsar.due` |
 | identity chain | captain's ruling 2026-11-12, recorded per row in `gates`: (1) account control: signed in, or controls the account's email; (2) a tie to the page: the page is claimed by that account **with evidence** (a processed claim carrying verification links, processed after it was made; see "A claim is a tie only with evidence" above), or the verified sender's host is the page's own catalog website; (3) an authority document only where 1 and 2 leave a real doubt. **A name match is not a tie** (paths B and C no longer pass; they answer `ASK_IDENTITY`), and **no message asks for a passport or any identity document** (GDPR Art. 12(6) allows asking for more only on reasonable doubt). A page that is already hidden or gone ties nobody: it is recorded as `hidden` / `gone`, never as a gate-2 pass (the first live dry run counted 40 passes of which 12 were claims). An 8-char id prefix that no page carries is a link to ask for only when the catalog lookup ANSWERED; a lookup that failed is `unknown` and is re-read. The chain yields ONE `need`: `none`, `claim_or_authority`, `claim_evidence` (the requester's own claim, with no evidence on it: the ownership ask, not "claim the page"), `link`, `authority`, `account`, `unknown`. A request not yet through the chain (`gates.v` absent) is owed no message: nothing claims to know what it needs, and the clock still names it | `dsar.gates`, `run.decide_row`, `identity.decide_page` |
 | acknowledgement | one per request, while the date is at least 3 days ahead (`ACK_MIN_RUNWAY_DAYS`: live request #52 would have been promised an answer "by 12 November" one hour before that date; nearer than that it gets NOTHING until the date itself, because "we are late" is not true yet; the clock names it throughout and the late update is owed the moment the date passes): the date we received it, the date we answer by, and the one thing needed. Claim-then-request is stated here: "claim the page, or send a document from the artist's label or management" (a requester whose own claim has no evidence gets `ack_claim_evidence` instead: a matching link or a label/management document, never "claim the page"). It replaces the older identity ask for a statutory request (`Run.asks` stands down once the ladder has authored a message for the row), so nobody is asked twice for two different things. Whether a first message already went is read from the send ledger as well as the row's stamp (23 live rows carry a `sent` ask and no `ask_sent_at`), and a letter that may be out (`sending`/`unknown`) counts | `dsar.owed`, `dsar.first_contact_made`, `policies/gdpr-dsar-copy.json` |
@@ -614,17 +616,51 @@ Measured 2026-11-15: 49 open erasure requests need nothing from the requester an
 
 | | |
 |---|---|
-| who is owed it | an erasure request that needs nothing from the requester and whose EVERY page verdict is `GONE` (`dsar.gone_candidate`). One page that is hidden, undecided or waiting on the requester makes it a different request, and it stays on the ladder |
-| the read | the stored verdict is not enough. In the run that authors or sends the letter, `Run.gone_now` reads each page again: the admin record says the profile is deleted and carries no merge (`sources.profiles_deleted`, one call per 20 ids), and the public address answers 404. Both, for every page |
+| who is owed it | an erasure request that needs nothing from the requester and whose EVERY page verdict is `GONE`, or `GONE` on at least one page and `ALREADY_HIDDEN` on the rest (`dsar.off_site_answer`: `gone` / `hidden_gone`; ruling g2-endstates-1115 item 1). One page that is half hidden (`HIDDEN_PENDING`), undecided or waiting on the requester makes it a different request, and it stays on the ladder. A request whose pages are ALL hidden is owed the erasure confirmation, not this letter |
+| the read | the stored verdict is not enough. In the run that authors or sends the letter, `Run.gone_now` reads each page again, by its verdict. A `GONE` page: the admin record says the profile is deleted and carries no merge (`sources.profiles_deleted`, one call per 20 ids), and the public address answers 404. An `ALREADY_HIDDEN` page: `checks.public_gone` (the address answers 410 and tells search engines not to list it). Every page must read as its verdict says |
 | a page that reads otherwise | live again, merged, or not returned: the request stays on the ladder (`gone=False`) |
-| a read that cannot be made | a run error, and the request is owed NOTHING that run (`gone=None`): not the answer, and not "still open" either |
+| a read that cannot be made | a run error, and the request is owed NOTHING that run (`gone=None`): not the answer, and not "still open" either. Such a request is also not closed with nobody to write to: the close carries the answer on the row, so it waits for a read (`Run.close_unreachable`) |
 | the letter | kind and slot `final`, variant `final_gone`, or `final_gone_late` past the date (late and sorry, once, no reason). It says the pages are no longer on Muso.AI and that no page is left to take down. It does not say what happened to a page, who removed it, or that Muso holds nothing about the person. One date: the day the request was received |
+| the letter, hidden and gone | variant `final_hidden_gone` / `final_hidden_gone_late`. It states the two facts that same run measured (some pages hidden from public view, the others no longer on the site) and that a restricted internal record of the hidden pages is kept. It names no page and gives no address message for either group (two different messages would tell a reader which page is which; the reviewer sent that wording back), and it does not say the request is complete or that nothing is left to take down |
 | the gate | campaign `gdpr-final` under the `gdpr` rubric (enforced); rule 6 of the rubric carries the one exception that lets this letter state the fact |
 | what it does | `stamp_sent` writes `confirmed_at`, so it is the request's final response: the request leaves the clock and the ladder |
 | when | at once. It waits for no halfway point, quiet window or promised next contact; it stands down only for a letter that may be out, and it is held to one message per person per UTC day like every other letter |
 
-Not covered: a request with a hidden page AND a gone page (9 on 2026-11-15) and any request with a page still to be
-decided. Rehearsal of the wording under the amended rubric: `data/gdpr-overdue-drive-g2/copy-review-round6.json`.
+Not covered: any request with a page still to be decided or half hidden. Rehearsals of the wording under the amended
+rubric: `data/gdpr-overdue-drive-g2/copy-review-round6.json` (all gone) and `copy-review-round7.json` (hidden and
+gone; 8 past-date requests on 2026-11-15).
+
+### Closed with nobody to write to (ruling g2-endstates-1115 item 3, 2026-11-15)
+
+A statutory request with no conversation, no address and no mail thread this host can reply in
+(`send.nobody_to_write_to`: a property of the row, never of a failed attempt) cannot be answered by any letter. It
+stayed past its date for good and the ladder refused it every hour (10 on 2026-11-15). Once it is past its date,
+`Run.close_unreachable` sets `status = closed_unreachable` (`store.STATUS_UNREACHABLE`).
+
+| | |
+|---|---|
+| what is kept | an `unreachable_owed` event with the kind, variant and body sha256 of what the request was owed at closing |
+| the clock | `dsar clock` lists it under `closed_unreachable` and the line counts it (`closed with nobody to write to: N`). It is not open, not past date and never answered |
+| reopening | `Store.upsert` sets it back to `open`, same row and same date, when a message brings a conversation, an address or a thread, or is later than the one on file. `reopen_unanswered` does not touch it |
+| never closed | a request still inside its date (a route can arrive in time), one with a letter that may be out (`sending` / `unknown`), one with a page still to hide (`identity.HIDE_ELIGIBLE` or `HIDDEN_PENDING`: the hide batch reads open rows only), one whose verdict is not settled (`decided_and_current`: no gate chain, pages written after the decision, a pass under older rules; no later pass re-decides a closed row), and a gone or hidden-plus-gone request whose page read was unknown that run, or whose page no longer reads off the site (live again, merged, served). Only a row owed no letter at all closes with `no ladder letter`; what a gone candidate is owed must be measured before it closes, and a row whose owed body could not be rendered stays open with the copy problem as a run error |
+| still watched | a page such a request had hidden stays watched: `hide_due_rows` reads these rows for their `ALREADY_HIDDEN` pages, and a page whose public address no longer answers page-gone is paged as an action line (it is on both hide lists, so the next step is the serving side, not a hide PR) |
+| undo | `status='open'` on the row |
+
+### The second row of an answered event
+
+A final answer closes the row it was sent on. When the same customer event stands on a second row
+(`Store.duplicate_events`), that row stayed open and was owed "still open" about a request the person had just been
+answered on (#62 and #63 on 2026-11-15). `Run.close_answered_twins` closes it as `duplicate`: one status write, no
+key or letter moved, and only when exactly one row of the pair has a final response, both are the same class, every
+page of the open row is a page of the answered one (`page_prefix`) and no letter from the open row is in flight.
+Undo: `status='open'`.
+
+Both closes run in the tick before the ladder (`dsar_end_states`) and stop under `/etc/hydra/gdpr-dsar-ladder.disabled`.
+
+**The same mail is not a new request.** On an answered row, `Store.upsert` asks whether a later read brings a page
+the row does not have. It compared ids verbatim, and the mail reader holds the first 8 characters where the answered
+row holds the full id, so all 6 final answers sent by new mail thread on 2026-11-15 were re-opened as new rows
+within the hour. It compares by `page_prefix` now.
 
 ### A requester with an address and no thread (ruling g2-walls-1115)
 

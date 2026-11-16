@@ -189,6 +189,31 @@ def takes_ladder_new_thread(row: dict) -> bool:
             and not str(row.get("conversation_id") or "").strip() and not str(row.get("gmail_thread") or "").strip())
 
 
+def nobody_to_write_to(row: dict) -> str:
+    """Why no letter can ever reach this requester, or '' when a route exists or could exist.
+
+    A property of the ROW, never of a failed attempt: `route` also refuses for reasons that clear by themselves (a
+    mailbox that cannot be asked right now, copy with no GO yet), and closing a request on one of those would close
+    it on an outage. Only these two shapes have no fix this host can make:
+
+      * no Intercom conversation, no mail thread and no address;
+      * no conversation and no address, and the only thread is in a mailbox that is an alias for a person
+        (`ALIAS_MAILBOXES`): nothing can be authed for it, and a new thread needs the address the row lacks.
+
+    A row with an address is never here (a new thread may be opened to it, or a ruling can open one), and neither
+    is a row whose thread sits in a real mailbox (it can be authed)."""
+    if str(row.get("conversation_id") or "").strip() or str(row.get("requester_email") or "").strip():
+        return ""
+    thread = str(row.get("gmail_thread") or "").strip()
+    if not thread:
+        return "no conversation, no mail thread and no address on the request"
+    mailbox = THREAD_MAILBOX_BY_CHANNEL.get(row.get("channel"), "")
+    if mailbox in ALIAS_MAILBOXES:
+        return (f"its only thread is in {mailbox}, an alias for a person that this host can never reply in, and "
+                f"the request carries no address to open a new thread to")
+    return ""
+
+
 def route(row: dict, ladder: bool = False) -> tuple[str, str]:
     """(kind, target) for this request, or Unknown with the reason a human needs to fix.
 

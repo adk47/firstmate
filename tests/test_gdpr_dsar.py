@@ -14,6 +14,9 @@ Locks (captain 2026-11-12):
 Hermetic: no network, no Intercom, no gate process. Stdlib unittest.
 """
 import hashlib
+import contextlib
+import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -2968,15 +2971,19 @@ class FinalAnswer(unittest.TestCase):
         self.assertEqual((owed[ok]["variant"], bad in owed), ("final_gone_late", False))
 
     def test_only_a_request_with_nothing_but_gone_pages_and_nothing_needed_is_read_at_all(self):
-        mixed = self.request(1, verdicts=("ALREADY_HIDDEN", "GONE"))
+        # hidden pages only: that request's answer is the confirmation letter. One page still in a hide PR nobody
+        # merged is not hidden yet. (Hidden AND gone is a candidate since g2-endstates-1115: class EndStates.)
+        mixed = self.request(1, verdicts=("ALREADY_HIDDEN", "ALREADY_HIDDEN"))
+        pending_hide = self.request(6, verdicts=("GONE", "HIDDEN_PENDING"))
         review = self.request(2, verdicts=("GONE", "JAN_REVIEW"), need="unknown")
         asked = self.request(3, need="link")
         access_req = self.request(4, cls="privacy_access")
         no_page = self.request(5, verdicts=())
         owed = self.owed()
         self.assertEqual(self.read, [], "none of these can be owed the answer, so no page of theirs is read")
-        self.assertTrue(all(owed[r]["kind"] == "status" for r in (mixed, review, asked, access_req, no_page)))
-        for row in (mixed, review, asked, access_req, no_page):
+        rows = (mixed, pending_hide, review, asked, access_req, no_page)
+        self.assertTrue(all(owed[r]["kind"] == "status" for r in rows))
+        for row in rows:
             self.assertFalse(dsar.gone_candidate(self.s.get(row)))
 
     def test_a_request_that_has_its_final_response_is_not_read_or_owed_again(self):
@@ -3603,6 +3610,505 @@ class FirstReply(unittest.TestCase):
         tick = src[src.index('if a.cmd in ("backfill", "tick"):'):]
         self.assertLess(tick.index("run.reopen_unanswered()"), tick.index("run.decide_all("))
         self.assertLess(tick.index("run.decide_all("), tick.index("dsar_ladder(run, now, a.ladder_limit"))
+
+
+class EndStates(unittest.TestCase):
+    """The end states ruling g2-endstates-1115 added (firstmate inbox 027, 2026-11-15), and the two defects found
+    beside them the same day.
+
+    Measured on the live register at 16:01Z: 126 statutory requests past their date. 8 named pages that were each
+    hidden by us or already gone and had no letter for that mix; 10 had no conversation, no thread this host can
+    reply in and no address, so no letter could ever end them; and every one of the 6 final answers sent by a new
+    mail thread had re-opened its own request as a new row within the hour."""
+
+    GONE = "0d1c2b3a-0000-4000-8000-00000000000"
+    HIDDEN = "5e6f7a8b-0000-4000-8000-00000000000"
+
+    def setUp(self):
+        self.s = Store(":memory:")
+        self.lines = []
+        self.run = Run(self.s, log=lambda *a: self.lines.append(" ".join(str(x) for x in a)))
+        self.checked = []
+
+    def request(self, n=1, received="2026-09-01T00:00:00Z", verdicts=("GONE", "ALREADY_HIDDEN"), need="none",
+                cls="privacy_erasure", route=True, channel="intercom"):
+        rid, _ = self.s.upsert({"keys": [f"{channel}:{n}"], "channel": channel, "class": cls,
+                                "received_at": received, "pages": []})
+        detail = [{"id": f"{self.GONE if v == 'GONE' else self.HIDDEN}{n}", "verdict": v} for v in verdicts]
+        cols = {"gates": {"v": 1, "need": need}, "verdict_detail": detail, "decided_at": "2026-11-14T00:00:00Z",
+                "pages": [{"entity": "profile", "id": d["id"]} for d in detail]}
+        if route:
+            cols.update(conversation_id=f"2154766503954{n:02d}", requester_email=f"p{n}@example.com")
+        self.s.update(rid, "decide", **cols)
+        self.s.mark_decided(rid)
+        return rid
+
+    def site(self, deleted=True, public=404, hidden=True):
+        """The three reads `Run.gone_now` makes; each is a value for every page, or an exception to raise."""
+        from gdpr_pipeline import checks
+
+        def answer(value):
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        def public_gone(entity, pid):
+            self.checked.append((entity, pid))
+            return answer(hidden)
+        return (mock.patch.object(sources, "profiles_deleted", lambda ids: {i: answer(deleted) for i in ids}),
+                mock.patch.object(sources, "public_status", lambda entity, pid: answer(public)),
+                mock.patch.object(checks, "public_gone", public_gone))
+
+    def owed(self, now=NOW, **site):
+        a, b, c = self.site(**site)
+        with a, b, c:
+            return {x["row"]: x for x in self.run.dsar_owed(now)}
+
+    # ---- ruling 1: some pages hidden by us, the rest gone
+    def test_hidden_and_gone_is_owed_one_answer_that_states_the_two_facts(self):
+        late, in_time = self.request(1), self.request(2, received="2026-11-01T00:00:00Z")
+        owed = self.owed()
+        self.assertEqual({k: (v["kind"], v["slot"], v["variant"], v["problem"]) for k, v in owed.items()},
+                         {late: ("final", "final", "final_hidden_gone_late", ""),
+                          in_time: ("final", "final", "final_hidden_gone", "")})
+        text = owed[late]["text"]
+        self.assertIn("This is our answer to the request you made on 1 September 2026.", text)
+        self.assertIn("None of them is shown to the public any more. Some are hidden from public view. "
+                      "The others are no longer on Muso.AI.", text)
+        self.assertIn("We are keeping a restricted internal record of the hidden pages.", text)
+        self.assertIn("We are late in giving you this answer, and we are sorry.", text)
+        self.assertNotIn("sorry", owed[in_time]["text"], "an answer given in time does not apologise")
+        for item in owed.values():
+            # the hidden pages are kept, so this letter never says the request is complete or that nothing is left
+            # and it says nothing by which a reader could tell which page is which (no page-gone / not-found wording)
+            for barred in ("completes this request", "no page left", "deleted", "removed", "we hold", "http", "@",
+                           "page-gone", "page-not-found", "search engine", "we have hidden"):
+                self.assertNotIn(barred, item["text"].lower())
+            self.assertEqual((item["effects"], item["next_contact_at"]), ({}, ""))
+        self.assertEqual(sorted(self.checked), [("profile", f"{self.HIDDEN}1"), ("profile", f"{self.HIDDEN}2")],
+                         "only the hidden pages take the page-gone read, once each")
+
+    def test_the_answer_is_owed_only_when_each_page_reads_as_its_verdict_says_in_this_run(self):
+        rid = self.request(1)
+        for site, why in (({"hidden": False}, "a hidden page that is served again"),
+                          ({"public": 200}, "a gone page that is live again"),
+                          ({"deleted": False}, "a gone page the admin record no longer calls deleted")):
+            self.run.errors.clear()
+            item = self.owed(**site)[rid]
+            self.assertEqual((item["kind"], self.run.errors), ("status", []), why)
+        for site in ({"hidden": sources.Unknown("HTTP 503")}, {"public": sources.Unknown("HTTP 503")},
+                     {"deleted": sources.Unknown("admin 502")}):
+            self.run.errors.clear()
+            self.assertNotIn(rid, self.owed(**site), "a read that could not be made owes nothing this run")
+            self.assertEqual(len(self.run.errors), 1, "and it is a run error, never a quiet skip")
+
+    def test_the_hidden_page_is_read_as_the_kind_of_page_it_is(self):
+        rid = self.request(1)
+        row = self.s.get(rid)
+        self.s.update(rid, "decide", pages=[{"entity": "album" if q["id"].startswith(self.HIDDEN) else "profile",
+                                            "id": q["id"]} for q in row["pages"]])
+        self.owed()
+        self.assertEqual(self.checked, [("album", f"{self.HIDDEN}1")])
+
+    def test_which_requests_can_be_owed_an_off_site_answer(self):
+        cases = ((("GONE",), "none", "privacy_erasure", dsar.OFF_SITE_GONE),
+                 (("GONE", "ALREADY_HIDDEN"), "none", "privacy_erasure", dsar.OFF_SITE_MIX),
+                 (("ALREADY_HIDDEN",), "none", "privacy_erasure", ""),          # the confirmation letter's
+                 (("GONE", "HIDDEN_PENDING"), "none", "privacy_erasure", ""),   # a hide PR nobody merged
+                 (("GONE", "ALREADY_HIDDEN", "JAN_REVIEW"), "none", "privacy_erasure", ""),
+                 (("GONE", "ALREADY_HIDDEN"), "link", "privacy_erasure", ""),
+                 (("GONE", "ALREADY_HIDDEN"), "none", "privacy_access", ""),
+                 ((), "none", "privacy_erasure", ""))
+        for n, (verdicts, need, cls, want) in enumerate(cases, 1):
+            row = self.s.get(self.request(n, verdicts=verdicts, need=need, cls=cls))
+            self.assertEqual((dsar.off_site_answer(row), dsar.gone_candidate(row)), (want, bool(want)), verdicts)
+
+    def test_the_sent_answer_is_the_final_response(self):
+        rid = self.request(1)
+        posted = []
+        a, b, c = self.site()
+        writer = mock.patch.object(send, "_intercom_send",
+                                   lambda conv, t, who, dry_run=False, key="": posted.append(conv) or "api-log posted")
+        with a, b, c, writer, mock.patch.object(copy_gate, "check", approve):
+            out = self.run.dsar_send(NOW, checker=approve)
+            self.assertEqual([(x["state"], x["variant"]) for x in out], [("sent", "final_hidden_gone_late")])
+            self.assertEqual(self.run.dsar_send(NOW + timedelta(days=30), checker=approve), [])
+        row = self.s.get(rid)
+        self.assertTrue(row["confirmed_at"] and dsar.final_response_at(row, self.s.sends(rid)))
+        self.assertEqual((len(posted), self.run.dsar_clock(NOW + timedelta(days=30))["past_due"]), (1, 0))
+
+    def test_the_copy_file_and_the_rubric_carry_the_second_form(self):
+        doc = dsar.load_copy()
+        for name in (dsar.FINAL_MIX_VARIANT, dsar.FINAL_MIX_LATE_VARIANT):
+            v = doc["variants"][name]
+            self.assertEqual((v["kind"], v["enabled"]), ("final", True))
+            self.assertNotIn("final_done", v["blocks"], "the hidden pages are kept: it never says 'complete'")
+            self.assertIn("final_record", v["blocks"])
+            self.assertEqual(dsar.says_late(name), name.endswith("_late"))
+
+    # ---- ruling 3: nobody to write to
+    def test_nobody_to_write_to_is_a_property_of_the_row_never_of_a_failed_attempt(self):
+        none = {"channel": "support"}
+        self.assertIn("no conversation, no mail thread and no address", send.nobody_to_write_to(none))
+        self.assertIn("alias", send.nobody_to_write_to({"channel": "notices", "gmail_thread": "t1"}))
+        self.assertIn("alias", send.nobody_to_write_to({"channel": "legal", "gmail_thread": "t1"}))
+        for reachable in ({"channel": "support", "conversation_id": "215"},
+                          {"channel": "support", "requester_email": "p@example.com"},
+                          {"channel": "notices", "gmail_thread": "t1", "requester_email": "p@example.com"},
+                          {"channel": "support", "gmail_thread": "t1"}):     # a real mailbox: it can be authed
+            self.assertEqual(send.nobody_to_write_to(reachable), "", reachable)
+
+    def close(self, now=NOW, **site):
+        a, b, c = self.site(**site)
+        with a, b, c:
+            return self.run.close_unreachable(now)
+
+    def test_a_past_date_request_nobody_can_be_written_to_is_closed_with_what_it_was_owed(self):
+        lost = self.request(1, verdicts=("GONE",), route=False, channel="support")
+        in_time = self.request(2, received="2026-11-01T00:00:00Z", verdicts=("GONE",), route=False, channel="support")
+        reachable = self.request(3, verdicts=("GONE",))
+        takedown = self.request(4, cls="dmca_takedown", route=False, channel="support")
+        no = lambda rid: self.s.get(rid)["register_no"]      # noqa: E731
+        self.assertEqual(self.close(), [no(lost)])
+        row = self.s.get(lost)
+        self.assertEqual(row["status"], dsar.STATUS_UNREACHABLE)
+        self.assertIn("nobody to write to", row["note"])
+        kept = [detail_of(e) for e in self.s.events(lost) if e["kind"] == "unreachable_owed"]
+        self.assertEqual([(d["owed_kind"], d["owed_variant"], len(d["owed_body_sha"])) for d in kept],
+                         [("final", "final_gone_late", 64)], "the answer it could not be sent is kept with the close")
+        for rid, why in ((in_time, "in time: a route can still arrive, and it belongs in the alarm"),
+                         (reachable, "it can be written to"), (takedown, "not a statutory request")):
+            self.assertEqual(self.s.get(rid)["status"], "open", why)
+        self.assertEqual(self.close(), [], "closing is one write, not one per tick")
+
+    def test_a_request_with_a_letter_that_may_be_out_is_not_closed(self):
+        rid = self.request(1, verdicts=("GONE",), route=False, channel="support")
+        self.s.claim_send(rid, "status", "intercom", "215", "ab" * 32, "seat")
+        self.assertEqual((self.close(), self.s.get(rid)["status"]), ([], "open"))
+
+    def test_a_request_with_a_page_still_to_hide_is_never_closed(self):
+        """The hide batch reads open rows only, and hiding a page needs nobody to write to."""
+        for n, verdict in enumerate(("PASS_A", "PASS_B", "PASS_C", "PASS_D", "LEGAL_HIDE_FIRST",
+                                     "HIDDEN_PENDING"), start=1):
+            rid = self.request(n, verdicts=("GONE", verdict), route=False, channel="support")
+            self.assertEqual((self.close(), self.s.get(rid)["status"]), ([], "open"), verdict)
+        done = self.request(9, verdicts=("GONE", "ALREADY_HIDDEN"), route=False, channel="support")
+        self.assertEqual(self.close(), [self.s.get(done)["register_no"]], "nothing is left to hide on this one")
+
+    def test_a_request_whose_verdict_is_not_settled_is_never_closed(self):
+        """A closed row is off every later pass, so a verdict that says nothing about its pages closes nothing."""
+        unsaid = self.request(1, verdicts=("GONE",), route=False, channel="support")
+        self.s.update(unsaid, "decide", decided_at="")
+        self.s.mark_decided(unsaid)
+        ungated = self.request(2, verdicts=("GONE",), route=False, channel="support")
+        self.s.update(ungated, "decide", gates={})
+        self.s.mark_decided(ungated)
+        changed = self.request(3, verdicts=("GONE",), route=False, channel="support")
+        self.s.update(changed, "decide", note="a page arrived after the decision")
+        uncovered = self.request(4, verdicts=("GONE",), route=False, channel="support")
+        row = self.s.get(uncovered)
+        self.s.update(uncovered, "decide", pages=row["pages"] + [{"entity": "profile", "id": "9f9f9f9f"}])
+        self.s.mark_decided(uncovered)
+        self.assertEqual(self.close(), [])
+        for rid, why in ((unsaid, "never decided"), (ungated, "no gate chain"),
+                         (changed, "changed since the decision"), (uncovered, "a page the verdict does not cover")):
+            self.assertEqual(self.s.get(rid)["status"], "open", why)
+        bare = self.request(5, verdicts=(), route=False, channel="support")
+        self.assertEqual(self.close(), [self.s.get(bare)["register_no"]],
+                         "a decided chain naming no page at all may still close")
+
+    def test_a_hidden_page_of_a_closed_unreachable_request_is_still_read_back(self):
+        """Request #24's shape: notices-channel erasure whose only thread is a personal alias, no conversation,
+        no address, a page already on both hide lists. Closed, and the page is watched all the same."""
+        rid, _ = self.s.upsert({"keys": ["gmail:notices:t1"], "channel": "notices", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T00:00:00Z", "gmail_thread": "t1", "pages": []})
+        page = f"{self.HIDDEN}7"
+        self.s.update(rid, "decide", gates={"v": 1, "need": "none"}, decided_at="2026-11-14T00:00:00Z",
+                      verdict_detail=[{"id": page, "verdict": "ALREADY_HIDDEN", "rules": identity.RULES_V}],
+                      pages=[{"entity": "profile", "id": page}])
+        self.s.mark_decided(rid)
+        self.assertEqual(self.close(), [self.s.get(rid)["register_no"]])
+        self.assertEqual(self.s.get(rid)["status"], dsar.STATUS_UNREACHABLE)
+        a, b, c = self.site(hidden=True)
+        with a, b, c:
+            self.run.mark_hidden()
+        row = self.s.get(rid)
+        no = row["register_no"]
+        self.assertEqual((row["status"], row["hidden_pages"]), (dsar.STATUS_UNREACHABLE, [page]))
+        self.assertTrue(row["hidden_at"], "a hidden page read back gone dates the row even after the close")
+        first = row["hidden_at"]
+        with a, b, c:
+            self.run.mark_hidden()
+        self.assertEqual(self.s.get(rid)["hidden_at"], first, "a steady read-back writes nothing")
+        self.assertEqual([n for n, _, _ in self.run.hide_due_rows(NOW) if n == no], [],
+                         "a page that answers page-gone is not an alert")
+        a, b, c = self.site(hidden=False)
+        with a, b, c:
+            self.run.mark_hidden()
+        row = self.s.get(rid)
+        self.assertEqual((row["hidden_at"], row["status"]), ("", dsar.STATUS_UNREACHABLE),
+                         "the page serves again: the marker is cleared and the row is not reopened")
+        self.assertIn("hidden_at cleared", " ".join(self.lines))
+        (reg, line, needs), = [x for x in self.run.hide_due_rows(NOW) if x[0] == no]
+        self.assertTrue(needs, "a hidden page serving again is a person's action, not a quiet line")
+        self.assertIn(f"#{no}", line)
+        self.assertIn("closed_unreachable (nobody to write to)", line)
+        self.assertIn(page[:8], line)
+        self.assertIn("both hide lists", line)
+        self.assertIn("no longer answer page-gone, so the page is being shown", line)
+        self.assertIn("hide batch does not read this request", line)
+        self.assertIn("the serving side (the deploy that carries the hide lists)", line)
+        open_row = self.request(2, verdicts=("ALREADY_HIDDEN",), route=False, channel="support")
+        (_, open_line, open_needs), = [x for x in self.run.hide_due_rows(NOW)
+                                     if x[0] == self.s.get(open_row)["register_no"]]
+        self.assertFalse(open_needs)
+        self.assertIn("listed in both hide lists, waiting for the public page to answer 410 (read-back)", open_line)
+        self.assertNotIn("closed_unreachable", open_line)
+
+    def test_a_closed_row_whose_read_back_failed_is_not_called_public(self):
+        rid = self.closed_hidden()
+        self.assertEqual(self.close(), [self.s.get(rid)["register_no"]])
+        a, b, c = self.site(hidden=sources.Unknown("admin route down"))
+        with a, b, c:
+            self.run.mark_hidden()
+        self.assertTrue(self.s.get(rid)["hidden_at"], "an unmeasured read changes no marker")
+        self.assertEqual(self.run.hide_due_rows(NOW), [], "no alert asserts a page is shown on a read nobody made")
+        self.assertIn("P read-back", " ".join(self.run.errors))
+
+    def test_a_row_whose_answer_could_not_be_measured_is_not_closed(self):
+        rid = self.closed_hidden()
+        self.assertEqual(self.close(hidden=sources.Unknown("admin route down")), [],
+                         "the close keeps the answer on the row, so it needs the read")
+        self.assertEqual(self.s.get(rid)["status"], "open")
+        self.assertEqual([e for e in self.s.events(rid) if e["kind"] == "unreachable_owed"], [])
+        self.assertTrue(any("could not be measured" in ln for ln in self.lines))
+        self.assertEqual(self.close(), [self.s.get(rid)["register_no"]])
+        (event,) = [json.loads(e["detail"]) for e in self.s.events(rid) if e["kind"] == "unreachable_owed"]
+        self.assertEqual((event["owed_kind"], event["owed_variant"]), ("final", "final_hidden_gone_late"))
+
+    def test_a_page_that_reads_live_again_keeps_the_unreachable_request_open(self):
+        """The close carries the answer on the row, so it is decided on the same read the letter is: a page that is
+        served again is not "no page left", and closing would take the request off every later pass."""
+        rid = self.request(1, verdicts=("GONE",), route=False, channel="support")
+        self.assertEqual(self.close(public=200), [], "a page that answers 200 is not off the site")
+        self.assertEqual(self.s.get(rid)["status"], "open")
+        self.assertEqual([e for e in self.s.events(rid) if e["kind"] == "unreachable_owed"], [])
+        self.assertTrue(any("does not read off the site" in ln for ln in self.lines))
+        self.assertEqual(self.close(), [self.s.get(rid)["register_no"]], "and it closes once the page reads gone")
+
+    def test_a_request_whose_answer_cannot_be_rendered_is_not_closed(self):
+        """The close promises the exact answer is kept on the row: an empty body keeps nothing, so it stays open and
+        the copy problem is a run error."""
+        rid = self.request(1, verdicts=("GONE",), route=False, channel="support")
+        with mock.patch.object(dsar, "render", side_effect=dsar.CopyError("variant final_gone_late is disabled")):
+            self.assertEqual(self.close(), [])
+        self.assertEqual(self.s.get(rid)["status"], "open")
+        self.assertEqual([e for e in self.s.events(rid) if e["kind"] == "unreachable_owed"], [])
+        self.assertTrue(any("could not be rendered" in e for e in self.run.errors), self.run.errors)
+        self.assertEqual(self.close(), [self.s.get(rid)["register_no"]])
+
+    def test_a_close_whose_owed_answer_record_fails_leaves_the_row_open(self):
+        """The close and the answer it was owed are one write: a row closed without its `unreachable_owed` record is
+        off every later pass and keeps no body hash, so a failure between the two writes must roll the close back."""
+        rid = self.request(1, verdicts=("GONE",), route=False, channel="support")
+        real = self.s.event
+
+        def event(request_id, kind, **detail):
+            if kind == "unreachable_owed":
+                raise sqlite3.OperationalError("disk I/O error")
+            return real(request_id, kind, **detail)
+
+        with mock.patch.object(self.s, "event", side_effect=event):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.close()
+        self.assertEqual(self.s.get(rid)["status"], "open", "the close did not land without its owed record")
+        self.assertEqual([e for e in self.s.events(rid) if e["kind"] == "unreachable_owed"], [])
+        self.assertEqual(self.close(), [self.s.get(rid)["register_no"]], "and it closes once the record can be written")
+        (event,) = [json.loads(e["detail"]) for e in self.s.events(rid) if e["kind"] == "unreachable_owed"]
+        self.assertEqual((event["owed_kind"], event["owed_variant"]), ("final", "final_gone_late"))
+
+    def closed_hidden(self):
+        rid, _ = self.s.upsert({"keys": ["gmail:notices:t9"], "channel": "notices", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T00:00:00Z", "gmail_thread": "t9", "pages": []})
+        page = f"{self.HIDDEN}6"
+        self.s.update(rid, "decide", gates={"v": 1, "need": "none"}, decided_at="2026-11-14T00:00:00Z",
+                      verdict_detail=[{"id": self.GONE, "verdict": "GONE", "rules": identity.RULES_V},
+                                      {"id": page, "verdict": "ALREADY_HIDDEN", "rules": identity.RULES_V}],
+                      pages=[{"entity": "profile", "id": self.GONE}, {"entity": "profile", "id": page}],
+                      hidden_at="2026-10-01T00:00:00Z")
+        self.s.mark_decided(rid)
+        return rid
+
+    def test_the_clock_lists_it_and_counts_it_neither_open_nor_answered(self):
+        rid = self.request(1, verdicts=("GONE",), route=False, channel="support")
+        before = self.run.dsar_clock(NOW)
+        self.close()
+        clock = self.run.dsar_clock(NOW)
+        no = self.s.get(rid)["register_no"]
+        self.assertEqual((before["past_due"], before["open"], before["closed_unreachable"]), (1, 1, []))
+        self.assertEqual((clock["past_due"], clock["open"], clock["closed_unreachable"],
+                          clock["closed_without_response"]), (0, 0, [no], []))
+        self.assertEqual(dsar.clock_line(clock), "", "by itself it is not a page: no step of ours can change it")
+        self.assertIn("closed with nobody to write to: 1", dsar.clock_quiet_line(clock),
+                      "the journal line still counts it")
+        self.request(2, verdicts=("GONE",))
+        self.assertIn("closed with nobody to write to: 1", dsar.clock_line(self.run.dsar_clock(NOW)),
+                      "and a clock that pages for another request counts it on that line")
+        self.assertEqual(self.run.reopen_unanswered(), [], "it is not 'closed with no answer': nothing reopens it "
+                                                         "but a message")
+        self.assertEqual(self.s.get(rid)["status"], dsar.STATUS_UNREACHABLE)
+
+    def test_a_message_that_brings_a_route_reopens_the_same_request(self):
+        rid = self.request(1, verdicts=("GONE",), route=False, channel="support")
+        self.close()
+        again = {"keys": ["support:1"], "channel": "support", "class": "privacy_erasure",
+                 "received_at": "2026-09-01T00:00:00Z", "pages": []}
+        self.assertEqual(self.s.upsert(dict(again)), (rid, "unchanged"), "a replay of the same source changes nothing")
+        self.assertEqual(self.s.get(rid)["status"], dsar.STATUS_UNREACHABLE)
+        got, how = self.s.upsert({**again, "requester_email": "p1@example.com"})
+        row = self.s.get(rid)
+        self.assertEqual((got, how, row["status"], row["requester_email"]), (rid, "merged", "open", "p1@example.com"))
+        self.assertEqual(len(self.s.all()), 1, "the same request, not a second one")
+        self.assertEqual(row["due_at"][:10], "2026-10-01", "and it keeps its own date")
+        self.assertIn("reopened", [e["kind"] for e in self.s.events(rid)])
+        self.assertEqual(self.owed()[rid]["variant"], "final_gone_late", "open again, it is owed its answer")
+
+    def test_a_later_message_with_no_route_reopens_it_too(self):
+        rid = self.request(1, verdicts=("GONE",), route=False, channel="support")
+        self.close()
+        self.s.upsert({"keys": ["support:1"], "channel": "support", "class": "privacy_erasure",
+                       "received_at": "2026-11-10T00:00:00Z", "pages": []})
+        self.assertEqual((self.s.get(rid)["status"], len(self.s.all())), ("open", 1))
+
+    # ---- the second row of an answered request
+    def pair(self, mail_pages=None, mail_class="privacy_erasure"):
+        """One customer event on two rows: the Intercom conversation (full id) and the notice (8-character id)."""
+        full = f"{self.GONE}1"
+        chat, _ = self.s.upsert({"keys": ["intercom:1"], "channel": "intercom", "class": "privacy_erasure",
+                                 "received_at": "2026-09-01T00:00:00Z", "conversation_id": "215476650395401",
+                                 "requester_email": "p1@example.com", "pages": [{"entity": "profile", "id": full}]})
+        self.s.db.execute("INSERT INTO erasure_requests(register_no,row_key,channel,class,received_at,due_at,"
+                          "hide_due_at,requester_email,gmail_thread,pages,status,created_at,updated_at) "
+                          "VALUES (900,'gmail:notices:t1','notices',?,'2026-09-01T00:00:09Z','2026-10-01T00:00:09Z',"
+                          "'2026-09-08T00:00:09Z','p1@example.com','t1',?,'open','x','x')",
+                          (mail_class, json.dumps(mail_pages or [{"entity": "profile", "id": full[:8]}])))
+        self.s.db.commit()
+        mail = self.s.db.execute("SELECT id FROM erasure_requests WHERE register_no=900").fetchone()[0]
+        return chat, mail
+
+    def test_the_second_row_of_an_answered_event_is_closed_as_its_duplicate(self):
+        chat, mail = self.pair()
+        self.assertEqual(self.run.close_answered_twins(), [], "nothing is answered yet")
+        self.s.update(chat, "confirmed", confirmed_at="2026-11-12T11:49:00Z")
+        self.assertEqual(self.run.close_answered_twins(), [900])
+        row = self.s.get(mail)
+        self.assertEqual(row["status"], "duplicate")
+        self.assertIn(f"#{self.s.get(chat)['register_no']}", row["note"])
+        self.assertEqual(self.s.get(chat)["status"], "open", "the answered row is not touched")
+        self.assertEqual(self.run.dsar_clock(NOW)["past_due"], 0)
+        self.assertEqual(self.run.close_answered_twins(), [])
+
+    def test_it_works_whichever_row_holds_the_answer(self):
+        chat, mail = self.pair()
+        self.s.update(mail, "confirmed", confirmed_at="2026-11-12T11:49:00Z")
+        self.assertEqual(self.run.close_answered_twins(), [self.s.get(chat)["register_no"]])
+
+    def test_an_answer_that_does_not_cover_the_second_row_closes_nothing(self):
+        other = "9a9a9a9a-0000-4000-8000-000000000009"
+        for kw, why in (({"mail_pages": [{"entity": "profile", "id": f"{self.GONE}1"[:8]},
+                                         {"entity": "profile", "id": other}]}, "it names a page the answer did not"),
+                        ({"mail_class": "dmca_takedown"}, "it is another duty")):
+            self.setUp()
+            chat, mail = self.pair(**kw)
+            self.s.update(chat, "confirmed", confirmed_at="2026-11-12T11:49:00Z")
+            self.assertEqual((self.run.close_answered_twins(), self.s.get(mail)["status"]), ([], "open"), why)
+
+    def test_a_second_row_with_a_letter_in_flight_is_left_for_a_person(self):
+        chat, mail = self.pair()
+        self.s.update(chat, "confirmed", confirmed_at="2026-11-12T11:49:00Z")
+        self.s.claim_send(mail, "status", "mail", "t1", "ab" * 32, "seat")
+        self.assertEqual((self.run.close_answered_twins(), self.s.get(mail)["status"]), ([], "open"))
+
+    # ---- the request its own final answer re-opened
+    def test_the_same_mail_read_after_the_answer_does_not_open_a_second_request(self):
+        full = f"{self.GONE}1"
+        rid, _ = self.s.upsert({"keys": ["gmail:notices:t1"], "channel": "notices", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T00:00:00Z", "gmail_thread": "t1",
+                                "requester_email": "p1@example.com", "pages": [{"entity": "profile", "id": full}]})
+        self.s.update(rid, "confirmed", confirmed_at="2026-11-12T11:49:00Z")
+        mail = {"keys": ["gmail:notices:t1"], "channel": "notices", "class": "privacy_erasure",
+                "received_at": "2026-09-01T00:00:00Z", "gmail_thread": "t1", "requester_email": "p1@example.com",
+                "pages": [{"entity": "profile", "id": full[:8]}]}          # the reader keeps 8 characters
+        self.assertEqual(self.s.upsert(dict(mail)), (rid, "unchanged"))
+        self.assertEqual(len(self.s.all()), 1)
+        new_page = {**mail, "pages": mail["pages"] + [{"entity": "profile", "id": "7b7b7b7b"}]}
+        got, how = self.s.upsert(new_page)
+        self.assertEqual((how, len(self.s.all())), ("created", 2), "a page the answer did not cover is a new request")
+        self.assertIn(":again:", self.s.get(got)["row_key"])
+
+    def test_the_tick_calls_the_end_states_before_it_reads_what_the_ladder_owes(self):
+        spec = importlib.util.spec_from_file_location("gdpr_cli_tick_order", ROOT / "scripts" / "gdpr-pipeline.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        self.request(1, verdicts=("GONE",), route=False, channel="support")
+        order = []
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        real_end_states = cli.dsar_end_states
+
+        def end_states(run, now):
+            order.append("end_states")
+            return real_end_states(run, now)
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(cli, "KILL", os.path.join(tmp.name, "no-kill-file")))
+            stack.enter_context(mock.patch.object(cli, "hold_lock", lambda path: object()))
+            stack.enter_context(mock.patch.object(cli, "Store", lambda path: self.s))
+            stack.enter_context(mock.patch.object(cli, "Run", lambda store: self.run))
+            stack.enter_context(mock.patch.object(cli, "do_intake", lambda *a, **k: None))
+            stack.enter_context(mock.patch.object(cli, "hidden_now", lambda run: (set(), {})))
+            stack.enter_context(mock.patch.object(cli, "watchdog", lambda *a, **k: None))
+            stack.enter_context(mock.patch.object(cli, "clock_reader_watch", lambda *a, **k: ""))
+            stack.enter_context(mock.patch.object(cli, "access_owed_send", lambda *a, **k: None))
+            stack.enter_context(mock.patch.object(cli, "dsar_end_states", end_states))
+            stack.enter_context(mock.patch.object(cli, "dsar_ladder", lambda *a, **k: order.append("ladder")))
+            stack.enter_context(mock.patch.object(self.run, "reopen_unanswered", return_value=[]))
+            stack.enter_context(mock.patch.object(self.run, "decide_all"))
+            stack.enter_context(mock.patch.object(self.run, "mark_hidden"))
+            stack.enter_context(mock.patch.object(self.run, "dsar_states"))
+            stack.enter_context(mock.patch.object(sys, "argv", ["gdpr-pipeline.py", "tick", "--ladder"]))
+            for patch in self.site(hidden=True):
+                stack.enter_context(patch)
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            cli.main()
+        self.assertEqual(order, ["end_states", "ladder"],
+                         "the ladder must read what is owed only after the end states have closed the rows they can")
+
+    def test_the_end_states_close_nothing_under_the_ladders_kill_switch_and_keep_the_answer(self):
+        spec = importlib.util.spec_from_file_location("gdpr_cli_end_states", ROOT / "scripts" / "gdpr-pipeline.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        lost = self.request(1, verdicts=("GONE",), route=False, channel="support")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        kill = os.path.join(tmp.name, "gdpr-pipeline.disabled")
+        pathlib.Path(kill).write_text("")
+        a, b, c = self.site(hidden=True)
+        with a, b, c:
+            with mock.patch.object(cli, "DSAR_KILL", kill), contextlib.redirect_stdout(io.StringIO()):
+                cli.dsar_end_states(self.run, NOW)
+            self.assertEqual(self.s.get(lost)["status"], "open", "the ladder's kill switch closes nothing")
+            self.assertEqual([e for e in self.s.events(lost) if e["kind"] == "unreachable_owed"], [])
+            with mock.patch.object(cli, "DSAR_KILL", kill + ".absent"), contextlib.redirect_stdout(io.StringIO()):
+                cli.dsar_end_states(self.run, NOW)
+        self.assertEqual(self.s.get(lost)["status"], dsar.STATUS_UNREACHABLE)
+        (event,) = [e for e in self.s.events(lost) if e["kind"] == "unreachable_owed"]
+        event = json.loads(event["detail"])
+        self.assertEqual(event["owed_kind"], "final")
+        self.assertTrue(event["owed_variant"], "the answer owed is kept on the row, not 'no letter'")
+        self.assertTrue(event["owed_body_sha"], "the exact body the request was owed is on file")
+        self.assertNotEqual(event["owed_variant"], "")
+        self.assertNotIn(lost, self.owed(), "the ladder reads nothing owed for a row closed this run")
 
 
 if __name__ == "__main__":
