@@ -15,7 +15,7 @@ Buckets (first match wins, so they partition the open population exactly and
   3. needs documents, user told — we asked (ledger ask note or core noticeSentAt)
   4. needs documents, not told  — we decided something, the user was never asked
   5. user sent documents, we owe a look — a document is on file / the reply is unreviewed
-  6. sitting with a person      — escalated to a human (support ticket / human-review hold)
+  6. sitting with a person      — a human-review hold, a support@ contact, a reply, a flagged hold
   7. held for fraud / watchlist — the fraud watchlist or the fraud-lens holds
   8. muted, no more messages    — a messaging refusal hold suppresses further notes
   9. declined in the last 24h   — flow, not open (core updatedat window)
@@ -857,7 +857,7 @@ CLASSIFICATION_LANES = {"credits_untouched", "credits_docs_in", "claims_untouche
 def _EMPTY_FACTS() -> dict:
     """The shape every reader expects, so an unreadable ledger degrades to "nothing known"
     (everything unmeasured) instead of aborting the unattended job."""
-    return {"asked": {}, "messaged": {}, "latest": {}, "decided": set(), "support": set(),
+    return {"asked": {}, "messaged": {}, "latest": {}, "decided": set(),
             "replied": set(), "proof_waiting": {}, "proof_tags": {}, "muted": {}, "flagged": {},
             "claim_notes": {}, "claim_proofs": {}, "claim_replied": set(), "claim_muted": {},
             "claim_flagged": {}, "first_proof_hold": {}, "first_deadend": {},
@@ -884,8 +884,10 @@ def ledger_facts() -> dict:
                 "WHERE status IN ('sent','attempted') AND account_id IS NOT NULL GROUP BY 1"):
             if acct is not None and str(acct).strip().isdigit():
                 messaged[int(acct)] = at or ""
-        # Latest decider verdict per user: 'support' = a support ticket was raised for a
-        # person, any 'hold' reason naming a human = a person owns it.
+        # Latest decider verdict per user. `support` is the decider's own ASK (see
+        # decide.py: REQUEST SUPPORT = status user_verification_needed, the requester is
+        # told), NOT a ticket and NOT a person: it never makes a row 'human'. A `hold`
+        # reason naming a human is the only verdict that does.
         # The LATEST decision per user. The bare columns are safe ONLY because this query
         # has exactly one aggregate (max): SQLite then takes them from the row that holds
         # the maximum. Add a second aggregate here and every reason silently becomes an
@@ -937,8 +939,6 @@ def ledger_facts() -> dict:
             first_deadend[int(uid)] = at or ""
         decided_users = {int(u) for (u,) in db.execute(
             "SELECT DISTINCT user_id FROM decisions WHERE user_id IS NOT NULL")}
-        support_users = {int(u) for (u,) in db.execute(
-            "SELECT DISTINCT user_id FROM decisions WHERE decision='support' AND user_id IS NOT NULL")}
         # A user who replied to a note (the removal was held for a human).
         replied = {int(a) for (a,) in db.execute(
             "SELECT DISTINCT account_id FROM verify_messages WHERE extension_requested_at IS NOT NULL "
@@ -1032,7 +1032,7 @@ def ledger_facts() -> dict:
     finally:
         db.close()
     return {"asked": asked, "messaged": messaged, "latest": latest, "decided": decided_users,
-            "support": support_users, "replied": replied, "proof_waiting": proof_waiting,
+            "replied": replied, "proof_waiting": proof_waiting,
             "proof_tags": proof_tags,
             "muted": muted, "flagged": flagged, "claim_notes": claim_notes,
             "claim_proofs": claim_proofs, "claim_replied": claim_replied,
@@ -1134,7 +1134,14 @@ def classify_credit(user: int, facts: dict, credit: dict, wz: frozenset) -> str:
     on_file = (reason.startswith("proof on file: human review")
                or (reason.startswith("proof on file")
                    and (lat.get("decision") == "hold" or bool(lat.get("proof_id")))))
-    if on_file or lat.get("decision") == "support" \
+    # NOT `decision == "support"`: that write is our OWN ask, not a ticket and not a person
+    # (captain 2026-11-16, "the only people involved should be the requester"). decide.py's
+    # REQUEST SUPPORT moves the row to user_verification_needed and Knock sends the "more
+    # info needed" notice, so the requester is the one who was told and the row carries on
+    # down the ask/approve/no ladder: `told` once core records that notice, `not_told` while
+    # the write has not landed (the report's own decided-not-closed class). Calling it a
+    # support ticket parked every asked row on a person who was never working it.
+    if on_file \
             or "emailed support@" in reason \
             or "support already requested" in reason or user in facts["replied"] \
             or user in facts["flagged"] or user in facts["support_contacts"]:
@@ -2326,7 +2333,7 @@ def selftest() -> int:
                      "doc_required": 0, "at": ""},
                  6: {"decision": "hold", "reason": "emailed support@ in the last 90 days",
                      "doc_required": 0, "at": ""}},
-             "decided": {3, 5, 6}, "support": {3}, "replied": set(),
+             "decided": {3, 5, 6}, "replied": set(),
              # 15/16 have a DATED proof reply; 17's is dated but OLDER than its request.
              "proof_waiting": {15: PROOF_NEW, 16: PROOF_NEW, 17: "2026-09-01T10:00:00Z",
                                19: "2026-10-27T10:00:00Z"},
@@ -2348,7 +2355,10 @@ def selftest() -> int:
         # a status note is a message, so the user is NOT untouched: it is a row that needs
         # documents and was never asked for them.
         ("2 only ever got a status note", 2, "not_told", cred()),
-        ("3 support ticket raised", 3, "human", cred()),
+        # our own support ASK whose core write never landed: waiting on us to tell them,
+        # never with a person.
+        ("3 our own support ask, never told", 3, "not_told", cred()),
+        ("3b our own support ask, told (core notice)", 20, "told", cred(core_ask=True)),
         ("4 muted hold", 4, "muted", cred()),
         ("5 an UNDATED document on file is human review", 5, "human", cred()),
         ("5b a document dated AFTER the request is docs_in", 15, "docs_in", cred()),

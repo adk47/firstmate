@@ -65,8 +65,8 @@ mismatch instead of printing a total it cannot defend).
    undated `proof on file` hold does **not** count — the proof feed carries no timestamps, so
    such a hold is structurally an old accepted document and the decider itself files it as
    "human review" (see the Fable ruling below).
-3. **Sitting with a person** — a `support` write (a support ticket/ask was raised), a
-   human-review hold (`emailed support@`, `support already requested`), a per-role split
+3. **Sitting with a person** — a human-review hold (`emailed support@`, `support already
+   requested`), a per-role split
    (`approve_partial`) whose reason carries the `proof on file: human review` sentence or a
    recorded `proof_id` (a catalog-only split has no document, so it is NOT documents on file),
    the user replying to a note (`extension_requested_at`), a flagged refusal hold already posted
@@ -79,8 +79,14 @@ mismatch instead of printing a total it cannot defend).
 6. **Not touched by us at all** — no ask, no message and no decision has EVER been written
    for that user. This is the bucket to act on, so it is measured strictly: one status note
    in the ledger moves a user out of it.
-7. **Needs documents — user NOT told** — we decided something (a hold, a defer) but never
-   asked the user for the document.
+7. **Needs documents — user NOT told** — we decided something (a hold, a defer, or a
+   `support` ask whose core write never landed) but never asked the user for the document.
+
+A decider `support` write is NOT in bucket 3. It is our own ask (status
+`user_verification_needed`, the requester gets the "more info needed" notice), so it lands in
+bucket 5 once core records that notice and in bucket 7 until it does. No support ticket is
+raised for it and no person owns it: the requester is told, and the row carries on down the
+ask / approve / no ladder.
 
 Claims are classified with CLAIM-scoped facts only: a claim note in the ledger
 (`request_ids_json` carries `claim-<claiming.id>`), the claimant emailing support@, the
@@ -90,7 +96,7 @@ touched.
 ## Deliberate limits
 
 - **Not an Intercom assignee census.** "Sitting with a person" means our own machinery
-  handed the row to a human (support write / human-review hold / reply / flagged hold /
+  handed the row to a human (human-review hold / reply / flagged hold /
   support@ contact). Mapping Intercom `admin_assignee_id` to a Muso user id per run is not
   reliable enough to put in a number the captain acts on; the open-conversation arithmetic
   already lives in the ops steward's `s1_tick.py` scoreboard.

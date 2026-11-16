@@ -36,7 +36,7 @@ NOW = datetime(2026, 10, 26, 21, 0, tzinfo=timezone.utc)
 
 
 def facts(**over):
-    base = {"asked": {}, "messaged": {}, "latest": {}, "decided": set(), "support": set(),
+    base = {"asked": {}, "messaged": {}, "latest": {}, "decided": set(),
             "replied": set(), "proof_waiting": set(), "muted": {}, "flagged": {},
             "claim_notes": {}, "claim_proofs": {}, "claim_replied": set(),
             "claim_muted": {}, "claim_flagged": {}, "first_proof_hold": {},
@@ -214,10 +214,23 @@ class CreditBuckets(unittest.TestCase):
         self.assertEqual(vqr.classify_credit(6, facts(), dict(CREDIT, core_reply=True),
                                             frozenset()), "docs_in")
 
-    def test_a_support_write_is_with_a_person(self):
+    def test_a_support_write_is_our_own_ask_not_a_person(self):
+        # decide.py's REQUEST SUPPORT is our ASK (status user_verification_needed + the Knock
+        # "more info needed" notice), not a support ticket. No person owns the row.
         f = facts(latest={7: {"decision": "support", "reason": "no trusted web evidence",
-                              "doc_required": 1, "at": ""}}, support={7}, decided={7})
-        self.assertEqual(vqr.classify_credit(7, f, CREDIT, frozenset()), "human")
+                              "doc_required": 1, "at": ""}}, decided={7})
+        bucket = vqr.classify_credit(7, f, CREDIT, frozenset())
+        self.assertNotEqual(bucket, "human")
+        self.assertEqual(bucket, "not_told", "ask never landed = we owe the tell")
+
+    def test_a_support_write_core_told_the_user_is_waiting_on_the_user(self):
+        # the same ledger verdict once core carries the notice (status user_verification_needed
+        # + proofRequest.noticeSentAt): the requester was told, so the ball is in their court.
+        f = facts(latest={7: {"decision": "support", "reason": "no trusted web evidence",
+                              "doc_required": 1, "at": ""}}, decided={7})
+        bucket = vqr.classify_credit(7, f, dict(CREDIT, core_ask=True), frozenset())
+        self.assertNotEqual(bucket, "human")
+        self.assertEqual(bucket, "told")
 
     def test_human_review_holds_are_with_a_person(self):
         for reason in ("emailed support@ in the last 90 days: human review, never asked",
