@@ -1,0 +1,944 @@
+{
+ "rows": [
+  {
+   "case": "D01",
+   "document_bytes": true,
+   "id": "c4445bca9d44a68c",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "forensic_doubt",
+    "document_does_not_name_claim",
+    "claimant_on_other_tracks"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "contract"
+  },
+  {
+   "case": "D02",
+   "document_bytes": true,
+   "id": "c6d18cbd36c51502",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "forensic_doubt",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "contract"
+  },
+  {
+   "case": "D03",
+   "document_bytes": true,
+   "id": "03fc765a8a0c4c32",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "contract"
+  },
+  {
+   "case": "D04",
+   "document_bytes": true,
+   "id": "04f93ae2d6d9897c",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "contract"
+  },
+  {
+   "case": "D05",
+   "document_bytes": false,
+   "id": "d10d4a2d3c66a202",
+   "judge": "not_judged",
+   "judge_not_judged": "no copy of the document's bytes on node-8",
+   "judge_saw": null,
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "tooling_extraction_did_not_run",
+    "tooling_not_located"
+   ],
+   "reader_rerun": "unknown",
+   "stratum": "contract"
+  },
+  {
+   "case": "D06",
+   "document_bytes": true,
+   "id": "23d226788eed777f",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "contract"
+  },
+  {
+   "case": "D07",
+   "document_bytes": true,
+   "id": "f6b59558ba5d5856",
+   "judge": "yes",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "no_independent_source"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "contract"
+  },
+  {
+   "case": "D08",
+   "document_bytes": true,
+   "id": "ef731f15f543600b",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "forensic_doubt",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "contract"
+  },
+  {
+   "case": "D09",
+   "document_bytes": true,
+   "id": "f7ab0c180cbb6c30",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "contract"
+  },
+  {
+   "case": "D10",
+   "document_bytes": false,
+   "id": "3631989c189feac9",
+   "judge": "not_judged",
+   "judge_not_judged": "no copy of the document's bytes on node-8",
+   "judge_saw": null,
+   "reader": "unverifiable",
+   "reader_blockers": [],
+   "reader_rerun": "not_run",
+   "stratum": "contract"
+  },
+  {
+   "case": "D11",
+   "document_bytes": false,
+   "id": "55dfd5f1b68d2c3d",
+   "judge": "not_judged",
+   "judge_not_judged": "no copy of the document's bytes on node-8",
+   "judge_saw": null,
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "tooling_extraction_did_not_run",
+    "tooling_not_located"
+   ],
+   "reader_rerun": "unknown",
+   "stratum": "contract"
+  },
+  {
+   "case": "D12",
+   "document_bytes": true,
+   "id": "620148a7d8a37641",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "forensic_doubt",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "contract"
+  },
+  {
+   "case": "D13",
+   "document_bytes": true,
+   "id": "17a7b5fefa616c9f",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D14",
+   "document_bytes": true,
+   "id": "037510c3c692c4e3",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim",
+    "claimant_on_other_tracks"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D15",
+   "document_bytes": true,
+   "id": "a24acf94501b5cdf",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D16",
+   "document_bytes": false,
+   "id": "cf138138de09ba1f",
+   "judge": "not_judged",
+   "judge_not_judged": "no copy of the document's bytes on node-8",
+   "judge_saw": null,
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "tooling_extraction_did_not_run",
+    "tooling_not_located"
+   ],
+   "reader_rerun": "unknown",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D17",
+   "document_bytes": true,
+   "id": "c061b0d649fd22ea",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D18",
+   "document_bytes": false,
+   "id": "0f848eecb24deba5",
+   "judge": "not_judged",
+   "judge_not_judged": "no copy of the document's bytes on node-8",
+   "judge_saw": null,
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "tooling_extraction_did_not_run",
+    "tooling_h3_missing",
+    "tooling_not_located"
+   ],
+   "reader_rerun": "unknown",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D19",
+   "document_bytes": true,
+   "id": "4e98631d47de91b5",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D20",
+   "document_bytes": false,
+   "id": "f423dd9d40f2d545",
+   "judge": "not_judged",
+   "judge_not_judged": "no copy of the document's bytes on node-8",
+   "judge_saw": null,
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "tooling_extraction_did_not_run",
+    "tooling_not_located"
+   ],
+   "reader_rerun": "unknown",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D21",
+   "document_bytes": true,
+   "id": "000d94ad60354d5d",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D22",
+   "document_bytes": false,
+   "id": "e5e65fe048687e89",
+   "judge": "not_judged",
+   "judge_not_judged": "no copy of the document's bytes on node-8",
+   "judge_saw": null,
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "tooling_extraction_did_not_run",
+    "tooling_not_located"
+   ],
+   "reader_rerun": "unknown",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D23",
+   "document_bytes": true,
+   "id": "b6d5662421144145",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D24",
+   "document_bytes": true,
+   "id": "f523c1247e744461",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D25",
+   "document_bytes": true,
+   "id": "13359c0adc19caae",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim",
+    "claimant_on_other_tracks"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D26",
+   "document_bytes": true,
+   "id": "070d6bb2c4808ab9",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D27",
+   "document_bytes": true,
+   "id": "c425e59711383d4d",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D28",
+   "document_bytes": true,
+   "id": "ba39f9af35db7be1",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D29",
+   "document_bytes": true,
+   "id": "a7a1d7e27dcfbaa9",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "cross_check_doubt",
+    "no_independent_source",
+    "document_does_not_name_claim",
+    "claimant_on_other_tracks"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D30",
+   "document_bytes": true,
+   "id": "c285f5a6621d4d7f",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D31",
+   "document_bytes": true,
+   "id": "7c252f94d377123a",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D32",
+   "document_bytes": true,
+   "id": "136736d5df4f026a",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D33",
+   "document_bytes": true,
+   "id": "b9d96c4669704ddc",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim",
+    "claimant_on_other_tracks"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "invoice"
+  },
+  {
+   "case": "D34",
+   "document_bytes": true,
+   "id": "56a76e5a3d438e9f",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "letter"
+  },
+  {
+   "case": "D35",
+   "document_bytes": true,
+   "id": "347280413693aeb2",
+   "judge": "yes",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "letter"
+  },
+  {
+   "case": "D36",
+   "document_bytes": true,
+   "id": "54ffc423c6fde61d",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D37",
+   "document_bytes": true,
+   "id": "ff52e4d7478b93a9",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D38",
+   "document_bytes": true,
+   "id": "e6ed5b9d65b75a73",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim",
+    "claimant_on_other_tracks"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D39",
+   "document_bytes": true,
+   "id": "346bb6b3071d98c4",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D40",
+   "document_bytes": true,
+   "id": "cb5f24cc85d11678",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D41",
+   "document_bytes": true,
+   "id": "813b581ef90a25cd",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D42",
+   "document_bytes": true,
+   "id": "0a133385a0d5b75f",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D43",
+   "document_bytes": true,
+   "id": "d134cda6d2a945c5",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D44",
+   "document_bytes": true,
+   "id": "a5a35b7a5691e1d3",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D45",
+   "document_bytes": true,
+   "id": "f9e4820d11f72565",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D46",
+   "document_bytes": true,
+   "id": "8a4baec2d583b305",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D47",
+   "document_bytes": false,
+   "id": "059e593efdc1c5bf",
+   "judge": "not_judged",
+   "judge_not_judged": "no copy of the document's bytes on node-8",
+   "judge_saw": null,
+   "reader": "unverifiable",
+   "reader_blockers": [],
+   "reader_rerun": "not_run",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D48",
+   "document_bytes": true,
+   "id": "4163bbf389f8abd0",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D49",
+   "document_bytes": true,
+   "id": "6224b5374b120564",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "pdf",
+   "reader": "unknown",
+   "reader_blockers": [
+    "tooling_h3_undetermined"
+   ],
+   "reader_rerun": "unknown",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D50",
+   "document_bytes": true,
+   "id": "7b499dc25eb7599f",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D51",
+   "document_bytes": true,
+   "id": "0e291a316b471dab",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim",
+    "claimant_on_other_tracks"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D52",
+   "document_bytes": false,
+   "id": "5e75369fbf325878",
+   "judge": "not_judged",
+   "judge_not_judged": "no copy of the document's bytes on node-8",
+   "judge_saw": null,
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "tooling_extraction_did_not_run",
+    "tooling_not_located"
+   ],
+   "reader_rerun": "unknown",
+   "stratum": "pro_registration"
+  },
+  {
+   "case": "D53",
+   "document_bytes": true,
+   "id": "87eb5de1606f440a",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "receipt"
+  },
+  {
+   "case": "D54",
+   "document_bytes": true,
+   "id": "da6254ee54ba45e4",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "receipt"
+  },
+  {
+   "case": "D55",
+   "document_bytes": true,
+   "id": "737802aff2a0043b",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "receipt"
+  },
+  {
+   "case": "D56",
+   "document_bytes": true,
+   "id": "787c1dd165361ea1",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "split_sheet"
+  },
+  {
+   "case": "D57",
+   "document_bytes": true,
+   "id": "1698eefc18d0e4f3",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "split_sheet"
+  },
+  {
+   "case": "D58",
+   "document_bytes": true,
+   "id": "b2361a3b79a7d7e7",
+   "judge": "yes",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "split_sheet"
+  },
+  {
+   "case": "D59",
+   "document_bytes": true,
+   "id": "25961da52757bd6d",
+   "judge": "yes",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "h3_not_approving",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "split_sheet"
+  },
+  {
+   "case": "D60",
+   "document_bytes": true,
+   "id": "3364ff9cf3732805",
+   "judge": "no",
+   "judge_not_judged": null,
+   "judge_saw": "image",
+   "reader": "unverifiable",
+   "reader_blockers": [
+    "no_independent_source",
+    "document_does_not_name_claim"
+   ],
+   "reader_rerun": "unverifiable",
+   "stratum": "split_sheet"
+  }
+ ]
+}
