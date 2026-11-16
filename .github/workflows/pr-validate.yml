@@ -2740,6 +2740,10 @@ jobs:
           # statement, one job per (user, stage), no send without a verdict or a recorded attempt, a body the
           # copy gate has not approved never reaches the sender, and the kill -9 mid-batch run. Stdlib only.
           python3 scripts/tests/test_bulk_queue.py
+          # the bulk first ask by email (docs/credit-verification/bulk-asks.md): the ramp's judge and its holds,
+          # the tick on its health sample's clock, the audience order and drops, a rehearsal with no duplicate at
+          # any layer, a seeded rehearsal never writes its seed, and the ledger's per-user read stays on an index.
+          python3 scripts/tests/test_bulk_asks.py
           # the TEMPORARY gate queue (scripts/credit_review/apply_queue.py) in front of the claim-proof-ask apply:
           # one caller per intent, attempted before the gate, outcomes read from the verify ledger, the same
           # report with and without it, and the kill -9 run. Stdlib only.

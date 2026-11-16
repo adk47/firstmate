@@ -1017,6 +1017,8 @@ frame + rubric sha256). Full doc, the sender list and what is deliberately outsi
   `approve`, no send. Observe: the message goes (exit 4, `observed`), the review is recorded and the ledger row says
   `copy_review = observed:<state>`. **A signed `refuse`, a code-lint hit and a `retired` frame hold in either mode**,
   and so does a table nobody can read. Only the gate reads the table: no caller, flag or env var picks a mode.
+  One documented caller may only TIGHTEN observe to a hold, never loosen: `bulk_asks.EnforcedCopyGate`
+  (`docs/credit-verification/bulk-asks.md`).
   A campaign moves to `enforce` by a one-line PR citing `gate.py report` (`ready_to_enforce`), one campaign at a
   time; never flip the default. Why: the first real measurement approved 20 of 77 rendered bodies.
 
@@ -1722,13 +1724,20 @@ is fine and nothing is left to see. Repro (two uids, container only):
 
 `scripts/credit_review/bulk_queue.py` (doc `docs/credit-verification/bulk-send-queue.md`, policy
 `policies/bulk-send-queue.json`) is the replacement for the per-message apply subprocess that loses its outcomes
-past ~80 sends. It is **not wired to production**: the policy is `enabled: false`, no template is pinned, no timer
-runs it, and the builder that fills its `people` table does not exist yet.
+past ~80 sends. It is **not wired to production**: the policy is `enabled: false`, no template is pinned and no
+timer runs it. Its one front end is `scripts/credit_review/bulk_asks.py` (doc `docs/credit-verification/bulk-asks.md`,
+policy `policies/bulk-asks.json`), which supplies the `people` rows, ramps the `ask` stage 100 → 1,000/min on clean
+measured windows and owns the email first ask. It also ships unarmed (`enabled: false`, no template pin, no approval).
 
 - **It is a transport, not a second sender or decider.** It writes no copy (every body passes `lib/copy_gate`),
-  approves nothing and sends no ask (`need_asks.py` owns asks).
+  approves nothing, and the email first ask it carries is `bulk_asks.py`'s (which document an Intercom ask names
+  stays `need_asks.py`'s).
 - **The guardrails are triggers, not caller discipline**: no job without a `send` verdict, one job per
-  (user, stage) ever, no `sent` without a recorded `attempted`, settled rows and the event log never rewritten.
+  (user, stage), no `sent` without a recorded `attempted`, settled rows and the event log never rewritten. The one
+  deletion is `cancel_held`: a copy-gate-held job still `queued` and never `attempted` leaves when its ledger claim
+  was given back, so "no claim, no job" holds and the person's next claim may enqueue a fresh one.
+- **Enqueue is scoped by `only=`** to the people a caller holds a live claim for, so a given-back person's standing
+  `send` verdict cannot recreate a job before a fresh claim.
 - **A dead worker's `attempted` row is re-presented only where the provider de-duplicates on our key** (email:
   send-gateway is at-most-once per `idempotency_key`). Anywhere else it becomes `uncertain`, which only a named
   person's `resolve` settles. Never add a route as `idempotent: true` without reading the provider's own code.

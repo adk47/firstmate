@@ -111,7 +111,9 @@ CREATE TRIGGER IF NOT EXISTS job_needs_send_verdict BEFORE INSERT ON jobs
   BEGIN SELECT RAISE(ABORT, 'bulk_queue: no send verdict for this job'); END;
 CREATE TRIGGER IF NOT EXISTS job_starts_queued BEFORE INSERT ON jobs WHEN NEW.state <> 'queued'
   BEGIN SELECT RAISE(ABORT, 'bulk_queue: a job starts queued'); END;
+DROP TRIGGER IF EXISTS job_no_delete;
 CREATE TRIGGER IF NOT EXISTS job_no_delete BEFORE DELETE ON jobs
+  WHEN OLD.state <> 'queued' OR OLD.attempted_at > 0 OR substr(OLD.reason, 1, 12) <> 'copy_review_'
   BEGIN SELECT RAISE(ABORT, 'bulk_queue: a job is never deleted'); END;
 CREATE TRIGGER IF NOT EXISTS job_terminal_is_final BEFORE UPDATE ON jobs WHEN OLD.state IN ('sent','rejected')
   BEGIN SELECT RAISE(ABORT, 'bulk_queue: a settled job is never rewritten'); END;
@@ -169,6 +171,15 @@ INSERT INTO jobs (idem_key, user_key, stage, message_class, route, state, enqueu
 SELECT bq_idem(v.user_key, v.stage, v.message_class), v.user_key, v.stage, v.message_class, v.route, 'queued', :now
   FROM verdicts v
  WHERE v.verdict = 'send'
+   AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.user_key = v.user_key AND j.stage = v.stage)
+"""
+
+ENQUEUE_SCOPED_SQL = """
+INSERT INTO jobs (idem_key, user_key, stage, message_class, route, state, enqueued_at)
+SELECT bq_idem(v.user_key, v.stage, v.message_class), v.user_key, v.stage, v.message_class, v.route, 'queued', :now
+  FROM verdicts v
+ WHERE v.verdict = 'send'
+   AND v.user_key IN (SELECT value FROM json_each(:only))
    AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.user_key = v.user_key AND j.stage = v.stage)
 """
 
@@ -285,12 +296,17 @@ def decide(db: sqlite3.Connection, *, now: float | None = None) -> dict:
             "decisions_per_min": int(people / secs * 60) if secs > 0 else None}
 
 
-def enqueue(db: sqlite3.Connection, *, now: float | None = None) -> dict:
-    """Every `send` verdict that has no job yet becomes one queued job. Running it again adds nothing."""
+def enqueue(db: sqlite3.Connection, *, now: float | None = None, only: Iterable[str] | None = None) -> dict:
+    """Every `send` verdict that has no job yet becomes one queued job; `only` narrows that to the named people,
+    which is how a caller makes a job exist only for someone holding a live claim. Running it again adds nothing."""
     now = time.time() if now is None else now
     t0 = time.perf_counter()
     with tx(db):
-        added = db.execute(ENQUEUE_SQL, {"now": now}).rowcount
+        if only is None:
+            added = db.execute(ENQUEUE_SQL, {"now": now}).rowcount
+        else:
+            added = db.execute(ENQUEUE_SCOPED_SQL,
+                               {"now": now, "only": json.dumps(sorted(set(only)))}).rowcount
     return {"enqueued": added, "seconds": round(time.perf_counter() - t0, 4)}
 
 
@@ -387,6 +403,20 @@ def claim(db: sqlite3.Connection, worker: str, n: int, *, route: str, lease_s: f
                        "WHERE idem_key=? AND state='queued'", (worker, now + lease_s, row[0]))
             _event(db, row[0], worker, "claimed", "", now)
     return [Job(*row[:5], attempts=row[5] + 1, attempted_before=row[6] > 0) for row in rows]
+
+
+def cancel_held(db: sqlite3.Connection, *, user_key: str, stage: str, reason: str, now: float) -> bool:
+    """Cancel a copy-gate-held job whose ledger claim has been given back: no claim, no job. Cancels only while
+    the job is still queued and never attempted, in one transaction, so a job a worker already took keeps
+    running and settles normally. The row leaves `jobs` so the person's next claim may enqueue a fresh one."""
+    with tx(db):
+        row = db.execute("SELECT idem_key, state, attempted_at FROM jobs WHERE user_key = ? AND stage = ?",
+                         (user_key, stage)).fetchone()
+        if row is None or row[1] != "queued" or row[2] > 0:
+            return False
+        _event(db, row[0], "", "cancelled", reason, now)
+        return db.execute("DELETE FROM jobs WHERE idem_key = ? AND state = 'queued' AND attempted_at = 0",
+                          (row[0],)).rowcount == 1
 
 
 def _release(db: sqlite3.Connection, job: Job, worker: str, reason: str, delay_s: float, now: float) -> None:

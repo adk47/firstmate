@@ -46,7 +46,8 @@ def require(campaign: str, body: str, *, subject: str = "", copy: str = "", kind
 
     Two answers are a send: `approved` (exit 0: a signed approval on these bytes) and `observed` (exit 4: the
     campaign is in observe mode, so the review is recorded and the send goes ahead; `answer["review"]` says what the
-    review said). Which mode applies is the gate's table, never this caller's choice."""
+    review said). Which mode applies is the gate's table, never this caller's choice. One documented exception may
+    only TIGHTEN observe to a hold, never loosen: bulk_asks.EnforcedCopyGate, see docs/credit-verification/bulk-asks.md."""
     sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
     argv = [sys.executable, "-I", str(GATE), "check", "--campaign", campaign, "--copy", copy, "--kind", kind,
             "--message-type", message_type]

@@ -4,7 +4,9 @@ Code: `scripts/credit_review/bulk_queue.py`. Policy: `policies/bulk-send-queue.j
 `scripts/tests/test_bulk_queue.py`.
 
 **Status: built and proven on scratch files. It is not wired to production and sends nothing.** The policy ships
-`enabled: false`, no email template is pinned, and no cron or timer runs it. The existing apply path
+`enabled: false` and no email template is pinned, so the queue itself is refused. Its one front end is
+`scripts/credit_review/bulk_asks.py` (doc `docs/credit-verification/bulk-asks.md`), which supplies the `people` rows
+and the `ask` stage's tick; it also ships unarmed, and no timer runs either. The existing apply path
 (`verify_notify.py` → `intercom-verify-request.sh`) is unchanged, and so are its per-tick caps.
 
 ## What it replaces, and why
@@ -22,7 +24,7 @@ The queue holds no outcome in memory. Each step is a committed row.
 | Step | What it is | What makes it safe |
 |---|---|---|
 | `decide` | One SQL statement (`DECIDE_SQL`) over the `people` table. One verdict per (person, stage). | A `send` verdict is final (trigger). Every other verdict is re-decided on the next pass. |
-| `enqueue` | One SQL statement. Each `send` verdict with no job becomes one queued job. | Key = sha256(user, stage, message class). `UNIQUE (user_key, stage)`: one job per person per stage, ever. |
+| `enqueue` | One SQL statement. Each `send` verdict with no job becomes one queued job; `only=` narrows it to the people a caller names (how `bulk_asks.py` enqueues nothing for someone whose ledger claim it does not hold). | Key = sha256(user, stage, message class). `UNIQUE (user_key, stage)`: one job per person per stage. |
 | `work` | N processes. Each claims a batch, commits `attempted`, sends, commits each outcome as it arrives. | The claim is one `BEGIN IMMEDIATE` transaction. `sent` is refused unless `attempted` was recorded first (trigger). |
 | `recover` | Run by every worker on every loop. Settles rows whose lease ran out. | See "A killed worker" below. |
 
@@ -46,7 +48,9 @@ number.
 | `body`, `subject`, `data`, `copy_data` | The reviewed line, the template data, and the customer-supplied words the copy gate should excuse. |
 | `chat_reachable`, `intercom_thread` | Route facts. |
 
-**That builder is not in this change.** Until one exists the queue has no production input.
+**The builder is `bulk_asks.py`'s** (`select` + `load`, doc `docs/credit-verification/bulk-asks.md`): it owns
+identity, the fraud lens and the copy for the `ask` stage. It ships unarmed too, so the queue still has no
+production input.
 
 ## The decision, in rank order
 
@@ -60,8 +64,13 @@ First match wins.
 6. no route → `hold:no_route`
 7. otherwise → `send`
 
-Only the two on-us stages are mapped: `doc_received` → `status-doc-received`, `team_review` → `status-team-review`.
-An ask is `need_asks.py`'s and is never sent from here.
+`doc_received` → `status-doc-received` and `team_review` → `status-team-review` are the two status stages; `ask` →
+`uvn-status` is the email first ask, whose who-and-when is `bulk_asks.py`'s (`policies/bulk-asks.json`, its own off
+switch). Which document an Intercom ask names stays `need_asks.py`'s; that path does not go through this queue.
+
+`cancel_held` is the one deletion: a copy-gate-held job that is still `queued` and never `attempted` is removed (with
+a `cancelled` event) when its ledger claim was given back, so "no claim, no job" holds and the person's next claim
+may enqueue a fresh one. Any other delete aborts (`job_no_delete`).
 
 A `send` verdict is final, so `decide` cannot take one back. The worker therefore reads the person again after it
 claims a job and before it sends: a stage that moved on ends the job as `stale_stage`, a stage another sender has
@@ -237,5 +246,6 @@ bulk_queue.py bench | chaos                     # scratch files; neither takes -
 
 Stop it: `touch /etc/hydra/bulk-send-queue.disabled`. Each worker checks before every claim and exits 3.
 
-To arm it, in one reviewed PR: a builder for `people`, the template pins, `enabled: true` at both levels of the
-policy, and a timer. Each campaign's mode in the copy gate stays the gate's own table.
+To arm it, in one reviewed PR: the template pins, `enabled: true` at both levels of the policy, and a timer (the
+`ask` stage's builder and tick are `bulk_asks.py`'s, armed by its own policy). Each campaign's mode in the copy gate
+stays the gate's own table.

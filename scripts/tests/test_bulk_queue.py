@@ -183,6 +183,44 @@ class DatabaseRefusesTests(Base):
         with self.assertRaisesRegex(sqlite3.IntegrityError, "append-only"):
             self.db.execute("DELETE FROM job_events")
 
+    def test_a_copy_held_job_is_cancelled_and_its_person_may_be_queued_again(self):
+        self.fill([person(1), person(2)])
+        for i in (1, 2):
+            self.db.execute("UPDATE jobs SET reason = 'copy_review_hold: pending' WHERE user_key = ?",
+                            (f"u{i}@example.test",))
+        self.assertEqual(len(bq.claim(self.db, "w", 5, route="email")), 2)
+        self.assertFalse(bq.cancel_held(self.db, user_key="u1@example.test", stage="doc_received",
+                                       reason="copy_review_hold: pending", now=10.0))
+        self.assertEqual(self.states(), {"claimed": 2})
+        self.db.execute("UPDATE jobs SET state = 'queued', worker = '', lease_until = 0")
+        self.assertTrue(bq.cancel_held(self.db, user_key="u1@example.test", stage="doc_received",
+                                      reason="copy_review_hold: pending", now=20.0))
+        self.assertIsNone(self.job(1))
+        self.assertEqual([e for (e,) in self.db.execute("SELECT event FROM job_events WHERE event = 'cancelled'")],
+                         ["cancelled"])
+        self.assertIsNone(self.job(1))
+        self.assertEqual(bq.enqueue(self.db, now=30.0)["enqueued"], 1)  # no job, so the send verdict queues one
+        self.assertEqual(self.job(1)[0], "queued")
+        self.db.execute("UPDATE jobs SET reason = '' WHERE user_key = 'u2@example.test'")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "never deleted"):
+            self.db.execute("DELETE FROM jobs WHERE user_key = 'u2@example.test'")  # not a cancel
+
+    def test_a_scoped_enqueue_queues_only_the_people_named(self):
+        self.fill([person(1), person(2)])
+        for i in (1, 2):
+            self.db.execute("UPDATE jobs SET reason = 'copy_review_hold: pending' WHERE user_key = ?",
+                            (f"u{i}@example.test",))
+        self.assertTrue(bq.cancel_held(self.db, user_key="u1@example.test", stage="doc_received",
+                                       reason="copy_review_hold: pending", now=20.0))
+        self.assertTrue(bq.cancel_held(self.db, user_key="u2@example.test", stage="doc_received",
+                                       reason="copy_review_hold: pending", now=20.0))
+        self.assertEqual(bq.enqueue(self.db, now=30.0, only=["u2@example.test"])["enqueued"], 1)
+        self.assertIsNone(self.job(1))
+        self.assertEqual(self.job(2)[0], "queued")
+        self.assertEqual(bq.enqueue(self.db, now=31.0, only=[])["enqueued"], 0)
+        self.assertEqual(bq.enqueue(self.db, now=32.0)["enqueued"], 1)  # unscoped callers are unchanged
+        self.assertEqual(self.job(1)[0], "queued")
+
     def test_second_job_for_the_same_user_and_stage_is_refused(self):
         self.fill([person(1)])
         with self.assertRaises(sqlite3.IntegrityError):

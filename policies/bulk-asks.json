@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "enabled": false,
+  "_enabled": "Off. Turning it on is a captain decision made in a PR: the email ask is off by a recorded ruling (scripts/paid-status/daily.sh, firstmate 024), and `approval` below must name the decision that lifts it.",
+  "stage": "ask",
+  "message_class": "uvn-status",
+  "template_key": "credit_status_uvn_ask",
+  "template_data": {"single": false, "titles": "the tracks you submitted on Muso"},
+  "_template_data": "The same data for every person, so the body is one set of bytes; the copy gate is asked on every job's bytes and an observed pass is a hold here. `titles` is words a customer reads: it is a proposal until the copy gate approves the rendered body.",
+  "template_sha256": "",
+  "subject": "",
+  "body": "",
+  "_body": "Filled from `bulk_asks.py pin --templates-dir <reviewed checkout>` in the PR that pins the template in policies/bulk-send-queue.json. Empty means nothing can be released.",
+  "approval": {"approved_by": "", "approval_ref": "", "approver_kind": "", "approval_id": ""},
+  "ramp": {
+    "route": "notify",
+    "floor_per_min": 100,
+    "max_per_min": 1000,
+    "factor": 2,
+    "window_s": 600,
+    "health_lag_s": 300,
+    "min_judged": 50,
+    "hard_bounce_max": 0.01,
+    "complaint_max": 0.001,
+    "soft_bounce_max": 0.10,
+    "rate_hold_s": 3600,
+    "_bars": "hard_bounce_max and complaint_max are the gateway's own pause bars (WARMUP_PAUSE_BOUNCE, WARMUP_PAUSE_COMPLAINT), stricter than the 2 percent in the lane's contract. health_lag_s is the gateway's 5 minute health cache. soft_bounce_max (twice the 4.96 percent the route measured on 2026-11-14) and rate_hold_s are this file's own choices and nobody has ruled on them."
+  }
+}

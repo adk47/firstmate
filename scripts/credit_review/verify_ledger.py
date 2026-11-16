@@ -399,7 +399,14 @@ INDEXES = """
 CREATE INDEX IF NOT EXISTS verify_messages_user_day ON verify_messages(user_key, day);
 CREATE INDEX IF NOT EXISTS verify_messages_msg ON verify_messages(message_id);
 CREATE INDEX IF NOT EXISTS verify_messages_parent ON verify_messages(parent_row, kind);
+CREATE INDEX IF NOT EXISTS verify_messages_account ON verify_messages(account_id);
+CREATE INDEX IF NOT EXISTS verify_messages_campaign_status ON verify_messages(campaign, status, created_at);
 """
+# verify_messages_account is what lets every _same_user read use SQLite's multi-index OR (user_key, account_id, and the
+# account_id IS NULL legacy rows) instead of a full scan of verify_messages. Measured on a copy of node-8's ledger,
+# 2026-11-16 (15,164 messages, 1.2M decisions, 383 users, identical answers): capped 19.9 -> 0.8 ms, uvn_user_done
+# 19.9 -> 4.9 ms, no_channel 6.1 -> 0.2 ms. claim() reads all three inside BEGIN IMMEDIATE, so the write lock every
+# sender shares was held ~45 ms per claim for reads alone (data/verif-1000-per-min-r1/report.md).
 TABLES = ("verify_messages", "verify_proof_reviews", "verify_requests", "verify_refusal_holds", "verify_channel_clears",
           "reply_ref_picks")
 # The verify_messages columns credit-retro's take-back / wave reader depends on
@@ -1034,6 +1041,7 @@ def capped(db: sqlite3.Connection, *, user_key: str, day: str, user_id: str = ""
 
 
 REASK_LOCK_DAYS = 90
+MESSAGED_COOLDOWN_DAYS = 7
 
 
 def prior_uvn_ask(db: sqlite3.Connection, user_key: str, user_id: str = "") -> bool:
@@ -1058,6 +1066,34 @@ def asked_within(db: sqlite3.Connection, *, user_key: str, day: str, days: int =
     q = (f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.kind='initial' AND m.status IN ('attempted','sent') "
          f"AND m.campaign IN ({','.join('?' * len(ASK_CAMPAIGNS))}) AND m.day > ? LIMIT 1")
     return db.execute(q, (*params, *ASK_CAMPAIGNS, since)).fetchone() is not None
+
+
+def deferral_expiry(db: sqlite3.Connection, *, user_key: str, reason: str, user_id: str = "",
+                    now: datetime | None = None) -> datetime | None:
+    """When the lock that deferred this user lapses, read from the ledger: the first instant the ledger's own
+    check admits the person. `messaged_7d` counts the note's own day (`m.day >= now - 7d`), so it lapses the day
+    after that window; `recently_asked` uses `m.day > now - 90d`, so it lapses on the 90th day. None when the
+    ledger has no row."""
+    cond, params = _same_user(db, user_key, user_id)
+    if reason == "messaged_7d":
+        row = db.execute(f"SELECT MAX(m.day) FROM verify_messages m WHERE {cond} AND m.status IN ('attempted','sent')",
+                         params).fetchone()
+        days = MESSAGED_COOLDOWN_DAYS + 1
+    elif reason == "recently_asked":
+        asks = ",".join("?" * len(ASK_CAMPAIGNS))
+        row = db.execute(f"SELECT MAX(m.day) FROM verify_messages m WHERE {cond} AND m.kind='initial' "
+                         f"AND m.status IN ('attempted','sent') AND m.campaign IN ({asks})",
+                         (*params, *ASK_CAMPAIGNS)).fetchone()
+        days = REASK_LOCK_DAYS
+    else:
+        return None
+    day = str(row[0])[:10] if row and row[0] else ""
+    if not day:
+        return None
+    try:
+        return datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=days)
+    except ValueError:
+        return None
 
 
 def past_user_done(db: sqlite3.Connection, user_key: str, user_id: str = "") -> str:
@@ -1095,7 +1131,7 @@ def uvn_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None
             f"AND m.campaign NOT IN ({_marks(CLAIM_CAMPAIGNS)}) LIMIT 1",
             (*params, *CLAIM_CAMPAIGNS)).fetchone():
         return "proof_received"
-    since = ((now or utcnow()) - timedelta(days=7)).strftime("%Y-%m-%d")
+    since = ((now or utcnow()) - timedelta(days=MESSAGED_COOLDOWN_DAYS)).strftime("%Y-%m-%d")
     if not skip_7d:
         recent = db.execute(f"SELECT m.campaign, m.request_ids_json, m.status FROM verify_messages m WHERE {cond} AND m.day>=? "
                             "AND m.status IN ('attempted','sent')", (*params, since)).fetchall()
@@ -1936,13 +1972,20 @@ COPY_HOLD_PREFIX = "copy_review"
 def hold_copy_review(db: sqlite3.Connection, *, message_row: int, reason: str, body_sha256: str = "",
                      now: datetime | None = None) -> dict[str, Any]:
     """The outbound copy gate did not approve the body this claim rendered, so NOTHING was posted: give the claim
-    back. The row becomes a `deferred` LOG (never a lock: no cap, no idempotency, no 7-day gate, not a refusal) that
-    carries the reason and the body's hash, and its requests return to what they were before the claim, so the note is
-    offered again next run - when the reviewer has ruled, or the copy has changed. Refuses any row that is not a
-    never-posted `attempted` claim: a hold can never un-send a message. One log row per user, campaign, day and
-    reason; a repeat the same day drops the fresh claim instead of adding a second identical line."""
+    back (`give_back_claim`), carrying the reason and the body's hash."""
     if not reason.startswith(COPY_HOLD_PREFIX):
         raise ValueError(f"a copy-review hold reason starts with {COPY_HOLD_PREFIX!r}: {reason!r}")
+    return give_back_claim(db, message_row=message_row, reason=reason, body_sha256=body_sha256, now=now)
+
+
+def give_back_claim(db: sqlite3.Connection, *, message_row: int, reason: str, body_sha256: str = "",
+                    now: datetime | None = None) -> dict[str, Any]:
+    """Give a never-posted claim back: the row becomes a `deferred` LOG (never a lock: no cap, no idempotency, no
+    7-day gate, not a refusal) that carries the reason, and its requests return to what they were before the claim,
+    so the note is offered again next run. A caller that is not the copy gate says so in its own words; the guard
+    that matters is that nothing was posted. Refuses any row that is not a never-posted `attempted` claim: a
+    give-back can never un-send a message. One log row per user, campaign, day and reason; a repeat the same day
+    drops the fresh claim instead of adding a second identical line."""
     if body_sha256 and not TEMPLATE_SHA_RE.match(body_sha256):
         raise ValueError("body sha256 is not a sha256 hex digest")
     ts = stamp(now)
@@ -1953,7 +1996,7 @@ def hold_copy_review(db: sqlite3.Connection, *, message_row: int, reason: str, b
                          "WHERE id=?", (message_row,)).fetchone()
         if row is None or row["status"] != "attempted" or row["message_id"]:
             db.execute("ROLLBACK")
-            raise ValueError(f"row {message_row} is not a never-posted claim; a copy hold cannot touch it")
+            raise ValueError(f"row {message_row} is not a never-posted claim; a give-back cannot touch it")
         # the claim's own request rows: a first attempt is removed, a retry goes back to the rejected attempt it was
         db.execute("DELETE FROM verify_requests WHERE message_row=? AND status='attempted' AND attempts<=1",
                    (message_row,))

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_about": "The bulk send queue (scripts/credit_review/bulk_queue.py; docs/credit-verification/bulk-send-queue.md). `enabled` and a route's `enabled` are both false: this ships UNARMED and turning either on is a captain decision made in a PR, never a merge side effect. `routes` is the captain's order of 2026-11-12 (our own chat, then email, then Intercom only where a thread already lives there). `batch_capable` says whether the queue may send on a route at all, and `idempotent` says whether the provider de-duplicates on our key, which decides what happens to a job a dead worker left `attempted`: re-presented under the same key, or `uncertain` and never sent again. `stages` maps a person's stage to the ONE message class that stage may ever get; only stages where the work is on us are listed, because an ask is scripts/credit_review/need_asks.py's and is never sent from here. An email template is sent only when the sha256 of its reviewed source is pinned in `template_sha256` (computed by scripts/request_comms/channels.py template_source_sha256); with no pin every job on that key is held.",
+  "_about": "The bulk send queue (scripts/credit_review/bulk_queue.py; docs/credit-verification/bulk-send-queue.md). `enabled` and a route's `enabled` are both false: this ships UNARMED and turning either on is a captain decision made in a PR, never a merge side effect. `routes` is the captain's order of 2026-11-12 (our own chat, then email, then Intercom only where a thread already lives there). `batch_capable` says whether the queue may send on a route at all, and `idempotent` says whether the provider de-duplicates on our key, which decides what happens to a job a dead worker left `attempted`: re-presented under the same key, or `uncertain` and never sent again. `stages` maps a person's stage to the ONE message class that stage may ever get; the two status stages are where the work is on us. `ask` is the first proof ask by email: who gets it and when is scripts/credit_review/bulk_asks.py's (policies/bulk-asks.json, which has its own off switch), and which document an Intercom ask names stays scripts/credit_review/need_asks.py's. An email template is sent only when the sha256 of its reviewed source is pinned in `template_sha256` (computed by scripts/request_comms/channels.py template_source_sha256); with no pin every job on that key is held.",
   "enabled": false,
   "routes": {
     "chat": {
@@ -16,7 +16,8 @@
       "pod_concurrency": 8,
       "template_keys": {
         "status-doc-received": "credit_status_doc_received",
-        "status-team-review": "credit_status_team_review"
+        "status-team-review": "credit_status_team_review",
+        "uvn-status": "credit_status_uvn_ask"
       },
       "template_sha256": {},
       "why": "send-gateway /v1/send is at-most-once per idempotency_key (a repeat answers the first send's row), so a job with no recorded outcome is safe to present again."
@@ -30,6 +31,7 @@
   },
   "stages": {
     "doc_received": "status-doc-received",
-    "team_review": "status-team-review"
+    "team_review": "status-team-review",
+    "ask": "uvn-status"
   }
 }
