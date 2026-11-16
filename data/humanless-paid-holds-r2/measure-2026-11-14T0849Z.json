@@ -1,0 +1,139 @@
+{
+ "ledger_rows": 1089571,
+ "first": "2026-10-17T10:45:12Z",
+ "last": "2026-11-14T08:30:03Z",
+ "paid_latest_requests": 18498,
+ "groups": {
+  "human_review": {
+   "rows": 7966,
+   "users": 857,
+   "by_mode": {
+    "apply": {
+     "rows": 3437,
+     "users": 492
+    },
+    "judge": {
+     "rows": 4505,
+     "users": 422
+    },
+    "shadow": {
+     "rows": 24,
+     "users": 1
+    }
+   },
+   "by_decision": {
+    "hold": 7966
+   },
+   "by_site": {
+    "proof on file: human review": {
+     "rows": 6904,
+     "users": 797
+    },
+    "validator reject rule fired": {
+     "rows": 606,
+     "users": 42
+    },
+    "emailed support@": {
+     "rows": 416,
+     "users": 34
+    },
+    "support already requested": {
+     "rows": 30,
+     "users": 5
+    },
+    "server approval guard would refuse": {
+     "rows": 10,
+     "users": 2
+    }
+   }
+  },
+  "score_not_now": {
+   "rows": 1206,
+   "users": 208,
+   "by_mode": {
+    "apply": {
+     "rows": 37,
+     "users": 2
+    },
+    "shadow": {
+     "rows": 1169,
+     "users": 206
+    }
+   },
+   "by_decision": {
+    "hold": 1182,
+    "defer": 24
+   },
+   "by_site": {
+    "proof path: engaged user": {
+     "rows": 553,
+     "users": 157
+    },
+    "stored popularity": {
+     "rows": 254,
+     "users": 63
+    },
+    "organization / label": {
+     "rows": 200,
+     "users": 5
+    },
+    "no independent anchor": {
+     "rows": 126,
+     "users": 10
+    },
+    "user reached": {
+     "rows": 24,
+     "users": 1
+    },
+    "same_anchor_requests": {
+     "rows": 24,
+     "users": 2
+    },
+    "big track": {
+     "rows": 12,
+     "users": 4
+    },
+    "user on the decider": {
+     "rows": 10,
+     "users": 2
+    },
+    "other: editorial role (Editorial) on a track at pop >= 30": {
+     "rows": 2,
+     "users": 1
+    },
+    "other: profile on the decider's deny / fraud / hold list": {
+     "rows": 1,
+     "users": 1
+    }
+   }
+  },
+  "stage2_judged": {
+   "rows": 1386,
+   "users": 225,
+   "by_mode": {
+    "apply": {
+     "rows": 53,
+     "users": 21
+    },
+    "judge": {
+     "rows": 1333,
+     "users": 207
+    }
+   },
+   "by_decision": {
+    "hold": 1386
+   },
+   "by_site": {
+    "need_more": {
+     "rows": 1286,
+     "users": 217
+    },
+    "no_document": {
+     "rows": 100,
+     "users": 8
+    }
+   }
+  }
+ },
+ "users_in_any_group": 1138
+}
