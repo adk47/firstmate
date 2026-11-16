@@ -643,7 +643,7 @@ The no-ask note for a pending claimant who gets **no** proof ask: holds, organiz
   - The list must be at most 30 hours old. No daily code check is required: the note promises none.
   - Without an explicit `audience`, a band-A or bandless row gets neither note (it is on the approval path).
   - A claim whose code was found is skipped.
-  - The run uses the same replica, support@, email and professional-id checks as the ask: paid first, one claim per user per run, at most 400 notes a day.
+  - The run uses the same replica, support@, email and professional-id checks as the ask: paid first, one claim per user per run, at most `shared_daily_cap.claim` notes a day (the two claim campaigns together; 200 since 2026-11-16, `verif-caps-arm-c1`, inside send-gateway's 500-a-day claim ceiling - 500 is a follow-up once the per-person daily gate is live).
 
 ## Removal notices (`--campaign removal-notice`)
 
@@ -816,7 +816,8 @@ the same segment.
   600-entry pages; it does not make them faster than they were at 200. How many notes a tick sends is measured from
   `run.log` after deploy, not derived from a ratio.
 - **Nothing else moved.** `CVO_CAP`, the tick budget and deadline, the per-user estimates and every stop rule are as
-  they were. Accepts are still bounded by the cap and by the policy `tick_cap` (uvn-status: 50 a tick per segment,
+  they were. Accepts are still bounded by the cap and by the policy `tick_cap` (uvn-status: 100 a tick on the free
+  segment and 50 on the paid one since 2026-11-16, `verif-caps-arm-c1`; 50 a tick per segment before that,
   paid and free).
 - **What it costs, on the sending family.** The check and the bodies each walk the page, so its read-only gate calls
   go from at most 400 to at most 1,200 a tick. And the runner's unmeasured stop is a share of the page
@@ -1172,7 +1173,10 @@ the configured caps were not among the ones that bound:
   slice's end, and it does not start at all with less than one user's worst case (`APPLY_USER_WORST_S`) left. What can
   still run past the slice is never a new send: a user whose send outruns its own worst case (the loop only starts
   one whose worst case, `WORST_USER_S`, fits), and that apply's own read-backs. At the default slice one claim apply carries at most
-  225 users (1,500 s x 6 workers / 40 s a user), under the default `CLAIM_CAP` of 250; node-8's claim cap is 25.
+  225 users (1,500 s x 6 workers / 40 s a user), under the default `CLAIM_CAP` of 250; node-8's shared claim day cap
+  was 25 until 2026-11-16 (`verif-caps-arm-c1` raised it to 200, inside send-gateway's 500-a-day claim allocation), and a claim
+  family is in any case clamped per segment per tick to `FIRST_CAP` (100) until the tick holds a `FULL_CAP_FROM` date
+  for it.
   A family that is started and then cut by the slice keeps its not-reached count: it sent nothing, so two ticks of
   that page exactly like two ticks of never being started.
 - **A family that is not reached is counted, and an armed one is paged.** Every wait for time (tick budget, claim
@@ -1201,7 +1205,8 @@ the configured caps were not among the ones that bound:
   unmeasured bar on the same users twice is a slow gate, not slow accounts: time one call before touching either.
 - **The other reasons the claim families sent nothing from 11-07 to 11-12 were not the order**: through 11-12 04:35Z
   every tick skipped them at `list_signed_on_stale` (fixed by the `claim-list-build.timer`, #1903), and the
-  `shared_daily_cap.claim` row on node-8 is 25 a DAY across both claim campaigns. Read the tick's own line before
+  `shared_daily_cap.claim` row on node-8 was 25 a DAY across both claim campaigns (200 since 2026-11-16,
+  `verif-caps-arm-c1`). Read the tick's own line before
   blaming the budget.
 
 A family whose check accepts nobody says so per rule in `<family>-<segment>-check.json` (`outcomes[].reason`); count

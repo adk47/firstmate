@@ -72,9 +72,10 @@ LIST_MAX_AGE_H = 30
 STALE_GMAIL_REASON = "stale_source:cs-gmail"
 PROOF_STORE = os.environ.get("COMM_STATE_PROOF_STORE", "/var/lib/hydra-credit-verify/proof.sqlite")
 DAILY_CHECK_MAX_AGE_H = 30
-# QA #1541 / b1 (10-31 14:29Z): ONE claim cap - the outbound policy's shared_daily_cap.claim (500/day), the number the
-# timer's room() reads too, counted across BOTH claim campaigns. No runner-local constant can bind below it (the old
-# 150 / 400 made later ticks send 0 while the wrapper reported room). Unreadable policy = budget 0 (nothing sent).
+# QA #1541 / b1 (10-31 14:29Z): ONE claim cap - the outbound policy's shared_daily_cap.claim, the number the timer's
+# room() reads too, counted across BOTH claim campaigns. The value lives in policies/credit-verify-outbound.json and is
+# never restated here. No runner-local constant can bind below it (the old 150 / 400 made later ticks send 0 while the
+# wrapper reported room). Unreadable policy = budget 0 (nothing sent).
 CLAIM_POLICY = os.environ.get("CVO_POLICY", "/opt/hydra/policies/credit-verify-outbound.json")
 
 

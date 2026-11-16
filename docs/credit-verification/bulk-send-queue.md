@@ -212,10 +212,11 @@ Acceptance for a family is its first 100 sends with `requests_with_two_notes`, `
 Kill run, 1,000 intents, 8 workers, 4 killed with 8 in flight (ak47, 2026-11-12): 997 sent, 3 uncertain (all 3
 had in fact been delivered), 0 requests delivered twice, 0 orphans.
 
-What bounds claim asks today is not this queue. It is the 25-a-day shared claim cap in
-`policies/credit-verify-outbound.json` (`shared_daily_cap.claim`, under send-gateway's 500-a-day claim ceiling) and a
-25-per-segment tick cap in that same `tick_cap` table - the repo copy carries both since the 2026-11-13 alignment to
-node-8's edited file.
+What bounds claim asks today is not this queue. It is the shared claim day cap in
+`policies/credit-verify-outbound.json` (`shared_daily_cap.claim` - 200 a day since 2026-11-16, `verif-caps-arm-c1`, inside the warm-up ceiling's 500 claim allocation;
+25 before that, and always under send-gateway's 500-a-day claim ceiling) plus a per-segment per-tick clamp: a claim
+family with no `FULL_CAP_FROM` date is held at `FIRST_CAP` (100), and `tick_cap` rows of 25 on `claim-proof-ask` pin
+that family lower. The repo copy carries all of these.
 Tick order was a third bound that day: the credit families ran first and ended four of the five ticks that started
 between 14:00Z and 19:30Z before the claim group ran; #1919 now runs the claim group first in its own 1,500 s
 slice. The gate itself sent 19 asks in 58 seconds at 6 workers. Intercom documents 10,000 API calls a minute per workspace for private apps. The design
