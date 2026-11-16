@@ -1,0 +1,132 @@
+{
+ "ledger_last_row": "2026-11-16T20:25:46Z",
+ "version": "dv-4",
+ "record_kinds": [
+  "split_sheet",
+  "contract",
+  "invoice",
+  "letter_of_direction",
+  "pro_portal"
+ ],
+ "record_doc_types": [
+  "split_sheet",
+  "contract",
+  "invoice",
+  "letter",
+  "pro_registration",
+  "receipt"
+ ],
+ "population": {
+  "requests": 30517,
+  "users": 2378,
+  "paid_requests": 12072,
+  "paid_users": 1034
+ },
+ "document_scope": {
+  "none": 13012,
+  "request": 14052,
+  "user": 3453
+ },
+ "lanes": {
+  "no_document_read": {
+   "requests": 13012,
+   "users": 1144,
+   "paid_requests": 5336,
+   "paid_users": 417
+  },
+  "account_hold": {
+   "requests": 3,
+   "users": 1,
+   "paid_requests": 3,
+   "paid_users": 1
+  },
+  "record_type": {
+   "requests": 3819,
+   "users": 296,
+   "paid_requests": 1421,
+   "paid_users": 158
+  },
+  "not_record_ask": {
+   "requests": 13683,
+   "users": 953,
+   "paid_requests": 5312,
+   "paid_users": 466
+  }
+ },
+ "users_in_more_than_one_lane": 16,
+ "asks": {
+  "counterparty_signed_or_registered": {
+   "requests": 25,
+   "users": 1,
+   "words": "a split sheet or agreement signed by the artist or label, a PRO registration that lists you in your role, a royalty statement that names the track, an invoice, or a letter from the label"
+  },
+  "distributor_dashboard_with_code": {
+   "requests": 10988,
+   "users": 843,
+   "words": "one screenshot of your distributor dashboard that shows the release and the code we send you"
+  },
+  "issuer_email_from_official_domain": {
+   "requests": 443,
+   "users": 37,
+   "words": "one line from the issuer's own address confirming your role on the track, or their original email with its headers"
+  },
+  "readable_document": {
+   "requests": 2227,
+   "users": 79,
+   "words": "the same document as a PDF or a clear photo of the whole page"
+  }
+ },
+ "requests_per_kind_by_lane": {
+  "not_record_ask": {
+   "unknown": 12468,
+   "catalog_page": 2997,
+   "daw_session": 1386,
+   "distributor_portal": 698
+  },
+  "record_type": {
+   "unknown": 2674,
+   "pro_portal": 1419,
+   "catalog_page": 870,
+   "invoice": 749,
+   "contract": 660,
+   "daw_session": 358,
+   "distributor_portal": 279,
+   "split_sheet": 118,
+   "letter_of_direction": 26,
+   "dsp_for_artists": 5
+  }
+ },
+ "documents_per_doc_type_by_lane": {
+  "account_hold": {
+   "invoice": 1
+  },
+  "not_record_ask": {
+   "other": 1632,
+   "credits_page": 1225,
+   "dashboard_screenshot": 561,
+   "email_screenshot": 211,
+   "email": 7,
+   "none": 1
+  },
+  "record_type": {
+   "other": 677,
+   "credits_page": 391,
+   "dashboard_screenshot": 253,
+   "pro_registration": 223,
+   "invoice": 178,
+   "contract": 174,
+   "email_screenshot": 167,
+   "split_sheet": 51,
+   "receipt": 24,
+   "letter": 23,
+   "email": 9,
+   "none": 2
+  }
+ },
+ "requests_record_by_kind_vs_doc_type": {
+  "kind=False doc_type=False": 13683,
+  "kind=False doc_type=True": 1128,
+  "kind=True doc_type=False": 211,
+  "kind=True doc_type=True": 2483
+ }
+}
