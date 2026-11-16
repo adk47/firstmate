@@ -626,6 +626,8 @@ The no-ask note for a pending claimant who gets **no** proof ask: holds, organiz
 - **Channel:** in-thread when the user has an open conversation from the last 14 days (unsigned, as the other status notes), otherwise email (with the sign-off).
 - **Ledger:** the key is `claim-<claiming.id>`; one note per claim, ever, with no follow-up. It is never sent to a claim that has a `claim-proof-ask` note: that claim is closed `proof_ask_sent`. It is never sent within 7 days (counted back from the send day) of another note from this gate to the same user (`messaged_7d`, deferred). The rule runs both ways: a proof ask waits 7 days after a claim-status note (`verify_ledger.claim_cross_check`). The one-message-per-user-per-UTC-day cap applies as everywhere.
 - **Replies** are tagged `claim-proof` (a person), never credit proof.
+- **Arming** on the scheduled tick is its own row, `armed_families["claim-status"]` in `policies/credit-verify-outbound.json`. With no row it checks every tick and applies on none (`claim-status-<segment>: DRY-RUN tick (no send): arming=policy claim-status=not armed`): that was its state from the day the file's first `armed_families` row reached node-8 until the row was added on 2026-11-15, with the last send on 2026-11-07. Both claim families share `shared_daily_cap.claim`. A grouped family with no row fails `credit-verify-outbound.bats` ("every grouped family").
+- **Switching it off.** `live` and `paid` are per-segment flags, not a master switch: `live` arms the free segment and `paid` arms the paid segment (`family_armed` in `scripts/credit-verify-outbound.sh`), so paid can be armed without free. To disarm the family set BOTH `"live": false` and `"paid": false` on its row. Setting only one leaves the other segment armed: `{"live": false, "paid": true}` still sends the paid notes. For a stop that waits for no policy edit, `touch /etc/hydra/claim-status.disabled` (the family's kill file: `intercom-verify-request.sh` refuses every real send of the campaign before any claim or Intercom call, and the check still renders) or `touch /etc/hydra/credit-verify-outbound.disabled` (the whole tick, every family). Removing the file resumes. `credit-verify-outbound.bats` ("live and paid are per-segment") holds this paragraph to the gate.
 - **Driver:** `credit-review.py claim-status --list <claim list> --segment paid|free --mode dry-run|apply --max-users N [--preview DIR]` (`claim_proof_ask.run_status`).
   - The list must be at most 30 hours old. No daily code check is required: the note promises none.
   - Without an explicit `audience`, a band-A or bandless row gets neither note (it is on the approval path).
@@ -972,9 +974,13 @@ or shortens the lock, and `asked_within()` never counts it.
   lower it); each segment walks up to 100 list entries a tick (`R14_ENTRIES`, the page sizes are owned by §"Three
   pages"); 1,200 per segment per UTC day under the shared credit cap; one message per user per UTC day as for
   every campaign. Raise `R14_CAP` by PR after three clean ticks.
-- **Arming.** Its own row, `armed_families["uvn-reminder-14"]`. No row, `live: false` or no date: it checks and
-  never applies. A policy with no `daily_cap` row or no group for it skips the family and does not stop the tick.
-- **Disarm.** Remove the row or set `live` to false; the tick reads the policy at every start.
+- **Arming.** Its own row, `armed_families["uvn-reminder-14"]`. No row, both flags false or no date: it checks and
+  never applies. `live` arms the free segment and `paid` the paid segment; neither is a master switch. A policy with
+  no `daily_cap` row or no group for it skips the family and does not stop the tick.
+- **Disarm.** Remove the row, or set BOTH `live` and `paid` to false: `live: false` alone leaves the paid segment
+  armed. The tick reads the policy at every start. For a stop that waits for no policy edit,
+  `touch /etc/hydra/uvn-reminder-14.disabled` (this campaign, at the gate) or
+  `touch /etc/hydra/credit-verify-outbound.disabled` (the whole tick).
 - **The policy file on node-8 was hand-edited** (lower caps, `armed_families`) and a deploy replaces it whenever a
   PR touches it. The PR that added this family carried every value live on 2026-11-13 unchanged (sha256
   `4321089f...`, read 18:22Z and again 22:26Z); the file's `_doc` itemises each one old -> new. Diff the live file
@@ -1003,7 +1009,10 @@ the `uvn-status` body over the new rows only. Evidence and the measured audience
 - **The cap is 5 users per tick across paid and free together** (`NR_CAP`, a constant; `tick_cap` in the policy can
   only lower it) and 120 per segment per day. It is low on purpose: the family had never sent, and the first runs
   must be read before it scales. Raising it is a PR that cites those runs.
-- **Arming** is its own `armed_families` row. No row, `live: false` or a row with no date checks and never applies.
+- **Arming** is its own `armed_families` row. No row, both flags false or a row with no date checks and never applies.
+  `live` arms the free segment and `paid` the paid segment, so disarming takes BOTH set to false (`live: false` alone
+  leaves paid armed); the stop that waits for no policy edit is `touch /etc/hydra/uvn-new-rows.disabled` (this
+  campaign, at the gate) or `touch /etc/hydra/credit-verify-outbound.disabled` (the whole tick).
   A policy with no `daily_cap` row or no group for the campaign skips the family and does not end the tick.
 - **A build that writes no new-rows list is unmeasured, never "0 listed".** Every build of the tick asks for the
   class and the file is removed before each build, so a file on disk is the one that build wrote. No file, or a file

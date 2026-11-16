@@ -2072,6 +2072,7 @@ assert p["shared_daily_cap"] == {"credit": 2500, "claim": 25}
 assert {k: v["unsigned_from"] for k, v in p["armed_families"].items() if k != r} == {
     "uvn-status": "2026-10-31T18:02Z", "status-doc-received": "2026-11-03T12:56Z",
     "claim-proof-ask": "2026-11-03T18:58Z", "proof-need-ask": "2026-11-10T02:17Z", "uvn-new-rows": "2026-11-14T22:48Z",
+    "claim-status": "2026-10-31T17:55Z",    # claim-status-arm-policy-r1: its own row, read by the tests below
     # node-8's live row of 2026-11-15T08:18Z, carried so a deploy of this file does not disarm it (the file is git-wins)
     "uvn-status:c2": "2026-11-15T08:18Z", "proof-refusal": "2026-11-15T13:41Z"}
 # proof-refusal: its own row, in the credit group, at most 100 a run and 395 a day
@@ -2094,8 +2095,116 @@ PY
   if grep -qiE "malformed|ARMING ROW IGNORED" "$t"; then false; fi
   grep -q -- "^uvn-status --list .*owing-reminder-14.json --segment paid --campaign uvn-reminder-14 .*--mode apply" "$CALLS"
   grep -q -- "^uvn-status --list .*owing-reminder-14.json --segment free --campaign uvn-reminder-14 .*--mode apply" "$CALLS"
-  # a family with no row in the shipped file stays dry: checked, never applied
+}
+
+# claim-status-arm-policy-r1 (2026-11-15). claim-status sat in the claim group with a 500/500 daily cap and NO
+# armed_families row. In policy mode a family is armed only by its own row, so it checked every tick, rendered its
+# bodies and applied on none: 0 sent from 2026-11-07T04:30:32Z while the tick log said, once per segment per tick,
+# "DRY-RUN tick (no send): arming=policy claim-status=not armed". Nothing failed and nothing paged.
+@test "outbound tick (shipped policy): every grouped family has an armed_families row the tick reads, or is named here with the reason it has none" {
+  python3 - "$SHIPPED_POLICY" "$SCRIPT" <<'PY'
+import json, re, sys
+p = json.load(open(sys.argv[1]))
+src = open(sys.argv[2]).read()
+# The tick's own list of the row keys it accepts, and its one alias (a family whose row is spelled by its campaign).
+known = set(re.findall(r'"([^"]+)"', re.search(r"^KNOWN = \{(.*?)\}", src, re.M | re.S).group(1)))
+canon = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"', re.search(r"^CANON = \{(.*?)\}", src, re.M | re.S).group(1)))
+assert {"claim-status", "claim-proof-ask", "uvn-status"} <= known, known      # the parse found the real set
+# A grouped family with no row is one the tick cannot take a row for, named WITH its reason. To switch a family off,
+# write "live": false AND "paid": false on its row (the flags are per-segment, see the test below): that is read in
+# review. A missing row is not.
+NO_ROW = {
+    "wait-apology": "read_arming's KNOWN has no such key, so a row for it would make the whole block malformed and "
+                    "arm nothing; the family is SIGNED-only in code (UNSIGNED_FROM[wait-apology] is empty) until "
+                    "fable d2's GO is stamped there",
+}
+armed = p["armed_families"]
+rows = set(armed) | {canon[k] for k in armed if k in canon} | {k for k, v in canon.items() if v in armed}
+grouped = [c for cs in p["groups"].values() for c in cs]
+assert len(grouped) == len(set(grouped)), grouped
+missing = [c for c in grouped if c not in rows and c not in NO_ROW]
+assert not missing, "in a group, with no armed_families row and no named reason (it would check and never send): %s" % missing
+for c, why in NO_ROW.items():
+    assert c in grouped and c not in rows, "%s is no longer a grouped family without a row: drop it from NO_ROW" % c
+    assert c not in known and canon.get(c) not in known, "the tick now accepts a row for %s: give it one (%s)" % (c, why)
+assert set(armed) <= known, sorted(set(armed) - known)   # and no row is one the tick would call malformed
+for c in grouped:
+    assert set(p["daily_cap"][c]) == {"paid", "free"}, c
+# claim-status itself: the shape of the claim group's other row, the date the code already carries, the caps it had
+s = "claim-status"
+assert armed[s] == {"live": True, "paid": True, "unsigned_from": "2026-10-31T17:55Z"}, armed.get(s)
+assert set(armed[s]) == set(armed["claim-proof-ask"])
+assert '[claim-status]="%s"' % armed[s]["unsigned_from"] in src      # a row with no date would CLEAR this one
+assert p["groups"]["claim"] == ["claim-status", "claim-proof-ask"]
+assert p["daily_cap"][s] == {"paid": 500, "free": 500}, p["daily_cap"][s]
+assert s not in p["tick_cap"]                                         # no cap added or raised by arming it
+assert p["shared_daily_cap"]["claim"] == 25                           # both claim families stay under this one
+PY
+}
+
+@test "outbound tick (shipped policy): claim-status is armed by its OWN row - it applies on both segments, and with that one row taken out it checks and never applies" {
+  claim_list
+  export CVO_POLICY="$SHIPPED_POLICY" CVO_UNSIGNED_ALL=0       # the dates decide, as on node-8
+  run -0 "$SCRIPT"
+  t="$(newest_tick)"
+  if grep -qiE "malformed|ARMING ROW IGNORED" "$t"; then false; fi
+  grep -q "arming=policy armed: .*claim-status=live/paid from 2026-10-31T17:55Z" "$t"
+  grep -q -- "^claim-status --list .*/claims-filtered.json --segment paid .*--mode apply" "$CALLS"
+  grep -q -- "^claim-status --list .*/claims-filtered.json --segment free .*--mode apply" "$CALLS"
+  grep -q "^.*claim-status-paid APPLY (rc=0)" "$t"
+  grep -q "^.*claim-status-free APPLY (rc=0)" "$t"
+  if grep -q "claim-status=not armed" "$t"; then false; fi
+  # the same file without the row: the 2026-11-07..15 state. Checked, bodies written, nothing sent, and the log says why.
+  jq 'del(.armed_families["claim-status"])' "$SHIPPED_POLICY" > "$TEST_TMPDIR/no-row.json"
+  : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"; rm -f "$CVO_LEDGER.segments.jsonl"
+  CVO_POLICY="$TEST_TMPDIR/no-row.json" run -0 "$SCRIPT"
+  t="$(newest_tick)"
+  grep -q -- "^claim-status --list .*--mode dry-run .*--check-recipients" "$CALLS"
   if grep -q -- "^claim-status .*--mode apply" "$CALLS"; then false; fi
+  grep -q "claim-status-paid: DRY-RUN tick (no send): arming=policy claim-status=not armed" "$t"
+  grep -q "claim-status-free: DRY-RUN tick (no send): arming=policy claim-status=not armed" "$t"
+}
+
+# QA on #2026: the doc said `"live": false` switches claim-status off. It does not: family_armed reads `live` for the
+# free segment and `paid` for the paid one, on purpose (paid can be armed without free), so {live:false, paid:true} -
+# the state an operator leaves behind by flipping one flag - keeps sending the paid notes. The gate is right and is
+# pinned here as it is; the doc is held to it, and to the kill-file paths the two scripts really read.
+@test "outbound tick (shipped policy): live and paid are per-segment, not a master switch - {live:false, paid:true} still applies claim-status to paid, both false applies to neither, and the doc says so" {
+  claim_list
+  export CVO_UNSIGNED_ALL=0
+  seg_row() { # <json flags>: the shipped policy with only claim-status's two flags changed, on a fresh day's state
+    jq --argjson r "$1" '.armed_families["claim-status"] += $r' "$SHIPPED_POLICY" > "$TEST_TMPDIR/seg.json"
+    : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"; rm -f "$CVO_LEDGER.segments.jsonl"
+    CVO_POLICY="$TEST_TMPDIR/seg.json" run -0 "$SCRIPT"
+    t="$(newest_tick)"
+    if grep -qiE "malformed|ARMING ROW IGNORED" "$t"; then false; fi
+  }
+  applied() { grep -q -- "^claim-status --list .*--segment $1 .*--mode apply" "$CALLS" && grep -q "claim-status-$1 APPLY (rc=0)" "$t"; }
+  dry() { # <segment>: checked, never applied, and the log says why
+    grep -q -- "^claim-status --list .*--segment $1 .*--mode dry-run .*--check-recipients" "$CALLS"
+    if grep -q -- "^claim-status --list .*--segment $1 .*--mode apply" "$CALLS"; then false; fi
+    grep -q "claim-status-$1: DRY-RUN tick (no send): arming=policy claim-status=not armed" "$t"
+  }
+  seg_row '{"live": false, "paid": true}';  applied paid; dry free      # live:false alone does NOT stop paid
+  seg_row '{"live": true, "paid": false}';  dry paid; applied free      # and paid:false alone does not stop free
+  seg_row '{"live": false, "paid": false}'; dry paid; dry free          # the off switch is both
+  # the doc's own paragraph: one line, naming both flags, the state that keeps sending, and both kill files
+  doc="$BATS_TEST_DIRNAME/../../docs/credit-verification/verify-request-notes.md"
+  [ "$(grep -c '^- \*\*Switching it off\.\*\*' "$doc")" -eq 1 ]
+  para="$(grep '^- \*\*Switching it off\.\*\*' "$doc")"
+  for want in 'per-segment flags, not a master switch' 'set BOTH `"live": false` and `"paid": false`' \
+              '`{"live": false, "paid": true}` still sends the paid notes' \
+              'touch /etc/hydra/claim-status.disabled' 'touch /etc/hydra/credit-verify-outbound.disabled'; do
+    grep -qF -- "$want" <<< "$para"
+  done
+  if grep -qF 'To switch it off, set `"live": false` on the row' "$doc"; then false; fi
+  # and the two paths are the ones the code reads: the tick's kill file, and the gate's per-campaign one
+  grep -qF 'ETC="$(cfg CVO_ETC /etc/hydra)"' "$SCRIPT"
+  grep -qF 'KILL="$ETC/credit-verify-outbound.disabled"' "$SCRIPT"
+  gate="$BATS_TEST_DIRNAME/../intercom-verify-request.sh"
+  grep -qF 'DISABLED_DIR="/etc/hydra"' "$gate"
+  grep -qF '[ -e "$DISABLED_DIR/$CAMPAIGN.disabled" ]' "$gate"
+  grep -qF 'CLAIM_STATUS_CAMPAIGN = "claim-status"' "$BATS_TEST_DIRNAME/../credit_review/verify_ledger.py"
 }
 
 r14_cap() { # <segment> <dry-run|apply>: the --max-users the reminder's check / apply was handed (empty = not run)
