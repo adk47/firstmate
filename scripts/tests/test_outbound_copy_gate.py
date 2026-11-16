@@ -737,9 +737,10 @@ class ModeTests(unittest.TestCase):
         self.assertEqual((g.RUBRIC_FAMILY["agent-reply"], g.mode_of("agent-reply", pol)), ("support", "enforce"))
         self.assertEqual(g.mode_of("agent-reply", {"default": "observe", "enforce": [], "observe": ["agent-reply"]}),
                          "enforce")
-        for campaign in ("uvn-status", "status-team-review", "status-doc-received", "proof-need-ask", "claim-status",
+        for campaign in ("uvn-status", "status-team-review", "status-doc-received", "claim-status",
                          "resolve-notify", "overdue-verification-notifier", "merge-outcome-notify"):
             self.assertEqual(g.mode_of(campaign, pol), "observe", campaign)
+        self.assertEqual(g.mode_of("proof-need-ask", pol), "enforce")
         self.assertTrue(g.retired_why("verify-live", "windowed", pol))
         self.assertEqual(g.retired_why("verify-live", "v1", pol), "")
         # every enforced campaign says why it is ready, so the list cannot grow by a bare edit

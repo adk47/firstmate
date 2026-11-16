@@ -99,7 +99,8 @@ ASK_NEEDS = (NEED_READABLE, NEED_COUNTERPARTY, NEED_DASHBOARD, NEED_ISSUER)
 ASK_LINES = {
     NEED_READABLE: "the same document as a PDF or a clear photo of the whole page",
     NEED_COUNTERPARTY: "a split sheet or agreement signed by the artist or label, a PRO registration that lists "
-                       "you in your role, or a royalty statement that names the track",
+                       "you in your role, a royalty statement that names the track, an invoice, or a letter from "
+                       "the label",
     NEED_DASHBOARD: "one screenshot of your distributor dashboard that shows the release and the code we send you",
     NEED_ISSUER: "one line from the issuer's own address confirming your role on the track, or their original "
                  "email with its headers",

@@ -48,7 +48,11 @@ bodies of that dry run on 2026-11-14 and that verdict replaced the sign-off, so 
 `observed` pass for it as it does for the reminder);
 `credit-approved-elsewhere` is enforced from its first byte (no reviewer has read the
 line, and the sender locks it with `APPROVED_ELSEWHERE_COPY_APPROVED=0`, so enforcing it stops no message that is sent
-today); `verify-live` / `windowed` is retired (it states a removal deadline; the reviewer
+today); `proof-refusal` is enforced from its first body (the campaign had never sent, so there was no `report` to
+cite; the reviewer's GO of 2026-11-15T13:41Z covered three rendered single-track bodies, and the sender holds an
+`observed` pass as a belt); `proof-need-ask` is enforced (ruled 2026-11-15T21:13Z: an observed pass sent the ask with
+no signed verdict on its exact bytes, a rewrite included, so it is reviewed under the rubric's "The document ask");
+`verify-live` / `windowed` is retired (it states a removal deadline; the reviewer
 refused it, and the sender already locks it with `LIVE_WINDOWED_COPY_APPROVED=0`); everything else is observed.
 
 ## How it works
@@ -204,11 +208,35 @@ Rule 3 of the default rubric ("never give a reason for a denial") is scoped, not
 This is not a family: `proof-refusal` is reviewed under the default rubric and is enforced by its row in
 `policies/outbound-copy-enforce.json` plus the sender's own hold on an `observed` pass.
 
+### The document ask (ruled 2026-11-15T20:30Z)
+
+`proof-need-ask` is neither class: nothing has been decided, a document came back that could not be checked on its
+own, and the note asks for one that can. Under the two classes alone the reviewer answered `rewrite` on the body
+`main` was sending and on the captain's new one-track ask alike, reading "on its own it isn't something we can
+check" as a reason outside the class 2 template and "nothing is removed" as a promise. The rubric's section "The
+document ask" admits that one message and nothing else:
+
+- It quotes the four parts word for word: the opening, exactly one of the four sendable need lines (one track,
+  several tracks, an unreadable file, the dashboard screenshot with a code), the closing and the sign-off, plus the
+  email subject. The issuer-email line is not listed, so a body carrying it is not approved.
+- A message with some of those words that is not built from all four parts gets nothing from the section. Measured
+  on the changed rubric, one read each, with a scratch signing key: the six sendable shapes and a class 2 refusal
+  were approved; an added promise, an added document, a "was not verified" sentence and another campaign's ask
+  that gives a reason were each `rewrite`.
+- The quoted sentences are the renderer's (`proof_need_ask` and its need lines in
+  `scripts/intercom-verify-request.sh`). Cases in `scripts/tests/intercom-verify-request.bats` render each shape and
+  fail when the rubric does not carry the same words, so a copy change that forgets the rubric is a red test and
+  not a body the reviewer silently stops approving.
+
+It is `enforce` (ruled 2026-11-15T21:13Z): an observed pass sent the ask with no signed verdict on its exact bytes, a rewrite included, so no body goes without a signed approve of its exact bytes. After the deploy every `proof-need-ask` body holds as `copy_review_pending` until the reviewer host is installed from the deployed tree and signs.
+
 **Editing the default rubric voids every verdict signed under it.** A verdict names the rubric's sha256, so after
 a deploy of a changed `policies/outbound-copy-rubric.md` every body of an enforced campaign is
 `copy_review_pending` again until the reviewer host (after `install-reviewer-host.sh`) signs it, and every observed
-campaign's rows read `observed:pending`. On 2026-11-15 that was `uvn-reminder-14` and `uvn-new-rows`, both armed.
-Plan the reviewer round with the merge.
+campaign's rows read `observed:pending`. On 2026-11-15 that was `uvn-reminder-14`, `uvn-new-rows`, `proof-refusal`
+and `proof-need-ask`, all armed, twice: once for the two classes and once for the document ask. Plan the reviewer
+round with the merge, and install the reviewer host only after the deploy: a host holding a default rubric the
+sender does not yet enforce stops the whole round (`rubric mismatch`), for every campaign.
 
 ## A reply an agent wrote
 

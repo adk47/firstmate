@@ -2694,10 +2694,27 @@ def removal_notice($fn; $c; $maxl):
 # plain "document" when stage 2 could not tell) and up to two OTHER held titles it names (catalog
 # titles, never document text). Several credits: up to 3 "<track> as <role>" pairs, then "and N more".
 # proof-need-ask (proof-loop captain card L11c, verbatim): common opening, the line for the reader's need code,
-# (the counterparty line ends "Reply here with it and we'll check it.": p1 ruling 098 under captain-1028-213x (c)),
+# (the PLURAL counterparty line ends "Reply here with it and we'll check it.": p1 ruling 098 under
+# captain-1028-213x (c); the one-track counterparty line is proof_request_ask below),
 # common closing (its "Thank you, Caroline, Muso Support" is the shared sign-off). One character differs from the
 # card: the issuer line's em dash is " - " (the gate refuses an em dash in any note: Caroline's voice; the approved
 # queued line uses the same " - "), flagged to proof-loop-lead-fable-p1 for the captain's yes.
+#
+# The one-track ask for a document of record (captain 2026-11-15T19:27Z; <item> and <role> are its only slots).
+# Measured that day on 9,147 extracted documents: 8,167 were credits pages, dashboards or screenshots and 0 of them
+# verified, so the ask names the documents that can. Its list is proof_reviewer.ASK_LINES' counterparty documents
+# word for word, then the invoice and the label's letter (a bats case holds the two together). The dashboard
+# sentence is true of both routes and must stay so: a dashboard screenshot alone is not checked, one that shows the
+# code of the distributor_dashboard_with_code line below is.
+# It is the approved text with ONE ruled change (firstmate 2026-11-15T20:30Z): the approved words were "the code we
+# sent you", and the person this line reaches was sent NO code (a code is issued only with that other line, and a
+# request is asked once). So it reads "a code we sent you" and then says what to send where there is none. The
+# payload of this need carries no code, so the line cannot branch on one: the sentence is true with a code or without.
+# Not the plural line: the text names one track and one role, so several tracks keep the ruled plural text.
+# These sentences are quoted in policies/outbound-copy-rubric.md ("The document ask"): the reviewer admits them in
+# these words only, so a change here is a change there too (a bats case holds the two together).
+def proof_request_ask($item; $role):
+  "To verify your credit on \($item) as \($role), send one of these: a split sheet or agreement signed by the artist or label, a PRO registration that lists you in your role, a royalty statement that names the track, an invoice, or a letter from the label. A screenshot of a dashboard or a credits page on its own cannot be checked, because it does not show who holds the right - but a dashboard screenshot that shows a code we sent you can be checked, because the code ties the release to your account. If we have not sent you a code, send one of the documents above. Reply to this conversation with it and the check runs again automatically.";
 def proof_need_line($n; $x):
   if $n.code == "readable_document" then
     "The file is hard to read on our side. Reply to this message with the same document as a PDF or a clear photo of the whole page, and we'll check it."
@@ -2706,7 +2723,7 @@ def proof_need_line($n; $x):
   elif $n.code == "distributor_dashboard_with_code" then
     "Open your \(if ($n.distributor // "") != "" then $n.distributor + " dashboard" else "distributor dashboard" end) in a web browser with your release \($x.track_title | qt) visible, press Ctrl+F (or Cmd+F on a Mac), type this code in the find box: \($n.verify_code), and take one screenshot that shows both. On a phone, open the dashboard website and use Share → Find on page. Reply here with the screenshot; the code works for 7 days."
   else
-    "We need the other side of it: a split sheet or agreement signed by the artist or label, a PRO registration (ASCAP, BMI, SOCAN or similar) that lists you as \($x.role), or a royalty statement that names the track. Reply here with it and we'll check it."
+    proof_request_ask($x.track_title | qt; $x.role)
   end;
 # the plural lines (Fable [key=l11c-plural]); only readable + counterparty can send (the other two are held at send)
 def proof_need_line_plural($n; $x):
@@ -2768,7 +2785,7 @@ def approved_elsewhere($fn; $c; $maxl):
 # closing sentence once. One track is ONE paragraph: byte for byte an approved body. No greeting and no sign-off.
 # refusal_evidence is proof_reviewer.ASK_LINES per need code, word for word (pinned by test_proof_refusal.py).
 def refusal_evidence: {
-  counterparty_signed_or_registered: "a split sheet or agreement signed by the artist or label, a PRO registration that lists you in your role, or a royalty statement that names the track",
+  counterparty_signed_or_registered: "a split sheet or agreement signed by the artist or label, a PRO registration that lists you in your role, a royalty statement that names the track, an invoice, or a letter from the label",
   readable_document: "the same document as a PDF or a clear photo of the whole page"}[.];
 def refusal_note($c):
   def roles: [ (.role // "") | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0) ];

@@ -15,6 +15,9 @@ Captain, 2026-11-15: that rule is scoped, not dropped. There are two classes of 
 about a credit that was not verified (see "The two classes" below). Rule 3 applies in full
 to the first and is replaced by one fixed template in the second.
 
+A request for a document, sent before anything is decided, is neither class. One such
+message is admitted, word for word (see "The document ask" below).
+
 ## Hard rules (any one broken: not approve)
 
 1. Never state or imply fraud, abuse, cheating, a fake or altered document, suspicious
@@ -89,7 +92,7 @@ For a class 2 message:
   approve.
   1. "the document you sent does not name you as {role} on {title}" with "a split sheet or
      agreement signed by the artist or label, a PRO registration that lists you in your
-     role, or a royalty statement that names the track".
+     role, a royalty statement that names the track, an invoice, or a letter from the label".
   2. "the document you sent credits you on other tracks, not on {title}" with the same
      evidence as pair 1.
   3. "we could not read the document you sent" with "the same document as a PDF or a clear
@@ -116,6 +119,89 @@ For a class 2 message:
   or says what to send: it is class 1 with a reason. Not approve.
 - A class 2 message with any promise beyond its closing (a date, a deadline, a removal,
   an outcome): not approve, rule 5.
+
+## The document ask
+
+This is a third kind of message and it is neither class. Nothing has been decided: the
+person sent us a document, we could not check it on its own, and we ask for one we can
+check. It denies nothing and it does not say a credit was not verified. Ruled
+2026-11-15T20:30Z on the ask copy the captain approved 2026-11-15T19:27Z. This section
+admits that one message in its own words. It loosens no rule for any other message.
+
+A message is a document ask only when it is these four parts, in this order, word for
+word, with nothing added and nothing left out. The words in braces are the only slots.
+
+1. The opening:
+
+       Hi {first name}, thanks for {document} for your {role} credit on {title} by {artist}. We have it on file, but on its own it isn't something we can check against an outside source.
+
+   {document} is the kind of file and the day it was sent ("the image you sent on October
+   18", "the PDF you sent on May 2, 2025", "the file you sent on ...", "the documents you
+   sent on ..."). With several roles it reads "your {roles} credits". With several tracks it
+   reads "for your credit requests for {titles}". With several documents its second
+   sentence reads "We have them on file, but on their own they aren't something we can
+   check against an outside source."
+
+2. One need line, exactly one of these four:
+
+   a. One track:
+
+          To verify your credit on {title} as {role}, send one of these: a split sheet or agreement signed by the artist or label, a PRO registration that lists you in your role, a royalty statement that names the track, an invoice, or a letter from the label. A screenshot of a dashboard or a credits page on its own cannot be checked, because it does not show who holds the right - but a dashboard screenshot that shows a code we sent you can be checked, because the code ties the release to your account. If we have not sent you a code, send one of the documents above. Reply to this conversation with it and the check runs again automatically.
+
+   b. Several tracks:
+
+          We need the other side of it: a split sheet or agreement signed by the artist or label, a PRO registration (ASCAP, BMI, SOCAN or similar) that lists you in your role on each track, or a royalty statement that names the tracks. Reply here with it and we'll check it.
+
+   c. A file we could not read:
+
+          The file is hard to read on our side. Reply to this message with the same document as a PDF or a clear photo of the whole page, and we'll check it.
+
+   d. A dashboard screenshot with a code. This line, and only this line, carries a code:
+
+          Open your {distributor} dashboard in a web browser with your release {title} visible, press Ctrl+F (or Cmd+F on a Mac), type this code in the find box: {code}, and take one screenshot that shows both. On a phone, open the dashboard website and use Share → Find on page. Reply here with the screenshot; the code works for 7 days.
+
+      Without a distributor name it reads "Open your distributor dashboard".
+
+3. The closing: "Your request stays open while we look, and nothing is removed." ("Your
+   requests stay open" with several requests).
+
+4. The sign-off: "Thank you," and then "Caroline, Muso Support".
+
+Sent by email it has a subject, which is "About the document for your Muso credit
+request" ("requests" with several). No other subject.
+
+For a document ask, and for no other message:
+
+- The opening's second sentence, and line a's sentence that a screenshot of a dashboard or
+  a credits page on its own cannot be checked, say what a kind of document can show. They
+  are said before anything is decided. They are not a reason for a denial (rule 3) and not
+  "which check failed" (rule 2). They are admitted in these words only.
+- The documents line a names are the ones listed there and no others: a split sheet or
+  agreement signed by the artist or label, a PRO registration, a royalty statement, an
+  invoice, a letter from the label. A message that names any other document, or that says
+  a screenshot, a link or a credits page can verify, is not a document ask.
+- Line a is one ask. It says what to send, says that a dashboard screenshot counts only
+  with a code from us, and points a person with no code back to the same list. That is not
+  asking twice (rule 8). Line a never states a code and never says how to get one.
+- The closing tells the person where the request stands today (rule 7). "Nothing is
+  removed" describes today. It is not a promise about later (rule 5), and it is admitted
+  in these words only: no date, no outcome, nothing about what happens next.
+- "The check runs again automatically" and "we'll check it" say what happens when the
+  document arrives. They promise no result (rule 5).
+- No email address and no link. A need line that asks anyone to write to an address is not
+  listed here, so a message carrying it is not approve.
+- Every other hard rule applies unchanged.
+
+A message that has some of these words and is not built from all four parts gets nothing
+from this section: judge it by the rest of the rubric. In particular:
+
+- An added sentence or clause, a date, a deadline, an outcome, or anything about removal
+  beyond the closing: not approve.
+- Anything that says or implies a credit, a request or a claim is denied or was not
+  verified: it is not a document ask. It is class 1 or class 2 and is judged there.
+- Anything that states or implies fraud, abuse, a fake or altered document, impersonation
+  or suspicious activity, or that names an internal gate, score, band, flag, list, rule
+  or threshold: refuse.
 
 ## What each stage must do
 

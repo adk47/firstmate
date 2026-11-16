@@ -5096,11 +5096,164 @@ $close" ]
   needfile "$TEST_TMPDIR/n.json" '.need += {code:"counterparty_signed_or_registered"}'
   run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
   [ "$(rendered .body | plain)" = "$open
-We need the other side of it: a split sheet or agreement signed by the artist or label, a PRO registration (ASCAP, BMI, SOCAN or similar) that lists you as Mixing, or a royalty statement that names the track. Reply here with it and we'll check it.
+To verify your credit on \"Song A\" as Mixing, send one of these: a split sheet or agreement signed by the artist or label, a PRO registration that lists you in your role, a royalty statement that names the track, an invoice, or a letter from the label. A screenshot of a dashboard or a credits page on its own cannot be checked, because it does not show who holds the right - but a dashboard screenshot that shows a code we sent you can be checked, because the code ties the release to your account. If we have not sent you a code, send one of the documents above. Reply to this conversation with it and the check runs again automatically.
 $close" ]
   # l1 [key=l11c-asks] exact text (+ the p1 165 / Fable 166 document naming): no Jaxsta, no "nothing else is needed"
   body="$(rendered .body | plain)"
   [[ "$body" != *"Jaxsta"* ]]; [[ "$body" != *"Nothing else is needed"* ]]
+}
+
+# The one-track ask for a document of record (captain 2026-11-15T19:27Z). 8,167 of 9,147 documents customers sent
+# were credits pages, dashboards or screenshots and none verified, so the ask names what can. One assertion a line.
+record_ask() { # the need paragraph of the one-track counterparty ask, as the customer reads it
+  needfile "$TEST_TMPDIR/n.json" '.need.code = "counterparty_signed_or_registered"'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  ASK="$(rendered .body | plain | sed -n 2p)"
+}
+
+@test "document-of-record ask: the rendered ask is the approved text with its one ruled change, byte for byte, <item> and <role> its only slots" {
+  record_ask
+  approved='To verify your credit on {item} as {role}, send one of these: a split sheet or agreement signed by the artist or label, a PRO registration that lists you in your role, a royalty statement that names the track, an invoice, or a letter from the label. A screenshot of a dashboard or a credits page on its own cannot be checked, because it does not show who holds the right - but a dashboard screenshot that shows a code we sent you can be checked, because the code ties the release to your account. If we have not sent you a code, send one of the documents above. Reply to this conversation with it and the check runs again automatically.'
+  want="${approved/\{item\}/\"Song A\"}"
+  want="${want/\{role\}/Mixing}"
+  [ "$ASK" = "$want" ]
+  [[ "$ASK" != *"{"* ]]
+}
+
+@test "document-of-record ask: it names each document of record" {
+  record_ask
+  [[ "$ASK" == *"a split sheet or agreement signed by the artist or label"* ]]
+  [[ "$ASK" == *"a PRO registration that lists you in your role"* ]]
+  [[ "$ASK" == *"a royalty statement that names the track"* ]]
+  [[ "$ASK" == *"an invoice"* ]]
+  [[ "$ASK" == *"a letter from the label"* ]]
+}
+
+@test "document-of-record ask: every kind it names is a document of record by the reader's own rule (RECORD_DOC_TYPES)" {
+  python3 -c "import sys; sys.path.insert(0, '$HYDRA_REPO/scripts'); from credit_verify.docverify import gate
+print(' '.join(gate.RECORD_DOC_TYPES))" > "$TEST_TMPDIR/record_types.txt"
+  grep -qw split_sheet "$TEST_TMPDIR/record_types.txt"
+  grep -qw contract "$TEST_TMPDIR/record_types.txt"
+  grep -qw pro_registration "$TEST_TMPDIR/record_types.txt"
+  grep -qw invoice "$TEST_TMPDIR/record_types.txt"
+  grep -qw letter "$TEST_TMPDIR/record_types.txt"
+  ! grep -qw dashboard_screenshot "$TEST_TMPDIR/record_types.txt"
+}
+
+@test "document-of-record ask: it carries proof_reviewer.ASK_LINES' counterparty documents word for word (one vocabulary)" {
+  record_ask
+  python3 -c "import re, sys; sys.path.insert(0, '$HYDRA_REPO/scripts'); from credit_review import proof_reviewer as pr
+print('\n'.join(re.split(r', (?:or )?', pr.ASK_LINES[pr.NEED_COUNTERPARTY])))" > "$TEST_TMPDIR/ask_lines.txt"
+  [ "$(wc -l < "$TEST_TMPDIR/ask_lines.txt")" -eq 5 ]
+  while IFS= read -r doc; do
+    [[ "$ASK" == *"$doc"* ]] || { echo "not in the ask: $doc"; false; }
+  done < "$TEST_TMPDIR/ask_lines.txt"
+}
+
+@test "document-of-record ask: it does not say a dashboard screenshot alone can verify" {
+  record_ask
+  [[ "$ASK" == *"A screenshot of a dashboard or a credits page on its own cannot be checked"* ]]
+  alone="${ASK%% - but *}"
+  [[ "$alone" != *"can be checked"* ]]
+}
+
+@test "document-of-record ask: it does say a dashboard screenshot with the code can" {
+  record_ask
+  [[ "$ASK" == *"a dashboard screenshot that shows a code we sent you can be checked"* ]]
+  [[ "$ASK" == *"because the code ties the release to your account"* ]]
+}
+
+# firstmate 2026-11-15T20:30Z: the approved words were "the code we sent you", and nobody this line reaches was sent
+# one (a code is issued only with the distributor_dashboard_with_code line). True with a code or without.
+@test "document-of-record ask: it never says a code was sent, and a person with no code is told what to send" {
+  record_ask
+  [[ "$ASK" != *"the code we sent you"* ]]
+  [[ "$ASK" == *"If we have not sent you a code, send one of the documents above."* ]]
+  [[ "$ASK" != *"MUSO-"* ]]
+}
+
+# The reviewer admits this ask in the words policies/outbound-copy-rubric.md quotes ("The document ask") and in no
+# others: a renderer that drifts from the rubric is sent unapproved, so the two are held together here.
+rubric_has() { # <sentence>: it is in the rubric, whatever the line wrapping
+  python3 - "$HYDRA_REPO/policies/outbound-copy-rubric.md" "$1" <<'PYEOF'
+import pathlib, sys
+flat = lambda s: " ".join(s.split())
+sys.exit(0 if flat(sys.argv[2]) in flat(pathlib.Path(sys.argv[1]).read_text()) else 1)
+PYEOF
+}
+
+@test "document-of-record ask: the rubric quotes the one-track ask word for word (title and role its slots)" {
+  record_ask
+  quoted="${ASK/\"Song A\"/\{title\}}"
+  quoted="${quoted/ as Mixing,/ as \{role\},}"
+  expected='To verify your credit on {title} as {role}, send one of these: a split sheet or agreement signed by the artist or label, a PRO registration that lists you in your role, a royalty statement that names the track, an invoice, or a letter from the label. A screenshot of a dashboard or a credits page on its own cannot be checked, because it does not show who holds the right - but a dashboard screenshot that shows a code we sent you can be checked, because the code ties the release to your account. If we have not sent you a code, send one of the documents above. Reply to this conversation with it and the check runs again automatically.'
+  [ "$quoted" = "$expected" ]
+  rubric_has "$quoted"
+}
+
+@test "document-of-record ask: the rubric quotes the frame and the other sendable need lines word for word" {
+  record_ask
+  body="$(rendered .body | plain)"
+  opening="$(printf '%s\n' "$body" | sed -n 1p)"
+  rubric_has "${opening#*by Big Star. }"
+  rubric_has "$(printf '%s\n' "$body" | sed -n 3p)"
+  rubric_has "$(rendered .subject)"
+  needfile "$TEST_TMPDIR/n.json" '.need.code = "readable_document"'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  rubric_has "$(rendered .body | plain | sed -n 2p)"
+  needfile "$TEST_TMPDIR/n.json" '.need.code = "counterparty_signed_or_registered" | .credits += [
+    {request_id:"r2", role:"Mastering", track_title:"Song B", artist_name:"Big Star", profile_id:"p1", track_id:"t2"}]'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  rubric_has "$(rendered .body | plain | sed -n 2p)"
+  needfile "$TEST_TMPDIR/n.json" '.need += {code:"distributor_dashboard_with_code", verify_code:"MUSO-7K2Q"}'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  line="$(rendered .body | plain | sed -n 2p)"
+  line="${line/your distributor dashboard/your \{distributor\} dashboard}"
+  line="${line/\"Song A\"/\{title\}}"
+  rubric_has "${line/MUSO-7K2Q/\{code\}}"
+}
+
+@test "document-of-record ask: the rubric admits no need line that names an email address" {
+  ! grep -q "verify@muso.ai" "$HYDRA_REPO/policies/outbound-copy-rubric.md"
+}
+
+@test "document-of-record ask: the dashboard-code route is unchanged, and still asks for the screenshot with the code" {
+  needfile "$TEST_TMPDIR/n.json" '.need += {code:"distributor_dashboard_with_code", verify_code:"MUSO-7K2Q"}'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  line="$(rendered .body | plain | sed -n 2p)"
+  [ "$line" = 'Open your distributor dashboard in a web browser with your release "Song A" visible, press Ctrl+F (or Cmd+F on a Mac), type this code in the find box: MUSO-7K2Q, and take one screenshot that shows both. On a phone, open the dashboard website and use Share → Find on page. Reply here with the screenshot; the code works for 7 days.' ]
+}
+
+@test "document-of-record ask: no promise, no date and no person in it, and it passes the gate's own lint as an ask" {
+  record_ask
+  [[ "$ASK" != *"we'll"* ]]
+  [[ "$ASK" != *"we will"* ]]
+  [[ "$ASK" != *"team"* ]]
+  [[ "$ASK" != *"verify@muso.ai"* ]]
+  [[ "$ASK" != *"—"* ]]
+  rendered . > "$TEST_TMPDIR/rendered.json"
+  hit="$(python3 -c "import json, sys; sys.path.insert(0, '$HYDRA_REPO/scripts'); from outbound_copy import gate
+m = json.load(open('$TEST_TMPDIR/rendered.json'))
+print(gate.lint(m.get('subject') or '', m['body'], gate.CAMPAIGN_STAGE['proof-need-ask'], ['Jane', 'Mixing', 'Song A', 'Big Star']))")"
+  [ -z "$hit" ]
+}
+
+@test "document-of-record ask: several roles on one track are named in the one slot; the ask and its frame say nothing else new" {
+  needfile "$TEST_TMPDIR/n.json" '.need.code = "counterparty_signed_or_registered" | .credits += [.credits[0] | .request_id = "r2" | .role = "Mastering"]'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  body="$(rendered .body | plain)"
+  [[ "$body" == *'To verify your credit on "Song A" as Mixing and Mastering, send one of these: '* ]]
+  [ "$(printf '%s\n' "$body" | sed -n 1p)" = 'Hi Jane, thanks for the image you sent on October 18 for your Mixing and Mastering credits on "Song A" by Big Star. We have it on file, but on its own it isn'"'"'t something we can check against an outside source.' ]
+  [ "$(printf '%s\n' "$body" | sed -n 3p)" = 'Your requests stay open while we look, and nothing is removed.' ]
+}
+
+@test "document-of-record ask: several TRACKS keep the ruled plural line (the approved text names one track and one role)" {
+  needfile "$TEST_TMPDIR/n.json" '.need.code = "counterparty_signed_or_registered" | .credits += [
+    {request_id:"r2", role:"Mastering", track_title:"Song B", artist_name:"Big Star", profile_id:"p1", track_id:"t2"}]'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  line="$(rendered .body | plain | sed -n 2p)"
+  [[ "$line" == "We need the other side of it: "* ]]
+  [[ "$line" != *"To verify your credit on"* ]]
 }
 
 @test "proof-need-ask: the distributor-code ask (captain-approved 2026-10-29 19:0xZ) sends, names its distributor when known, one credit only; a CLOSED filing thread sends by email" {
@@ -6632,7 +6785,7 @@ REF_R2="aaaaaaa2-2222-4222-8222-222222222222"
 REF_R3="aaaaaaa3-3333-4333-8333-333333333333"
 REF_CP="counterparty_signed_or_registered"
 REF_RD="readable_document"
-REF_EV_CP="a split sheet or agreement signed by the artist or label, a PRO registration that lists you in your role, or a royalty statement that names the track"
+REF_EV_CP="a split sheet or agreement signed by the artist or label, a PRO registration that lists you in your role, a royalty statement that names the track, an invoice, or a letter from the label"
 REF_EV_RD="the same document as a PDF or a clear photo of the whole page"
 REF_CLOSE="Reply to this conversation with it and the check runs again automatically. Without it, the result stands."
 refusal_credits() { # <file> then one "request|role|title|artist|reason|need|review_family" per credit
