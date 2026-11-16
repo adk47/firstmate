@@ -523,6 +523,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/established-claimant.py, its credit_review module or its policy is missing"
 [[ -f "$HYDRA_ROOT/scripts/credit_review/precedent_ledger.py" && -f "$HYDRA_ROOT/scripts/credit_review/reconcile_approved.py" ]] \
   || fail "$HYDRA_ROOT/scripts/credit_review/precedent_ledger.py or reconcile_approved.py is missing"
+[[ -f "$HYDRA_ROOT/scripts/credit-ask-tick.sh" && -f "$HYDRA_ROOT/scripts/credit_review/need_asks.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/credit-ask-tick.sh or the ask sender it runs is missing"
 [[ -f "$HYDRA_ROOT/scripts/resolution-matcher.py" ]] \
   || fail "$HYDRA_ROOT/scripts/resolution-matcher.py missing"
 [[ -f "$HYDRA_ROOT/scripts/caroline-behavior-digest.py" ]] \
@@ -3416,6 +3418,67 @@ systemctl start "$mon" >/dev/null 2>&1 || fail "could not start $mon: precedent 
 [[ "$(systemctl is-active "$mon" 2>/dev/null)" == active ]] || fail "$mon is not active after start: precedent approvals would not reach the ledger"
 log "  $mon: active"
 
+# ─── credit-ask-tick: one bounded pass of the per-need proof ask, twice an hour ───
+# scripts/credit-ask-tick.sh hands ONE segment of the need-ask list to the reviewed ask path
+# (need_asks.py send --mode apply) and saves where it stopped. It replaces the unit and script
+# hand-installed on node-8 on 2026-11-14, which ran both segments with no cursor under a 3600 s
+# timeout on a 30-minute timer: the run was killed and restarted the same second, held the
+# credit-group run lock without a gap, and the hourly outbound tick lost every credit family
+# behind its first apply (00:18Z and 01:15Z on 2026-11-15).
+# The budget is the script's: a run walks the list in batches (one check, then one apply of
+# the check's accepted set), saving its cursor after each, and starts no batch past 1500 s or
+# past 240 s before the outbound tick's next :00, whichever is first; any step is killed by
+# 1680 s (plus 30 s to SIGKILL). TimeoutStartSec=1740 sits above that and inside the 1800 s
+# between two timer fires, so two runs cannot overlap; the script's flock on
+# /run/credit-ask-tick.lock says the same. The credit-group run lock is held only inside each
+# apply (at most 300 s), never between batches. :20 and :50 keep it off the outbound tick's
+# start at :00; it yields when that tick is in flight. No Persistent=: a run missed while the
+# host was down is not owed, the next one walks the same cursor.
+# Its writes are under /var/lib/hydra/credit-ask-tick (NOT /opt/hydra, which the deploy rsync
+# overwrites). Exit 1 (a step failed or could not be measured) reaches OnFailure.
+# Stop switch: /etc/hydra/credit-ask-tick.disabled (exit 0, nothing built, nothing sent). This
+# step starts the timer on every deploy, so `systemctl stop credit-ask-tick.timer` lasts only
+# until the next one. docs/credit-verification/credit-ask-tick.md.
+install -d -m 700 /var/lib/hydra/credit-ask-tick
+
+cat > /etc/systemd/system/credit-ask-tick.service << CREDITASKSVC
+[Unit]
+Description=credit-ask-tick: one bounded pass of the per-need proof ask (proof-need-ask)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=1740
+Nice=10
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=/bin/bash $HYDRA_ROOT/scripts/credit-ask-tick.sh
+CREDITASKSVC
+
+cat > /etc/systemd/system/credit-ask-tick.timer << CREDITASKTMR
+[Unit]
+Description=Run credit-ask-tick at :20 and :50 of every hour
+
+[Timer]
+OnCalendar=*-*-* *:20,50:00
+Unit=credit-ask-tick.service
+
+[Install]
+WantedBy=timers.target
+CREDITASKTMR
+
+systemctl daemon-reload
+# FATAL, not a WARN: with the timer down no ask of this family goes out between two outbound
+# ticks, and the service's OnFailure cannot page because the service never starts.
+mon=credit-ask-tick.timer
+systemctl enable "$mon" >/dev/null 2>&1 || fail "could not enable $mon: the ask tick would not run"
+systemctl start "$mon" >/dev/null 2>&1 || fail "could not start $mon: the ask tick would not run"
+[[ "$(systemctl is-active "$mon" 2>/dev/null)" == active ]] || fail "$mon is not active after start: the ask tick would not run"
+log "  $mon: active"
+
 # ─── Codex OAuth keepalive at 15-min cadence ──────────────────
 # PROACTIVE complement to the watchdog: openclaw-watchdog.sh pages REACTIVELY
 # (journal 401 signature, after the fleet is already on the mini fallback);
@@ -5107,6 +5170,7 @@ AUX_ONFAILURE_UNITS=(
   claim-doc-ladder.service
   established-claimant.service
   precedent-ledger-reconcile.service
+  credit-ask-tick.service
   support-resolution-daily.service
   ops-intake-digest.service
   ops-intake-redteam.service

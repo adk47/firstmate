@@ -1707,6 +1707,31 @@ measured audience: `docs/credit-verification/verify-request-notes.md` §"The day
 - **5 users per tick across paid and free** (`NR_CAP` in `scripts/credit-verify-outbound.sh`). Raise it only by a PR
   that cites the first runs' output; never by env, a state file or the policy (`tick_cap` only lowers).
 
+## The ask tick: batches inside its timer, no lock between them, and `sent 0` is the gates
+
+`scripts/credit-ask-tick.sh` (`credit-ask-tick.timer`, :20 and :50) reads the family's arming row and walks one segment
+of the need-ask list in batches: each one a read-only `--check-recipients` pass, then an apply of exactly that check's
+`--signed-accepted` set, then the cursor saved. Doc: `docs/credit-verification/credit-ask-tick.md`.
+
+- **The credit-group run lock is held only inside one apply, never between batches, and never across :00.** The
+  outbound tick does not retry its credit applies on that lock, so the run ends `OUTBOUND_MARGIN_S` before the next :00
+  and re-reads the outbound tick's lock before every check and apply.
+- **Every apply is read back with the outbound tick's checks** (health, refusal spike, fraud, zero-read, sample)
+  before another batch starts; a STOP writes `/etc/hydra/credit-ask-tick.disabled`, and a missing reader refuses the run.
+- **A killed run resumes; it never re-sends.** The cursor moves only after a batch is done, and the ledger's claim before
+  each post (`verify_ledger.claim` / `blocked_ids`) is what keeps a resumed batch from posting twice. Do not add a
+  second idempotency record in the tick: the ledger is the one.
+
+- **A preflight refusal rate is a per-candidate gate population, never evidence of a broken dependency, and it must
+  be measured before anyone calls it broken.** `distributor_preflight_not_ok` labels one user's own gate answer and
+  the line now carries that answer. Where the measurement lives, with its dates and sources:
+  `docs/credit-verification/credit-ask-tick.md` §"`distributor_preflight_not_ok` is a label, not a dependency".
+- **A sender whose run outlives its timer starves the family.** The hand-installed tick (3600 s timeout, 30-minute
+  timer, no cursor) held the credit-group run lock without a gap, and the outbound tick dropped every credit family
+  behind its first apply. A new scheduled sender keeps its hard stop inside its period and yields to the outbound
+  tick's lock; `scripts/tests/credit-ask-tick.bats` holds this one to both.
+- **A deploy starts the timer again**: the stop that lasts is `/etc/hydra/credit-ask-tick.disabled`.
+
 ## The proof refusal: told only where the body is true, and never without a clean read-back
 
 `proof-refusal` (captain 2026-11-15) tells a person why the document they sent did not verify a credit and what

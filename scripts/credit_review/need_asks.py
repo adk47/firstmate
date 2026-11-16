@@ -1043,7 +1043,11 @@ def preflight_ok(p: dict[str, Any], report: verify_notify.Report, wrapper: str, 
     """QA #1513: BEFORE an F9 code is minted, the gate runs every send-time check read-only on the masked payload
     (--check-recipient, C11: the same deferral / hold / refusal as the send). Only 'RECIPIENT OK' mints; any other
     answer is recorded in the run's report exactly as the send would have recorded it, and no code exists to strand.
-    The send itself re-checks everything (a change between the two reads holds, never sends)."""
+    The send itself re-checks everything (a change between the two reads holds, never sends).
+
+    The line this leaves in `refusals` names the gate's own answer. `distributor_preflight_not_ok:<request>` alone was
+    read on 2026-11-15 as one broken dependency refusing every candidate: it is a label on a per-user gate answer
+    (a 7-day cooldown, a comm_state hold, a G2 refusal), and most of those answers are deferrals, not refusals."""
     pre = verify_notify.Report()
     masked = {**p, "need": {**p["need"], "verify_code": CODE_PLACEHOLDER}}
     verify_notify.send_all([masked], pre, mode="dry-run", wrapper=wrapper, runner=runner, extra=["--campaign", CAMPAIGN],
@@ -1062,8 +1066,18 @@ def preflight_ok(p: dict[str, Any], report: verify_notify.Report, wrapper: str, 
             a.extend(b)
         elif isinstance(b, str) and not a:
             setattr(report, f.name, b)
-    report.refusals.append(f"distributor_preflight_not_ok:{p['credits'][0]['request_id']}")
+    report.refusals.append(f"distributor_preflight_not_ok:{p['credits'][0]['request_id']} ({preflight_answer(pre)})")
     return False
+
+
+def preflight_answer(pre: verify_notify.Report) -> str:
+    """What the gate answered on the distributor preflight, in its own words: `<result>: <the gate's first line>`, a
+    halt, or that it answered nothing. One line, bounded; it decides nothing."""
+    if pre.halted:
+        return f"halted: {pre.halted}"[:200]
+    for o in pre.outcomes:
+        return f"{o.get('result')}: {o.get('reason')}"[:200]
+    return "the gate did not answer RECIPIENT OK and recorded no outcome"
 
 
 def accounting(rep: verify_notify.Report) -> dict[str, Any]:

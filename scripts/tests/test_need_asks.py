@@ -602,6 +602,14 @@ class NeedAsksTest(unittest.TestCase):
         self.assertTrue(getattr(rep, "cap_short", False))
         self.assertEqual([o["reason"] for o in rep.outcomes], ["daily_cap_short"])
         self.assertEqual([a for a in gate.calls if "--check-recipient" not in a], [])
+        with unittest.mock.patch.object(na.uvn_status, "DAILY_MAX", 2):
+            # the family clamp the ask tick applies (its daily cap read) hands --max-users; the shared credit cap still
+            # stops the users past today's room
+            gate = FakeGate()
+            rep = na.send(list_path=str(lst), segment="paid", mode="apply", query=self.q, runner=gate,
+                          wrapper=str(unlocked), ledger_path=ledger, max_users=50)
+            self.assertTrue(rep.outcomes and all(o["reason"].startswith("daily_cap") for o in rep.outcomes))
+            self.assertEqual([a for a in gate.calls if "--check-recipient" not in a], [])
         with unittest.mock.patch.object(na.uvn_status, "DAILY_MAX", 3):        # one slot left: the one user goes
             gate = FakeGate(); rep = run(gate)
         self.assertEqual(rep.halted, "")
@@ -1279,7 +1287,10 @@ class DistributorIssueOrderTest(unittest.TestCase):
                            ledger_path=str(d / "ledger.sqlite3"), issuer=issuer)
             self.assertEqual(issued, [])                                    # nothing minted while it would be held
             self.assertEqual((rep1.deferred_users, rep1.sent_notes), (1, 0))
-            self.assertIn("distributor_preflight_not_ok:r1", rep1.refusals)
+            # the line names the gate's own answer: a deferral here, never a bare label that reads as a broken check
+            self.assertEqual(rep1.refusals,
+                             ["distributor_preflight_not_ok:r1 (deferred: messaged_7d credits=1 (x))"])
+            self.assertEqual(rep1.refused_users, 0)
             self.assertTrue(all("--check-recipient" in a for a in state["argv"]))   # no live send attempted
             state["day"] = 2
             rep2 = na.send(list_path=str(lst), segment="paid", mode="apply", query=lambda sql: [], runner=gate,
