@@ -1139,7 +1139,7 @@ PYSRC
     CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 run -1 "$SCRIPT"
   [ $(( $(date +%s) - t0 )) -lt 25 ]
   grep -q "owing builder on the rebuild before uvn-status paid hit the 6900s deadline (rc=124" "$(newest_tick)"
-  grep -q "credit families: FAILED at the unmeasured bar, the deadline or a failed apply; the tick ends here" "$(newest_tick)"
+  grep -q "credit families: FAILED at the deadline or a failed apply; the tick ends here" "$(newest_tick)"
   if grep -q "the next family group still runs" "$(newest_tick)"; then false; fi
   # nothing behind a spent budget runs blind. The claim group runs BEFORE the credit families now
   # ([key=claims-never-starved]), so the group behind the rebuild is the need group.
@@ -1165,7 +1165,7 @@ PYSRC
     CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6880 CVO_TICK_HARD_S=6900 run -1 "$SCRIPT"
   [ $(( $(date +%s) - t0 )) -lt 60 ]
   grep -q "proof-need-ask builder (rebuild before need families) hit the 6900s deadline (rc=124" "$(newest_tick)"
-  grep -q "need families: FAILED at the unmeasured bar, the deadline or a failed apply; the tick ends here" "$(newest_tick)"
+  grep -q "need families: FAILED at the deadline or a failed apply; the tick ends here" "$(newest_tick)"
   if grep -q "proof-need-ask builder failed (rebuild before need families" "$(newest_tick)"; then false; fi
 }
 
@@ -3359,7 +3359,7 @@ PY
   : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"; rm -f "$CALLS.need" "$CVO_ETC/credit-verify-outbound.disabled" "$CVO_LEDGER.segments.jsonl"
   STUB_APPLY_RC=1 STUB_APPLY_RC_SUB=claim-proof-ask run -1 "$SCRIPT"
   grep -q "claim-proof-ask-free: apply failed rc=1; tick stops" "$(newest_tick)"
-  grep -q "claim families: FAILED at the unmeasured bar, the deadline or a failed apply; the tick ends here" "$(newest_tick)"
+  grep -q "claim families: FAILED at the deadline or a failed apply; the tick ends here" "$(newest_tick)"
   if grep -q -- "^uvn-status " "$CALLS"; then false; fi                  # no credit family started
   no_group_behind_credit
 }
@@ -3685,17 +3685,23 @@ PY
   grep -q "Z tick done$" "$(newest_tick)"
 }
 
-@test "outbound tick (Fable d2, Defect A): the UNMEASURED bar (max(5, 10% of the batch)) is the one check failure that ends the tick - loudly, in tick.log, with no later group" {
+@test "outbound tick ([key=family-unmeasured-stop], firstmate 037): an UNMEASURED STOP ends only THAT family - loud in tick.log, nothing sent past it, and the families and groups behind it (proof-need-ask) still run" {
   touch "$CVO_ETC/credit-verify-outbound.live"
   claim_list
   rm -f "$CVO_ETC/credit-verify-outbound.disabled"
   STUB_UNMEASURED=5 STUB_UNMEASURED_STOP=1 STUB_UNMEASURED_SUB=uvn-status run -1 "$SCRIPT"
   grep -q "uvn-status-paid: UNMEASURED STOP - the check crossed the bar (unmeasured 5 / bar 5" "$(newest_tick)"
-  grep -q "credit families: FAILED at the unmeasured bar, the deadline or a failed apply; the tick ends here" "$(newest_tick)"
-  no_group_behind_credit                                                  # nothing behind a slow gate runs blind
-  if grep -q -- "^uvn-status .*--mode apply" "$CALLS"; then false; fi     # and no credit apply (the claims ran before it)
+  grep -q "uvn-status-paid: .*THIS FAMILY stops and the families behind it still run" "$(newest_tick)"
   jq -e '.stopped_on_unmeasured | test("UNMEASURED STOP: 5 of 12")' "$CVO_OUT_ROOT"/*/uvn-status-paid-check.json >/dev/null
-  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]                     # a loud exit 1, not an auto-kill
+  # the next uvn-status family is still checked (under its own bar), and nothing is sent past a bar
+  grep -q -- "^uvn-status --list .*owing-uvn.json --segment free .*--mode dry-run" "$CALLS"
+  if grep -q -- "^uvn-status .*--mode apply" "$CALLS"; then false; fi
+  # the group is recorded failed and the groups behind it run: the need group builds its list
+  grep -q "credit families: FAILED (rc=1); the next family group still runs" "$(newest_tick)"
+  if grep -q "credit families: FAILED at the deadline or a failed apply; the tick ends here" "$(newest_tick)"; then false; fi
+  grep -q -- "need-build" "$CALLS.need"
+  grep -q "tick done with FAILED group(s): credit families" "$(newest_tick)"   # still a loud exit 1
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]                          # not an auto-kill
 }
 
 @test "outbound tick (Fable d2): a claim-family CHECK failure does not skip the credit families, and claims still go first" {

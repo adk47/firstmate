@@ -623,6 +623,98 @@ class NeedAsksTest(unittest.TestCase):
             gate = FakeGate(); rep = run(gate)
         self.assertTrue(rep.policy_error); self.assertEqual(gate.calls, [])
 
+    def test_an_own_lock_apply_runs_beside_the_group_lock_and_leaves_the_reserve(self):
+        # firstmate 031: the ask tick's apply takes its OWN run lock, so it sends while the outbound tick holds the
+        # credit-group lock; with no lock between the two writers it leaves OWN_LOCK_RESERVE of the shared cap unspent
+        import fcntl
+        lst = self.d / "list.json"
+        lst.write_text(json.dumps(self.build()))
+        ledger = str(self.d / "ledger.sqlite3")
+        unlocked = self.d / "gate-open.sh"
+        unlocked.write_text("readonly PROOF_NEED_ASK_COPY_APPROVED=1\n")
+        run = lambda gate: na.send(list_path=str(lst), segment="paid", mode="apply", query=self.q, runner=gate,  # noqa: E731
+                                   wrapper=str(unlocked), ledger_path=ledger, own_lock=True)
+        sends = lambda gate: [a for a in gate.calls if "--check-recipient" not in a]  # noqa: E731
+        with open(f"{ledger}.credit-group.run.lock", "a+") as group:
+            fcntl.flock(group.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)      # the outbound tick is applying
+            with unittest.mock.patch.object(na.uvn_status, "DAILY_MAX", na.OWN_LOCK_RESERVE):
+                gate = FakeGate(); rep = run(gate)                          # room only inside the reserve: none
+            self.assertEqual(sends(gate), [])
+            self.assertTrue(rep.outcomes and all(o["reason"].startswith("daily_cap") for o in rep.outcomes))
+            with unittest.mock.patch.object(na.uvn_status, "DAILY_MAX", na.OWN_LOCK_RESERVE + 1):
+                gate = FakeGate(); rep = run(gate)                          # one past the reserve: the one user goes
+            self.assertEqual(rep.halted, "")
+            self.assertEqual(len(sends(gate)), 1)
+            self.assertFalse([o for o in rep.outcomes if o["reason"].startswith("daily_cap")])
+        with open(na.own_lock_path(ledger), "a+") as own:
+            fcntl.flock(own.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)        # another ask-tick apply is running
+            gate = FakeGate(); rep = run(gate)
+        self.assertIn("another ask-tick apply run is in progress", rep.halted)
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(na._GROUP_LOCKED, {})
+
+    def test_an_own_lock_apply_re_reads_the_family_room_under_its_lock(self):
+        # QA on #2111: the tick read the family's room before its long check; the outbound tick can spend it meanwhile.
+        # Under the own lock the apply reads it again, so a room spent in between sends nobody.
+        lst = self.d / "list.json"
+        lst.write_text(json.dumps(self.build()))
+        ledger = str(self.d / "ledger.sqlite3")
+        unlocked = self.d / "gate-open.sh"
+        unlocked.write_text("readonly PROOF_NEED_ASK_COPY_APPROVED=1\n")
+        from credit_review import verify_ledger
+        cap = verify_ledger.family_day_cap(na.CAMPAIGN)
+        self.assertGreater(cap, 0)
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        db = verify_ledger.connect(ledger)
+        for i in range(cap):                                   # the outbound tick spent the family's whole day
+            db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, "
+                       "request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, sent_at) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (na.CAMPAIGN, "initial", f"o{i}@x", f"9{i}", day, "sent", "email", "[]", 1, "t", "t",
+                        verify_ledger.stamp(), verify_ledger.stamp(), verify_ledger.stamp()))
+        db.commit(); db.close()
+        gate = FakeGate()
+        with unittest.mock.patch.object(na.uvn_status, "DAILY_MAX", 10**6):
+            rep = na.send(list_path=str(lst), segment="paid", mode="apply", query=self.q, runner=gate,
+                          wrapper=str(unlocked), ledger_path=ledger, own_lock=True)
+        self.assertEqual([a for a in gate.calls if "--check-recipient" not in a], [])
+        self.assertTrue(rep.outcomes and all(o["reason"].startswith("daily_cap") for o in rep.outcomes))
+
+    def test_the_claim_refuses_past_the_family_cap_whoever_sends(self):
+        # QA on #2111, the race itself: two senders that each believe one send is left. The claim transaction is the
+        # one place both pass in order, so exactly one of them gets the last send and the other a family_cap answer.
+        from credit_review import verify_ledger
+        ledger = str(self.d / "race.sqlite3")
+        cap = verify_ledger.family_day_cap(na.CAMPAIGN)
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        db = verify_ledger.connect(ledger)
+        for i in range(cap - 1):
+            db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, "
+                       "request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, sent_at) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (na.CAMPAIGN, "initial", f"o{i}@x", f"9{i}", day, "sent", "email", "[]", 1, "t", "t",
+                        verify_ledger.stamp(), verify_ledger.stamp(), verify_ledger.stamp()))
+        db.commit()
+        answers = [verify_ledger.claim(db, user_key=f"{who}@x", day=day, request_ids=[f"req-{who}"],
+                                       message_type="email", approved_by="t", approval_ref="t",
+                                       campaign=na.CAMPAIGN, user_id=who)["result"] for who in ("101", "102")]
+        db.close()
+        self.assertEqual(answers[1], "family_cap")
+        self.assertNotEqual(answers[0], "family_cap")
+        self.assertEqual(verify_ledger.family_day_cap(na.CAMPAIGN, path=str(self.d / "missing.json")), 0)
+
+    def test_the_cli_takes_the_own_lock_only_for_a_paged_signed_apply(self):
+        import contextlib, io
+        lst = self.d / "list.json"
+        lst.write_text(json.dumps(self.build()))
+        for argv in (["send", "--list", str(lst), "--segment", "paid", "--own-lock"],
+                     ["send", "--list", str(lst), "--segment", "paid", "--mode", "apply", "--own-lock"]):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), unittest.mock.patch.object(na, "send") as sent:
+                self.assertEqual(na._main(argv), 2)
+            self.assertIn("--own-lock needs --mode apply --signed-accepted CHECK --page", out.getvalue())
+            sent.assert_not_called()
+
     def test_a_run_walks_one_page_of_list_entries_and_records_where_it_stopped(self):
         # r5 639 / p1 638: [start_entry, start_entry + max_entries) of this segment's entries, before any read; page.end =
         # the first entry this run will not examine (past --max-users), so the tick's cursor resumes exactly there
@@ -661,6 +753,45 @@ class NeedAsksTest(unittest.TestCase):
                       "--start-entry", "200", "--outcomes-json", str(out)])
         self.assertEqual((got["max_entries"], got["start_entry"]), (200, 200))
         self.assertEqual(json.loads(out.read_text())["page"], {"start": 200, "end": 260, "listed": 450})
+
+    def test_a_time_sized_check_records_the_first_entry_it_did_not_gate_so_the_tick_cursor_skips_nobody(self):
+        """Fable on #2110 (3a37532a5): the ask tick hands its apply `--max-entries check_end - cursor`, so the tick is only
+        honest if the CHECK's own page record ends at the first entry it did not gate. This runs the real CLI and the
+        real `send`/`_send` (no fake of need_asks); only the replica read and the gate call are stubbed. A check sized
+        to 3 users over a page of 8 must record end = the 4th live user's entry (a user the live re-read dropped counts
+        as examined), and the next check from that end gates the rest: every live user is gated exactly once."""
+        import contextlib, io
+        from credit_review import verify_ledger  # noqa: PLC0415
+        users = [{"user_id": str(i), "paid": True, "asks": [{"request_id": f"q{i}"}]} for i in range(1, 9)]
+        lst = self.d / "time-sized.json"
+        lst.write_text(json.dumps({"users": users}))
+        gated: list[list[str]] = []
+
+        def payloads(us, q, asked, held=None, filtered=None):      # the replica: user 2's request resolved
+            return [{"user": {"id": u["user_id"]}, "credits": [{"request_id": u["asks"][0]["request_id"]}],
+                     "need": {"code": "x"}} for u in us if u["user_id"] != "2"]
+
+        def send_all(ps, rep, **kw):                                  # the gate: every user it is handed answers
+            self.assertTrue(kw.get("check_recipients"))
+            gated.append([str(p["user"]["id"]) for p in ps])
+
+        def check(start, cap, out):
+            with unittest.mock.patch.object(na, "payloads", payloads), \
+                    unittest.mock.patch.object(na.verify_notify, "send_all", send_all), \
+                    unittest.mock.patch.object(verify_ledger, "DEFAULT_PATH", str(self.d / "ledger.sqlite3")), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                na._main(["send", "--list", str(lst), "--segment", "paid", "--check-recipients", "--max-users", str(cap),
+                          "--max-entries", str(8 - start), "--start-entry", str(start), "--outcomes-json", str(out)])
+            return json.loads(out.read_text())["page"]
+
+        page = check(0, 3, self.d / "c1.json")
+        self.assertEqual(gated, [["1", "3", "4"]])
+        self.assertEqual((page["start"], page["end"], page["listed"]), (0, 4, 8))   # entry 4 = user 5, never gated
+        page2 = check(page["end"], 3, self.d / "c2.json")
+        self.assertEqual(gated[1], ["5", "6", "7"])
+        page3 = check(page2["end"], 3, self.d / "c3.json")
+        self.assertEqual((gated[2], page3["end"]), (["8"], 8))                  # the tail; the tick wraps to 0
+        self.assertEqual(sorted(sum(gated, []), key=int), ["1", "3", "4", "5", "6", "7", "8"])
 
     def test_the_cursor_stops_at_the_user_the_apply_budget_deferred(self):
         """QA #1756 Important, the proof-need-ask half: `_send` computes page.end from the batch BEFORE the send loop

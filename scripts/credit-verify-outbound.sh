@@ -529,8 +529,13 @@ slice_spent() { [ -n "$GROUP_END_S" ] && [ "$(elapsed)" -ge "$GROUP_END_S" ]; }
 py_ro() { bounded_to "$(step_end)" "$PY" "$@"; }
 # Defect A (Fable d2): the runner stops a batch LOUDLY only at unmeasured_users >= max(5, 10% of the batch) and writes
 # the reason into the outcome file (`stopped_on_unmeasured`). The tick reads that field - never a string match on the
-# summary - and that stop is the ONE family failure that ends the whole tick (the gate itself is slow, every family
-# behind it would stall the same way). TICK_ENDS=1 marks it for run_group below.
+# summary. [key=family-unmeasured-stop] (firstmate 037, 2026-11-16): that stop ends THAT FAMILY, never the tick. It
+# used to end the whole tick ("the gate is slow, every family behind it would stall the same way"), and from 04:00Z
+# on 2026-11-16 every tick ended at uvn-status-free's or -paid's bar before proof-need-ask, whose check had not run
+# since. A family behind it does not stall blind: it has its OWN bar, so a gate that really is slow stops each later
+# family after at most max(5, 10% of its batch) unmeasured users, and TICK_HARD_S still ends the tick. Nothing is
+# sent past a bar (it is a read-only check), the family is recorded failed and the tick still exits 1 at the end.
+# TICK_ENDS=1 marks the outcomes that DO end the tick for run_group below: the deadline and a failed apply.
 TICK_ENDS=0
 unmeasured_bar_hit() { # <outcomes json>: 0 iff the runner recorded an UNMEASURED STOP in it
   [ -s "$1" ] || return 1
@@ -1205,8 +1210,8 @@ family_run() {
   if deadline_rc "$rc"; then log "$tag: check hit the ${TICK_HARD_S}s deadline (read-only, stopped); the tick ends"; TICK_ENDS=1; return 1; fi
   [ -s "$OUT/$tag-check.json" ] && log "$tag check: $(unmeasured_summary "$OUT/$tag-check.json")"
   if unmeasured_bar_hit "$OUT/$tag-check.json"; then
-    log "$tag: UNMEASURED STOP - the check crossed the bar ($(unmeasured_summary "$OUT/$tag-check.json")); the gate is slow, not these accounts; the tick ends here (fail loud)"
-    TICK_ENDS=1; return 1
+    log "$tag: UNMEASURED STOP - the check crossed the bar ($(unmeasured_summary "$OUT/$tag-check.json")); the gate is slow, not these accounts; nothing sent, THIS FAMILY stops and the families behind it still run, each under its own bar (the tick exits 1 at the end)"
+    return 1
   fi
   [ "$rc" = 0 ] || { alert_nothing_sent "$tag" "$OUT/$tag-check.out"; log "$tag: check failed; this family stops"; return 1; }
   # QA #1612 (round 2): the cursor moves only when the family's step for this page is DONE - a dry tick or a check
@@ -1854,7 +1859,7 @@ apology_family() { # <segment>
 # the family that actually sends - for the whole tick. On 2026-11-11 05:39Z exactly that happened: reply-due-paid's
 # check timed out after 900 s on a Trino replica read, the group returned 1, and uvn-status never ran. A family that
 # cannot run is a reason to run the NEXT one, not to stop. The outcomes that still end the group are the ones that end
-# the TICK (TICK_ENDS=1: the unmeasured bar, the deadline, a failed apply) and a kill file - those are not this
+# the TICK (TICK_ENDS=1: the deadline, a failed apply) and a kill file - those are not this
 # family's problem to swallow. A DEFERRAL (rc 2) is different and still stops the group: the condition that deferred
 # it - a deploy lock, a transient Trino read - is still there for the family behind it, so walking past it would only
 # buy a second deferral. Only a FAILURE is worth walking past, and it is remembered so the group still reports it.
@@ -2198,8 +2203,8 @@ done
 # starved everyone behind the first bad check (the 02:30Z tick: uvn-status died, claims and need got nothing). A failed
 # GROUP is recorded, the next group still runs, and the tick exits 1 at the end so the failure stays loud. This covers
 # the READ-ONLY stages (check, bodies, accepted-bodies, a list rebuild): nothing was sent, so the other audience loses
-# nothing by going on. The family failures that still end the tick at once (TICK_ENDS=1): the unmeasured bar (Defect A -
-# the gate itself is slow, every family behind it would stall the same way), the TICK_HARD_S deadline (nothing behind
+# nothing by going on. An UNMEASURED STOP is one of these read-only failures since [key=family-unmeasured-stop]: the
+# families behind it each have their own bar. The family failures that still end the tick at once (TICK_ENDS=1): the TICK_HARD_S deadline (nothing behind
 # it would fit), a FAILED or PARTIAL APPLY (QA #1799 / spec-deploy-lock-deferral-m1: rows may be sent, the post-send
 # rails own it and more sends are the wrong direction), and an auto-kill (the kill file means nothing more runs).
 # [key=tick-yield] (2026-11-15): what each family's walk bought this tick, read from the check files this tick just
@@ -2238,7 +2243,7 @@ run_group() { # <label> <group fn>: 0 = done, 1 = hard stop (exit 1), 2 = deferr
     0) return 0 ;;
     2) DEFERRED=1; log "$label: deferred (transient); continuing to the next family group"; return 0 ;;
   esac
-  if [ "$TICK_ENDS" = 1 ]; then log "$label: FAILED at the unmeasured bar, the deadline or a failed apply; the tick ends here"; return 1; fi
+  if [ "$TICK_ENDS" = 1 ]; then log "$label: FAILED at the deadline or a failed apply; the tick ends here"; return 1; fi
   if killed; then log "$label: FAILED and the kill file is present (auto-kill); nothing more runs"; return 1; fi
   FAILED_GROUPS="${FAILED_GROUPS:+$FAILED_GROUPS, }$label"
   log "$label: FAILED (rc=$rc); the next family group still runs (a credit failure never skips the claim families and a claim failure never skips the credit families); the tick exits 1 at the end"

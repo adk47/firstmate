@@ -53,6 +53,7 @@ CLI:  need_asks.py build --out FILE [--from-drain AUDIENCE] [--blocked-stamps]
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -842,25 +843,41 @@ def with_codes(ps: list[dict[str, Any]], mode: str, report: verify_notify.Report
     return out
 
 
-_GROUP_LOCKED: dict[str, bool] = {}
+_GROUP_LOCKED: dict[str, str] = {}     # ledger path -> "group" (the credit-group run lock) or "own" (--own-lock)
+
+# --own-lock (the ask tick, firstmate 031): the apply takes its OWN run lock instead of the credit-group one, so it
+# runs while the outbound tick (60-95 min, every even hour) holds the group lock. Two writers then read the shared
+# credit cap without one lock between them, so an own-lock apply leaves this many of today's shared credit sends
+# unspent: the outbound tick's own apply can still spend them, and the overspend of the two together is bounded by
+# this apply's size (the ask tick's tick_cap, 50). No user is ever sent twice either way: every note is claimed in
+# the ledger before it is posted (verify_ledger.claim, BEGIN IMMEDIATE) and blocked_ids skips a live claim.
+OWN_LOCK_RESERVE = 100
 
 
-def send(*, mode: str = "dry-run", ledger_path: str | None = None, **kw: Any) -> verify_notify.Report:
+def own_lock_path(ledger: str) -> str:
+    return f"{ledger}.{CAMPAIGN}.ask-tick.run.lock"
+
+
+def send(*, mode: str = "dry-run", ledger_path: str | None = None, own_lock: bool = False,
+         **kw: Any) -> verify_notify.Report:
     """QA #1617: an apply holds the credit-group run lock (ONE shared budget with every credit campaign, uvn_status's
-    runs included) from before the budget read to after the last send; a dry run takes no lock."""
+    runs included) from before the budget read to after the last send; a dry run takes no lock. With own_lock (the
+    ask tick's paged apply only) it holds its own run lock instead and leaves OWN_LOCK_RESERVE of the shared cap."""
     if mode != "apply" or not uvn_status.campaign_lock_open(kw.get("wrapper", verify_notify.WRAPPER), LOCK):
         return _send(mode=mode, ledger_path=ledger_path, **kw)      # (a send-locked apply halts there, no lock taken)
     import fcntl  # noqa: PLC0415
     from credit_review import verify_ledger  # noqa: PLC0415
     lpath = ledger_path or verify_ledger.DEFAULT_PATH
-    with open(uvn_status.group_lock_path(lpath, CAMPAIGN), "a+") as fh:
+    path = own_lock_path(lpath) if own_lock else uvn_status.group_lock_path(lpath, CAMPAIGN)
+    with open(path, "a+") as fh:
         try:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             report = verify_notify.Report()
-            report.halted = "another credit-group apply run is in progress (one shared budget); nothing sent by this one"
+            report.halted = ("another ask-tick apply run is in progress; nothing sent by this one" if own_lock else
+                             "another credit-group apply run is in progress (one shared budget); nothing sent by this one")
             return report
-        _GROUP_LOCKED[lpath] = True
+        _GROUP_LOCKED[lpath] = "own" if own_lock else "group"
         try:
             return _send(mode=mode, ledger_path=ledger_path, **kw)
         finally:
@@ -956,6 +973,20 @@ def _send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int
             report.halted = "the credit-group run lock is not held; nothing sent"
             return report
         left = max(uvn_status.credit_group_left(lpath, datetime.now(timezone.utc).strftime("%Y-%m-%d")), 0)
+        if _GROUP_LOCKED.get(lpath) == "own":
+            left = max(left - OWN_LOCK_RESERVE, 0)    # see OWN_LOCK_RESERVE: no group lock, so leave a margin
+            # QA on #2111: the tick sized this apply from the family's room read before its long check; read it again
+            # here, under the own lock, so the page is sized to today's room. The claim re-reads it per user inside
+            # its transaction (verify_ledger.FAMILY_DAY_CAPPED), which is what keeps a race with the outbound tick
+            # from overshooting it.
+            from credit_review import verify_ledger  # noqa: PLC0415
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            try:
+                with contextlib.closing(sqlite3.connect(f"file:{lpath}?mode=ro", uri=True)) as fdb:
+                    fam = verify_ledger.family_day_left(fdb, CAMPAIGN, today)
+            except sqlite3.Error:
+                fam = 0                                # unreadable is no room, never the earlier number
+            left = min(left, max(fam, 0))
         if verify_notify.APPLY_ONLY is not None and not verify_notify.APPLY_PAGE and left < len(ps):
             report.cap_short = True
             report.halted = (f"daily_cap_short: {left} left of today's shared credit cap, {len(ps)} signed users in this "
@@ -1152,6 +1183,9 @@ def _main(argv: list[str] | None = None) -> int:
     # need-ask apply exited 2 at argparse before writing a single thing - and the tick reads a missing outcomes file as
     # UNMEASURED and kills itself, with nothing refused and nothing sent. Declared here; the send loop reads it through
     # verify_notify.APPLY_BUDGET_S, exactly as the other families' CLIs do.
+    s.add_argument("--own-lock", action="store_true",
+                   help="the ask tick: a paged signed apply under its own run lock, not the credit-group one "
+                        "(leaves OWN_LOCK_RESERVE of today's shared credit cap)")
     s.add_argument("--apply-budget-s", type=float, default=None, metavar="SECONDS",
                    help="the tick's remaining share; the send loop never STARTS a user whose worst case would not fit")
     a = ap.parse_args(argv)
@@ -1173,6 +1207,10 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"NEED ASKS: --preview-accepted: {exc}; nothing rendered")
             return 2
     signed = None
+    if a.op == "send" and getattr(a, "own_lock", False) and not (a.mode == "apply" and a.signed_accepted and a.page):
+        # the own lock is for the ask tick's paged signed apply only: a hand apply keeps the credit-group lock
+        print("NEED ASKS: --own-lock needs --mode apply --signed-accepted CHECK --page (the ask tick); nothing sent")
+        return 2
     if a.op == "send" and a.signed_accepted:
         # Fable [key=apply-sized-to-list] (amended 586): sized from the signed check's attempt cap; sends only its set
         if a.mode != "apply":
@@ -1263,7 +1301,8 @@ def _main(argv: list[str] | None = None) -> int:
                 with verify_notify.apply_session():
                     rep = send(list_path=a.list, segment=a.segment, mode=a.mode, max_users=a.max_users,
                                preview_dir=a.preview, check_recipients=a.check_recipients,
-                               max_entries=a.max_entries, start_entry=a.start_entry)
+                               max_entries=a.max_entries, start_entry=a.start_entry,
+                               own_lock=bool(getattr(a, "own_lock", False)))
             except verify_notify.ApplyLockError as exc:
                 print(f"NEED ASKS: {exc}")
                 return 3

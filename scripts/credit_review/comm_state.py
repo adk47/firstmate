@@ -91,6 +91,9 @@ TELL_NOTES = ("removal-notice", "takeback-notice", "withdrawal-confirm")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 CONV_CAP = 60
 STALE_THREAD_DAYS = 30
+# the per-need ask's recency window (firstmate 034a, Aaron: one message per person per day) - the same 24 hours as
+# verify_ledger.RECONTACT_HOURS[proof-need-ask] and the gate's RECONTACT_S; scripts/tests pin the three equal
+NEED_ASK_RECENT_HOURS = 24
 RESOLVED = re.compile(r"\b(all sorted|sorted now|it'?s sorted|now sorted|resolved|all set|taken care of|fixed now|"
                       r"closing this|closed this|marked as resolved)\b", re.I)
 POLICIES = os.environ.get("COMM_STATE_POLICIES", "/opt/hydra/policies")
@@ -186,7 +189,8 @@ def store_facts(uid: int, keys: list[str] | tuple[str, ...] = (), since: str = "
     """Documents on file for this user in our own stores. p1 198 / Fable 199 (rule): only a document that could be
     proof of the NAMED requests counts - one that arrived on/after the oldest named request was created (`since`,
     ISO UTC; empty = unknown = every document counts, fail closed) or one tied to a named request."""
-    out: dict[str, Any] = {"docs": [], "acked": "", "notes_7d": [], "told_notes": [], "last_ask": "", "last_sent": None,
+    out: dict[str, Any] = {"docs": [], "acked": "", "notes_7d": [], "notes_24h": [], "told_notes": [], "last_ask": "",
+                          "last_sent": None,
                           # the Intercom contact our newest note went to: the render-time read needs it to see the files
                           # the customer sent us (QA #1660 b), and it must be the contact the send-time check reads
                           "last_contact": "", "_contact_at": 0.0}
@@ -232,6 +236,7 @@ def store_facts(uid: int, keys: list[str] | tuple[str, ...] = (), since: str = "
     except sqlite3.Error as exc:
         raise Unknown(f"verify ledger unreadable: {exc}") from exc
     week = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    day_ago = (datetime.now(timezone.utc) - timedelta(hours=NEED_ASK_RECENT_HOURS)).strftime("%Y-%m-%dT%H:%M:%S")
     want = {str(k).lower() for k in keys}
     for camp, kind, status, at, _reply, tagged, day, ids_json, msg_id, contact in rows:
         if status not in ("sent", "attempted"):
@@ -254,6 +259,8 @@ def store_facts(uid: int, keys: list[str] | tuple[str, ...] = (), since: str = "
                 out["told_notes"].append(camp)
         if str(day or "") >= week:
             out["notes_7d"].append(camp)
+        if _ts(at) and _ts(at) >= day_ago:            # the per-need ask's window (firstmate 034a / 040): 24 hours
+            out["notes_24h"].append(camp)
         # the newest note we sent this user, whatever its campaign: the [key=mcf-wait-lines] waiver needs its CLASS and
         # its Intercom message id (QA #1660 a: the waiver matches the part by ID, never by a timestamp window - a manual
         # admin part posted seconds after our ledgered status would otherwise be read as that status)
@@ -408,6 +415,8 @@ def thread_facts(conversation: str, ic: Intercom, now: float | None = None,
              and (p.get("part_type") or "comment") not in ("note",) and (p.get("body") or "").strip()]
     if any((p.get("created_at") or 0) >= now - 7 * 86400 for p in admin):
         out.append("R5_admin_comment_7d")
+    if any((p.get("created_at") or 0) >= now - NEED_ASK_RECENT_HOURS * 3600 for p in admin):
+        out.append("R5_admin_comment_24h")
     cust = [p.get("created_at") or 0 for p in parts if (p.get("author") or {}).get("type") in ("user", "lead", "contact")]
     if not cust or max(cust) < now - STALE_THREAD_DAYS * 86400:
         out.append("R6_stale_thread")
@@ -663,7 +672,7 @@ def need_facts(uid: int, keys: list[str], doc_sha: str, doc_at: str, need_code: 
                doc_map: dict[str, str] | None = None, doc_intakes: dict[str, str] | None = None) -> dict[str, Any]:
     """L11c: was EVERY named request checked with a need code, and did anything arrive after the NEWEST named document
     (doc_sha / doc_at; Fable [key=l11c-plural] (c))?"""
-    out: dict[str, Any] = {"checked": False, "newer": [], "unchecked": []}
+    out: dict[str, Any] = {"checked": False, "newer": [], "unchecked": [], "decided_at": ""}
     # the NAMED documents (QA #1418 round 4): doc_sha may list every document the message names, comma-separated
     named = {s.strip().lower() for s in (doc_sha or "").split(",") if re.fullmatch(r"[0-9a-fA-F]{64}", s.strip())}
     if not named or not doc_at:
@@ -707,7 +716,7 @@ def need_facts(uid: int, keys: list[str], doc_sha: str, doc_at: str, need_code: 
                 # for it is still an unverifiable need. A document re-checked since the cut no longer counts (r5 / QA
                 # #1418), and a dashboard or verified read of ANOTHER document does not cancel this one.
                 # the latest row per (document, INTAKE): a later read of another intake of the same file is its own unit
-                rows = db.execute(f"SELECT proof_id, outcome, coalesce(need, ''), {iid_col} FROM dv_outcomes d WHERE "
+                rows = db.execute(f"SELECT proof_id, outcome, coalesce(need, ''), {iid_col}, coalesce(at, '') FROM dv_outcomes d WHERE "
                                   "user_id=? AND lower(request_id)=? AND id = (SELECT e.id FROM dv_outcomes e WHERE "
                                   "e.user_id=d.user_id AND lower(e.request_id)=lower(d.request_id) AND e.proof_id=d.proof_id "
                                   f"AND {iid_col.replace('intake_id', 'e.intake_id')} = {iid_col.replace('intake_id', 'd.intake_id')} "
@@ -721,13 +730,17 @@ def need_facts(uid: int, keys: list[str], doc_sha: str, doc_at: str, need_code: 
                 else:
                     own = set()                       # unmapped, or mapped to a document the message does not name
                 if not any(str(p).lower() in own and o == "unverifiable" and n in ASKABLE_NEEDS
-                           and (not need_code or n == need_code) and bound(str(p).lower(), str(ri)) for p, o, n, ri in rows):
+                           and (not need_code or n == need_code) and bound(str(p).lower(), str(ri)) for p, o, n, ri, _a in rows):
                     out["unchecked"].append(k)
-                for p, o, n, ri in rows:
+                for p, o, n, ri, at in rows:
                     pl = str(p).lower()
                     if pl in named and bound(pl, str(ri)):
                         ok = o == "unverifiable" and n in ASKABLE_NEEDS and (not need_code or n == need_code)
                         doc_state[pl] = doc_state.get(pl, True) and ok
+                        # [key=circular-gate]: when the reader decided this need (the read the ask is about); the
+                        # OLDEST such read across the named requests, so a reply is cleared only by every decision
+                        if ok and _ts(at) and (not out["decided_at"] or _ts(at) < out["decided_at"]):
+                            out["decided_at"] = _ts(at)
             # QA #1418 (23:39Z): EVERY document the message names - not only each request's newest - must still be an
             # askable need on its latest bound read; one re-checked since the cut (or never read on a named request)
             # makes "the documents ... can't be checked" false: hold
@@ -803,9 +816,13 @@ def decide(campaign: str, copy: str, st: dict[str, Any], core: dict[str, Any], i
     why: list[str] = list(fraud or [])
     thread = thread or []
     waived = wait_line_waived(campaign, st, last_part)
-    if st["notes_7d"] and not waived:
-        why.append("messaged_7d:" + "+".join(sorted(set(st["notes_7d"]))))
-    if "R5_admin_comment_7d" in thread and not waived:
+    # [key=circular-gate] (firstmate 034a / 040): the per-need ask keeps ONE message per person per day, so its recency
+    # holds look back 24 hours (the reason codes keep their names); every other campaign keeps 7 days
+    need_ask = campaign == NEED_ASK
+    recent = st.get("notes_24h", []) if need_ask else st["notes_7d"]
+    if recent and not waived:
+        why.append("messaged_7d:" + "+".join(sorted(set(recent))))
+    if ("R5_admin_comment_24h" if need_ask else "R5_admin_comment_7d") in thread and not waived:
         why.append("messaged_7d:R5_admin_comment_in_thread")
     if campaign in WAIT_LINES:
         # r5 fable-copy-1103-r5/mcf-proof-ack: merge-claim-first's copy acknowledges the documents on file, so for it
@@ -827,8 +844,10 @@ def decide(campaign: str, copy: str, st: dict[str, Any], core: dict[str, Any], i
             why.append("newer_after_document:" + ",".join(newer)[:300])
         if decided or told:
             why.append("decided_or_told")
-        # a CLOSED filing thread is not a hold here: the gate sends the ask by email instead (l1 [key=l11c-asks])
-        why += [t for t in thread if t in ("R6_stale_thread", "R7_thread_resolved")]
+        # a CLOSED filing thread is not a hold here: the gate sends the ask by email instead (l1 [key=l11c-asks]), and
+        # neither is a STALE one ([key=circular-gate], firstmate 040: 212 of the replied users' holds; the gate sends
+        # those by email too)
+        why += [t for t in thread if t == "R7_thread_resolved"]
         if not why:
             state = "checked"
     elif campaign == RECEIPT and copy in ("docrecvr", "docrecvn", "docrecvq", "docrecv"):
@@ -1481,7 +1500,13 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
         # the filing-part evidence comes from the FILING conversation even when the note goes by email (R9 / a closed
         # thread): r5 / QA #1418 - otherwise the document's own part reads as newer and the email path never sends
         fc = filing_conversation or conversation
-        ic_found = intercom_facts(contact_id, _ts(datetime.fromtimestamp(since, timezone.utc).isoformat()), ic,
+        # [key=circular-gate] (firstmate 040/041): a customer TEXT message the reader's need decision came after is
+        # not news about it - it is what the customer said before we decided, and holding the ask on it meant an ask
+        # created because the customer wrote could never go. Only a message AFTER the decision holds. An attachment
+        # or a document link still holds from the document's arrival (it may be the proof nobody has read), a filed
+        # newer intake is need_facts' rule, and no decision time on file keeps the old rule (fail closed).
+        replies_from = max(_ts(datetime.fromtimestamp(since, timezone.utc).isoformat()), need.get("decided_at") or "")
+        ic_found = intercom_facts(contact_id, replies_from, ic,
                                   attach_since=since, filing=(fc, since) if fc.isdigit() else None,
                                   text_after_ask=True)
     else:

@@ -202,6 +202,31 @@ MERGE_CLAIM_FIRST = "merge-claim-first"
 # gap-ask: it exists because a document arrived, so only its own rows and a gap ask on the same request block
 # it (once per request, ever), and it may follow a status-doc-received note inside 7 days.
 PROOF_NEED_ASK = "proof-need-ask"
+# A campaign whose daily cap is enforced INSIDE claim() (QA on #2111, 2026-11-16): two senders send proof-need-ask at
+# once (the outbound tick under the credit-group lock, the ask tick under its own), and each sized its run from a room
+# it read before its long recipient check, so with one send left both could spend it. The claim transaction is the one
+# place every send of the family passes in order (BEGIN IMMEDIATE), so the cap read there cannot be overshot by any
+# sender. The cap is the policy's daily_cap row for the family: the smallest segment value, because both senders count
+# today's rows of BOTH segments against it (outbound room(), ask tick read_caps). An unreadable policy is a cap of 0.
+FAMILY_DAY_CAPPED = (PROOF_NEED_ASK,)
+FAMILY_CAP_POLICY = str(Path(__file__).resolve().parents[2] / "policies" / "credit-verify-outbound.json")
+
+
+def family_day_cap(campaign: str, path: str | None = None) -> int:
+    try:
+        with open(path or FAMILY_CAP_POLICY) as fh:
+            row = json.load(fh)["daily_cap"][campaign]
+        vals = [int(v) for v in row.values() if isinstance(v, int) and not isinstance(v, bool)]
+        return max(min(vals), 0) if vals else 0
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return 0
+
+
+def family_day_left(db: sqlite3.Connection, campaign: str, day: str, path: str | None = None) -> int:
+    """Today's room in the family's daily cap: the cap minus today's sent and attempted rows of the campaign."""
+    used = db.execute("SELECT count(*) FROM verify_messages WHERE day = ? AND campaign = ? "
+                      "AND status IN ('sent','attempted')", (day, campaign)).fetchone()[0]
+    return family_day_cap(campaign, path) - int(used)
 GAP_LIKE = (GAP_ASK, PROOF_NEED_ASK)
 # credit-approved-elsewhere (send-locked, the line is not approved): the line to a requester whose credit the
 # conflict rule decided `credit_approved_for_another_user`. A notice: only its own rows block it (one message per
@@ -1364,14 +1389,32 @@ def claim_cross_check(db: sqlite3.Connection, campaign: str, request_ids: list[s
 DEFER_REASONS = ("messaged_7d", "recently_asked")
 
 
-def gap_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None = None, user_id: str = "") -> str:
-    """gap-ask: why this user must not get one now ('' when they may). Only a deferral exists:
-    messaged_7d, any note from this gate in the last 7 days except a GAP_ASK_FOLLOWS note. The
+# The no-recontact window of an ask, per campaign (firstmate 034a, 2026-11-16, Aaron's rule "one message per person
+# per day"): proof-need-ask waits 24 hours after any other note from this gate, not 7 days. The window is read from a
+# note's created_at, so it is 24 real hours, never "yesterday or today". The gate's Intercom check
+# (intercom-verify-request.sh recently_messaged) and core_notice.py --window-hours take the same window for the
+# campaign. Every other campaign keeps 7 days, by the note's day, exactly as before.
+RECONTACT_HOURS = {PROOF_NEED_ASK: 24}
+
+
+def recontact_hours(campaign: str) -> int:
+    return RECONTACT_HOURS.get(campaign, 7 * 24)
+
+
+def gap_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None = None, user_id: str = "",
+                  campaign: str = GAP_ASK) -> str:
+    """gap-ask / proof-need-ask: why this user must not get one now ('' when they may). Only a deferral exists:
+    messaged_7d, any note from this gate inside the campaign's window (recontact_hours: 7 days, 24 hours for
+    proof-need-ask) except a GAP_ASK_FOLLOWS note. The reason code keeps its name whatever the window. The
     per-credit once and the one-message-per-user-per-day cap are claim()'s."""
     cond, params = _same_user(db, user_key, user_id)
-    since = ((now or utcnow()) - timedelta(days=7)).strftime("%Y-%m-%d")
+    hours = recontact_hours(campaign)
     follows = ",".join("?" * len(GAP_ASK_FOLLOWS))
-    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day>=? AND m.status IN ('attempted','sent') "
+    if hours == 7 * 24:
+        since, col = ((now or utcnow()) - timedelta(days=7)).strftime("%Y-%m-%d"), "m.day"
+    else:
+        since, col = stamp((now or utcnow()) - timedelta(hours=hours)), "m.created_at"
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND {col}>=? AND m.status IN ('attempted','sent') "
                   f"AND m.campaign NOT IN ({follows}) LIMIT 1", (*params, since, *GAP_ASK_FOLLOWS)).fetchone():
         return "messaged_7d"
     return ""
@@ -1482,10 +1525,13 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
                 db.execute("COMMIT")
                 return {"result": "user_done", "reason": why, "request_ids": fresh}
         if campaign in GAP_LIKE and enforce_cap:
-            why = gap_user_done(db, user_key, now=now, user_id=user_id)
+            why = gap_user_done(db, user_key, now=now, user_id=user_id, campaign=campaign)
             if why:
                 db.execute("COMMIT")
                 return {"result": "recent", "reason": why, "request_ids": fresh}
+        if campaign in FAMILY_DAY_CAPPED and enforce_cap and family_day_left(db, campaign, day) <= 0:
+            db.execute("COMMIT")
+            return {"result": "family_cap", "request_ids": fresh}
         if campaign in (DECLINE_CAMPAIGN, PROOF_REFUSAL) and enforce_cap:
             # proof-refusal keeps the same cooldown (firstmate 2026-11-15: a refusal never lands inside 7 days of
             # another note from this gate, an ask included; the person waits and is offered again)
@@ -3269,7 +3315,7 @@ def _main(argv: list[str] | None = None) -> int:
             out["recent"] = why in DEFER_REASONS
             out["recent_why"] = why if why in DEFER_REASONS else ""
         if a.user_key and a.campaign in GAP_LIKE:
-            why = gap_user_done(db, a.user_key, user_id=a.user_id)
+            why = gap_user_done(db, a.user_key, user_id=a.user_id, campaign=a.campaign)
             out["user_done"], out["recent"], out["recent_why"] = "", bool(why), why
         if a.user_key and a.campaign in (DECLINE_CAMPAIGN, PROOF_REFUSAL):
             why = decline_user_done(db, a.user_key, day=a.day or utcnow().strftime("%Y-%m-%d"), user_id=a.user_id)

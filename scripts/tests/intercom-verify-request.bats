@@ -4996,6 +4996,33 @@ needfile() { # $1 file, $2 jq edit (default: the readable_document need)
                 doc_shas:["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}}' | jq -c "${2:-.}" > "$1"
 }
 
+@test "proof-need-ask G2 (firstmate 034c): a filing conversation WE opened is not a refusal - the per-need ask goes by email as our own message; a customer-opened one is still the thread, unless it is stale (circular-gate)" {
+  unlocked_gate need
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  export STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}'
+  needfile "$TEST_TMPDIR/n.json" '.user.filing_conversation = "777"'
+  ours='{"type":"conversation","id":"777","title":"about my credit","source":{"author":{"type":"admin","id":"5763097"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}'
+  STUB_CONVERSATION="$ours" run -0 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"G2 filing conversation 777 was opened by us; the per-need ask goes by email instead"* ]]
+  [[ "$output" == *"POSTED email"* ]]
+  [[ "$output" != *"G2: conversation 777 was opened by us"* ]]
+  [ "$(replies)" -eq 0 ]; [ "$(posts)" -eq 1 ]
+  # a customer-opened filing conversation takes no detour: the ask goes into the thread the document came in
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  STUB_CONVERSATION="$(jq -c '.source.author.type = "user" | .created_at = 1760990000' <<<"$ours")" \
+    run -0 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment conversation=777"* ]]
+  [[ "$output" != *"goes by email"* ]]
+  # [key=circular-gate] (firstmate 040): a STALE customer-opened filing thread (no customer message in 30 days) is not
+  # a hold either - comm_state no longer holds it on R6, and the gate sends the ask by email like a closed thread
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  STUB_CONVERSATION="$(jq -c '.source.author.type = "user" | .created_at = (1761000000 - 40 * 86400)' <<<"$ours")" \
+    run -0 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"filing conversation 777 has no customer message in 30 days; the per-need ask goes by email"* ]]
+  [[ "$output" == *"POSTED email"* ]]
+}
+
 @test "track identity (QA #1603): the gate's number/roles checks count TRACKS by the renderer's own tkey - two tracks both called 'Home' are two" {
   # the gate's TRACKS_JQ defs are byte-identical to the renderer's
   for d in 'def tnorm: tostring | ascii_downcase | gsub("\\s+"; " ") | gsub("^ +| +$"; "");' 'def tkey: if ((.track_id // "") | length) > 0 then "id:" + .track_id'; do
@@ -5262,7 +5289,7 @@ print(gate.lint(m.get('subject') or '', m['body'], gate.CAMPAIGN_STAGE['proof-ne
   export INTERCOM_VERIFY_TEST_NOW=1761000000
   export STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}'
   needfile "$TEST_TMPDIR/n.json" '.user.filing_conversation = "777" | .need += {code:"distributor_dashboard_with_code", verify_code:"MUSO-7K2Q"}'
-  STUB_CONVERSATION='{"type":"conversation","id":"777","title":"about my credit","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}' \
+  STUB_CONVERSATION='{"type":"conversation","id":"777","title":"about my credit","source":{"author":{"type":"user"},"created_at":1760990000},"contacts":{"contacts":[{"id":"6650aa01"}]}}' \
     run -0 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED comment conversation=777"* ]]
   [[ "$(jq -r .body "$CURL_STUB_REPLY" | plain)" == *"press Ctrl+F (or Cmd+F on a Mac), type this code in the find box: MUSO-7K2Q"* ]]
@@ -5310,7 +5337,7 @@ print(gate.lint(m.get('subject') or '', m['body'], gate.CAMPAIGN_STAGE['proof-ne
   export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
   export INTERCOM_VERIFY_TEST_NOW=1761000000
   export STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}'
-  export STUB_CONVERSATION='{"type":"conversation","id":"777","title":"about my credit","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}'
+  export STUB_CONVERSATION='{"type":"conversation","id":"777","title":"about my credit","source":{"author":{"type":"user"},"created_at":1760990000},"contacts":{"contacts":[{"id":"6650aa01"}]}}'
   needfile "$TEST_TMPDIR/n.json" '.user.filing_conversation = "777" | .credits[0].ask_class = "core_proof_request"'
   run -0 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED comment"* ]]

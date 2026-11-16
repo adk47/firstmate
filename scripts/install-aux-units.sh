@@ -3439,11 +3439,13 @@ log "  $mon: active"
 # The budget is the script's: a run walks the list in batches (one check, then one apply of
 # the check's accepted set), saving its cursor after each, and starts no batch past 1500 s or
 # past 240 s before the outbound tick's next :00, whichever is first; any step is killed by
-# 1680 s (plus 30 s to SIGKILL). TimeoutStartSec=1740 sits above that and inside the 1800 s
-# between two timer fires, so two runs cannot overlap; the script's flock on
-# /run/credit-ask-tick.lock says the same. The credit-group run lock is held only inside each
-# apply (at most 300 s), never between batches. :20 and :50 keep it off the outbound tick's
-# start at :00; it yields when that tick is in flight. No Persistent=: a run missed while the
+# 1680 s (plus 30 s to SIGKILL). TimeoutStartSec=1740 sits above that. The timer fires every
+# 10 minutes except :00 (the outbound tick's start), so a run starts within 10 minutes of the
+# outbound tick going idle; a fire while a run is still going starts nothing (systemd starts no
+# second instance of a running oneshot, and the script's flock on /run/credit-ask-tick.lock
+# refuses one). The run never takes the credit-group run lock: each apply holds its own
+# (need_asks --own-lock, at most 300 s), so it runs while the outbound tick is in flight, and the
+# family's daily cap is enforced per send inside the ledger claim. No Persistent=: a run missed while the
 # host was down is not owed, the next one walks the same cursor.
 # Its writes are under /var/lib/hydra/credit-ask-tick (NOT /opt/hydra, which the deploy rsync
 # overwrites). Exit 1 (a step failed or could not be measured) reaches OnFailure.
@@ -3471,10 +3473,10 @@ CREDITASKSVC
 
 cat > /etc/systemd/system/credit-ask-tick.timer << CREDITASKTMR
 [Unit]
-Description=Run credit-ask-tick at :20 and :50 of every hour
+Description=Run credit-ask-tick every 10 minutes except :00
 
 [Timer]
-OnCalendar=*-*-* *:20,50:00
+OnCalendar=*-*-* *:10,20,30,40,50:00
 Unit=credit-ask-tick.service
 
 [Install]

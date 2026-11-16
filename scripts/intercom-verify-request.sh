@@ -2200,7 +2200,8 @@ elif [ "$LIVE" = "1" ]; then
   if printf '%s' "$USER_ID" | grep -qE '^[0-9]{1,12}$'; then cn_who=(--user-id "$USER_ID"); else cn_who=(--email "$EMAIL"); fi
   [ -r "$CORE_NOTICE_HELPER" ] || { echo "CORE NOTICE CHECK NOT POSSIBLE: $CORE_NOTICE_HELPER is missing; nothing was sent or claimed" >&2; exit 4; }
   set +e
-  CN="$(with_gate_facts "$PY_BIN" -I "$CORE_NOTICE_HELPER" check "${cn_who[@]}" 2>/dev/null)"; cn_rc=$?
+  cn_win=(); [ "$CAMPAIGN" != "proof-need-ask" ] || cn_win=(--window-hours 24)   # firstmate 034a: the ask waits 24 h
+  CN="$(with_gate_facts "$PY_BIN" -I "$CORE_NOTICE_HELPER" check "${cn_who[@]}" "${cn_win[@]}" 2>/dev/null)"; cn_rc=$?
   set -e
   case "$cn_rc" in
     0) ;;
@@ -3363,6 +3364,20 @@ if [ "$GOLIVE" = "1" ] && [ "$LIVE" = "1" ]; then
   g5norm="$(printf '%s' "$INPUT" | "$JQ_BIN" -r "$g5def"' g5f | map(select(type == "string" and . != "-" and bad)) | length' 2>/dev/null || echo unreadable)"
   g5="$g5raw"; [ "$g5raw" = "0" ] && g5="$g5norm"
   [ "$g5" = "0" ] || refuse "G5: $g5 interpolated field(s) carry a link, an address or markup; nothing was sent or claimed."
+  # firstmate 034c (2026-11-16): a per-need ask whose filing conversation WE opened (an admin or bot; e.g. our own
+  # note the customer attached the document to) is no longer refused by G2's opener rule: it goes as our own message
+  # by email, the path a closed or off-topic filing thread already takes. G3 below still requires the filing
+  # conversation's contact to be this recipient; G2's single-contact and account-user rules still apply to any thread.
+  if [ "$COPY" = "proofneed" ] && [ "$R1_THREAD" = "1" ] && [ -n "$THREAD" ] && [ -z "$REPLY_DUE" ]; then
+    pn_conv="$(api GET "/conversations/$THREAD?display_as=plaintext")" \
+      || { printf 'CONVERSATION READ FAILED (curl); nothing was sent or claimed\n' >&2; exit 4; }
+    printf '%s' "$pn_conv" | "$JQ_BIN" -e '(.type // "") == "conversation"' >/dev/null 2>&1 \
+      || { printf 'CONVERSATION READ NOT VERIFIED (conversation %s); nothing was sent or claimed\n' "$THREAD" >&2; exit 4; }
+    if ! printf '%s' "$pn_conv" | "$JQ_BIN" -e '((.source.author.type // "") | IN("user", "lead", "contact"))' >/dev/null 2>&1; then
+      printf 'G2 filing conversation %s was opened by us; the per-need ask goes by email instead\n' "$THREAD" >&2
+      THREAD=""; MESSAGE_TYPE="email"; R1_THREAD=0
+    fi
+  fi
   # The recipient contact: the thread's single contact in-thread, else the contact the email lookup picked.
   if [ -n "$THREAD" ]; then
     # G2: the thread must be opened by the customer, carry exactly one contact, an Intercom USER, and that
@@ -3458,6 +3473,17 @@ PY
     # The per-need ask goes INTO the filing thread; if that thread is CLOSED it goes by email instead, so the
     # reply opens a new Intercom conversation of the same contact (l1 [key=l11c-asks]). R1 never does this.
     if [ "$COPY" = "proofneed" ] && printf '%s' "$g3" | "$JQ_BIN" -e '((.state // "") | ascii_downcase) == "closed" or .open == false' >/dev/null 2>&1; then
+      THREAD=""; MESSAGE_TYPE="email"; R1_THREAD=0
+    fi
+    # [key=circular-gate] (firstmate 040): so does a STALE filing thread - no customer message in comm_state's
+    # STALE_THREAD_DAYS (30) - which comm_state no longer holds for the per-need ask (R6). The opening part's time falls
+    # back to the conversation's own date (QA #1508); with neither it is 0, reads as stale and the ask goes by email,
+    # never into a thread whose age is unknown.
+    if [ "$COPY" = "proofneed" ] && [ -n "$THREAD" ] && printf '%s' "$g3" | "$JQ_BIN" -e --argjson now "$(g1_now)" \
+         '. as $c | ([(.source // {}) | .created_at //= ($c.created_at // 0)] + (.conversation_parts.conversation_parts // [])
+           | map(select((.author.type // "") as $t | ["user","lead","contact"] | index($t)) | (.created_at // 0))
+           | max // 0) < ($now - 30 * 86400)' >/dev/null 2>&1; then
+      printf 'filing conversation %s has no customer message in 30 days; the per-need ask goes by email\n' "$fconv" >&2
       THREAD=""; MESSAGE_TYPE="email"; R1_THREAD=0
     fi
     # R9: a filing thread that is not about credits (e.g. a refund thread where a receipt was attached) is never the
@@ -3660,20 +3686,24 @@ docs_submitted() { # <contact-id> -> prints the reason when documents exist; exi
 # FOLLOWED_IDS (the user's status-doc-received notes of those 7 days, from the ledger: the gap
 # ask is the follow-up they promised); every other message from us still defers it.
 FOLLOWED_IDS="[]"
-recently_messaged() { # <contact-id> -> prints the reason when we wrote to them in 7 days; exit 4 on a failed read
+# firstmate 034a (2026-11-16, Aaron's rule "one message per person per day"): the ask proof-need-ask waits 24 hours
+# after any message from us, not 7 days. Same window as verify_ledger.RECONTACT_HOURS and core_notice --window-hours
+# (pinned equal by scripts/tests/test_verify_ledger_proof_need.py). Every other campaign keeps 7 days.
+case "$CAMPAIGN" in proof-need-ask) RECONTACT_S=86400; RECONTACT_LABEL="24 hours" ;; *) RECONTACT_S=$(( 7*86400 )); RECONTACT_LABEL="7 days" ;; esac
+recently_messaged() { # <contact-id> -> prints the reason when we wrote to them in the window; exit 4 on a failed read
   local contact="$1" since body ids n cid convo ex
   ex="$("$JQ_BIN" -nc --argjson a "$FOLLOWED_IDS" --argjson b "${C2_EX:-[]}" '$a + $b')" || ex="$FOLLOWED_IDS"
-  since=$(( $(date -u +%s) - 7*86400 ))
+  since=$(( $(date -u +%s) - RECONTACT_S ))
   body="$(printf '%s' "$contact" | "$JQ_BIN" -Rc --argjson since "$since" \
     '{query: {operator: "AND", value: [{field: "contact_ids", operator: "=", value: .}, {field: "updated_at", operator: ">", value: $since}]}, pagination: {per_page: 50}}' \
     | api POST /conversations/search)" || { printf 'RECENT-CONTACT CHECK FAILED (curl); nothing was sent or claimed:\n%s\n' "$body" >&2; exit 4; }
   printf '%s' "$body" | "$JQ_BIN" -e '(.conversations|type) == "array" and ((.total_count // 0) | type) == "number"' >/dev/null 2>&1 \
     || { printf 'RECENT-CONTACT CHECK NOT VERIFIED; nothing was sent or claimed:\n%s\n' "$body" >&2; exit 4; }
   n="$(printf '%s' "$body" | "$JQ_BIN" -r '.total_count // (.conversations | length)')"
-  [ "$n" -le 50 ] || { echo "more than 50 conversations in 7 days (counted as messaged)"; return 0; }
+  [ "$n" -le 50 ] || { echo "more than 50 conversations in $RECONTACT_LABEL (counted as messaged)"; return 0; }
   if printf '%s' "$body" | "$JQ_BIN" -e --argjson since "$since" --argjson ex "$ex" '[.conversations[] | select(((.source.author.type // "") | IN("admin","bot","team")) and ((.created_at // 0) > $since)
        and (((.source.id // "") | tostring) as $s | $ex | any(. == $s) | not))] | length > 0' >/dev/null; then
-    echo "we started a conversation with them in the last 7 days"; return 0
+    echo "we started a conversation with them in the last $RECONTACT_LABEL"; return 0
   fi
   ids="$(printf '%s' "$body" | "$JQ_BIN" -r '.conversations[].id | tostring')"
   for cid in $ids; do
@@ -3684,7 +3714,7 @@ recently_messaged() { # <contact-id> -> prints the reason when we wrote to them 
       || { printf 'RECENT-CONTACT CHECK NOT VERIFIED on conversation %s; nothing was sent or claimed\n' "$cid" >&2; exit 4; }
     if printf '%s' "$convo" | "$JQ_BIN" -e --argjson since "$since" --argjson ex "$ex" '[(.conversation_parts.conversation_parts // [])[] | select(((.author.type // "") | IN("admin","bot","team")) and (.part_type // "") != "note" and ((.created_at // 0) > $since) and ((.body // "") != "")
        and (((.id // "") | tostring) as $p | $ex | any(. == $p) | not))] | length > 0' >/dev/null; then
-      echo "we replied to them in the last 7 days"; return 0
+      echo "we replied to them in the last $RECONTACT_LABEL"; return 0
     fi
   done
   return 0
@@ -4164,6 +4194,9 @@ case "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r 'if .result == "recent" and .reason 
   daily_cap)
     printf 'DEFERRED daily-cap credits=%s (this user already had a verify message on %s UTC; they go in the next one)\n' \
       "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')" "$DAY"; exit 3 ;;
+  family_cap)
+    printf 'DEFERRED family-cap credits=%s (today'"'"'s %s daily cap is spent; this user goes on a later day)\n' \
+      "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')" "$CAMPAIGN"; exit 3 ;;
   recently_asked)
     printf 'DEFERRED recently-asked credits=%s (this user got an ask in the last 90 days; the credits wait)\n' \
       "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')"; exit 3 ;;

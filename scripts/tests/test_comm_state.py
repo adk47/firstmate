@@ -1075,10 +1075,10 @@ class NeedAskRulesTest(CommStateTest):
     DOC_AT = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
     DOC_EPOCH = datetime.fromisoformat(DOC_AT.replace("Z", "+00:00")).timestamp()
 
-    def checked(self, sha=None, need="readable_document", outcome="unverifiable", rid="r1", at=None):
+    def checked(self, sha=None, need="readable_document", outcome="unverifiable", rid="r1", at=None, decided_at=None):
         db = sqlite3.connect(cs.DV_STORE)
-        db.execute("INSERT INTO dv_outcomes (user_id, request_id, proof_id, need, outcome) VALUES (?,?,?,?,?)",
-                   (UID, rid, sha or self.SHA, need, outcome))
+        db.execute("INSERT INTO dv_outcomes (user_id, request_id, proof_id, need, outcome, at) VALUES (?,?,?,?,?,?)",
+                   (UID, rid, sha or self.SHA, need, outcome, decided_at))
         db.commit(); db.close()
         db = sqlite3.connect(cs.PROOF_STORE)
         # one intake per arrived file (a dv row per request does not mean another upload)
@@ -1354,11 +1354,12 @@ class NeedAskRulesTest(CommStateTest):
         self.checked(); self.core = [["r1", "rejected", "", ""]]
         self.assertIn("decided_or_told", self.ask()["reasons"])
         self.setUp(); self.checked()
-        self.note("status-doc-received", at=(datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))
-        self.assertTrue(any(r.startswith("messaged_7d") for r in self.ask()["reasons"]))   # receipt 3 days ago
+        self.note("status-doc-received", at=(datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.assertTrue(any(r.startswith("messaged_7d") for r in self.ask()["reasons"]))   # receipt 3 hours ago
         self.setUp(); self.checked()
-        self.note("status-doc-received", at=(datetime.now(timezone.utc) - timedelta(days=8)).strftime("%Y-%m-%dT%H:%M:%SZ"))
-        self.assertFalse(self.ask()["hold"])               # the >= 7-day 'checked' follow-up after a receipt
+        # [key=circular-gate] (firstmate 034a / 040): the per-need ask's window is 24 hours, not 7 days
+        self.note("status-doc-received", at=(datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.assertFalse(self.ask()["hold"])               # a receipt 2 days ago no longer holds it
         self.setUp(); self.checked()
         now = datetime.now(timezone.utc).timestamp()
         self.ic.convs["7"] = {"id": "7", "state": "closed", "source": {"author": {"type": "user"}, "created_at": now - 86400},
@@ -1374,7 +1375,38 @@ class NeedAskRulesTest(CommStateTest):
         self.assertIn("R7_thread_resolved", self.ask(conversation="7")["reasons"])
         self.ic.convs["7"]["conversation_parts"]["conversation_parts"] = []
         self.ic.convs["7"]["source"]["created_at"] = now - 40 * 86400
-        self.assertIn("R6_stale_thread", self.ask(conversation="7")["reasons"])
+        # [key=circular-gate] (firstmate 040): a STALE filing thread no longer holds it either (the gate sends by email)
+        self.assertNotIn("R6_stale_thread", self.ask(conversation="7")["reasons"])
+
+    def test_circular_gate_the_reply_the_decision_came_after_never_holds_its_ask(self):
+        """[key=circular-gate] (firstmate 040/041): a replied user whose need decision is ASK is accepted. The text
+        reply came before the reader's decision, so it is not news; one after the decision still holds; an attachment
+        still holds from the document's arrival (it may be the proof nobody read); no decision time keeps the old rule."""
+        iso = lambda e: datetime.fromtimestamp(e, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        reply = {"author": {"type": "user"}, "body": "I sent the split sheet, please check", "created_at": self.DOC_EPOCH + 3600}
+
+        def conv(*parts):
+            self.ic.convs["9"] = {"id": "9", "source": {"author": {"type": "user"}, "attachments": [{"name": "d.jpg"}],
+                                                        "created_at": self.DOC_EPOCH},
+                                  "conversation_parts": {"conversation_parts": list(parts)}}
+        self.checked(decided_at=iso(self.DOC_EPOCH + 7200)); conv(reply)
+        res = self.ask(conversation="9")
+        self.assertEqual((res["hold"], res["state"]), (False, "checked"), res)          # accepted
+        self.setUp(); self.checked(decided_at=iso(self.DOC_EPOCH + 7200))
+        conv(reply, {**reply, "body": "actually, use this one", "created_at": self.DOC_EPOCH + 9000})
+        self.assertIn("intercom_reply_after_ask", json.dumps(self.ask(conversation="9")["reasons"]))   # after: holds
+        self.setUp(); self.checked(decided_at=iso(self.DOC_EPOCH + 7200))
+        conv({"author": {"type": "user"}, "body": "", "attachments": [{"name": "x.pdf"}], "created_at": self.DOC_EPOCH + 3600})
+        self.assertIn("intercom_attachment", json.dumps(self.ask(conversation="9")["reasons"]))       # a file: holds
+        self.setUp(); self.checked(); conv(reply)
+        self.assertIn("intercom_reply_after_ask", json.dumps(self.ask(conversation="9")["reasons"]))   # no decision time
+        # the per-person 24 hours still applies: an admin message in the thread 2 hours ago holds, 2 days ago does not
+        now = datetime.now(timezone.utc).timestamp()
+        for ago, held in ((2 * 3600, True), (2 * 86400, False)):
+            self.setUp(); self.checked(decided_at=iso(self.DOC_EPOCH + 7200))
+            conv(reply, {"author": {"type": "admin"}, "part_type": "comment", "body": "We will take a look.",
+                         "created_at": now - ago})
+            self.assertEqual(any(r.startswith("messaged_7d") for r in self.ask(conversation="9")["reasons"]), held, ago)
 
     def test_no_document_named_is_unknown(self):
         with self.assertRaises(cs.Unknown):

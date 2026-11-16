@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PATH = os.path.join(HERE, "..", "credit_review", "core_notice.py")
@@ -42,6 +42,17 @@ class ReasonsTest(unittest.TestCase):
             self.assertEqual(self.why([r])[1], [want])
         self.assertEqual(self.why([(1, "", "", "", old)], claims=[(1, "2026-10-24 10:00:00.000")])[1],
                          ["claim updated within 7d"])
+
+    def test_a_24_hour_window_holds_only_the_last_24_hours_and_names_its_window(self):
+        # firstmate 034a: the ask (proof-need-ask) waits 24 hours after a core notice, not 7 days
+        old = "2026-09-01 00:00:00.000"
+        win = timedelta(hours=24)
+        why = lambda r, claims=(): cn.reasons_by_user([1], query=fake([r], claims), now=NOW, window=win)[1]  # noqa: E731
+        self.assertEqual(why((1, '{"noticeSentAt":"2026-10-25T16:22:50Z"}', "", "", old)), [])      # 46 h ago
+        self.assertEqual(why((1, '{"noticeSentAt":"2026-10-26T15:30:00Z"}', "", "", old)), ["approvedNotice within 24h"])
+        self.assertEqual(why((1, "", "", "", old), claims=[(1, "2026-10-24 10:00:00.000")]), [])
+        self.assertEqual(why((1, "", "", "", old), claims=[(1, "2026-10-27 10:00:00.000")]), ["claim updated within 24h"])
+        self.assertEqual(why((1, "", "", "", "2026-10-27 08:00:00.000")), ["credit request changed today"])
 
     def test_a_claim_never_touched_since_filing_is_not_a_notice(self):
         # p1 180: claims 1621336/1621425/1621613 were held only because they were FILED within 7 days
@@ -151,6 +162,18 @@ class CliTest(unittest.TestCase):
         os.chmod(stub, 0o755)
         env = dict(os.environ, CORE_NOTICE_TRINO=stub)
         return subprocess.run([sys.executable, "-I", PATH, *args], env=env, capture_output=True, text=True), t
+
+    def test_the_cli_takes_the_window_in_hours_and_refuses_one_outside_a_week(self):
+        two_days = (datetime.now(timezone.utc) - timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body = ('grep -q claiming && exit 0; '
+                f'echo \'"7","{{""noticeSentAt"":""{two_days}""}}","","","2020-01-01 00:00:00.000"\'')
+        p, _ = self.run_cli(body, "check", "--user-id", "7")
+        self.assertEqual(p.returncode, 3, p.stdout + p.stderr)                  # 7 days: held
+        p, _ = self.run_cli(body, "check", "--user-id", "7", "--window-hours", "24")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)                  # 24 hours: clear
+        for bad in ("0", "169"):
+            p, _ = self.run_cli(body, "check", "--user-id", "7", "--window-hours", bad)
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
 
     def test_exit_codes(self):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

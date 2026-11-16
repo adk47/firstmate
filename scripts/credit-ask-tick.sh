@@ -19,11 +19,11 @@
 #   - the run outlived its 30-minute timer, so the unit restarted the second it was killed and held the credit-group
 #     run lock without a gap. The hourly tick's first credit apply then found the lock taken ("another uvn-status
 #     apply run is in progress"), which that tick treats as a failed apply: every credit family behind it was dropped
-#     at 00:18Z and 01:15Z. A run now ends inside RUN_S, is killed at HARD_S, and yields to an outbound tick in flight.
+#     at 00:18Z and 01:15Z. A run now ends inside RUN_S and is killed at HARD_S; its applies take their own lock, not the credit-group one.
 #   - `distributor_preflight_not_ok` was never one broken dependency: it labels a per-user gate answer, and the
 #     sender now prints that answer with the label.
 #
-# Exit: 0 ran, yielded or stopped cleanly; 1 a step failed or could not be measured (the unit pages); 2 bad config.
+# Exit: 0 ran or stopped cleanly; 1 a step failed or could not be measured (the unit pages); 2 bad config.
 #
 # Reviewed baseline: deploy overwrites. node-8 carries a hand-written file at this path that was never in git
 # (installed 2026-11-14 23:26Z: no cursor, no budget, both segments in one run under a 3600 s timeout). The path is
@@ -44,7 +44,6 @@ ETC="$(cfg ASK_TICK_ETC /etc/hydra)"
 STATE="$(cfg ASK_TICK_STATE /var/lib/hydra/credit-ask-tick)"
 # The hand-installed version took this same path, so a copy of it still running excludes this one and the reverse.
 LOCK="$(cfg ASK_TICK_LOCK /run/credit-ask-tick.lock)"
-OUTBOUND_LOCK="$(cfg ASK_TICK_OUTBOUND_LOCK /var/lib/hydra/credit-verify-outbound/tick.lock)"
 RUNNER="$(cfg ASK_TICK_RUNNER "$HYDRA_ROOT/scripts/credit_review/need_asks.py")"
 POLICY="$(cfg ASK_TICK_POLICY "$HYDRA_ROOT/policies/credit-verify-outbound.json")"
 LEDGER="$(cfg ASK_TICK_LEDGER /var/lib/hydra/credit-review/ledger.sqlite3)"
@@ -61,11 +60,12 @@ REFUSAL_SPIKE="$(cfg ASK_TICK_REFUSAL_SPIKE 0.20)"
 NOTIFY_LIB="$(cfg ASK_TICK_NOTIFY_LIB "$HYDRA_ROOT/scripts/lib/slack-notify.sh")"
 RUN_START="$(date -u +%FT%TZ)"
 
-# The budget. INTERVAL_S is the timer's period (credit-ask-tick.timer, pinned to this by a bats test). A run's sends
-# are budgeted to end by RUN_S, any step still running at HARD_S is killed, and systemd's TimeoutStartSec sits above
-# HARD_S and under INTERVAL_S: two runs cannot overlap. Whatever RUN_S allows, a run also ends OUTBOUND_MARGIN_S
-# before the hourly outbound tick's cron at :00 (below), so no apply of this one holds the credit-group lock then.
-INTERVAL_S="$(cfg ASK_TICK_INTERVAL_S 1800)"
+# The budget. INTERVAL_S is the timer's period (credit-ask-tick.timer, pinned to this by a bats test): every 10
+# minutes. A run's sends are budgeted to end by RUN_S and any step still running at HARD_S is killed; systemd's
+# TimeoutStartSec sits above HARD_S. A run may outlast the period: systemd does not start a oneshot unit that is still
+# running and the run lock refuses a second run. Whatever RUN_S allows, a run also ends OUTBOUND_MARGIN_S before the
+# hourly outbound tick's cron at :00 (below).
+INTERVAL_S="$(cfg ASK_TICK_INTERVAL_S 600)"
 # A run walks the list in batches until RUN_S (or the outbound tick's next start, below) leaves no room for another.
 # HARD_S is the last resort for a hung step; the unit's TimeoutStartSec sits past HARD_S + the kill grace.
 RUN_S="$(cfg ASK_TICK_RUN_S 1500)"
@@ -75,10 +75,11 @@ KILL_GRACE_S="$(cfg ASK_TICK_KILL_GRACE_S 30)"
 # The least a send is started with. The send loop starts no user whose worst case (verify_notify.WORST_USER_S, 200 s)
 # would not fit its share, so a share at or under that sends nobody; a bats test holds this above it.
 MIN_SHARE_S="$(cfg ASK_TICK_MIN_SHARE_S 230)"
-# List entries walked per BATCH. Each batch is one read-only check and, when the check accepted anyone, one apply; the
-# cursor is saved after every batch, so a killed run resumes at the first batch it did not finish. The check pays a
-# gate call per gated user (about 12 s; most entries are filtered before the gate), so 20 keeps a batch near a minute.
-PAGE="$(cfg ASK_TICK_PAGE 20)"
+# List entries walked per BATCH, at most. Each batch is one read-only check and, when the check accepted anyone, one
+# apply; the cursor is saved after every batch, so a killed run resumes at the first batch it did not finish. The
+# check gates only the users that fit its time (CHECK_S_PER_USER, below), so the page is a ceiling, not the size:
+# 400 lets a :10 run's first check use its whole ~20 minutes (about 300 users at 4 s) instead of stopping at 20.
+PAGE="$(cfg ASK_TICK_PAGE 400)"
 # What one check costs, measured, so each check gates only the users that fit before its deadline. The first live pass
 # (2026-11-16 05:50Z, a :50 run) gave the check 83 s for 20 entries and was killed at 130 s, nothing walked. The
 # outbound tick's proof-need-ask checks measured 8-16 s per gated user that night (50 in 662 s, 50 in 810 s, 15 in
@@ -89,14 +90,14 @@ PAGE="$(cfg ASK_TICK_PAGE 20)"
 # run with room for none ends there with its cursor kept instead of starting a check that cannot finish.
 CHECK_S_PER_USER="$(cfg ASK_TICK_CHECK_S_PER_USER 4)"
 CHECK_SETUP_S="$(cfg ASK_TICK_CHECK_SETUP_S 20)"
-# The longest share one apply is handed. The apply is the only step that holds the credit-group run lock
-# (ledger.sqlite3.credit-group.run.lock, taken inside need_asks' apply and released when it exits), so this is the
-# longest that lock is held at a time; between batches it is free.
+# The longest share one apply is handed. The apply is the only step that holds a run lock (need_asks --own-lock:
+# ledger.sqlite3.proof-need-ask.ask-tick.run.lock, taken inside the apply and released when it exits, never the
+# credit-group lock the outbound tick needs), so this is the longest that lock is held at a time.
 BATCH_APPLY_S="$(cfg ASK_TICK_BATCH_APPLY_S 300)"
 MAX_BATCHES="$(cfg ASK_TICK_MAX_BATCHES 200)"
-# The hourly outbound tick starts at minute :00 (/etc/cron.d/credit-verify-outbound) and refuses its credit applies
-# when another run holds the credit-group lock (it retries only a deploy's APPLY_LOCK_HELD). No batch of this run may
-# still be running then: the run ends OUTBOUND_MARGIN_S before the next :00, which also covers HARD_S - RUN_S of overrun.
+# The hourly outbound tick starts at minute :00 (/etc/cron.d/credit-verify-outbound). This run no longer shares a lock
+# with it, but it still ends OUTBOUND_MARGIN_S before the next :00 (which also covers HARD_S - RUN_S of overrun), so its
+# gate calls stay off the outbound tick's build and first checks, the heaviest replica reads of the hour.
 OUTBOUND_MARGIN_S="$(cfg ASK_TICK_OUTBOUND_MARGIN_S 240)"
 OUTBOUND_DUE_S="$(cfg ASK_TICK_OUTBOUND_DUE_S '')"   # harness only: seconds from the run's start to the next :00
 ELAPSED0="$(cfg ASK_TICK_ELAPSED0 0)"   # harness only: seconds already spent, so no test sleeps
@@ -106,8 +107,6 @@ T0="$(date +%s)"
 elapsed() { echo $(( $(date +%s) - T0 + ELAPSED0 )); }
 log() { printf '%s credit-ask-tick: %s\n' "$(date -u +%FT%TZ)" "$*"; }
 killed() { [ -e "$KILL" ] || [ -e "$KILL_LEGACY" ]; }
-# A held flock is a live outbound tick (the same read scripts/lib/deploy-send-tick-hold.sh makes).
-outbound_in_flight() { [ -e "$OUTBOUND_LOCK" ] && ! flock -n -x "$OUTBOUND_LOCK" true 2>/dev/null; }
 
 # ── the safety checks after every apply (the outbound tick's, scripts/credit-verify-outbound.sh) ──
 page() { # best effort: the kill file is the guarantee, the page is the notice
@@ -241,9 +240,9 @@ for v in "$INTERVAL_S" "$RUN_S" "$HARD_S" "$KILL_GRACE_S" "$MIN_SHARE_S" "$PAGE"
   case "$v" in ''|*[!0-9]*) log "BAD CONFIG: '$v' is not a whole number; nothing runs"; exit 2 ;; esac
 done
 if [ "$PAGE" -lt 1 ] || [ "$MAX_BATCHES" -lt 1 ] || [ "$CHECK_S_PER_USER" -lt 1 ] || [ "$RUN_S" -le "$MIN_SHARE_S" ] || [ "$RUN_S" -ge "$HARD_S" ] \
-   || [ "$BATCH_APPLY_S" -lt "$MIN_SHARE_S" ] || [ $(( HARD_S + 60 )) -gt "$INTERVAL_S" ] \
+   || [ "$BATCH_APPLY_S" -lt "$MIN_SHARE_S" ] || [ "$INTERVAL_S" -lt 60 ] || [ $(( HARD_S + KILL_GRACE_S + 60 )) -gt 3600 ] \
    || [ "$OUTBOUND_MARGIN_S" -lt $(( HARD_S - RUN_S )) ]; then
-  log "BAD BUDGET: page $PAGE, batches $MAX_BATCHES, share floor ${MIN_SHARE_S}s, batch apply ${BATCH_APPLY_S}s, run ${RUN_S}s, hard stop ${HARD_S}s, outbound margin ${OUTBOUND_MARGIN_S}s, timer period ${INTERVAL_S}s. A run must fit one send (run > share floor, batch apply >= share floor), end before its hard stop, the hard stop must sit at least 60 s inside the timer period, and the outbound margin must cover the hard stop's overrun; nothing runs"
+  log "BAD BUDGET: page $PAGE, batches $MAX_BATCHES, share floor ${MIN_SHARE_S}s, batch apply ${BATCH_APPLY_S}s, run ${RUN_S}s, hard stop ${HARD_S}s, outbound margin ${OUTBOUND_MARGIN_S}s, timer period ${INTERVAL_S}s. A run must fit one send (run > share floor, batch apply >= share floor), end before its hard stop, the hard stop and its kill grace must end at least 60 s inside the hour, the timer period must be at least 60 s, and the outbound margin must cover the hard stop's overrun; nothing runs"
   exit 2
 fi
 # Where this run must end: RUN_S, or OUTBOUND_MARGIN_S before the outbound tick's next start, whichever is first.
@@ -370,10 +369,10 @@ finish() { # <exit code> <state> [segment rc start next]: the run's record, then
   exit "$code"
 }
 
-if outbound_in_flight; then
-  log "the outbound tick is in flight ($OUTBOUND_LOCK is held): it owns the credit-group budget now; this run yields"
-  finish 0 yielded_to_outbound_tick
-fi
+# The outbound tick is NOT waited for (firstmate 031): it holds the credit-group lock 60-95 minutes of every even
+# hour, and waiting for it left this run idle most of the day. Each apply below takes its OWN run lock
+# (need_asks --own-lock), leaves need_asks.OWN_LOCK_RESERVE of the shared credit cap for the outbound tick, and a user
+# is never sent twice: the ledger claims every note before it is posted.
 # No live send without the readers that check it afterwards (the outbound tick's LIVE REFUSED rule, QA #1541).
 if [ ! -r "$ZERO_READ" ] || [ ! -r "$HEALTH" ]; then
   log "LIVE REFUSED: the zero-read reader ($ZERO_READ) or the health read ($HEALTH) is not deployed; nothing built, nothing sent"
@@ -474,10 +473,6 @@ other=free; [ "$seg" = free ] && other=paid
 cur="$(cat "$STATE/cursor-$seg" 2>/dev/null || echo 0)"; [[ "$cur" =~ ^[0-9]{1,9}$ ]] || cur=0
 
 if killed; then log "stop file placed during the build; nothing sent"; finish 0 stopped "$seg" 0 "$cur" "$cur"; fi
-if outbound_in_flight; then
-  log "the outbound tick started during the build; this run yields before any send"
-  finish 0 yielded_to_outbound_tick "$seg" 0 "$cur" "$cur"
-fi
 
 # The family's caps in the policy, the same rows the outbound tick's room() honours. The per-tick cap bounds this
 # RUN's attempts (all batches together); the per-family daily cap (which need_asks does not read on this path) is
@@ -521,17 +516,14 @@ save_cursor() { printf '%s\n' "$1" > "$STATE/cursor-$seg.tmp" && mv -f "$STATE/c
 # of exactly the check's accepted set. The cursor is saved after each batch, so a run killed anywhere resumes at the
 # first batch it did not finish; a user that batch already sent is not sent again, because the ledger claims every note
 # before it is posted (verify_ledger.claim, one BEGIN IMMEDIATE per user) and the sender skips any request with a live
-# claim (verify_ledger.blocked_ids). This script holds no ledger lock: the credit-group run lock lives inside each
-# apply process, so between two batches it is free, and the outbound tick is re-read before every check and apply.
+# claim (verify_ledger.blocked_ids). This script holds no ledger lock: each apply takes its own run lock (--own-lock),
+# never the credit-group one, so the outbound tick applies whenever it runs, beside this run or between its batches.
 rm -f "$STATE"/check-*.json "$STATE"/check-*.out "$STATE"/send-*.out "$STATE"/outcomes-*.json 2>/dev/null
 start_cur="$cur"; tick0=""; end_state=ran; rc=0
 while :; do
   if [ "$BATCHES" -ge "$MAX_BATCHES" ]; then log "$FAMILY/$seg: $MAX_BATCHES batches walked; the run ends"; break; fi
   if [ "$BATCHES" -gt 0 ]; then
     if killed; then log "stop file placed during the run; no further batch"; end_state=stopped; break; fi
-    if outbound_in_flight; then
-      log "the outbound tick started; this run yields after $BATCHES batch(es)"; end_state=yielded_to_outbound_tick; break
-    fi
   fi
   if [ $(( RUN_END - $(elapsed) )) -le "$MIN_SHARE_S" ]; then
     if [ "$BATCHES" -eq 0 ]; then
@@ -569,9 +561,12 @@ while :; do
     log "$FAMILY/$seg: this run has sent the policy's per-tick cap of $tick; the next run starts at entry $cur"
     end_state=tick_cap_spent; break
   fi
-  cap="$PAGE"; [ "$cap" -le "$tick_left" ] || cap="$tick_left"; [ "$cap" -le "$left" ] || cap="$left"
-  # Size the check to the time it has: the users that fit before RUN_END - MIN_SHARE_S at the measured cost. The apply
-  # takes the same cap, so it sends at most what this check signed.
+  # Two caps, not one. The check gates every user that fits its time (an outcome per user: accepted, or the gate's
+  # reason); the apply sends at most the room the policy leaves (per-tick and daily), and its page ends at the first
+  # accepted user it did not send, so the next batch re-checks that user instead of skipping them.
+  scap="$tick_left"; [ "$scap" -le "$left" ] || scap="$left"
+  cap="$PAGE"
+  # Size the check to the time it has: the users that fit before RUN_END - MIN_SHARE_S at the measured cost.
   fit=$(( (RUN_END - MIN_SHARE_S - $(elapsed) - CHECK_SETUP_S) / CHECK_S_PER_USER ))
   if [ "$fit" -lt 1 ]; then
     if [ "$BATCHES" -eq 0 ]; then
@@ -605,6 +600,10 @@ while :; do
     finish 1 check_failed "$seg" "$rc" "$start_cur" "$cur"
   fi
   log "$FAMILY/$seg: batch $n's check of up to $cap user(s) from entry $cur took $(( $(elapsed) - check_t0 ))s"
+  # The entries this check examined: the apply walks exactly these, never past them. An apply's page drops users outside
+  # the signed set without counting them as unexamined, so a longer apply page would carry the cursor past users this
+  # check never gated.
+  check_end="$("$PY" -c 'import json,sys; print(int((json.load(open(sys.argv[1])).get("page") or {})["end"]))' "$CHECK" 2>/dev/null)" || check_end=""
   accepted="$("$PY" -c 'import json,sys; a=json.load(open(sys.argv[1])).get("accepted"); print("" if a is None else len(a))' "$CHECK" 2>/dev/null)" || accepted=""
   if ! [[ "$accepted" =~ ^[0-9]{1,6}$ ]]; then
     log "CHECK UNMEASURED: $CHECK records no accepted set; nothing more sent"
@@ -625,11 +624,11 @@ while :; do
     continue
   fi
 
-  if outbound_in_flight; then
-    log "the outbound tick started during batch $n's check; this run yields before its apply, the next run starts at entry $cur"
-    end_state=yielded_to_outbound_tick; break
-  fi
   if killed; then log "stop file placed during batch $n's check; nothing of it sent"; end_state=stopped; break; fi
+  if ! [[ "$check_end" =~ ^[0-9]{1,9}$ ]] || [ "$check_end" -le "$cur" ]; then
+    log "NO PAGE RECORD in $CHECK: the entries the check examined are unmeasured; nothing of batch $n sent, the cursor stays at $cur"
+    finish 1 page_unmeasured "$seg" "$rc" "$start_cur" "$cur"
+  fi
   share=$(( RUN_END - $(elapsed) )); [ "$share" -le "$BATCH_APPLY_S" ] || share="$BATCH_APPLY_S"
   if [ "$share" -lt "$MIN_SHARE_S" ]; then
     if [ "$n" -eq 1 ]; then
@@ -652,8 +651,8 @@ while :; do
   # not fit, and the user in flight finishes). APPLY_END is the last resort for a hung interpreter, not how it ends.
   apply_end=$(( $(elapsed) + share + HARD_S - RUN_S )); [ "$apply_end" -le "$APPLY_END" ] || apply_end="$APPLY_END"
   [ "$apply_end" -le "$HARD_S" ] || apply_end="$HARD_S"
-  bounded_to "$apply_end" "$PY" "$RUNNER" send --list "$LIST" --segment "$seg" --mode apply --max-users "$cap" \
-    --max-entries "$PAGE" --start-entry "$cur" --apply-budget-s "$share" --signed-accepted "$CHECK" --page \
+  bounded_to "$apply_end" "$PY" "$RUNNER" send --list "$LIST" --segment "$seg" --mode apply --max-users "$scap" \
+    --max-entries "$(( check_end - cur ))" --start-entry "$cur" --apply-budget-s "$share" --signed-accepted "$CHECK" --page --own-lock \
     --outcomes-json "$OUTCOMES" > "$SEND_OUT" 2>&1; rc=$?
   # the sender was reached: the other segment takes the next run, whatever this one answered
   printf '%s\n' "$other" > "$STATE/next-segment"
@@ -664,9 +663,10 @@ while :; do
     finish 1 send_killed "$seg" "$rc" "$start_cur" "$cur"
   fi
   if [ "$rc" != 0 ]; then
-    # Two answers are another holder's turn, not a failure: the credit-group run lock (another credit sender is
-    # applying) and the deploy's apply lock. Nothing was sent by this batch; the cursor stays.
-    if grep -qF -e 'another credit-group apply run is in progress' -e 'holds the apply lock' "$SEND_OUT"; then
+    # Two answers are another holder's turn, not a failure: the ask tick's own run lock (another ask-tick apply is
+    # running) and the deploy's apply lock. Nothing was sent by this batch; the cursor stays.
+    if grep -qF -e 'another ask-tick apply run is in progress' -e 'another credit-group apply run is in progress' \
+         -e 'holds the apply lock' "$SEND_OUT"; then
       finish 0 lock_held_by_another "$seg" "$rc" "$start_cur" "$cur"
     fi
     log "SEND FAILED (rc=$rc): $(grep -v '^{' "$SEND_OUT" | tail -n 1 | cut -c1-300)"

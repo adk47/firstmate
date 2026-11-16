@@ -1,7 +1,8 @@
 """verify_ledger rules for proof-need-ask (proof-loop captain card L11c; send-locked until the captain's yes):
 an ASK handled like gap-ask. Once per request, ever; it never crosses a gap ask on the same request (either way);
-it may follow a status-doc-received note inside 7 days (the receipt promised this message) but no other note;
-it counts for the shared one-ask locks."""
+it may follow a status-doc-received note at any time (the receipt promised this message), and any other note only
+after 24 hours (firstmate 034a, 2026-11-16: one message per person per day, not one a week); it counts for the shared
+one-ask locks."""
 from __future__ import annotations
 
 import credit_test_env  # noqa: F401 - first: test logs never reach the production run.log
@@ -22,9 +23,9 @@ class ProofNeedAskTest(unittest.TestCase):
     def setUp(self):
         self.db = vl.connect(str(Path(tempfile.mkdtemp()) / "ledger.sqlite3"))
 
-    def claim(self, campaign, ids, day, user="jane@example.com", uid="42"):
+    def claim(self, campaign, ids, day, user="jane@example.com", uid="42", at="01:00:00"):
         return vl.claim(self.db, user_key=user, day=day, request_ids=list(ids), campaign=campaign, user_id=uid,
-                        now=datetime.fromisoformat(day + "T01:00:00+00:00"), **KW)
+                        now=datetime.fromisoformat(f"{day}T{at}+00:00"), **KW)
 
     def sent(self, c):
         self.assertEqual(c["result"], "claimed", c)
@@ -50,13 +51,33 @@ class ProofNeedAskTest(unittest.TestCase):
         self.sent(self.claim("proof-need-ask", ["r3"], "2026-10-28"))
         self.assertEqual(vl.blocked_ids(self.db, ["r3"], "gap-ask"), {"r3"})
 
-    def test_it_may_follow_the_receipt_inside_7_days_but_no_other_note(self):
+    def test_it_may_follow_the_receipt_at_once_and_any_other_note_after_24_hours(self):
         self.sent(self.claim("status-doc-received", ["r1"], "2026-10-26"))
-        self.assertEqual(self.claim("proof-need-ask", ["r1"], "2026-10-28")["result"], "claimed")
+        # (the next UTC day: one message per person per day still holds) - inside 24 hours of the receipt
+        self.assertEqual(self.claim("proof-need-ask", ["r1"], "2026-10-27", at="00:30:00")["result"], "claimed")
+        # another note: held inside 24 hours (the reason code keeps its name), sent once 24 hours have passed
         self.sent(self.claim("status-team-review", ["s1"], "2026-10-26", user="b@example.com", uid="43"))
-        got = self.claim("proof-need-ask", ["s1"], "2026-10-28", user="b@example.com", uid="43")
+        got = self.claim("proof-need-ask", ["s1"], "2026-10-27", user="b@example.com", uid="43", at="00:59:00")
+        self.assertEqual((got["result"], got.get("reason")), ("recent", "messaged_7d"))
+        got = self.claim("proof-need-ask", ["s1"], "2026-10-27", user="b@example.com", uid="43", at="01:01:00")
+        self.assertEqual(got["result"], "claimed", got)
+
+    def test_only_proof_need_ask_has_the_24_hour_window(self):
+        self.assertEqual(vl.recontact_hours("proof-need-ask"), 24)
+        self.assertEqual(vl.recontact_hours("gap-ask"), 7 * 24)
+        # gap-ask keeps the week: a note 2 days earlier still holds it
+        self.sent(self.claim("status-team-review", ["g1"], "2026-10-26", user="c@example.com", uid="44"))
+        got = self.claim("gap-ask", ["g1x"], "2026-10-28", user="c@example.com", uid="44")
         self.assertEqual((got["result"], got.get("reason")), ("recent", "messaged_7d"))
 
+    def test_the_shell_gate_and_the_ledger_hold_proof_need_ask_for_the_same_24_hours(self):
+        sh = (ROOT / "scripts" / "intercom-verify-request.sh").read_text()
+        self.assertIn('proof-need-ask) RECONTACT_S=86400;', sh)
+        self.assertIn('[ "$CAMPAIGN" != "proof-need-ask" ] || cn_win=(--window-hours 24)', sh)
+        self.assertEqual(vl.recontact_hours("proof-need-ask") * 3600, 86400)
+        # [key=circular-gate]: comm_state's notes / R5 holds for this ask look back the same 24 hours
+        from credit_review import comm_state  # noqa: PLC0415
+        self.assertEqual(comm_state.NEED_ASK_RECENT_HOURS, vl.recontact_hours("proof-need-ask"))
 
 if __name__ == "__main__":
     unittest.main()

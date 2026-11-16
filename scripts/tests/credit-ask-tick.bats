@@ -3,7 +3,8 @@
 #
 # The version this replaces was hand-installed on node-8 and had none of what is tested here: no cursor (every run
 # walked the same first 200 paid entries and sent 0), a 3600 s timeout on a 30-minute timer (killed and restarted the
-# same second, so the credit-group run lock was never free) and nothing that yielded to the hourly outbound tick.
+# same second, so the credit-group run lock was never free). Its applies now take their own run lock (--own-lock), so
+# the hourly outbound tick in flight neither stops this run nor is refused by it.
 #
 # The sender is a stub that records its argv: what this file holds is the tick's own behaviour (one segment, the
 # cursor, the budget, the locks, the record of a run) and that it hands the sender no flag that skips a gate. The
@@ -57,6 +58,7 @@ setup() {
   # is about it: the wall clock's minute must never decide a case.
   export ASK_TICK_MAX_BATCHES=1 ASK_TICK_OUTBOUND_DUE_S=100000
   export ASK_TICK_CHECK_S_PER_USER=1 ASK_TICK_CHECK_SETUP_S=0   # the sizing has its own cases below
+  export ASK_TICK_PAGE=20                                         # small batches keep the batch cases readable
   # the safety checks after every apply: stubs that answer clean unless a case says otherwise, and log their reads
   export ASK_TICK_HEALTH="$T/health.py" ASK_TICK_ZERO_READ="$T/zero_read.py" ASK_TICK_FRAUD="$T/fraud.py"
   export ASK_TICK_NOTIFY_LIB="$T/notify.sh"
@@ -155,7 +157,7 @@ if a[0] == "send" and "--check-recipients" in a:
     if not os.environ.get("STUB_CHECK_NO_ACCEPTED"):
         doc["accepted"] = accepted
     if not os.environ.get("STUB_NO_PAGE"):
-        doc["page"] = {"start": start, "end": int(os.environ.get("STUB_PAGE_END") or min(listed, start + entries)),
+        doc["page"] = {"start": start, "end": int(os.environ.get("STUB_CHECK_PAGE_END") or os.environ.get("STUB_PAGE_END") or min(listed, start + entries)),
                        "listed": listed}
     json.dump(doc, open(arg("--outcomes-json"), "w"))
     print(json.dumps({"halted": "", "candidates": len(accepted), "sent": 0, "deferred": 0,
@@ -243,7 +245,7 @@ last_run() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(
 
 # ── the budget and the unit ──
 
-@test "the run ends inside its hard stop, the hard stop inside the unit's timeout, the timeout inside the timer period" {
+@test "the run ends inside its hard stop, the hard stop inside the unit's timeout, the timeout inside the hour" {
   run_s="$(tick_const RUN_S)"; hard_s="$(tick_const HARD_S)"; interval="$(tick_const INTERVAL_S)"
   grace="$(tick_const KILL_GRACE_S)"
   [ -n "$run_s" ] && [ -n "$hard_s" ] && [ -n "$interval" ] && [ -n "$grace" ]
@@ -252,22 +254,30 @@ last_run() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(
   unit_timeout="$(unit_get "$SVC" Service TimeoutStartSec)"
   [ "$run_s" -lt "$hard_s" ]
   [ $(( hard_s + grace )) -lt "$unit_timeout" ]
-  [ "$unit_timeout" -lt "$interval" ]
+  # a run may outlast the 10-minute timer period (systemd starts no second instance of a running oneshot, and the run
+  # lock refuses one); what it must never do is run into the outbound tick's next :00
+  [ "$unit_timeout" -le $(( 3600 - $(tick_const OUTBOUND_MARGIN_S) )) ]
+  [ "$interval" -ge 60 ]
 }
 
-@test "the timer fires twice an hour, which is the period the script budgets against" {
+@test "the timer fires every 10 minutes and never at :00, which is the period the script budgets against" {
   if ! command -v systemd-analyze >/dev/null 2>&1; then skip "systemd-analyze is not installed"; fi
   TMR="$T/credit-ask-tick.timer"
   unit_body 'cat > /etc/systemd/system/credit-ask-tick.timer' CREDITASKTMR > "$TMR"
   cal="$(unit_get "$TMR" Timer OnCalendar)"
-  [ "$cal" = '*-*-* *:20,50:00' ]
+  [ "$cal" = '*-*-* *:10,20,30,40,50:00' ]
   [ "$(unit_get "$TMR" Timer Unit)" = credit-ask-tick.service ]
-  mapfile -t fires < <(TZ=UTC systemd-analyze calendar --iterations=3 "$cal" \
+  mapfile -t fires < <(TZ=UTC systemd-analyze calendar --iterations=12 "$cal" \
     | sed -n 's/^ *\(Next elapse\|Iteration #[0-9]*\): [A-Za-z]* \(.*\) UTC$/\2/p')
-  [ "${#fires[@]}" -eq 3 ]
-  a="$(date -u -d "${fires[0]}" +%s)"; b="$(date -u -d "${fires[1]}" +%s)"; c="$(date -u -d "${fires[2]}" +%s)"
-  [ $(( b - a )) -eq "$(tick_const INTERVAL_S)" ]
-  [ $(( c - b )) -eq "$(tick_const INTERVAL_S)" ]
+  [ "${#fires[@]}" -eq 12 ]
+  min=999999; prev=""
+  for f in "${fires[@]}"; do
+    t="$(date -u -d "$f" +%s)"
+    [ "$(date -u -d "$f" +%M)" != 00 ] || { echo "fires at :00: $f"; return 1; }   # the outbound tick's start
+    if [ -n "$prev" ] && [ $(( t - prev )) -lt "$min" ]; then min=$(( t - prev )); fi
+    prev="$t"
+  done
+  [ "$min" -eq "$(tick_const INTERVAL_S)" ]
 }
 
 @test "systemd's own parser accepts both units, and the service runs the script with no flags" {
@@ -368,8 +378,12 @@ delta_step() {
   [ "$(cat "$S/scripts/credit-ask-tick.sh")" = "$(printf '%s' "$hand")" ]
 }
 
-@test "a budget that does not fit the timer period runs nothing" {
-  ASK_TICK_HARD_S=1790 run bash "$TICK"
+@test "a budget that does not fit the hour runs nothing" {
+  ASK_TICK_HARD_S=1790 run bash "$TICK"          # the outbound margin no longer covers the overrun
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"BAD BUDGET"* ]]
+  [ "$(builds)" -eq 0 ]
+  ASK_TICK_RUN_S=3400 ASK_TICK_HARD_S=3550 ASK_TICK_OUTBOUND_MARGIN_S=200 run bash "$TICK"   # past the hour
   [ "$status" -eq 2 ]
   [[ "$output" == *"BAD BUDGET"* ]]
   [ "$(builds)" -eq 0 ]
@@ -401,18 +415,18 @@ delta_step() {
   [ "$(builds)" -eq 0 ]
 }
 
-@test "it yields to an outbound tick in flight, and reports no numbers from an earlier run" {
-  run bash "$TICK"                                 # an earlier run that sent 1
-  [ "$status" -eq 0 ]
-  : > "$CALLS"
+@test "an outbound tick in flight does not stop the run: its apply takes its own lock, never the credit-group one" {
+  # firstmate 031: the outbound tick holds its tick lock and the credit-group run lock 60-95 minutes of every even hour
+  mkdir -p "$(dirname "$ASK_TICK_OUTBOUND_LOCK")"
   exec 7>>"$ASK_TICK_OUTBOUND_LOCK"; flock -n 7
+  exec 8>>"$T/ledger.sqlite3.credit-group.run.lock"; flock -n 8
   run bash "$TICK"
-  exec 7>&-
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"yielded_to_outbound_tick: the sender was not run"* ]]
-  [ "$(builds)" -eq 0 ]
-  [ "$(last_run sender_ran)" = False ]
-  [ "$(last_run sent)" = None ]
+  exec 7>&- 8>&-
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(builds)" -eq 1 ]
+  [ "$(applies)" -eq 1 ]
+  grep -q -- '--mode apply .* --page --own-lock ' "$CALLS"
+  [ "$(last_run sender_ran)" = True ]
 }
 
 @test "an outbound tick lock file nobody holds does not stop the run" {
@@ -432,8 +446,9 @@ delta_step() {
   line="$(grep '^send .*--mode apply' "$CALLS")"
   share="$(sed -n 's/.*--apply-budget-s \([0-9]*\) .*/\1/p' <<<"$line")"
   [ "$share" -ge "$(tick_const MIN_SHARE_S)" ] && [ "$share" -le "$(tick_const RUN_S)" ]
-  [ "$line" = "send --list $T/state/asks.json --segment paid --mode apply --max-users 50 --max-entries 60 --start-entry 0 --apply-budget-s $share --signed-accepted $T/state/check-paid-1.json --page --outcomes-json $T/state/outcomes-paid-1.json" ]
-  grep -q -- "^send --list $T/state/asks.json --segment paid --mode dry-run --max-users 50 --max-entries 60 --start-entry 0 --check-recipients --outcomes-json $T/state/check-paid-1.json\$" "$CALLS"
+  [ "$line" = "send --list $T/state/asks.json --segment paid --mode apply --max-users 50 --max-entries 60 --start-entry 0 --apply-budget-s $share --signed-accepted $T/state/check-paid-1.json --page --own-lock --outcomes-json $T/state/outcomes-paid-1.json" ]
+  # the check gates every user that fits (the page); the apply sends at most the per-tick cap of what it signed
+  grep -q -- "^send --list $T/state/asks.json --segment paid --mode dry-run --max-users 60 --max-entries 60 --start-entry 0 --check-recipients --outcomes-json $T/state/check-paid-1.json\$" "$CALLS"
   [ ! -s "$CALLS.gate-env" ]
 }
 
@@ -789,9 +804,9 @@ PY
   [ "$(cat "$T/state/next-segment")" = free ]
 }
 
-@test "the credit-group lock is free between batches: an outbound apply could take it before every check" {
+@test "the run never holds the credit-group lock: an outbound apply could take it before every check" {
   export ASK_TICK_MAX_BATCHES=4 STUB_ONE_USER_PER_BATCH=1
-  export STUB_SLOW_LOCK="$T/ledger.sqlite3.credit-group.run.lock" STUB_LOCK_PROBE="$T/ledger.sqlite3.credit-group.run.lock"
+  export STUB_SLOW_LOCK="$T/ledger.sqlite3.proof-need-ask.ask-tick.run.lock" STUB_LOCK_PROBE="$T/ledger.sqlite3.credit-group.run.lock"
   run bash "$TICK"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(applies)" -eq 4 ]
@@ -799,14 +814,14 @@ PY
   ! grep -q '^held$' "$CALLS.probe"
 }
 
-@test "an outbound tick that starts mid-run is yielded to before the next apply, and the cursor keeps the done batches" {
-  export ASK_TICK_MAX_BATCHES=200 STUB_ONE_USER_PER_BATCH=1 STUB_GRAB_OUTBOUND_AT=3
+@test "an outbound tick that starts mid-run does not stop the next apply" {
+  export ASK_TICK_MAX_BATCHES=4 STUB_ONE_USER_PER_BATCH=1 STUB_GRAB_OUTBOUND_AT=3
   run bash "$TICK"
   kill "$(cat "$CALLS.holder")" 2>/dev/null || true
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(applies)" -eq 2 ]
-  [ "$(last_run state)" = yielded_to_outbound_tick ]
-  [ "$(cat "$T/state/cursor-paid")" = 40 ]
+  [ "$(applies)" -eq 4 ]
+  [ "$(last_run state)" = ran ]
+  [ "$(cat "$T/state/cursor-paid")" = 80 ]
 }
 
 @test "the deadline stops the run between batches with the cursor at the first batch not done" {
@@ -963,18 +978,43 @@ PY
   # (540 - 240 - 230 - 20) / 4 = 12 with no time spent, 11 or 10 once the stub build and a slow runner have taken
   # up to 10 s: fewer than the page of 20, so the sizing, not the page, set it
   [ "$m" -ge 10 ] && [ "$m" -le 12 ] || { echo "max-users $m"; return 1; }
-  grep -q -- "--mode apply --max-users $m " "$CALLS"     # the apply sends at most what the check signed
+  # the apply sends at most the per-tick cap of what the check signed, over exactly the entries the check examined
+  grep -q -- "--mode apply --max-users 50 --max-entries 20 --start-entry 0 " "$CALLS"
   [ "$(last_run state)" != check_killed ]
   [ "$(cat "$T/state/cursor-paid")" -gt 0 ]                 # the batch was walked and the cursor moved
   grep -q "check of up to $m user(s) from entry 0 took" <<<"$output"
 }
 
-@test "at the production cost a :50 run checks the full page of 20" {
-  unset ASK_TICK_CHECK_S_PER_USER ASK_TICK_CHECK_SETUP_S
-  export ASK_TICK_OUTBOUND_DUE_S=600                            # :50: (600 - 240 - 230 - 20) / 4 = 27, capped at 20
+@test "at the production cost a run's check gates every user that fits its time, not a page of 20" {
+  unset ASK_TICK_CHECK_S_PER_USER ASK_TICK_CHECK_SETUP_S ASK_TICK_PAGE
+  export ASK_TICK_OUTBOUND_DUE_S=600                            # :50: (600 - 240 - 230 - 20) / 4 = 27
   run bash "$TICK"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  grep -q -- '--max-users 20 --max-entries 20 .*--check-recipients' "$CALLS" || { cat "$CALLS"; return 1; }
+  m="$(grep -- '--check-recipients' "$CALLS" | sed -E 's/.*--max-users ([0-9]+) .*/\1/')"
+  [ "$m" -ge 24 ] && [ "$m" -le 27 ] || { cat "$CALLS"; return 1; }
+  grep -q -- "--max-users $m --max-entries 400 .*--check-recipients" "$CALLS" || { cat "$CALLS"; return 1; }
+  : > "$CALLS"; rm -f "$T/state/cursor-"*
+  export ASK_TICK_OUTBOUND_DUE_S=3000                           # :10: RUN_END 1500, (1500 - 230 - 20) / 4 = 312
+  run bash "$TICK"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  m="$(grep -- '--check-recipients' "$CALLS" | head -1 | sed -E 's/.*--max-users ([0-9]+) .*/\1/')"
+  [ "$m" -ge 300 ] && [ "$m" -le 312 ] || { cat "$CALLS"; return 1; }
+}
+
+@test "the apply walks only the entries its check examined, so the cursor never passes a user no check gated" {
+  export STUB_CHECK_PAGE_END=7          # the check stopped at entry 7 (its users ran out at --max-users)
+  export STUB_PAGE_END=7
+  run bash "$TICK"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q -- "--mode apply --max-users 50 --max-entries 7 --start-entry 0 " "$CALLS" || { cat "$CALLS"; return 1; }
+  [ "$(cat "$T/state/cursor-paid")" = 7 ]
+  echo 3 > "$T/state/cursor-free"; echo free > "$T/state/next-segment"
+  export STUB_CHECK_PAGE_END=3          # a check that examined nothing past its start is unmeasured: nothing sent
+  run bash "$TICK"
+  [ "$status" -eq 1 ]
+  [ "$(last_run state)" = page_unmeasured ]
+  [ "$(cat "$T/state/cursor-free")" = 3 ]
+  [ "$(grep -c -- '--segment free --mode apply' "$CALLS")" -eq 0 ]
 }
 
 @test "a run with no room for one gated user starts no check, keeps its cursor and is not a failure" {

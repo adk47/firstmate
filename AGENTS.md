@@ -1790,13 +1790,17 @@ measured audience: `docs/credit-verification/verify-request-notes.md` §"The day
 
 ## The ask tick: batches inside its timer, no lock between them, and `sent 0` is the gates
 
-`scripts/credit-ask-tick.sh` (`credit-ask-tick.timer`, :20 and :50) reads the family's arming row and walks one segment
+`scripts/credit-ask-tick.sh` (`credit-ask-tick.timer`, every 10 minutes except :00) reads the family's arming row and walks one segment
 of the need-ask list in batches: each one a read-only `--check-recipients` pass, then an apply of exactly that check's
 `--signed-accepted` set, then the cursor saved. Doc: `docs/credit-verification/credit-ask-tick.md`.
 
-- **The credit-group run lock is held only inside one apply, never between batches, and never across :00.** The
-  outbound tick does not retry its credit applies on that lock, so the run ends `OUTBOUND_MARGIN_S` before the next :00
-  and re-reads the outbound tick's lock before every check and apply.
+- **The check is sized to its time, the apply to the policy's caps.** A check gates every user that fits (an outcome
+  each); the apply sends at most the per-tick and daily room of what it signed and walks only the entries its check
+  examined. Never hand an apply a longer page than its check walked: unsigned users are dropped uncounted, and the
+  cursor would pass users no check gated.
+- **It never takes the credit-group run lock and never waits for the outbound tick.** Each apply runs
+  `need_asks send --own-lock` (its own run lock) and leaves `need_asks.OWN_LOCK_RESERVE` of the shared credit cap:
+  waiting for the outbound tick, which holds that lock 60-95 min of every even hour, left the pass idle most of the day.
 - **Every apply is read back with the outbound tick's checks** (health, refusal spike, fraud, zero-read, sample)
   before another batch starts; a STOP writes `/etc/hydra/credit-ask-tick.disabled`, and a missing reader refuses the run.
 - **A killed run resumes; it never re-sends.** The cursor moves only after a batch is done, and the ledger's claim before
@@ -1809,8 +1813,25 @@ of the need-ask list in batches: each one a read-only `--check-recipients` pass,
   `docs/credit-verification/credit-ask-tick.md` §"`distributor_preflight_not_ok` is a label, not a dependency".
 - **A sender whose run outlives its timer starves the family.** The hand-installed tick (3600 s timeout, 30-minute
   timer, no cursor) held the credit-group run lock without a gap, and the outbound tick dropped every credit family
-  behind its first apply. A new scheduled sender keeps its hard stop inside its period and yields to the outbound
-  tick's lock; `scripts/tests/credit-ask-tick.bats` holds this one to both.
+  behind its first apply. A new scheduled sender keeps its hard stop inside its period and never holds the
+  credit-group lock across a run; `scripts/tests/credit-ask-tick.bats` holds this one to both.
+- **Two senders of one family share its daily cap, so the cap is read in the ledger claim, not before the run.**
+  The ask tick and the outbound tick both send proof-need-ask under different locks; each sized its run from a room
+  read before a minutes-long check. `verify_ledger.claim` refuses a family in `FAMILY_DAY_CAPPED` once today's rows
+  reach its `daily_cap` (`family_cap`, DEFERRED by the gate). A new family a second sender reaches goes in that list.
+- **proof-need-ask waits 24 hours after another message, not 7 days** (firstmate 034a: one message per person per
+  day). The same 24 hours in four places: `verify_ledger.RECONTACT_HOURS`, the gate's `RECONTACT_S`,
+  `core_notice check --window-hours 24` (pinned equal by `test_verify_ledger_proof_need.py`) and comm_state's
+  `NEED_ASK_RECENT_HOURS` (its notes and R5 admin-comment holds). The reason code keeps its name (`messaged_7d`,
+  `core_notice_within_7d`); every other campaign keeps the week. A filing conversation WE opened is no longer a G2
+  refusal for this ask: it goes by email as our own message (034c).
+- **The reply a need decision came after never holds that decision's ask** (`[key=circular-gate]`, firstmate 040).
+  comm_state reads a customer TEXT message as news only after the reader's decision (`need_facts` `decided_at`, the
+  bound dv_outcomes read); an attachment or document link still holds from the document's arrival, and no decision time
+  keeps the old rule. A stale filing thread (R6) is not a hold for this ask: the gate sends it by email, like a closed
+  one. Before this, 76 of 274 paid replied users were held by the very reply that produced their ASK.
+- **An UNMEASURED STOP ends its own family, never the outbound tick** (`[key=family-unmeasured-stop]`). Each family
+  behind it has its own bar and the tick still exits 1; before, uvn-status's bar ended every tick ahead of proof-need-ask.
 - **A deploy starts the timer again**: the stop that lasts is `/etc/hydra/credit-ask-tick.disabled`.
 
 ## The proof refusal: told only where the body is true, and never without a clean read-back

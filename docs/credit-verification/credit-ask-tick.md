@@ -21,7 +21,7 @@ page, including every user the real gate deferred.
 
 | Trigger | When | Why |
 |---|---|---|
-| `credit-ask-tick.timer` | :20 and :50 of every hour | off the outbound tick's start at :00; 1800 s between two fires |
+| `credit-ask-tick.timer` | every 10 minutes except :00 | off the outbound tick's start at :00; a run starts within 10 minutes of that tick going idle, and a fire while a run is still going starts nothing |
 
 The timer starts `credit-ask-tick.service` (`Type=oneshot`, `TimeoutStartSec=1740`). Both are written
 by `scripts/install-aux-units.sh`, which fails the deploy if the timer cannot be enabled, started or
@@ -31,38 +31,48 @@ is not `active` afterwards. A failed run pages through the `AUX_ONFAILURE_UNITS`
 
 1. Stops at once if a stop file is present.
 2. Takes a flock on `/run/credit-ask-tick.lock`. A second run exits 0 without building anything.
-3. Yields if the outbound tick is in flight (`/var/lib/hydra/credit-verify-outbound/tick.lock` is
-   held). That tick owns the credit-group budget while it runs.
+3. Does NOT wait for the outbound tick (firstmate 031, 2026-11-16): that tick holds the
+   credit-group lock 60-95 minutes of every even hour, and waiting for it left the pass idle most of
+   the day. Each apply takes its own run lock instead (step 6).
 4. Builds the list (`need_asks.py build`) into `/var/lib/hydra/credit-ask-tick/asks.json`.
 5. Picks ONE segment (paid and free alternate, one per run; a paid segment the policy does not arm
    is never applied, so the free segment carries every run until it is), then checks the stop file
-   and the outbound tick again.
-6. Walks that segment in BATCHES from the saved cursor. Before each batch it re-reads the stop file,
-   the outbound tick's lock and the policy's caps; the per-tick cap counts this run's
+   again.
+6. Walks that segment in BATCHES from the saved cursor. Before each batch it re-reads the stop file
+   and the policy's caps; the per-tick cap counts this run's
    `proof-need-ask` ledger rows (all batches together), and the daily cap counts today's
    `proof-need-ask` ledger rows (both segments, `sent` and `attempted` - the same count `room()` in
    `credit-verify-outbound.sh` makes, because `need_asks` keeps no per-segment record).
    One batch is:
-   - the read-only `--check-recipients` pass over `PAGE` entries from the cursor, with `--max-users`
-     the smallest of `PAGE`, what is left of the per-tick cap, and what is left of the daily cap;
-   - when the check accepted anyone, and the outbound tick has not started since: one apply of
-     exactly that check's accepted set (`--signed-accepted`), with `--page` and `--apply-budget-s`
-     at most `BATCH_APPLY_S`;
+   - the read-only `--check-recipients` pass over up to `PAGE` entries from the cursor, with
+     `--max-users` the users that fit the check's time (`CHECK_S_PER_USER`), at most `PAGE`: every
+     one of them gets an outcome, accepted or the gate's reason;
+   - when the check accepted anyone: one apply (`--own-lock`) of
+     exactly that check's accepted set (`--signed-accepted`), with `--max-users` the smaller of what
+     is left of the per-tick cap and of the daily cap, `--max-entries` exactly the entries the check
+     examined (an apply drops users outside the signed set without counting them, so a longer apply
+     page would carry the cursor past users no check gated), `--page`, and `--apply-budget-s` at most
+     `BATCH_APPLY_S`. An accepted user the caps leave unsent ends the apply's page, so the next batch
+     checks them again;
    - the cursor saved from the batch's own page record (the apply's, or the check's when it accepted
      nobody), wrapping to 0 at the end of the list.
 7. Ends when the end of the list is reached (`pass_complete`), the run's time is spent
-   (`budget_spent`), a cap is spent, `MAX_BATCHES` batches are walked (`ran`), a stop file appears,
-   or the outbound tick starts (`yielded_to_outbound_tick`).
+   (`budget_spent`), a cap is spent, `MAX_BATCHES` batches are walked (`ran`), or a stop file
+   appears.
 
 ### Locks, resume, and sending nobody twice
 
-- This script holds no ledger lock. `ledger.sqlite3.credit-group.run.lock` is taken inside each
-  apply (`need_asks.send`) and released when that apply exits, so it is held at most
-  `BATCH_APPLY_S` at a time and is free between batches.
-- The outbound tick starts at :00 (`/etc/cron.d/credit-verify-outbound`) and does not retry its
-  credit applies when that lock is busy. A run therefore starts no batch later than
-  `OUTBOUND_MARGIN_S` before the next :00, and a run with less than one send's room before then does
-  not start (`outbound_tick_due`).
+- This script holds no ledger lock, and never takes the credit-group one. Each apply runs
+  `need_asks send --own-lock`, which takes `ledger.sqlite3.proof-need-ask.ask-tick.run.lock` instead
+  and releases it when the apply exits (at most `BATCH_APPLY_S`). The outbound tick therefore applies
+  whenever it runs, beside this run or between its batches, and this run applies while it runs.
+- With no lock between the two writers, an own-lock apply leaves `need_asks.OWN_LOCK_RESERVE` (100)
+  of today's shared credit cap (`shared_daily_cap.credit`) unspent, so the two together can overspend
+  it by no more than one ask apply (the per-tick cap, 50). Neither can send a user twice: the ledger
+  claims every note before it is posted.
+- A run still starts no batch later than `OUTBOUND_MARGIN_S` before the next :00, and a run with less
+  than one send's room before then does not start (`outbound_tick_due`), to keep its gate calls off
+  the outbound tick's build and first checks.
 - The cursor moves only after a batch is done. A run killed during an apply resumes at that batch.
   Users that apply already sent are not sent again: the ledger claims each note before it is posted
   (`verify_ledger.claim`, one `BEGIN IMMEDIATE` per user) and the sender skips any request with a live
@@ -96,21 +106,21 @@ before building anything (`rails_missing`).
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `INTERVAL_S` | 1800 | the timer's period |
+| `INTERVAL_S` | 600 | the timer's period; a run may outlast it |
 | `RUN_S` | 1500 | no batch starts after this second of the run |
 | `HARD_S` | 1680 | any step still running is sent SIGTERM |
 | `KILL_GRACE_S` | 30 | the SIGKILL delay after `HARD_S`'s SIGTERM |
 | `TimeoutStartSec` | 1740 | systemd's own stop, above `HARD_S` plus the grace and inside the period |
 | `MIN_SHARE_S` | 230 | the least a send is started with |
-| `PAGE` | 20 | list entries walked per batch, by the check and by the apply |
+| `PAGE` | 400 | the most list entries one check walks; the time sizing (`CHECK_S_PER_USER`) usually sets fewer: ~310 users in a :10 run's first check, ~27 in a :50 run's |
 | `CHECK_S_PER_USER` | 4 | measured cost of one gated user in the check plus margin (2.6 s all in after #2099, node-8 2026-11-16 06:58Z; 8-16 s before it); the check gets only the users that fit before its deadline |
 | `CHECK_SETUP_S` | 20 | the check's start-up before its first gate call, in the same sizing |
-| `BATCH_APPLY_S` | 300 | the longest share one apply gets: the longest the credit-group lock is held at a time |
+| `BATCH_APPLY_S` | 300 | the longest share one apply gets: the longest its own run lock is held at a time |
 | `MAX_BATCHES` | 200 | batches per run at most |
 | `OUTBOUND_MARGIN_S` | 240 | the run ends this long before the outbound tick's next :00; it must cover `HARD_S - RUN_S` |
 
 A run that does not fit (`RUN_S` at or below the share floor, `BATCH_APPLY_S` under it, `RUN_S` not
-under `HARD_S`, `HARD_S + 60 > INTERVAL_S`, or an outbound margin under `HARD_S - RUN_S`) exits 2
+under `HARD_S`, `HARD_S + KILL_GRACE_S` within 60 s of the hour, `INTERVAL_S` under 60, or an outbound margin under `HARD_S - RUN_S`) exits 2
 and runs nothing. The check is bounded to leave `MIN_SHARE_S`
 for the apply, and the send loop starts no user whose worst case (`verify_notify.WORST_USER_S`,
 200 s) would not fit its share, so a share at or under 200 s would send nobody: `MIN_SHARE_S` is
@@ -133,8 +143,7 @@ facts. States:
 | `check_not_reached` | 0 | the run had no room for one gated user (`CHECK_SETUP_S + CHECK_S_PER_USER`) before the check's deadline: no check, nothing sent, the cursor kept |
 | `tick_cap_spent` | 0 | this run's ledger rows reached the policy's per-tick cap |
 | `outbound_tick_due` | 0 | the outbound tick starts too soon for one send to finish before it; nothing built |
-| `yielded_to_outbound_tick` | 0 | the outbound tick was in flight; nothing built or nothing sent |
-| `lock_held_by_another` | 0 | another credit sender held the credit-group run lock, or a deploy held the apply lock; nothing sent, the cursor stays |
+| `lock_held_by_another` | 0 | another ask-tick apply held the own run lock, or a deploy held the apply lock; nothing sent, the cursor stays |
 | `tick_cap_zero` | 0 | the policy's per-tick cap for this segment is 0 |
 | `daily_cap_used` | 0 | today's `proof-need-ask` sends have used the policy's daily cap for this segment; nothing sent, the next run takes the other segment |
 | `stopped` | 0 | a stop file was placed during the run; no further batch |

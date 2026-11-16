@@ -135,12 +135,13 @@ def _ts(text: str) -> list[datetime]:
 
 
 def reasons_by_user(user_ids: Iterable[int], *, query: Query = trino,
-                    now: datetime | None = None) -> dict[int, list[str]]:
+                    now: datetime | None = None, window: timedelta = WINDOW) -> dict[int, list[str]]:
     """{user id: [why...]} for the users core told something lately (empty list = clear). Unreadable raises.
     A marker that is present but carries no readable timestamp is UNKNOWN for that user ("unknown: ..."):
     the caller holds them, never clears them."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    since, today = now - WINDOW, now.date()
+    since, today = now - window, now.date()
+    span = "7d" if window == timedelta(days=7) else f"{int(window.total_seconds() // 3600)}h"   # the reasons name it
 
     def within(u: int, what: str, value: str, test) -> None:
         try:
@@ -164,7 +165,7 @@ def reasons_by_user(user_ids: Iterable[int], *, query: Query = trino,
             if u not in out:
                 continue
             for name, blob in (("approvedNotice", ap), ("proofRequest", pr), ("infoRequest", ir)):
-                within(u, f"{name} within 7d", blob, lambda t: t >= since)
+                within(u, f"{name} within {span}", blob, lambda t: t >= since)
             within(u, "credit request changed today", upd, lambda t: t.date() == today)
         # p1 180: a claim never touched since it was filed (updatedat == createdat) is the user's own filing, not
         # something core told them - it never holds. Any later update (a decision, a code check) still does.
@@ -173,7 +174,7 @@ def reasons_by_user(user_ids: Iterable[int], *, query: Query = trino,
                 f"FROM postgresql_core.public.claiming WHERE userid IN ({lst}) AND updatedat >= current_timestamp - INTERVAL '8' DAY", 3):
             u = int(uid)
             if u in out and not (upd and upd == created):
-                within(u, "claim updated within 7d", upd, lambda t: t >= since)
+                within(u, f"claim updated within {span}", upd, lambda t: t >= since)
     return {u: sorted(set(w)) for u, w in out.items()}
 
 
@@ -195,6 +196,9 @@ def _main(argv: list[str] | None = None) -> int:
     who = c.add_mutually_exclusive_group(required=True)
     who.add_argument("--user-id")
     who.add_argument("--email")
+    # firstmate 034a (2026-11-16): the ask's no-recontact window is per campaign; the gate passes 24 for
+    # proof-need-ask. The reason code (core_notice_within_7d) keeps its name; the reasons name the window.
+    c.add_argument("--window-hours", type=int, default=int(WINDOW.total_seconds() // 3600))
     b = sub.add_parser("batch")
     b.add_argument("--users-file", required=True)
     b.add_argument("--out", required=True)
@@ -205,7 +209,11 @@ def _main(argv: list[str] | None = None) -> int:
             return 2
         try:
             ids = [int(a.user_id)] if a.user_id is not None else user_ids_for_email(a.email)
-            why = sorted({w for ws in reasons_by_user(ids).values() for w in ws}) if ids else []
+            if not 1 <= a.window_hours <= 24 * 7:
+                print(json.dumps({"hold": None, "reasons": [f"--window-hours {a.window_hours} is outside 1..168"]}))
+                return 2
+            why = sorted({w for ws in reasons_by_user(ids, window=timedelta(hours=a.window_hours)).values()
+                          for w in ws}) if ids else []
         except Unreadable as exc:
             print(json.dumps({"hold": None, "reasons": [str(exc)]}))
             return 2
