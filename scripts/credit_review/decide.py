@@ -131,6 +131,7 @@ from typing import Any, Callable, Iterable, Sequence
 from . import account_gate, doc_approve
 from . import admin as admin_api
 from . import dsp_gate, proof_parts
+from . import user_decision
 from .evidence import (
     BIG_ARTIST_POPULARITY,
     BIG_TRACK_POPULARITY,
@@ -151,10 +152,10 @@ from .policy import (
     facts_of,
     server_approval_refusal,
     validator_conflict,
-    validator_rejected_rules,
 )
 from .roles import ONE_PERSON_FAMILIES, editorial_terms, family_of, is_editorial
 from .runner import log
+from .user_decision import DENY_PROFILE_REASON, DENY_USER_REASON, NO_TRACK_REASON, conflict_reason
 
 AUTOMATION = "credit-trust-decide"
 # [key=doc-approval-doctrine] Fable 2026-11-03 19:3xZ (under Aaron's 11-03 delegation): a dv-4
@@ -673,19 +674,17 @@ def pre_model(req: dict[str, Any], ev: Evidence, policy: Policy, fp: int) -> Dec
     d.footprint = fp
     uid = d.user_id
     if uid is not None and uid in policy.deny_user_ids:
-        return _set(d, "support", "user on the fraud / PULL / HOLD / RE-VERIFY list")
+        return _set(d, "support", DENY_USER_REASON)
     if d.profile_id.lower() in policy.deny_profile_ids:
-        return _set(d, "support", "profile on the fleet-scan / stillfloo deny list")
+        return _set(d, "support", DENY_PROFILE_REASON)
     if not ev.track_id:
-        return _set(d, "defer", "track not ingested yet (no trackId): decided once the catalog has it")
+        return _set(d, "defer", NO_TRACK_REASON)
     if ev.track_popularity is None and any(e.startswith("track") for e in ev.errors):
         return _defer_unreadable(d, ev, "catalog track unreadable this run: " + "; ".join(ev.errors)[:200])
     conflict = validator_conflict(req.get("verificationData"))
     if conflict:
         d.conflict = conflict
-        return _set(d, "support", "validator conflict (the server refuses agent approvals of these): "
-                    + ",".join(conflict["hold_rules"] + (["class_c"] if conflict["class_c"] else [])
-                               + (["hold_on_error"] if conflict["hold_on_error"] else [])))
+        return _set(d, "support", conflict_reason(conflict))
     if ev.catalog.artist_read_failed and not known_big(ev):
         return _defer_unreadable(d, ev, "a linked artist's profile was unreadable this run: decided once it is read")
     if ev.big_track:
@@ -2979,13 +2978,17 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     builder = EvidenceBuilder(admin, now=now)
     decisions: list[Decision] = []
     needs_web: list[tuple[dict[str, Any], Evidence, int]] = []
-    for req in batch:
+    # User-level decision, row-level effect (user_decision.py): the stored-fact rules are walked once per
+    # PERSON and group of like rows, and each row still gets its own answer. Only the reject rule is taken
+    # from it here - it is the one rule decided before any live read - so every other rule below still
+    # sees this row's own evidence. A row the pass could not read was walked on its own in there.
+    stored_answers = user_decision.decide_users(batch, policy).answers
+    for n, req in enumerate(batch):
         if time.monotonic() - t0 > budget_s:
             break
-        rejected = validator_rejected_rules(req.get("verificationData"))
-        if rejected:
-            decisions.append(_set(request_decision(req), "hold", f"validator reject rule fired ({', '.join(rejected)}): "
-                                  "never approved or asked by automation; human review"))
+        stored = stored_answers[n]
+        if stored.rule == user_decision.REJECT_RULE:
+            decisions.append(_set(request_decision(req), stored.decision, stored.reason))
             continue
         try:
             ev = builder.build(req)

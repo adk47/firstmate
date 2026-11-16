@@ -776,6 +776,19 @@ ever PROPOSED, in shadow, in `link_proposals`. That table is never the decider's
 every row as a credit decision. Code never links on a name alone and never relinks:
 `docs/credit-verification/profile-link-proposals.md`.
 
+**The decider's stored-fact rules are evaluated per PERSON, and the effect is still per row**
+(`scripts/credit_review/user_decision.py`, captain 2026-11-12; `docs/credit-verification/user-level-decisions.md`).
+A reject rule, the deny lists, a missing trackId and a validator conflict get one walk per user and group of
+like rows; every approval and everything that reads a row's own track stays per-row (`user_decision.RULES`).
+`decide.run` takes only the reject-rule hold from the pass today - it is the one rule ahead of every live
+read; the other four still land in `decide.pre_model`, after the row's own evidence build, importing their
+wording from `user_decision.py`. That wording lives ONCE there: never re-type one of those reasons in
+`decide.py`. A row the pass cannot read
+falls back to the per-row path and is counted, never batched. Before changing the ladder or the view, run
+`scripts/credit-user-decisions.py equivalence --rows <snapshot>` on a real snapshot: any disagreement is a
+defect. It bought fewer evaluations and a per-person worklist, not wall clock - the cost is the live
+evidence build, which it does not skip (that is not equivalent, and needs a ruling).
+
 ## Claim documents get one recorded decision, in shadow, and none of them is a person's
 
 `scripts/claim-doc-ladder.py` (`claim-doc-ladder.timer`, every 4 h) is the claim twin of `doc_approve.py`: every open
