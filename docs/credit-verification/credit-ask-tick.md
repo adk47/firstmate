@@ -103,6 +103,8 @@ before building anything (`rails_missing`).
 | `TimeoutStartSec` | 1740 | systemd's own stop, above `HARD_S` plus the grace and inside the period |
 | `MIN_SHARE_S` | 230 | the least a send is started with |
 | `PAGE` | 20 | list entries walked per batch, by the check and by the apply |
+| `CHECK_S_PER_USER` | 4 | measured cost of one gated user in the check plus margin (2.6 s all in after #2099, node-8 2026-11-16 06:58Z; 8-16 s before it); the check gets only the users that fit before its deadline |
+| `CHECK_SETUP_S` | 20 | the check's start-up before its first gate call, in the same sizing |
 | `BATCH_APPLY_S` | 300 | the longest share one apply gets: the longest the credit-group lock is held at a time |
 | `MAX_BATCHES` | 200 | batches per run at most |
 | `OUTBOUND_MARGIN_S` | 240 | the run ends this long before the outbound tick's next :00; it must cover `HARD_S - RUN_S` |
@@ -128,6 +130,7 @@ facts. States:
 | `ran` | 0 | `MAX_BATCHES` batches walked; the cursor moved after each |
 | `pass_complete` | 0 | the end of the list was reached; the cursor wrapped to 0 |
 | `budget_spent` | 0 | no room for another batch before the run's end; the cursor is at the first batch not done |
+| `check_not_reached` | 0 | the run had no room for one gated user (`CHECK_SETUP_S + CHECK_S_PER_USER`) before the check's deadline: no check, nothing sent, the cursor kept |
 | `tick_cap_spent` | 0 | this run's ledger rows reached the policy's per-tick cap |
 | `outbound_tick_due` | 0 | the outbound tick starts too soon for one send to finish before it; nothing built |
 | `yielded_to_outbound_tick` | 0 | the outbound tick was in flight; nothing built or nothing sent |
@@ -144,6 +147,8 @@ facts. States:
 | `check_failed`, `check_killed`, `check_unmeasured` | 1 | the recipient check did not answer; nothing sent |
 | `send_failed`, `send_killed` | 1 | the sender ended badly; read the ledger for what went out |
 | `page_unmeasured`, `cursor_not_saved` | 1 | the sender ran; where it stopped is not saved |
+
+**The check is sized, not the timeout.** The first live pass (2026-11-16 05:50Z) ran at :50, where the run ends 240 s before :00 and keeps 230 s for the send: the check had until 130 s, the 47 s build left it 83 s for 20 entries, and it was killed with nothing walked. Each check now gets `floor((RUN_END - MIN_SHARE_S - now - CHECK_SETUP_S) / CHECK_S_PER_USER)` users at most (the full page of 20 at :50 and at :20 at 4 s a user; it was about 5 at :50 at the pre-#2099 16 s), the apply takes the same cap, and every batch logs how long its check took, so `CHECK_S_PER_USER` is re-measured from the journal rather than guessed.
 
 A number the sender did not print is `unmeasured` in the line and `null` in the file, never 0. A run
 that did not reach the sender reads no sender file, so it never repeats an earlier run's numbers.

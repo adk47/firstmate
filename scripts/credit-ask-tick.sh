@@ -79,6 +79,16 @@ MIN_SHARE_S="$(cfg ASK_TICK_MIN_SHARE_S 230)"
 # cursor is saved after every batch, so a killed run resumes at the first batch it did not finish. The check pays a
 # gate call per gated user (about 12 s; most entries are filtered before the gate), so 20 keeps a batch near a minute.
 PAGE="$(cfg ASK_TICK_PAGE 20)"
+# What one check costs, measured, so each check gates only the users that fit before its deadline. The first live pass
+# (2026-11-16 05:50Z, a :50 run) gave the check 83 s for 20 entries and was killed at 130 s, nothing walked. The
+# outbound tick's proof-need-ask checks measured 8-16 s per gated user that night (50 in 662 s, 50 in 810 s, 15 in
+# 118 s, 50 in 572 s), plus the list read before the first gate call. #2099 (the check reads distributor identities
+# once per page and gates them on the check workers) took the same 20 paid users from 277 s to 51 s on node-8
+# (2026-11-16 06:58Z), 22.8 s of it before the first gate call: 2.6 s a user all in, so 4 s is the measure plus margin.
+# A check is handed floor((deadline - now - CHECK_SETUP_S) / CHECK_S_PER_USER) users, at most the batch's cap, and a
+# run with room for none ends there with its cursor kept instead of starting a check that cannot finish.
+CHECK_S_PER_USER="$(cfg ASK_TICK_CHECK_S_PER_USER 4)"
+CHECK_SETUP_S="$(cfg ASK_TICK_CHECK_SETUP_S 20)"
 # The longest share one apply is handed. The apply is the only step that holds the credit-group run lock
 # (ledger.sqlite3.credit-group.run.lock, taken inside need_asks' apply and released when it exits), so this is the
 # longest that lock is held at a time; between batches it is free.
@@ -226,10 +236,11 @@ deadline_rc() { [ "$1" = 124 ] || [ "$1" = 137 ]; }
 if killed; then log "stop file present ($KILL or $KILL_LEGACY); nothing runs"; exit 0; fi
 
 for v in "$INTERVAL_S" "$RUN_S" "$HARD_S" "$KILL_GRACE_S" "$MIN_SHARE_S" "$PAGE" "$ELAPSED0" "$BATCH_APPLY_S" \
+         "$CHECK_S_PER_USER" "$CHECK_SETUP_S" \
          "$MAX_BATCHES" "$OUTBOUND_MARGIN_S" "${OUTBOUND_DUE_S:-0}"; do
   case "$v" in ''|*[!0-9]*) log "BAD CONFIG: '$v' is not a whole number; nothing runs"; exit 2 ;; esac
 done
-if [ "$PAGE" -lt 1 ] || [ "$MAX_BATCHES" -lt 1 ] || [ "$RUN_S" -le "$MIN_SHARE_S" ] || [ "$RUN_S" -ge "$HARD_S" ] \
+if [ "$PAGE" -lt 1 ] || [ "$MAX_BATCHES" -lt 1 ] || [ "$CHECK_S_PER_USER" -lt 1 ] || [ "$RUN_S" -le "$MIN_SHARE_S" ] || [ "$RUN_S" -ge "$HARD_S" ] \
    || [ "$BATCH_APPLY_S" -lt "$MIN_SHARE_S" ] || [ $(( HARD_S + 60 )) -gt "$INTERVAL_S" ] \
    || [ "$OUTBOUND_MARGIN_S" -lt $(( HARD_S - RUN_S )) ]; then
   log "BAD BUDGET: page $PAGE, batches $MAX_BATCHES, share floor ${MIN_SHARE_S}s, batch apply ${BATCH_APPLY_S}s, run ${RUN_S}s, hard stop ${HARD_S}s, outbound margin ${OUTBOUND_MARGIN_S}s, timer period ${INTERVAL_S}s. A run must fit one send (run > share floor, batch apply >= share floor), end before its hard stop, the hard stop must sit at least 60 s inside the timer period, and the outbound margin must cover the hard stop's overrun; nothing runs"
@@ -559,12 +570,25 @@ while :; do
     end_state=tick_cap_spent; break
   fi
   cap="$PAGE"; [ "$cap" -le "$tick_left" ] || cap="$tick_left"; [ "$cap" -le "$left" ] || cap="$left"
+  # Size the check to the time it has: the users that fit before RUN_END - MIN_SHARE_S at the measured cost. The apply
+  # takes the same cap, so it sends at most what this check signed.
+  fit=$(( (RUN_END - MIN_SHARE_S - $(elapsed) - CHECK_SETUP_S) / CHECK_S_PER_USER ))
+  if [ "$fit" -lt 1 ]; then
+    if [ "$BATCHES" -eq 0 ]; then
+      log "CHECK NOT REACHED: $(( RUN_END - MIN_SHARE_S - $(elapsed) ))s are left for a check, and one gated user needs $(( CHECK_SETUP_S + CHECK_S_PER_USER ))s; nothing sent, the cursor stays at $cur"
+      finish 0 check_not_reached "$seg" 0 "$start_cur" "$cur"
+    fi
+    log "$FAMILY/$seg: no room for another check after $BATCHES batch(es); the next run starts at entry $cur"
+    end_state=budget_spent; break
+  fi
+  [ "$cap" -le "$fit" ] || cap="$fit"
   BATCHES=$(( BATCHES + 1 )); n="$BATCHES"
 
   # The real gate, read only. Its `accepted` set is the ONLY set the apply may send; the hourly tick builds the list the
   # same way and hands the same file to the apply. Bounded to leave MIN_SHARE_S for the apply.
   CHECK="$STATE/check-$seg-$n.json"; CHECK_OUT="$STATE/check-$seg-$n.out"
   : > "$CHECK_OUT"
+  check_t0="$(elapsed)"
   bounded_to $(( RUN_END - MIN_SHARE_S )) "$PY" "$RUNNER" send --list "$LIST" --segment "$seg" --mode dry-run \
     --max-users "$cap" --max-entries "$PAGE" --start-entry "$cur" --check-recipients --outcomes-json "$CHECK" \
     > "$CHECK_OUT" 2>&1; rc=$?
@@ -580,6 +604,7 @@ while :; do
     log "CHECK FAILED (rc=$rc): $(grep -v '^{' "$CHECK_OUT" | tail -n 1 | cut -c1-300); nothing more sent"
     finish 1 check_failed "$seg" "$rc" "$start_cur" "$cur"
   fi
+  log "$FAMILY/$seg: batch $n's check of up to $cap user(s) from entry $cur took $(( $(elapsed) - check_t0 ))s"
   accepted="$("$PY" -c 'import json,sys; a=json.load(open(sys.argv[1])).get("accepted"); print("" if a is None else len(a))' "$CHECK" 2>/dev/null)" || accepted=""
   if ! [[ "$accepted" =~ ^[0-9]{1,6}$ ]]; then
     log "CHECK UNMEASURED: $CHECK records no accepted set; nothing more sent"

@@ -56,6 +56,7 @@ setup() {
   # One batch per run unless a case is about the batches, and the outbound tick's next start far away unless a case
   # is about it: the wall clock's minute must never decide a case.
   export ASK_TICK_MAX_BATCHES=1 ASK_TICK_OUTBOUND_DUE_S=100000
+  export ASK_TICK_CHECK_S_PER_USER=1 ASK_TICK_CHECK_SETUP_S=0   # the sizing has its own cases below
   # the safety checks after every apply: stubs that answer clean unless a case says otherwise, and log their reads
   export ASK_TICK_HEALTH="$T/health.py" ASK_TICK_ZERO_READ="$T/zero_read.py" ASK_TICK_FRAUD="$T/fraud.py"
   export ASK_TICK_NOTIFY_LIB="$T/notify.sh"
@@ -948,4 +949,55 @@ PY
   [ "$status" -eq 1 ]
   [ "$(last_run state)" = auto_killed ]
   grep -q "refusal spike" "$ASK_TICK_ETC/credit-ask-tick.disabled"
+}
+
+# The first live pass (2026-11-16 05:50Z) ran at :50: the run ends 240 s before :00 and keeps 230 s for the send, so the
+# check had until 130 s and was killed there with 20 entries asked of it, nothing walked. The check is now sized to
+# the time it has at the measured per-user cost.
+@test "a :50 run hands its check only the users that fit before the check's deadline, and walks them" {
+  unset ASK_TICK_CHECK_S_PER_USER ASK_TICK_CHECK_SETUP_S        # the production cost: 4 s a user, 20 s to start
+  export ASK_TICK_OUTBOUND_DUE_S=540                            # nine minutes to the outbound tick
+  run bash "$TICK"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  m="$(grep -- '--check-recipients' "$CALLS" | sed -E 's/.*--max-users ([0-9]+) .*/\1/')"
+  # (540 - 240 - 230 - 20) / 4 = 12 with no time spent, 11 or 10 once the stub build and a slow runner have taken
+  # up to 10 s: fewer than the page of 20, so the sizing, not the page, set it
+  [ "$m" -ge 10 ] && [ "$m" -le 12 ] || { echo "max-users $m"; return 1; }
+  grep -q -- "--mode apply --max-users $m " "$CALLS"     # the apply sends at most what the check signed
+  [ "$(last_run state)" != check_killed ]
+  [ "$(cat "$T/state/cursor-paid")" -gt 0 ]                 # the batch was walked and the cursor moved
+  grep -q "check of up to $m user(s) from entry 0 took" <<<"$output"
+}
+
+@test "at the production cost a :50 run checks the full page of 20" {
+  unset ASK_TICK_CHECK_S_PER_USER ASK_TICK_CHECK_SETUP_S
+  export ASK_TICK_OUTBOUND_DUE_S=600                            # :50: (600 - 240 - 230 - 20) / 4 = 27, capped at 20
+  run bash "$TICK"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q -- '--max-users 20 --max-entries 20 .*--check-recipients' "$CALLS" || { cat "$CALLS"; return 1; }
+}
+
+@test "a run with no room for one gated user starts no check, keeps its cursor and is not a failure" {
+  export ASK_TICK_CHECK_S_PER_USER=16 ASK_TICK_CHECK_SETUP_S=20
+  export ASK_TICK_OUTBOUND_DUE_S=500                            # 500 - 240 - 230 = 30 s: under 20 + 16
+  echo 40 > "$T/state/cursor-paid" 2>/dev/null || { mkdir -p "$T/state"; echo 40 > "$T/state/cursor-paid"; }
+  run bash "$TICK"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(last_run state)" = check_not_reached ]
+  # bats ignores a failed `! cmd` that is not the last line, so a forbidden call fails the case explicitly
+  if grep -q -- '--check-recipients' "$CALLS"; then echo "a check was started"; false; fi
+  if grep -q -- '--mode apply' "$CALLS"; then echo "an apply was started"; false; fi
+  [ "$(cat "$T/state/cursor-paid")" = 40 ]
+  grep -q "CHECK NOT REACHED" <<<"$output"
+}
+
+@test "a later batch with no room for a check ends the run with the cursor after the last batch done" {
+  export ASK_TICK_MAX_BATCHES=200 ASK_TICK_CHECK_S_PER_USER=1 ASK_TICK_CHECK_SETUP_S=3
+  export ASK_TICK_MIN_SHARE_S=1 ASK_TICK_BATCH_APPLY_S=1 ASK_TICK_RUN_S=8 ASK_TICK_HARD_S=9 ASK_TICK_INTERVAL_S=120
+  export STUB_CHECK_SLEEP=1
+  run bash "$TICK"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(last_run state)" = budget_spent ] || { echo "$output"; return 1; }
+  [ "$(last_run batches)" -ge 1 ]
+  [ "$(cat "$T/state/cursor-paid")" -eq $(( $(last_run batches) * 20 )) ]
 }
