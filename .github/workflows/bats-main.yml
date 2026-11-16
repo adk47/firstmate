@@ -1,0 +1,83 @@
+name: Bats on main (every suite)
+
+# 2026-11-15. Every Bats suite, on every push to main and once a night.
+#
+# WHY THIS EXISTS. Until this day Bats ran only on pull requests, and every pull
+# request ran all ~430 suites. Measured on ovh-hydra over 6.3 hours: Bats was 69
+# of the fleet's 98 runner-hours, 77 heads arrived, and a run waited a median of
+# 30 minutes for a runner. A pull request now runs the suites concerned by what
+# it changes plus the whole-tree guards (scripts/ci/bats-scope.py); the rest of
+# the suites run HERE.
+#
+# So a red run of this workflow means: a pull request merged that broke a suite
+# two or more steps away from what it changed. That is the cost accepted with
+# the scoping, and this run is the only place it shows. Nothing waits on this
+# workflow: not a merge, not the nightly deploy.
+#
+# ONE SOURCE. This does not carry a copy of the Bats step. It takes the step out
+# of pr-validate.yml (scripts/ci/bats-job-step.py) and runs it, so the list of
+# suites, the shard split, the slot and the refusal of skipped cases cannot
+# drift from what a pull request runs. The shard list below must equal that
+# job's; scripts/tests/bats-scope.bats fails when it does not.
+#
+# CONCURRENCY. One group, nothing cancelled: a run in progress finishes, and
+# GitHub keeps only the newest waiting run of a group. Pushes that arrive while
+# a run is going are therefore covered by ONE later run of the newest main, not
+# one run each. Every run tests all of main as it is then, so nothing is skipped.
+#
+# Rollback: delete this file and the scope block in pr-validate.yml's Bats step
+# (the lines between `SCOPE (2026-11-15)` and `count=`), in one change. Deleting
+# only this file leaves pull requests scoped with nothing behind them.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bats-main
+  cancel-in-progress: false
+
+jobs:
+  bats:
+    name: Bats, every suite (${{ matrix.shard }}/4)
+    runs-on: ovh-hydra
+    # The pull-request job's bound, for the same reasons (see pr-validate.yml).
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    # The same fences as the pull-request job: no test here may reach a real Jev
+    # key, the production shadow log, or a Slack token.
+    env:
+      JEV_ENV_FILE: /dev/null
+      JEV_SHADOW_DIR: /tmp/hydra-ci-jev-shadow-${{ github.run_id }}-${{ github.job }}-${{ matrix.shard }}
+      JEV_EVAL_DIR: /tmp/hydra-ci-jev-eval-${{ github.run_id }}-${{ github.job }}-${{ matrix.shard }}
+      MUSO_SLACK_ENV_FILE: /dev/null
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
+
+      - name: Ensure bats + parallel + jq + sqlite3 + node installed
+        run: bash scripts/ci/arc-toolchain.sh bats
+
+      - name: Run the pull-request Bats step, unscoped
+        env:
+          SHARD: ${{ matrix.shard }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          step="${RUNNER_TEMP:-/tmp}/bats-step-${SHARD}.sh"
+          python3 scripts/ci/bats-job-step.py "$SHARD" "$EVENT" > "$step"
+          bash "$step"

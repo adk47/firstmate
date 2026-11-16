@@ -604,6 +604,28 @@ deploy pre-flight, the QA hand-off and the dispatch workflows stay on node-8 (he
 a test that truly needs node-8's host (real systemd, live `/opt/hydra`) is tagged
 `# bats test_tags=host-systemd` or belongs in a node-8 job, never silently skipped.
 
+**A pull request does not run every Bats suite** (2026-11-15). It runs the suites it changes,
+the suites that name a file it changes (or name a file that names one), and the whole-tree
+guards (`scripts/tests/check-*.bats`, `audit-*.bats`, and any suite tagged
+`# bats file_tags=every-pr`). Every suite runs on each push to main and nightly in
+`.github/workflows/bats-main.yml`, which no merge waits on, so **a red "Bats on main" is a
+merged pull request that broke a suite two steps from what it changed**. It has an owner,
+and it is a lane, not a person: `.github/workflows/bats-main-report.yml` reads every finished
+run on node-8 and raises the Alertmanager alert `BatsOnMainRed` with `owner=ci`, which the
+lights dispatcher turns into one task for the `ci` lane; every green run resolves it. The
+deploy channel gets the failing suites and everything merged since the last green run (by
+GitHub login, as information), again on a new failing suite and on each nightly run while it
+stays red. Nobody is mentioned, in Slack or in the alert (Aaron's rule, firstmate on #2048:
+no ping and no task to any person). An alert Alertmanager did not accept, or a message Slack
+did not confirm, fails that job. If you merged into a red main, fix or revert before the
+next merge lands on top. The rule and what it measured
+are in `scripts/ci/bats-scope.py` (`scripts/tests/bats-scope.bats` executes it); what the
+report says and when is in `scripts/ci/bats-main-report.py`
+(`scripts/tests/bats-main-report.bats`). A new suite that reads the whole repo needs the
+`every-pr` tag or a `check-` name, or it only runs on main. Anything the selector cannot work
+out, and any change to how Bats itself runs, runs everything. Why: Bats was 69 of the
+fleet's 98 runner-hours over 6.3 hours that day and a run waited 30 minutes for a runner.
+
 **Read a red PR Validation from the failing JOB, never the run conclusion.** The
 2026-11-03 report "0 of 11 PR Validation runs passed since 20:00Z, hydra CI is BROKEN"
 was wrong: `concurrency: group: pr-validate-${{ github.ref }}` + `cancel-in-progress:

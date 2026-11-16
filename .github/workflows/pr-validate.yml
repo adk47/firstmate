@@ -1850,6 +1850,25 @@ jobs:
           fi
           count=$(echo "$files" | wc -l | tr -d ' ')
           echo "Discovered $count bats file(s) across both shards."
+          # SCOPE (2026-11-15). A pull request runs the suites concerned by what it changes
+          # plus the whole-tree guards; every suite runs on each push to main and nightly
+          # (.github/workflows/bats-main.yml, which runs THIS step with its own event name).
+          # Measured on ovh-hydra over 6.3 hours that day: Bats was 69 of the fleet's 98
+          # runner-hours and a run waited a median of 30 minutes for a runner. The rule, what
+          # it lets through and why are in scripts/ci/bats-scope.py; scripts/tests/bats-scope.bats
+          # executes it. Anything the selector cannot work out runs EVERY suite: it exits
+          # non-zero, prints nothing, or prints a path that was not discovered -> all of them.
+          discovered="$files"
+          if scoped=$(printf '%s\n' "$files" | BATS_SCOPE_EVENT="${{ github.event_name }}" python3 scripts/ci/bats-scope.py) \
+             && [ -n "$scoped" ] \
+             && ! grep -vFxq -f <(printf '%s\n' "$discovered") <<<"$scoped"; then
+            files="$scoped"
+          else
+            echo "::warning::the Bats scope could not be worked out; running every suite"
+            files="$discovered"
+          fi
+          echo "This run executes $(grep -c . <<<"$files" || true) of $count discovered bats file(s)."
+          count=$(grep -c . <<<"$files" || true)
           # Parallel across FILES, serial within a file (MUS-11315, from the MUS-7954
           # audit on node-8: corpus 1493 s serial -> 279 s at --jobs 8, identical
           # 6497-test name set). Slowest files go first so the long poles start at

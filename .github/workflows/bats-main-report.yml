@@ -1,0 +1,70 @@
+name: Bats on main, report
+
+# 2026-11-15. Reads every finished "Bats on main (every suite)" run. A red one
+# raises the Alertmanager alert BatsOnMainRed (owner=ci), a green one resolves it,
+# and the deploy channel is told what failed and what merged.
+#
+# WHY THIS EXISTS. A pull request runs only the Bats suites its change concerns,
+# so a break two steps away merges green and shows only as a red run on main.
+# Nothing waits on that run. Without a reader the break stays while later pull
+# requests keep merging green past it (QA finding on #2048, 2026-11-15).
+#
+# WHO GETS IT: A LANE, NEVER A PERSON (firstmate on #2048, inbox 035; Aaron's rule:
+# no Slack ping and no task to any person). The alert carries owner=ci, and the
+# lights second mate's dispatcher (H-DevOps scripts/lights/am_dispatch.py) turns it
+# into one task for the ci lane. The channel message and the alert mention nobody;
+# authors are listed by GitHub login only. Two earlier versions named people (the
+# authors by Slack id, then Nick, with an ak47 inbox reader for the lane); both are
+# gone. The rule for what is said and when is in scripts/ci/bats-main-report.py.
+#
+# A WORKFLOW OF ITS OWN, not a job in bats-main.yml, for two reasons:
+#   - it must run on node-8, the one CI host with the Slack bot token (the pods
+#     that run Bats carry none, on purpose), and a K3s node whose host reaches
+#     the Alertmanager Service. A job in bats-main.yml waiting for
+#     the node-8 runner would hold that workflow's single concurrency group, and
+#     a node-8 runner outage would then stop Bats running on main at all;
+#   - a run that is cancelled while it waits never starts a job, so a job inside
+#     it could not see that either.
+# No concurrency group here: a report replaced while waiting would lose a red
+# run its alert. Two reports at once do not conflict: a report whose run is older
+# than the newest finished run on main leaves the alert to that run's report.
+#
+# It runs from main's copy of this file (that is how workflow_run works), so a
+# change to it cannot be tried from a branch. scripts/tests/bats-main-report.bats
+# executes the script below against a stand-in API, Alertmanager and Slack instead.
+#
+# Rollback: delete this file. Bats on main keeps running; nobody is told. An alert
+# already raised expires on its own within 26 hours.
+
+on:
+  workflow_run:
+    workflows: ["Bats on main (every suite)"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  report:
+    name: Tell the owner what the run found
+    runs-on: [self-hosted, hydra]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Say what the run found, and to whom
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT: ${{ github.event.workflow_run.event }}
+          RESULT: ${{ github.event.workflow_run.conclusion }}
+        run: bash scripts/ci/bats-main-report.sh
