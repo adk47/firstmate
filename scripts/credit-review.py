@@ -678,7 +678,7 @@ def cmd_score_approve(args: argparse.Namespace) -> int:
     # lasts); every run's line carries it into run.log either way. It is not a failed run: the rest was read.
     if res.mode == "apply" and not (res.approved or res.write_errors or res.skipped_by_server
                                     or res.read_exhausted or res.paused_mid_run or res.audit_failed
-                                    or res.unreadable_new):
+                                    or res.unreadable_new or res.guard_cooling):
         print("NO_REPLY")
     else:
         print(res.line())

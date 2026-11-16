@@ -434,6 +434,21 @@ ask are owned by other tickets:
 - anything else the server would refuse is held for a human.
 If the server still answers `agent_cannot_approve_declined`, it wrote nothing: the decider records the refused rows as `skipped:agent_cannot_approve_declined:<reasons>` and sends the rest of the batch once more; uvn-under30 clears its unresolved-attempt blocker and leaves the rows held.
 
+**Core's `lost_race` is read again before score-approve records it (2026-11-15).** Core answers `lost_race` whenever its guarded approve `UPDATE` matches no row. For the low-risk automation that `UPDATE` also carries core's own eligibility guards (engaged claimant, profile burst, cap day), so the one word covers a request another actor rewrote mid-write and a request a core guard refuses. Measured that day on node-8: 1,020 `skipped:lost_race` rows in 39 runs were 51 requests sent 15 to 28 times each; the 34 that were refused on every tick were all still `user_verification_needed`, last updated 1 to 4 days earlier; 17 were approved by an ordinary tick with no re-push. No approval was lost and none of it was a race. `score_approve.settle_lost_race` therefore reads the request again (the same profile-scoped read, both held statuses) and records what that read shows in `decision_outcomes`:
+
+| outcome | what the second read showed | sent again |
+| --- | --- | --- |
+| `skipped:core_guard_refused` | the request reads as it did when it was decided: status, `updatedAt`, verdict, roles, stamps, popularity and its user, profile and track ids all equal | no, and not for 6 h (`GUARD_REFUSED_COOLDOWN_H`) |
+| `skipped:lost_race:retrying`, then that send's own outcome | changed, still held, the same validator verdict, roles, track, profile and user, and `why_not` still clear | once, expecting the status just read |
+| `skipped:retry_exhausted:lost_race` | the second send was answered `lost_race` too | no; the next run decides it |
+| `skipped:lost_race:decision_stale` | changed, and it is no longer the row that was decided | no; the next run decides it |
+| `skipped:lost_race:left_held` | in neither held status | no |
+| `skipped:lost_race:state_unread:<why>` | not read (`read_failed`, `time_budget`, `reread_budget`, `page_full`, or the exception's type name when the settle itself raised) | no; not cooled either, unread is not unchanged |
+| `skipped:lost_race:changed_not_resent:time_budget` | changed and still approvable, with no room left in the run for a write | no; the next run decides it |
+| `error:unverified:re-send raised <Type>` | the second send raised, so whether it committed is unknown | no; the next run reads the row |
+
+A request has one outcome row per send, so a request sent twice in a run has two; every reader of the table takes the newest. The cooldown is keyed on that recorded outcome (`recently_guard_refused`: the newest written outcome of a `score-` run is `skipped:core_guard_refused`), in apply runs only. A cooling request is left out before the profile read: it gets no new decision row and takes no per-run slot, and the run line reports how many were left out (`guard_cooling`), so a run whose only activity is parking them prints that line instead of `NO_REPLY`. Hydra does not copy any core guard to predict the refusal, and never sends a request core's guard refuses in a way that would get past it: when the guard clears, the first send after the cooldown lands. So a request whose guard clears waits up to 6 h longer than it did when every tick re-sent it. Which guard refused is not in core's answer; `skipped:core_guard_refused` says only that nothing moved the request.
+
 
 **Support@ contacts are never asked (firstmate 041).** Every user in the export's top-level `gmail_contacts_90d` (a list, or `{generated_at, source, user_ids}`) emailed support@ in the last 90 days: their support rows are held for a human, never asked, even when no document was found. A missing or malformed list makes proof status UNKNOWN, so nobody is asked.
 

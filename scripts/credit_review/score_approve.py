@@ -26,7 +26,11 @@ executor side. Only these rows, every other guard intact:
     paid < 24 h, free), then risk 0 first, then oldest;
   * (9) ledger before any write (decisions.evidence_kind = ``validator_low_risk``); writes via
     the decider's conditional PUT (expected user_verification_needed) under the shared write
-    lock; outcomes per row; reversible per run (``credit-review.py revert --run RUN_ID``, named human);
+    lock; outcomes per row; reversible per run (``credit-review.py revert --run RUN_ID``, named human).
+    Core's ``lost_race`` answer is read again before it is recorded (settle_lost_race): a request that
+    reads the same as when it was decided was refused by a core guard, is recorded as
+    ``skipped:core_guard_refused`` and is not sent again for GUARD_REFUSED_COOLDOWN_H hours; one that
+    changed and still carries the same decision is sent once more;
   * (10) a deterministic audit sample (10 % in week 1, then 5 %; one-person roles 10 % always)
     filed to <AUDIT_DIR>/<day>.jsonl; ``score-approve --pause REASON`` (an audit below 95 %
     precision) stops every write at once until ``--resume``; the registry flip follows by PR;
@@ -307,6 +311,112 @@ def recently_held(db, now: datetime, hours: int = REREAD_COOLDOWN_H) -> set[str]
         return set()
     return {str(rid).lower() for rid, dec, why in rows
             if dec != "approve" and not any(t in (why or "") for t in TRANSIENT_HOLD)}
+
+
+# 2026-11-15: core answers ``lost_race`` whenever its guarded approve UPDATE matches zero rows, and for this
+# automation that UPDATE also carries core's own eligibility guards (engaged claimant, profile burst, cap day).
+# So the word covers two different things: a row another actor rewrote while core was writing it, and a row a
+# core guard refuses. Measured that day: 1,020 ``skipped:lost_race`` rows in 39 runs were 51 requests re-sent
+# 15-28 times each; the 34 that lost every tick were all still in the status we read, last updated 1-4 days
+# before, and 17 landed in an ordinary tick once the guard cleared. Nothing was lost and nothing was a race.
+# The executor therefore reads the row again when core says ``lost_race`` (settle_lost_race) and records what
+# the read shows. It never copies a core guard: which guard refused is core's to say, not ours to re-derive.
+CORE_LOST_RACE = "lost_race"
+#: Core refused the write and the request reads exactly as it did when it was decided: a guard, not a race.
+GUARD_REFUSED = "skipped:core_guard_refused"
+#: A request whose latest written outcome is GUARD_REFUSED is not sent again for this long. Keyed on the
+#: recorded outcome, never on a second copy of core's rule: when the guard clears, the next send lands.
+GUARD_REFUSED_COOLDOWN_H = 6
+RACE_REREAD_MAX_PROFILES = 20   # profiles re-read per run to settle lost_race answers; the rest say so
+RACE_READ_LIMIT = 1000          # the profile-scoped page reread() asks for; a full page may hide a row
+RACE_PACE_S = 1.0               # the same shared 120 list calls a minute reread() paces for
+RACE_READ_TIMEOUT_S = 20        # one settle read; the client's own 90 s would not fit the write budget
+
+
+def recently_guard_refused(db, now: datetime, hours: int = GUARD_REFUSED_COOLDOWN_H) -> set[str]:
+    """Request ids (lower) whose LATEST written outcome from this executor, within ``hours``, is
+    GUARD_REFUSED. A shadow run writes no approval, so its ``shadow`` rows never lift the cooldown."""
+    since = (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        rows = db.execute(
+            "SELECT o.request_id, o.outcome FROM decision_outcomes o JOIN (SELECT request_id, MAX(id) id "
+            "FROM decision_outcomes WHERE run_id LIKE 'score-%' AND action = 'approve' AND outcome <> 'shadow' "
+            "AND at >= ? GROUP BY request_id) l ON l.id = o.id", (since,)).fetchall()
+    except Exception:  # an unreadable ledger only loses the cooldown, never a guard
+        return set()
+    return {str(rid).lower() for rid, out in rows if out == GUARD_REFUSED}
+
+
+def _canon(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def row_state(row: dict[str, Any]) -> tuple:
+    """The request's own columns as the admin list returns them. Equal before and after = nobody touched it
+    (core bumps ``updatedAt`` on every write; the other columns say the same where it is absent)."""
+    return (row.get("status"), row.get("updatedAt"), row.get("userId"), row.get("profileId"), row.get("trackId"),
+            row.get("spotifyPopularity"), _canon(row.get("credits")), _canon(row.get("verificationData")),
+            _canon(row.get("metadata")))
+
+
+def decision_inputs(row: dict[str, Any]) -> tuple:
+    """What the approve decision was made on, apart from the status and the stamps in ``metadata`` (why_not
+    reads those again). A row that differs here is a different decision: it is not sent again, the next run
+    decides it from the start."""
+    return (row.get("userId"), row.get("profileId"), row.get("trackId"), row.get("spotifyPopularity"),
+            _canon(row.get("credits")), _canon(row.get("verificationData")))
+
+
+def fresh_rows(admin: admin_api.Admin, lost: dict[str, str], *, sleep: Callable[[float], None],
+               clock: Callable[[], float], deadline: float, spent: list[int]) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """The live rows of ``lost`` ({request id: profile id}), by the same profile-scoped read the decision was
+    made on, in both held statuses. Returns (rows by id, {request id: why it could not be read}). An id in
+    neither was read completely and is in no held status any more. Bounded: RACE_REREAD_MAX_PROFILES profiles
+    a run (``spent`` carries the count across batches) and no read starts that could outlive ``deadline``:
+    a client that carries a ``timeout`` is held to RACE_READ_TIMEOUT_S for these reads and given it back."""
+    own_timeout = getattr(admin, "timeout", None)
+    bounded = isinstance(own_timeout, (int, float)) and not isinstance(own_timeout, bool)
+    read_worst = RACE_PACE_S + (min(own_timeout, RACE_READ_TIMEOUT_S) if bounded else RACE_READ_TIMEOUT_S)
+    if bounded:
+        admin.timeout = min(own_timeout, RACE_READ_TIMEOUT_S)
+    try:
+        return _fresh_rows(admin, lost, sleep, clock, deadline, spent, read_worst)
+    finally:
+        if bounded:
+            admin.timeout = own_timeout
+
+
+def _fresh_rows(admin, lost, sleep, clock, deadline, spent, read_worst):
+    by_pid: dict[str, set[str]] = {}
+    for rid, pid in lost.items():
+        by_pid.setdefault(pid, set()).add(rid)
+    rows: dict[str, dict[str, Any]] = {}
+    unread: dict[str, str] = {}
+    for pid, ids in by_pid.items():
+        why = None
+        if spent[0] >= RACE_REREAD_MAX_PROFILES:
+            why = "reread_budget"
+        elif clock() + len(HELD_STATUSES) * read_worst > deadline:
+            why = "time_budget"
+        if why is None:
+            spent[0] += 1
+            full_page = False
+            try:
+                for status in HELD_STATUSES:
+                    sleep(RACE_PACE_S)
+                    items = admin_api.list_requests(admin, status=status, limit=RACE_READ_LIMIT, page=1,
+                                                    profile_ids=[pid])
+                    full_page = full_page or len(items) >= RACE_READ_LIMIT
+                    for r in items:
+                        if str(r.get("id")) in ids:
+                            rows[str(r["id"])] = r
+            except admin_api.AdminError:
+                why = "read_failed"
+            else:
+                why = "page_full" if full_page else None   # a full page may hide the row: absent is not "left"
+        if why:
+            unread.update({rid: why for rid in ids if rid not in rows})
+    return rows, unread
 
 
 def last_decided(db, now: datetime, days: int = 7) -> dict[str, str]:
@@ -988,6 +1098,14 @@ class ScoreResult:
     paused_mid_run: bool = False
     write_errors: list[str] = field(default_factory=list)
     skipped_by_server: dict[str, int] = field(default_factory=dict)
+    # Core answered lost_race and the row was read again (settle_lost_race). guard_refused: it read exactly as
+    # decided (also under skipped_by_server as core_guard_refused). retried: it had changed and the decision
+    # still stood, so it was sent once more; retry_landed of those were approved. guard_cooling: rows not
+    # sent this run because a core guard refused them within GUARD_REFUSED_COOLDOWN_H.
+    guard_refused: int = 0
+    retried: int = 0
+    retry_landed: int = 0
+    guard_cooling: int = 0
     note: str = ""
 
     def unreadable_note(self) -> str:
@@ -1025,6 +1143,13 @@ class ScoreResult:
                 + (f"; {self.unreadable_note()}" if self.unreadable_profiles else "")
                 + ("; AUDIT SAMPLE NOT FILED: PAUSED" if self.audit_failed else "")
                 + (f"; server skipped {self.skipped_by_server}" if self.skipped_by_server else "")
+                + (f"; {self.guard_refused} refused by a core guard (core answered lost_race; the request read the "
+                   f"same before and after, so no race): not sent again for {GUARD_REFUSED_COOLDOWN_H} h"
+                   if self.guard_refused else "")
+                + (f"; {self.retried} changed after the read and sent once more ({self.retry_landed} landed)"
+                   if self.retried else "")
+                + (f"; {self.guard_cooling} not sent: a core guard refused them in the last "
+                   f"{GUARD_REFUSED_COOLDOWN_H} h" if self.guard_cooling else "")
                 + (f"; WRITE ERRORS: {'; '.join(self.write_errors[:3])}" if self.write_errors else "")
                 + (f"; {self.note}" if self.note else ""))
 
@@ -1089,6 +1214,13 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
     wanted = sorted(wanted, key=lambda c: (str(c[0]).lower() in cooling,
                                            not (paying is not None and len(c) > 4 and c[4] in paying),
                                            seen.get(str(c[0]).lower(), ""), c[2] > 0))
+    if mode == "apply":
+        # 2026-11-15: a request a core guard refused is not sent again every tick. Left out before the read,
+        # so it costs no profile read, takes no per-run or daily cap slot from a row that can land, and gets
+        # no new decision row (nothing new was decided; the refusal on file is the record).
+        parked = recently_guard_refused(db, now)
+        res.guard_cooling = sum(1 for c in wanted if str(c[0]).lower() in parked)
+        wanted = [c for c in wanted if str(c[0]).lower() not in parked]
     wanted = wanted[:sp.candidate_limit]
     notes: list[str] = []
     skipped: list[dict[str, Any]] = []
@@ -1259,8 +1391,10 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
     readback = readback or decide.status_readback(timeout_s=WRITE_READBACK_TIMEOUT_S)
     groups = [(st, [rid for rid in ids if status_of[rid] == st]) for st in HELD_STATUSES]
     who = {d.request_id: d for d in approve}
+    race = SimpleNamespace(admin=admin, rows=rows, engaged=engaged, sleep=sleep or _time.sleep, spent=[0])
     try:
-        _write_batches(db, res, now, policy, sp, ids, groups, who, writer, readback, paused, day_start, t0, _time)
+        _write_batches(db, res, now, policy, sp, ids, groups, who, writer, readback, paused, day_start, t0, _time,
+                       race)
     except decide.WriteLockBusy:
         # QA @1347 00:02Z: the lock wait is inside the run budget. A peer holding the lock past the last moment
         # a batch can still finish = nothing written this run (transient, next run), never a cron kill.
@@ -1270,7 +1404,83 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
     return res
 
 
-def _write_batches(db, res, now, policy, sp, ids, groups, who, writer, readback, paused, day_start, t0, _time) -> None:
+def settle_lost_race(db, res, lost: list[str], who, policy, sp, writer, readback, t0, _time, race) -> None:
+    """Core answered ``lost_race`` for ``lost``. Read each row again and record what the read shows, one
+    outcome row per send:
+
+      * it reads exactly as it did when it was decided -> GUARD_REFUSED. Nothing moved it, so a second send
+        would get the same answer; recently_guard_refused() keeps it out of the next runs;
+      * it changed and the same decision still stands on the new row (same decision_inputs, why_not still
+        clear) -> ``skipped:lost_race:retrying``, then ONE more conditional PUT expecting the status just
+        read. That send's outcome is recorded as core gave it; a second ``lost_race`` is
+        ``skipped:retry_exhausted:lost_race``;
+      * it changed and the decision no longer stands on it -> ``skipped:lost_race:decision_stale``: the
+        next run decides it from the start;
+      * it is in no held status any more -> ``skipped:lost_race:left_held``;
+      * it could not be read -> ``skipped:lost_race:state_unread:<why>``. Unread is not unchanged: the row
+        is neither called a guard refusal nor cooled.
+
+    No rule is applied here that the run did not already apply: a row is sent again only when every input
+    the decision was made on is byte-equal, and through the same conditional PUT and gate chain."""
+    prefix = f"skipped:{CORE_LOST_RACE}"
+
+    def final(rid: str, out: str) -> None:
+        decide.record_outcome(db, res.run_id, rid, "approve", out, datetime.now(timezone.utc))
+        if out == decide.APPROVED:
+            res.approved += 1
+        elif out.startswith("skipped:"):
+            k = out.split(":", 1)[1][:60]
+            res.skipped_by_server[k] = res.skipped_by_server.get(k, 0) + 1
+
+    pending = list(lost)        # core's answer not yet on file
+    resending: list[str] = []   # sent a second time, that send's answer not yet on file
+    try:
+        fresh, unread = fresh_rows(race.admin, {rid: who[rid].profile_id for rid in lost}, sleep=race.sleep,
+                                   clock=_time.monotonic, deadline=t0 + RUN_BUDGET_S, spent=race.spent)
+        again: dict[str, list[str]] = {}
+        for rid in lost:
+            now_row, was = fresh.get(rid), race.rows[rid]
+            if now_row is None:
+                out = f"{prefix}:state_unread:{unread[rid]}" if rid in unread else f"{prefix}:left_held"
+            elif row_state(now_row) == row_state(was):
+                out = GUARD_REFUSED
+                res.guard_refused += 1
+            elif (decision_inputs(now_row) != decision_inputs(was)
+                  or why_not(now_row, sp, policy, race.engaged) is not None):
+                out = f"{prefix}:decision_stale"
+            else:
+                again.setdefault(now_row["status"], []).append(rid)
+                continue
+            final(rid, out)
+            pending.remove(rid)
+        for status, chunk in again.items():
+            if _time.monotonic() + WRITE_BATCH_WORST_S > t0 + RUN_BUDGET_S:
+                for rid in chunk:
+                    final(rid, f"{prefix}:changed_not_resent:time_budget")
+                    pending.remove(rid)
+                continue
+            for rid in chunk:   # the first send, on the record before the second is made
+                decide.record_outcome(db, res.run_id, rid, "approve", f"{prefix}:retrying", datetime.now(timezone.utc))
+                pending.remove(rid)
+            res.retried += len(chunk)
+            resending = list(chunk)
+            outs, err = decide.write_chunk(writer, readback, decide.APPROVED, chunk, status)
+            if err is not None:
+                res.write_errors.append(f"approve re-send of {len(chunk)}: {err}"[:200])
+            for rid, out in outs.items():
+                res.retry_landed += 1 if out == decide.APPROVED else 0
+                final(rid, f"skipped:retry_exhausted:{CORE_LOST_RACE}" if out == prefix else out)
+                resending.remove(rid)
+    except Exception as exc:  # no send is left without the outcome it had
+        res.write_errors.append(f"settling {len(pending) + len(resending)} lost_race answer(s): {exc}"[:200])
+        for rid in pending:
+            final(rid, f"{prefix}:state_unread:{type(exc).__name__}")
+        for rid in resending:   # the second send may have committed: decide's word for a write nobody confirmed
+            final(rid, f"error:unverified:re-send raised {type(exc).__name__}")
+
+
+def _write_batches(db, res, now, policy, sp, ids, groups, who, writer, readback, paused, day_start, t0, _time,
+                   race) -> None:
     lock_wait = max(0.0, t0 + RUN_BUDGET_S - WRITE_BATCH_WORST_S - _time.monotonic())
     with decide.write_lock(wait_s=lock_wait):
         for st, chunk in ((st, g[i:i + decide.BATCH]) for st, g in groups for i in range(0, len(g), decide.BATCH)):
@@ -1326,13 +1536,20 @@ def _write_batches(db, res, now, policy, sp, ids, groups, who, writer, readback,
             done = datetime.now(timezone.utc)
             if err is not None:
                 res.write_errors.append(f"approve batch of {len(ok_chunk)}: {err}"[:200])
+            lost = [rid for rid, out in outs.items() if out == f"skipped:{CORE_LOST_RACE}"]
             for rid, out in outs.items():
+                if rid in lost:
+                    continue
                 decide.record_outcome(db, res.run_id, rid, "approve", out, done)
                 if out == decide.APPROVED:
                     res.approved += 1
                 elif out.startswith("skipped:"):
                     k = out.split(":", 1)[1][:60]
                     res.skipped_by_server[k] = res.skipped_by_server.get(k, 0) + 1
+            if lost:
+                # Core's lost_race is not yet an outcome: it is read again first, in this batch and under
+                # the same lock, so the caps the next batch reads already hold whatever the re-send landed.
+                settle_lost_race(db, res, lost, who, policy, sp, writer, readback, t0, _time, race)
             # QA @7c371efa: file this batch's sample now, not only at the end of the run.
             if not write_audit_sample(db, res, now):
                 res.note = (res.note + "; " if res.note else "") + "audit filing failed: rest not written"

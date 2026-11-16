@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 import dataclasses
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -128,9 +128,9 @@ class ScoreApprove(unittest.TestCase):
             "users": len({e["user_id"] for e in entries}), "entries": entries}))
 
     def go(self, rows, *, mode="apply", sp=None, pol=None, convo=None, admin=None, anchors=None, fanout=None,
-           editorial_velocity=None, gate=None):
+           editorial_velocity=None, gate=None, writer=None, now=None):
         sp = sp or sa.ScorePolicy(enabled=True)
-        w = Writer()
+        w = writer or Writer()
         cands = lambda risk, limit: [(r["id"], r["profileId"], float(r["verificationData"]["total_risk_percent"]),
                                       r["status"], r["userId"])
                                      for r in sorted(rows, key=lambda r: r["verificationData"]["total_risk_percent"])]
@@ -140,7 +140,7 @@ class ScoreApprove(unittest.TestCase):
             self.convo_asked.update(users)
             return {u: (convo or {}).get(u, False) for u in users}
         res = sa.run(admin or FakeAdmin(rows), self.db, mode=mode, policy=pol or policy(), sp=sp, candidates=cands, writer=w,
-                     readback=lambda status, ids: set(), now=NOW, sleep=lambda _s: None, conversations=conversations,
+                     readback=lambda status, ids: set(), now=now or NOW, sleep=lambda _s: None, conversations=conversations,
                      anchors=anchors or (lambda rs: {str(r["id"]): ("none", None) for r in rs}),
                      fanout=fanout or (lambda rs: {}),
                      editorial_velocity=editorial_velocity or (lambda rs: {}), account_gate=gate)
@@ -1515,6 +1515,352 @@ class BoundedCandidateRead(unittest.TestCase):
                 self.walk(replica, page_rows=4, timeout_s=100)
         self.assertEqual(len(replica.calls), 4)
         self.assertEqual([c["timeout"] for c in replica.calls], [100.0, 70.0, 40.0, 10.0])
+
+
+class LiveAdmin(FakeAdmin):
+    """Core's list as it really answers: a NEW object per read, so a row read before a write and the same
+    row read after it are compared by value (FakeAdmin hands back the test's own dicts)."""
+
+    def get(self, path, params=None):
+        return json.loads(json.dumps(super().get(path, params)))
+
+    def change(self, rid, **cols):
+        """Another actor rewrote the request: the columns given, and core's updatedAt with them."""
+        for r in self.rows:
+            if r["id"] == rid:
+                r.update(cols)
+                r["updatedAt"] = "2026-10-20T12:00:%02d.000Z" % len(self.calls)
+
+
+class CoreWriter:
+    """Core's answer per send. ``lost[n]`` names the ids the n-th send answers ``lost_race`` for (the last
+    entry repeats); ``after(n)`` runs once that send has answered."""
+
+    def __init__(self, lost, after=None):
+        self.lost, self.after, self.calls = [set(x) for x in lost], after, []
+
+    def __call__(self, status, ids, expected):
+        n = len(self.calls)
+        self.calls.append((status, list(ids), expected))
+        lost = self.lost[min(n, len(self.lost) - 1)] & set(ids)
+        if self.after:
+            self.after(n)
+        return {"data": {"updatedIds": [i for i in ids if i not in lost],
+                         "skipped": [{"id": i, "reason": "lost_race"} for i in ids if i in lost]}}
+
+
+class LostRace(unittest.TestCase):
+    """2026-11-15: core answers ``lost_race`` both for a row another actor rewrote mid-write and for a row
+    one of its own guards refuses. The executor reads the row again and records which it was."""
+
+    # The fixture of ScoreApprove, without running its tests a second time.
+    setUp, proof, go = ScoreApprove.setUp, ScoreApprove.proof, ScoreApprove.go
+
+    def outcomes(self, rid):
+        return [r[0] for r in self.db.execute(
+            "SELECT outcome FROM decision_outcomes WHERE request_id = ? ORDER BY id", (rid,))]
+
+    def sends(self, w, rid):
+        return [c for c in w.calls if rid in c[1]]
+
+    # -- the three the task names -------------------------------------------------------------------
+
+    def test_a_row_that_changed_between_read_and_write_is_sent_once_more_and_lands(self):
+        admin = LiveAdmin([row("x", status=decide.UNVERIFIED)])
+        w = CoreWriter([{"x"}, set()], after=lambda n: n == 0 and admin.change("x", status=decide.UVN))
+        res, _ = self.go(admin.rows, admin=admin, writer=w)
+        self.assertEqual(len(self.sends(w, "x")), 2)
+        self.assertEqual(w.calls[0][2], decide.UNVERIFIED)
+        self.assertEqual(w.calls[1][2], decide.UVN, "the second send expects the status just read")
+        self.assertEqual(self.outcomes("x"), ["skipped:lost_race:retrying", decide.APPROVED])
+        self.assertEqual(res.approved, 1)
+        self.assertEqual(res.retried, 1)
+        self.assertEqual(res.retry_landed, 1)
+        self.assertEqual(res.guard_refused, 0)
+
+    def test_the_resend_is_bounded_and_running_out_is_recorded(self):
+        admin = LiveAdmin([row("x")])
+        w = CoreWriter([{"x"}], after=lambda n: admin.change("x", metadata={"touched": n}))
+        res, _ = self.go(admin.rows, admin=admin, writer=w)
+        self.assertEqual(len(self.sends(w, "x")), 2, "the first send and one more, never a third")
+        self.assertEqual(self.outcomes("x"), ["skipped:lost_race:retrying", "skipped:retry_exhausted:lost_race"])
+        self.assertEqual(res.approved, 0)
+        self.assertEqual(res.retried, 1)
+        self.assertEqual(res.retry_landed, 0)
+        self.assertEqual(res.skipped_by_server, {"retry_exhausted:lost_race": 1})
+
+    def test_a_write_core_takes_lands_first_time_with_no_second_read(self):
+        admin = LiveAdmin([row("x")])
+        w = CoreWriter([set()])
+        res, _ = self.go(admin.rows, admin=admin, writer=w)
+        self.assertEqual(len(w.calls), 1)
+        self.assertEqual(self.outcomes("x"), [decide.APPROVED])
+        self.assertEqual(len(admin.calls), 1, "one read to decide, none after a write that landed")
+        self.assertEqual(res.approved, 1)
+        self.assertEqual(res.retried, 0)
+        self.assertEqual(res.skipped_by_server, {})
+
+    # -- the label: a refusal of a row nobody touched is a guard, never a race --------------------------
+
+    def test_a_row_that_reads_the_same_after_the_refusal_is_a_guard_refusal_and_is_not_resent(self):
+        admin = LiveAdmin([row("x")])
+        w = CoreWriter([{"x"}])
+        res, _ = self.go(admin.rows, admin=admin, writer=w)
+        self.assertEqual(len(w.calls), 1)
+        self.assertEqual(self.outcomes("x"), [sa.GUARD_REFUSED])
+        self.assertEqual(res.guard_refused, 1)
+        self.assertEqual(res.retried, 0)
+        self.assertEqual(res.skipped_by_server, {"core_guard_refused": 1})
+        self.assertNotIn("'lost_race'", res.line(), "the funnel's count is not under core's word for it")
+        self.assertIn("1 refused by a core guard", res.line())
+
+    def test_the_rest_of_the_batch_lands_beside_a_guard_refusal(self):
+        admin = LiveAdmin([row("x"), row("ok", pid="p2", uid=501)])
+        w = CoreWriter([{"x"}])
+        res, _ = self.go(admin.rows, admin=admin, writer=w)
+        self.assertEqual(self.outcomes("ok"), [decide.APPROVED])
+        self.assertEqual(self.outcomes("x"), [sa.GUARD_REFUSED])
+        self.assertEqual(res.approved, 1)
+        self.assertEqual(len(w.calls), 1)
+
+    def test_a_changed_row_whose_verdict_changed_is_not_resent(self):
+        admin = LiveAdmin([row("x")])
+        w = CoreWriter([{"x"}], after=lambda n: admin.change("x", verificationData={
+            "is_approved": True, "total_risk_percent": 5, "rule_risk_percent": {}, "band_hint": "A"}))
+        res, _ = self.go(admin.rows, admin=admin, writer=w)
+        self.assertEqual(len(w.calls), 1, "still approvable, but not the row that was decided")
+        self.assertEqual(self.outcomes("x"), ["skipped:lost_race:decision_stale"])
+        self.assertEqual(res.retried, 0)
+        self.assertEqual(res.guard_refused, 0)
+
+    def test_a_changed_row_the_rules_no_longer_admit_is_not_resent(self):
+        admin = LiveAdmin([row("x")])
+        w = CoreWriter([{"x"}], after=lambda n: admin.change("x", metadata={"proofRequest": {}}))
+        res, _ = self.go(admin.rows, admin=admin, writer=w)
+        self.assertEqual(len(w.calls), 1)
+        self.assertEqual(self.outcomes("x"), ["skipped:lost_race:decision_stale"])
+
+    def test_a_row_that_left_the_held_statuses_is_not_resent(self):
+        admin = LiveAdmin([row("x")])
+        w = CoreWriter([{"x"}], after=lambda n: admin.change("x", status=decide.APPROVED))
+        res, _ = self.go(admin.rows, admin=admin, writer=w)
+        self.assertEqual(len(w.calls), 1)
+        self.assertEqual(self.outcomes("x"), ["skipped:lost_race:left_held"])
+        self.assertEqual(res.approved, 0, "somebody else's approval is not counted as this run's")
+
+    def test_a_row_that_cannot_be_read_again_is_neither_a_guard_refusal_nor_resent(self):
+        class DiesAfterWrite(LiveAdmin):
+            dead = False
+
+            def get(self, path, params=None):
+                if self.dead:
+                    raise sa.admin_api.AdminError("admin GET timed out")
+                return super().get(path, params)
+        admin = DiesAfterWrite([row("x")])
+        w = CoreWriter([{"x"}], after=lambda n: setattr(admin, "dead", True))
+        res, _ = self.go(admin.rows, admin=admin, writer=w)
+        self.assertEqual(len(w.calls), 1)
+        self.assertEqual(self.outcomes("x"), ["skipped:lost_race:state_unread:read_failed"])
+        self.assertEqual(res.guard_refused, 0)
+        self.assertEqual(sa.recently_guard_refused(self.db, NOW), set(), "unread is not unchanged: not cooled")
+
+    def test_the_second_send_goes_through_the_same_caps_once(self):
+        admin = LiveAdmin([row("x", status=decide.UNVERIFIED)])
+        w = CoreWriter([{"x"}, set()], after=lambda n: n == 0 and admin.change("x", status=decide.UVN))
+        self.go(admin.rows, admin=admin, writer=w)
+        users, profiles, fleet = sa.written_today(self.db, "2026-10-20T00:00:00Z")
+        self.assertEqual(fleet, 1)
+        self.assertEqual(users, {500: 1})
+        self.assertEqual(profiles, {"p1": 1})
+
+    # -- the backoff, keyed on the recorded outcome ---------------------------------------------------
+
+    def test_a_guard_refused_row_is_not_read_decided_or_sent_on_the_next_tick(self):
+        admin = LiveAdmin([row("x")])
+        self.go(admin.rows, admin=admin, writer=CoreWriter([{"x"}]))
+        decided, reads = len(self.db.execute("SELECT 1 FROM decisions").fetchall()), len(admin.calls)
+        w = CoreWriter([{"x"}])
+        res, _ = self.go(admin.rows, admin=admin, writer=w, now=NOW + timedelta(minutes=15))
+        self.assertEqual(w.calls, [])
+        self.assertEqual(len(admin.calls), reads, "no profile read is spent on it")
+        self.assertEqual(len(self.db.execute("SELECT 1 FROM decisions").fetchall()), decided)
+        self.assertEqual(self.outcomes("x"), [sa.GUARD_REFUSED])
+        self.assertEqual(res.guard_cooling, 1)
+        self.assertEqual(res.candidates, 1, "it is still counted as a candidate")
+        self.assertIn("1 not sent: a core guard refused them", res.line())
+
+    def test_a_run_that_only_parks_guard_refused_rows_is_not_silent(self):
+        admin = LiveAdmin([row("x")])
+        self.go(admin.rows, admin=admin, writer=CoreWriter([{"x"}]))
+        import importlib.util
+        import io
+        from contextlib import redirect_stdout
+        spec = importlib.util.spec_from_file_location("credit_review_cli", ROOT / "scripts" / "credit-review.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        orig_run = sa.run
+
+        def run_again(_admin, db, **kw):
+            cands = lambda risk, limit: [(r["id"], r["profileId"],
+                                          float(r["verificationData"]["total_risk_percent"]),
+                                          r["status"], r["userId"]) for r in admin.rows]
+            return orig_run(admin, db, **{**kw, "candidates": cands, "writer": CoreWriter([{"x"}]),
+                                          "now": NOW + timedelta(minutes=15)})
+        sa.run = run_again
+        self.addCleanup(setattr, sa, "run", orig_run)
+        for attr in ("KILL_SWITCH",):
+            self.addCleanup(setattr, sa, attr, getattr(sa, attr))
+            setattr(sa, attr, Path(self.tmp) / "nope")
+        self.addCleanup(setattr, decide, "KILL_SWITCH", decide.KILL_SWITCH)
+        decide.KILL_SWITCH = Path(self.tmp) / "nope2"
+        args = cli.argparse.Namespace(pause=None, resume=False, mode="apply", max_per_run=None,
+                                      ledger=os.path.join(self.tmp, "ledger.sqlite3"))
+        orig_load, orig_sp = decide.Policy.load, sa.ScorePolicy.load
+        decide.Policy.load = staticmethod(lambda *a, **k: policy())
+        sa.ScorePolicy.load = staticmethod(lambda *a, **k: sa.ScorePolicy(enabled=True))
+        self.addCleanup(setattr, decide.Policy, "load", orig_load)
+        self.addCleanup(setattr, sa.ScorePolicy, "load", orig_sp)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cli.cmd_score_approve(args)
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("NO_REPLY", out)
+        self.assertIn("1 not sent: a core guard refused them", out)
+
+    def test_a_cooling_row_does_not_take_the_slot_of_a_row_that_can_land(self):
+        admin = LiveAdmin([row("x")])
+        self.go(admin.rows, admin=admin, writer=CoreWriter([{"x"}]))
+        admin.rows.append(row("ok", pid="p2", uid=501))
+        w = CoreWriter([{"x"}])
+        res, _ = self.go(admin.rows, admin=admin, writer=w, now=NOW + timedelta(minutes=15),
+                         sp=sa.ScorePolicy(enabled=True, max_per_run=1))
+        self.assertEqual([c[1] for c in w.calls], [["ok"]])
+        self.assertEqual(res.approved, 1)
+
+    def test_the_cooldown_ends_and_the_row_lands_once_the_guard_clears(self):
+        # An outcome row carries the wall-clock time of its write, so the earlier refusal is put on file here.
+        decide.ensure_schema(self.db)
+        ended = NOW - timedelta(hours=sa.GUARD_REFUSED_COOLDOWN_H, minutes=1)
+        decide.record_outcome(self.db, "score-earlier", "x", "approve", sa.GUARD_REFUSED, ended)
+        self.assertEqual(sa.recently_guard_refused(self.db, NOW - timedelta(minutes=2)), {"x"})
+        self.assertEqual(sa.recently_guard_refused(self.db, NOW), set())
+        admin = LiveAdmin([row("x")])
+        w = CoreWriter([set()])
+        res, _ = self.go(admin.rows, admin=admin, writer=w)
+        self.assertEqual(len(w.calls), 1)
+        self.assertEqual(self.outcomes("x"), [sa.GUARD_REFUSED, decide.APPROVED])
+        self.assertEqual(res.guard_cooling, 0)
+        self.assertEqual(res.approved, 1)
+
+    def test_only_the_latest_written_outcome_cools_a_row(self):
+        at = NOW - timedelta(hours=1)
+        decide.ensure_schema(self.db)
+        decide.record_outcome(self.db, "score-a", "refused-then-unread", "approve", sa.GUARD_REFUSED, at)
+        decide.record_outcome(self.db, "score-b", "refused-then-unread", "approve",
+                              "skipped:lost_race:state_unread:read_failed", at)
+        decide.record_outcome(self.db, "score-a", "refused-then-shadow", "approve", sa.GUARD_REFUSED, at)
+        decide.record_outcome(self.db, "score-b", "refused-then-shadow", "approve", "shadow", at)
+        decide.record_outcome(self.db, "trust-a", "another-jobs-row", "approve", sa.GUARD_REFUSED, at)
+        decide.record_outcome(self.db, "score-a", "core-said-race", "approve", "skipped:lost_race", at)
+        cooling = sa.recently_guard_refused(self.db, NOW)
+        self.assertNotIn("refused-then-unread", cooling)
+        self.assertIn("refused-then-shadow", cooling, "a shadow run wrote nothing: it lifts no cooldown")
+        self.assertNotIn("another-jobs-row", cooling)
+        self.assertNotIn("core-said-race", cooling, "the rows recorded before this change are not cooled")
+
+    def test_a_shadow_run_still_decides_a_cooling_row(self):
+        admin = LiveAdmin([row("x")])
+        self.go(admin.rows, admin=admin, writer=CoreWriter([{"x"}]))
+        res, w = self.go(admin.rows, admin=admin, mode="shadow", now=NOW + timedelta(minutes=15))
+        self.assertEqual(res.would_approve, 1)
+        self.assertEqual(res.guard_cooling, 0)
+        self.assertEqual(w.calls, [])
+
+    # -- the settle read is bounded ---------------------------------------------------------------------
+
+    def test_no_settle_read_starts_that_could_outlive_the_run(self):
+        admin = LiveAdmin([row("x")])
+        rows, unread = sa.fresh_rows(admin, {"x": "p1"}, sleep=lambda _s: None, clock=lambda: 100.0,
+                                     deadline=100.0 + 2 * (sa.RACE_PACE_S + sa.RACE_READ_TIMEOUT_S) - 1, spent=[0])
+        self.assertEqual(rows, {})
+        self.assertEqual(unread, {"x": "time_budget"})
+        self.assertEqual(admin.calls, [])
+
+    def test_the_settle_reads_stop_at_the_profile_budget(self):
+        admin = LiveAdmin([row("x")])
+        spent = [sa.RACE_REREAD_MAX_PROFILES]
+        rows, unread = sa.fresh_rows(admin, {"x": "p1"}, sleep=lambda _s: None, clock=lambda: 0.0,
+                                     deadline=10_000.0, spent=spent)
+        self.assertEqual(unread, {"x": "reread_budget"})
+        self.assertEqual(admin.calls, [])
+
+    def test_a_settle_read_is_held_to_its_own_timeout_and_the_client_gets_its_own_back(self):
+        seen = []
+
+        class Timed(LiveAdmin):
+            timeout = 90
+
+            def get(self, path, params=None):
+                seen.append(self.timeout)
+                return super().get(path, params)
+        admin = Timed([row("x")])
+        rows, unread = sa.fresh_rows(admin, {"x": "p1"}, sleep=lambda _s: None, clock=lambda: 0.0,
+                                     deadline=10_000.0, spent=[0])
+        self.assertEqual(seen, [sa.RACE_READ_TIMEOUT_S] * len(sa.HELD_STATUSES))
+        self.assertEqual(admin.timeout, 90)
+        self.assertEqual(sorted(rows), ["x"])
+        self.assertEqual(unread, {})
+
+    def test_a_full_page_that_does_not_show_the_row_is_unread_not_left(self):
+        admin = LiveAdmin([row("x")] + [row(f"f{i}") for i in range(3)])
+        with _mock.patch.object(sa, "RACE_READ_LIMIT", 3):
+            with _mock.patch.object(sa.admin_api, "list_requests",
+                                    lambda a, **kw: [r for r in a.rows if r["id"] != "x"
+                                                     and r["status"] == kw["status"]][:3]):
+                rows, unread = sa.fresh_rows(admin, {"x": "p1"}, sleep=lambda _s: None, clock=lambda: 0.0,
+                                             deadline=10_000.0, spent=[0])
+        self.assertEqual(rows, {})
+        self.assertEqual(unread, {"x": "page_full"})
+
+    def test_a_second_send_that_dies_is_recorded_as_unconfirmed_not_as_a_skip(self):
+        admin = LiveAdmin([row("x")])
+
+        class Dies(CoreWriter):
+            def __call__(self, status, ids, expected):
+                if self.calls:
+                    self.calls.append((status, list(ids), expected))
+                    raise RuntimeError("boom")
+                return super().__call__(status, ids, expected)
+        w = Dies([{"x"}], after=lambda n: admin.change("x", metadata={"touched": n}))
+        res, _ = self.go(admin.rows, admin=admin, writer=w)
+        self.assertEqual(len(w.calls), 2)
+        self.assertEqual(self.outcomes("x"), ["skipped:lost_race:retrying", "error:unverified:re-send raised RuntimeError"])
+        self.assertEqual(len(res.write_errors), 1)
+
+    def test_a_changed_row_is_not_resent_when_no_write_can_still_finish(self):
+        decide.ensure_schema(self.db)
+        was = row("x")
+        admin = LiveAdmin([dict(was, metadata={"touched": 1}, updatedAt="2026-10-20T12:00:01.000Z")])
+        res, w = sa.ScoreResult(run_id="score-t", mode="apply"), CoreWriter([set()])
+        late = sa.RUN_BUDGET_S - sa.WRITE_BATCH_WORST_S + 1   # room for the two reads, none for a write
+        sa.settle_lost_race(self.db, res, ["x"], {"x": SimpleNamespace(profile_id="p1")}, policy(),
+                            sa.ScorePolicy(enabled=True), w, lambda status, ids: set(), 0.0,
+                            SimpleNamespace(monotonic=lambda: float(late)),
+                            SimpleNamespace(admin=admin, rows={"x": was}, engaged=None, sleep=lambda _s: None,
+                                            spent=[0]))
+        self.assertEqual(len(admin.calls), len(sa.HELD_STATUSES), "it was read")
+        self.assertEqual(w.calls, [])
+        self.assertEqual(self.outcomes("x"), ["skipped:lost_race:changed_not_resent:time_budget"])
+        self.assertEqual(res.retried, 0)
+
+    def test_a_failure_while_settling_still_leaves_an_outcome_for_every_row(self):
+        admin = LiveAdmin([row("x")])
+        with _mock.patch.object(sa, "fresh_rows", side_effect=RuntimeError("boom")):
+            res, w = self.go(admin.rows, admin=admin, writer=CoreWriter([{"x"}]))
+        self.assertEqual(self.outcomes("x"), ["skipped:lost_race:state_unread:RuntimeError"])
+        self.assertEqual(len(res.write_errors), 1)
+        self.assertEqual(res.guard_refused, 0)
 
 
 if __name__ == "__main__":
