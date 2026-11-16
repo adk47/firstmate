@@ -289,3 +289,13 @@ are closed and a reminder goes once. The equivalent today is another finite audi
   `r1_filing_class_unknown` and walked again the next.
 - The hourly cron yields one tick per two hours.
 - The paid class C rate (3 of 8) is the weakest number here; the first armed paid check replaces it.
+
+## Follow-up, 15 November: the census is part of the tick
+
+The census that settled section 2 (`tools/tick_census.py`) was a script run by hand. Nothing in the tick read its
+own yield, so the same shape could come back unseen, and by 15 November it had: `r1-free` 23 ticks running with
+3,288 gate calls and 0 accepted, `uvn-status-paid` 8 ticks with 491 and 0. `scripts/credit_review/tick_yield.py`
+now runs at the end of every tick and pages a segment that makes gate calls and sends nobody three ticks in a row
+(`docs/credit-verification/verify-request-notes.md`, `[key=tick-yield]`). The other tools here (`owing_sample.py`,
+`subset_list.py`, `answers_check.py`) answered a one-time question and fix nothing; class C itself is a policy row
+the tick re-reads every run, and it sent 383 `uvn-status` asks on 15 November with nobody starting it.

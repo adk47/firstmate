@@ -2202,6 +2202,34 @@ done
 # the gate itself is slow, every family behind it would stall the same way), the TICK_HARD_S deadline (nothing behind
 # it would fit), a FAILED or PARTIAL APPLY (QA #1799 / spec-deploy-lock-deferral-m1: rows may be sent, the post-send
 # rails own it and more sends are the wrong direction), and an auto-kill (the kill file means nothing more runs).
+# [key=tick-yield] (2026-11-15): what each family's walk bought this tick, read from the check files this tick just
+# wrote (credit_review/tick_yield.py; no ledger, replica or Intercom read). A family that is never reached has had a
+# page since [key=claims-never-starved]; a family that IS reached, spends the tick on gate calls and sends nobody had
+# none - on 2026-11-13 uvn-status walked 3,252 users for 1 send and it took a hand-run census to see that one rule
+# answered 62% of the gate calls. It runs on every way the tick ends once the families began. It changes no list, cap
+# or gate and can never fail the tick: a reader that is absent or does not answer is logged as not measured. The repeat
+# window starts only on a CONFIRMED page (`paged`), so an undelivered page is owed again next tick.
+TICK_YIELD="$SCRIPTS_DIR/credit_review/tick_yield.py"
+tick_yield() {
+  local out line page=""
+  [ -r "$TICK_YIELD" ] || { log "tick yield: no reader at $TICK_YIELD on this tree; not measured this tick"; return 0; }
+  out="$(py -I "$TICK_YIELD" record --out "$OUT" --state "$STATE/tick-yield.json" 2>&1)" \
+    || { log "tick yield UNMEASURED: the reader did not answer ($(printf '%s' "$out" | tail -1 | cut -c1-200)); not measured this tick"; return 0; }
+  while IFS= read -r line; do
+    case "$line" in
+      "PAGE: "*) page="${line#PAGE: }" ;;
+      "") ;;
+      *) log "$line" ;;
+    esac
+  done <<< "$out"
+  [ -n "$page" ] || return 0
+  if notify_confirmed "$page"; then
+    py -I "$TICK_YIELD" paged --state "$STATE/tick-yield.json" >/dev/null 2>&1 \
+      || log "tick yield: the page was delivered but its repeat window could not be recorded; it repeats next tick"
+  else
+    log "tick yield: page NOT DELIVERED (${PAGE_WHY:-unknown}); owed again next tick"
+  fi
+}
 FAILED_GROUPS=""
 run_group() { # <label> <group fn>: 0 = done, 1 = hard stop (exit 1), 2 = deferred (continue, DEFERRED=1)
   local label="$1" rc; shift
@@ -2222,11 +2250,12 @@ run_group() { # <label> <group fn>: 0 = done, 1 = hard stop (exit 1), 2 = deferr
 # reached". A group that is never reached is not low priority, it is unreachable.
 log "claim families first (every day), held to their own ${CLAIM_GROUP_BUDGET_S}s slice"
 GROUP_END_S=$(( $(elapsed) + CLAIM_GROUP_BUDGET_S ))
-run_group "claim families" claim_families || exit 1
+run_group "claim families" claim_families || { tick_yield; exit 1; }
 GROUP_END_S=""
-run_group "credit families" credit_families || exit 1
-run_group "refusal family" refusal_families || exit 1
-run_group "need families" need_families || exit 1
+run_group "credit families" credit_families || { tick_yield; exit 1; }
+run_group "refusal family" refusal_families || { tick_yield; exit 1; }
+run_group "need families" need_families || { tick_yield; exit 1; }
+tick_yield
 if [ -n "$FAILED_GROUPS" ]; then
   log "tick done with FAILED group(s): $FAILED_GROUPS (the other groups ran); exit 1"
   exit 1

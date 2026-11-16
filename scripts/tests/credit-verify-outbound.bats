@@ -123,6 +123,10 @@ elif "--outcomes-json" in a:
     for i in range(nu):
         doc["outcomes"].append({"user": "u%d" % i, "result": "unmeasured",
                                 "reason": "gate_timeout: a gate call timed out after 1 attempt(s) of 20s; outcome unknown"})
+    # [key=tick-yield]: gate calls the gate answered with a hold - the walk that spends the tick and sends nobody
+    for i in range(int(os.environ.get("STUB_HELD", "0")) if mode != "apply" else 0):
+        doc["outcomes"].append({"user": "h%d" % i, "result": "deferred",
+                                "reason": "HELD comm_state credits=1 (replied: proof_on_file)"})
     doc["unmeasured_users"] = nu
     doc["unmeasured_stop_at"] = 5
     doc["unmeasured_stop_rule"] = "unmeasured_users >= max(5, 10% of the batch)"
@@ -3705,4 +3709,55 @@ PY
   if grep -q -- "^uvn-status --list .*owing-uvn.json" "$CALLS"; then false; fi    # the stale list was never checked
   grep -q -- "^claim-proof-ask --list .*--mode apply" "$CALLS"                    # and the claims still ran
   grep -q "tick done with FAILED group(s): credit families" "$(newest_tick)"
+}
+
+# [key=tick-yield]: the read the tick takes of its own check files when it ends (credit_review/tick_yield.py; the rule
+# itself is pinned in scripts/tests/test_tick_yield.py). These pin the WIRING: it runs every tick, pages once on a
+# confirmed post, owes an undelivered page again, and cannot fail the tick.
+yield_seg() { python3 -c 'import json,sys; s=json.load(open(sys.argv[1]))["segments"].get(sys.argv[2]) or {}; print(s.get(sys.argv[3], "-"))' "$CVO_STATE/tick-yield.json" "$1" "$2"; }
+
+@test "outbound tick ([key=tick-yield]): a family that makes gate calls and sends nobody for three ticks is PAGED once, by name, with its count and the rule that answered" {
+  rm -f "$CALLS.page-confirmed"
+  STUB_HELD=45 STUB_ACCEPTED="" run -0 "$SCRIPT"
+  grep -q "tick yield: .* check(s) measured, .* spent: .*uvn-status-free 1 ticks, 45 gate calls, 0 accepted, 100% comm_state" "$(newest_tick)"
+  rm -rf "$CVO_OUT_ROOT"
+  STUB_HELD=45 STUB_ACCEPTED="" run -0 "$SCRIPT"
+  if grep -q "sending nobody" "$CALLS.page-confirmed" 2>/dev/null; then false; fi   # two empty walks are not yet a page
+  rm -rf "$CVO_OUT_ROOT"
+  STUB_HELD=45 STUB_ACCEPTED="" run -0 "$SCRIPT"
+  [ "$(grep -c "keep spending the tick on gate calls and sending nobody" "$CALLS.page-confirmed")" = 1 ]   # ONE page for every segment
+  grep -q "uvn-status-free 3 ticks, 135 gate calls, 0 accepted, 100% comm_state" "$CALLS.page-confirmed"
+  grep -q "uvn-status-paid 3 ticks, 135 gate calls, 0 accepted, 100% comm_state" "$CALLS.page-confirmed"
+  [ "$(yield_seg uvn-status-free paged_at)" = 3 ]
+  : > "$CALLS.page-confirmed"; rm -rf "$CVO_OUT_ROOT"
+  STUB_HELD=45 STUB_ACCEPTED="" run -0 "$SCRIPT"                    # fourth tick: still spent, already paged
+  [ "$(yield_seg uvn-status-free streak)" = 4 ]
+  if grep -q "sending nobody" "$CALLS.page-confirmed"; then false; fi
+}
+
+@test "outbound tick ([key=tick-yield]): an UNDELIVERED yield page is owed again next tick, and a tick that sends ends the streak" {
+  rm -f "$CALLS.page-confirmed"
+  STUB_HELD=45 STUB_ACCEPTED="" run -0 "$SCRIPT"; rm -rf "$CVO_OUT_ROOT"
+  STUB_HELD=45 STUB_ACCEPTED="" run -0 "$SCRIPT"; rm -rf "$CVO_OUT_ROOT"
+  STUB_HELD=45 STUB_ACCEPTED="" STUB_SLACK_CONFIRM_RC=1 run -0 "$SCRIPT"
+  grep -q "tick yield: page NOT DELIVERED" "$(newest_tick)"
+  [ "$(yield_seg uvn-status-free paged_at)" = 0 ]                   # an undelivered page buys no silence
+  : > "$CALLS.page-confirmed"; rm -rf "$CVO_OUT_ROOT"
+  STUB_HELD=45 STUB_ACCEPTED="" run -0 "$SCRIPT"
+  grep -q "uvn-status-free 4 ticks, 180 gate calls, 0 accepted" "$CALLS.page-confirmed"
+  [ "$(yield_seg uvn-status-free paged_at)" = 4 ]
+  rm -rf "$CVO_OUT_ROOT"
+  STUB_HELD=45 run -0 "$SCRIPT"                                     # 1 accepted of 46 gate calls: the walk sends
+  [ "$(yield_seg uvn-status-free streak)" = "-" ]
+}
+
+@test "outbound tick ([key=tick-yield]): a tick whose walks send is counted and never paged, and a reader that cannot answer never fails the tick" {
+  rm -f "$CALLS.page-confirmed"
+  run -0 "$SCRIPT"
+  grep -q "tick yield: .* check(s) measured, 0 spent" "$(newest_tick)"
+  if grep -q "sending nobody" "$CALLS.page-confirmed" 2>/dev/null; then false; fi
+  rm -rf "$CVO_OUT_ROOT"; rm -f "$CVO_STATE/tick-yield.json"; mkdir -p "$CVO_STATE/tick-yield.json"   # the state path cannot be written
+  STUB_HELD=45 STUB_ACCEPTED="" run -0 "$SCRIPT"
+  grep -q "tick yield UNMEASURED: the reader did not answer" "$(newest_tick)"
+  grep -q "tick done" "$(newest_tick)"
 }

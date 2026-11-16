@@ -1081,6 +1081,38 @@ audience and the held classes: `data/proof-refusal-send-r1/report.md`.
   and clears itself when the read is clean again; `/etc/hydra/proof-refusal.disabled` stops the campaign in the
   gate.
 
+## What a tick's walk bought is read every tick (`[key=tick-yield]`, 2026-11-15)
+
+A family the tick never reaches has a page (`not_reached`, below). A family the tick reaches, spends its time on
+gate calls and sends nobody had none. On 13 November `uvn-status` walked 3,252 users for 1 send; one rule answered
+1,685 of 2,732 gate calls, and that was found by a census somebody ran by hand over the tick's check files
+(`data/rapid-verif-final-h3/`). On 15 November the same shape was on other families and nothing said so.
+
+`scripts/credit_review/tick_yield.py` is that census as part of the tick. `credit-verify-outbound.sh` runs it on
+every way a tick ends once the families began (`tick_yield`). It reads the `<family>-<segment>-check.json` files the
+tick just wrote and nothing else. It changes no list, cap or gate, and it cannot fail the tick.
+
+- **Spent**: the check made 40 or more gate calls and accepted at most 1 in 100. A gate call is an outcome row that
+  reached the gate, plus every accepted user; `run_size`, `daily_cap` and `apply_budget` rows are not gate calls.
+- **Page**: `#clio_devops`, on the third spent tick in a row and every 24 spent ticks after. It names each segment
+  with its ticks, gate calls, accepts and the reason code that answered most.
+- **A tick that sends** (more than 1 in 100 accepted) ends the streak. A short walk that sent nobody neither extends
+  nor ends it; 24 such ticks in a row drop it.
+- **Not measured is not spent.** A family the tick did not reach, or a check file that cannot be read, leaves the
+  streak as it was, and an unreadable file is named in `tick.log`. A reader that is missing or does not answer logs
+  `tick yield UNMEASURED` and the tick goes on.
+- **An undelivered page is owed again.** The repeat window starts only after Slack confirmed the post.
+
+State is `/var/lib/hydra/credit-verify-outbound/tick-yield.json` (counts and reason codes, no user). Read the
+standing streaks with `python3 /opt/hydra/scripts/credit_review/tick_yield.py report`. Deleting
+the file restarts the count; it silences nothing for longer than three ticks.
+
+What to do about a page: the users the gate turns away every tick belong out of the list when it is built (as
+`[key=class-c-precheck]` did for class C), or the rule holding them is armed on purpose (as the class C row did).
+Replayed over the real ticks of 14 and 15 November it stood at: `r1-free` 23 ticks, 3,288 gate calls, 0 accepted,
+63% `r1_receipted_in_thread`; `uvn-status-paid` 8 ticks, 491 gate calls, 0 accepted, 49% `comm_state`; `r1-paid`
+3 ticks, 369 gate calls, 0 accepted, 61% `r1_receipted_in_thread`. Those three are the first pages it will send.
+
 ## What bounds a tick's sends: order, the claim slice, the not-reached page, class C, the gate's reads (`[key=claims-never-starved]`, `[key=class-c-precheck]`, `[key=gate-reads-beside]`, 2026-11-12)
 
 Measured on node-8 on 2026-11-12: 44 sends by 16:35Z, every one of them `uvn-status`. Five things bound a tick, and

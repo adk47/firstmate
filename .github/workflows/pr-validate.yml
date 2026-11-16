@@ -2677,6 +2677,9 @@ jobs:
           python3 scripts/tests/test_verify_ledger_owing_proof.py
           # the S1 credit-hold-status audience (credit_review/owing_proof.py; the campaign stays send-locked).
           python3 scripts/tests/test_owing_proof.py
+          # what each family's walk bought a tick (credit_review/tick_yield.py, run by the outbound tick as it ends):
+          # a segment that makes gate calls and sends nobody three ticks running is paged; unmeasured is never spent.
+          python3 scripts/tests/test_tick_yield.py
           # the ONE send order of every audience list (credit_review/audience_order.py): paying first, oldest first,
           # the user id last - never the order the source returned its rows in. Mutation cases included.
           python3 scripts/tests/test_audience_order.py
