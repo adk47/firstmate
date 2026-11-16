@@ -3148,10 +3148,17 @@ check_media_host_binaries
 # (/var/lib/hydra/credit-review/ledger.sqlite3, shared with the decider) and refuses
 # every row while the table is absent. Until 2026-10-18 the table only appeared on the
 # gate's first send, and every send is locked, so take-back skipped everything.
-# `verify_ledger.py migrate` creates/upgrades ONLY the verify_* tables (CREATE TABLE IF
+# `verify_ledger.py migrate` upgrades ONLY the verify_* tables (CREATE TABLE IF
 # NOT EXISTS + ALTER TABLE ADD COLUMN), idempotent, never touching the decider's tables
 # or any row. A failure leaves take-back fail-closed (no removals), so it WARNS: an
 # unrelated deploy must not wedge on it.
+# Since 2026-11-13 it never STARTS the send record at this path: a missing file, or one with
+# no verify_messages table, is refused (an empty send record says nobody was ever messaged).
+# The warning below carries that refusal. For a MISSING file it names the one command that creates it
+# (`verify_ledger.py --db <path> init`, a person's decision on a new host; it logs who to stderr); for an
+# existing file that holds tables but no send record, init refuses it too (a restored pre-send-record
+# backup), so that refusal says to restore the send record or init a fresh path. On a new host init has to
+# run before the decider creates the file at that path.
 migrate_verify_ledger() {
   local out rc=0
   out=$(run_on_node8 '/usr/bin/python3 -I /opt/hydra/scripts/credit_review/verify_ledger.py --db /var/lib/hydra/credit-review/ledger.sqlite3 migrate' 2>&1) || rc=$?

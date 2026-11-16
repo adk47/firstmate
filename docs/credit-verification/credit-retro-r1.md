@@ -141,8 +141,9 @@ for the canary. A user who already got a message that UTC day has their whole se
 as `notice_would_defer` and executed on a later day (the set stays approved for 7 days).
 
 **Before the first real `stage` (Fable v3 §4):** Caroline's send ledger has its
-`verify_messages` table (every deploy creates it, schema: `verify-request-notes.md` → Operate;
-without it every run is `proof_source_unavailable`, by design); prod answers
+`verify_messages` table (a person creates it once with `verify_ledger.py init` and every deploy
+upgrades it; schema: `verify-request-notes.md` → Operate; without it every run is
+`proof_source_unavailable`, by design); prod answers
 `GET /admin/credit-removals` (core #10614 re-twin deployed); the `takeback-notice` campaign is
 in Caroline's gate with the wording rules below enforced by its renderer.
 
@@ -317,9 +318,9 @@ a user who sends a document after a deferred day keeps the role.
   unreadable.
   A send ledger without Caroline's `verify_messages` table (for example one holding only the
   decider's tables), or missing any of its `verify_ledger.READER_COLUMNS`, counts as malformed;
-  every deploy creates it (schema: `verify-request-notes.md` → Operate), so its absence means
-  that deploy step failed. "Cannot check proof" is never "no proof" (Fable v3; contract test
-  `test_send_ledger_without_verify_messages_removes_nothing`).
+  neither a deploy nor an open creates it (schema: `verify-request-notes.md` → Operate), so its
+  absence means it was never created on this host. "Cannot check proof" is never "no proof"
+  (Fable v3; contract test `test_send_ledger_without_verify_messages_removes_nothing`).
 - org-affiliation is the credit-trust export, schema `org-affiliation/v1` (H-DevOps
   `scripts/credit-trust-exports/org-affiliation/README.md`, published hourly at :23):
   `users{id: {verdict, coverage, evidence[]}}` and `held{id: {reason}}`. Its consumer rule

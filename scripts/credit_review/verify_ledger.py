@@ -104,6 +104,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 DEFAULT_PATH = os.environ.get("CREDIT_REVIEW_LEDGER", "/var/lib/hydra/credit-review/ledger.sqlite3")
+# The path every deployed sender is pinned to (intercom-verify-request.sh PROD_LEDGER, credit-verify-outbound.sh
+# LEDGER; test_verify_ledger_contract.py holds the three equal). A literal: no env var or flag moves it. connect() never
+# creates the send record at this path (see LedgerAbsentError).
+PRODUCTION_PATH = "/var/lib/hydra/credit-review/ledger.sqlite3"
+SEND_RECORD_TABLE = "verify_messages"
 MAX_ATTEMPTS = 3
 BLOCKING = ("attempted", "sent", "refused", "skipped")
 DEFERRED = "deferred_pending_doc"
@@ -455,15 +460,74 @@ def ledger_open() -> Any:
     return sys.modules[name]
 
 
-def connect(path: str) -> sqlite3.Connection:
-    """The WRITE opener (creates, migrates). A read-only run uses connect_ro(), or read_only_process() around its
-    whole body. A write this connection is refused raises ledger_open().LedgerNotWritableError naming the reason."""
+class LedgerAbsentError(RuntimeError):
+    """The production ledger has no send record (no file, or a file with no verify_messages table), and this open
+    would have created an empty one. An empty send record answers "never messaged" for every person, so a sender on
+    a host that lacks the real ledger would message everyone again. Measured 2026-11-13: `pending` against a missing
+    path exited 0 with daily_cap false and user_done "" and left a 73,728-byte ledger with 0 rows.
+    Deliberately NOT a ReadOnlyLedgerError and not a sqlite3.Error: the callers that tolerate those and carry on
+    must not tolerate this."""
+
+
+def is_production_path(path: str) -> bool:
+    """True when `path` is the production ledger, a symlink to it included."""
+    return path != ":memory:" and os.path.realpath(path) == os.path.realpath(PRODUCTION_PATH)
+
+
+def _has_send_record(db: sqlite3.Connection) -> bool:
+    return db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                      (SEND_RECORD_TABLE,)).fetchone() is not None
+
+
+def _holds_tables(db: sqlite3.Connection) -> bool:
+    return db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").fetchone() \
+        is not None
+
+
+def _absent(path: str, what: str) -> LedgerAbsentError:
+    return LedgerAbsentError(
+        f"verify ledger {path} {what}; refusing to create an empty send record (it would say nobody was ever "
+        "messaged). Restore the send record, or init a fresh path")
+
+
+def _missing(path: str) -> LedgerAbsentError:
+    return LedgerAbsentError(
+        f"verify ledger {path} does not exist; refusing to create an empty send record (it would say nobody was "
+        f"ever messaged). On a host that has truly never sent run: verify_ledger.py --db {path} init")
+
+
+def _connection_path(db: sqlite3.Connection) -> str:
+    """The file a connection opened elsewhere is attached to ('' for :memory: or an unreadable handle)."""
+    try:
+        rows = db.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return ""
+    for row in rows:
+        if str(row[1]) == "main":
+            return str(row[2] or "")
+    return ""
+
+
+def connect(path: str, *, create: bool = False) -> sqlite3.Connection:
+    """The WRITE opener (migrates; creates a scratch ledger). A read-only run uses connect_ro(), or
+    read_only_process() around its whole body. A write this connection is refused raises
+    ledger_open().LedgerNotWritableError naming the reason.
+
+    At PRODUCTION_PATH it never creates the send record: a missing file, or a file with no verify_messages table,
+    raises LedgerAbsentError and nothing is written. `create=True` is the one way to make it, and only init() passes
+    it. New tables and columns are still added to a ledger that already holds the send record."""
     if READ_ONLY_PROCESS and path != ":memory:":
         return connect_ro(path, must_exist=True)
-    if path != ":memory:":
+    guarded = not create and is_production_path(path)
+    if guarded and not Path(path).is_file():
+        raise _missing(path)
+    if path != ":memory:" and not guarded:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     db = ledger_open().open_rw(path, opener="verify_ledger.connect", timeout=30, isolation_level=None)
     db.row_factory = sqlite3.Row
+    if guarded and not _has_send_record(db):
+        db.close()
+        raise _absent(path, f"has no {SEND_RECORD_TABLE} table")
     db.executescript(SCHEMA)
     _migrate(db)
     db.executescript(INDEXES)
@@ -550,9 +614,37 @@ def connect_ro(path: str, *, must_exist: bool = False) -> sqlite3.Connection:
         ref.close()
 
 
+def init(path: str) -> dict[str, Any]:
+    """The one explicit creation of the send record, for a host that has truly never sent. A ledger that already
+    holds it is left exactly as it is (`exists`): init never empties, replaces or re-stamps one.
+
+    An existing file that holds tables but no send record is REFUSED, never given an empty one: that file is a
+    restored pre-send-record backup (or another instance's file), and an empty send record beside the decider's
+    history answers "never messaged" for everyone."""
+    if path != ":memory:" and Path(path).is_file():
+        ro = ledger_open().open_ro(path, opener="verify_ledger.init", timeout=30, isolation_level=None)
+        try:
+            if _has_send_record(ro):
+                return {"result": "exists", "path": path}
+            if _holds_tables(ro):
+                raise LedgerAbsentError(
+                    f"verify ledger {path} exists without a send record - restore the send record, or init a "
+                    "fresh path")
+        finally:
+            ro.close()
+    connect(path, create=True).close()
+    return {"result": "created", "path": path}
+
+
 def ensure_schema(db: sqlite3.Connection) -> None:
     """Create/migrate this ledger's tables on a connection opened elsewhere (the credit decider's
-    own handle: its asks live in verify_messages in the same file). Idempotent."""
+    own handle: its asks live in verify_messages in the same file). Idempotent.
+
+    It refuses to START the send record at PRODUCTION_PATH, like connect(): a decider handle to a ledger that has
+    no verify_messages table would otherwise create an empty one, which answers "never messaged" for everyone."""
+    path = _connection_path(db)
+    if path and is_production_path(path) and not _has_send_record(db):
+        raise _absent(path, f"has no {SEND_RECORD_TABLE} table")
     db.executescript(SCHEMA)
     _migrate(db)
 
@@ -2902,7 +2994,11 @@ def _main(argv: list[str] | None = None) -> int:
     p.add_argument("--readonly", action="store_true", help="QA #1564: open mode=ro; never create or migrate (read ops only)")
     sub = p.add_subparsers(dest="op", required=True)
     sub.add_parser("migrate", help="create or upgrade the verify tables in this ledger (idempotent; "
-                                   "touches no other table); scripts/deploy.sh runs it every deploy")
+                                   "touches no other table); scripts/deploy.sh runs it every deploy. At the "
+                                   "production path it upgrades only: a ledger with no send record is refused")
+    sub.add_parser("init", help="create an EMPTY send record in a path that has none. For a host that has truly "
+                                 "never sent; a ledger that has one is untouched, and an existing file that holds "
+                                 "other tables is refused. Logs who ran it to stderr")
     for name in ("claim", "refuse"):
         s = sub.add_parser(name)
         s.add_argument("--campaign", default="verify-live", choices=CAMPAIGNS)
@@ -3045,9 +3141,23 @@ def _main(argv: list[str] | None = None) -> int:
     ru.add_argument("--hours", type=float, default=24.0, help="age at which a silent refund is a finding (default 24)")
     ru.add_argument("--now", default="", help="evaluate the age at this UTC timestamp (tests: YYYY-MM-DDTHH:MM:SSZ)")
     a = p.parse_args(argv)
+    if a.op == "init":
+        if a.readonly:
+            print(json.dumps({"error": "init writes; it cannot run --readonly"}), file=sys.stderr)
+            return 2
+        try:
+            out = init(a.db)
+        except LedgerAbsentError as exc:
+            print(json.dumps({"error": str(exc)}), file=sys.stderr)
+            return 2
+        who = os.environ.get("SUDO_USER") or os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown"
+        print(json.dumps(out))
+        print(f"verify_ledger.py init: {out['result']} the send record at {out['path']} (by {who})",
+              file=sys.stderr)
+        return 0
     try:
         db = connect_ro(a.db) if a.readonly else connect(a.db)
-    except ReadOnlyLedgerError as exc:
+    except (ReadOnlyLedgerError, LedgerAbsentError) as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 2
     if a.op == "migrate":

@@ -6960,3 +6960,51 @@ $REF_CLOSE"
   [[ "$output" == "DEFERRED messaged_7d"* ]]
   [ "$(posts)" -eq 1 ]
 }
+
+# --- a missing production ledger (lane verif-sender-cluster-scale-k1) ------------------
+
+@test "a missing production ledger: the gate refuses and posts nothing, and no empty send record is started" {
+  # verify_ledger keys this rule to ONE literal path, which a test cannot write. So the helper under test is a mirror
+  # of scripts/credit_review with that one literal rewritten to this test's ledger path, and nothing else changed.
+  local mirror="$TEST_TMPDIR/credit_review" real="$HYDRA_REPO/scripts/credit_review"
+  cp -r "$real" "$mirror"
+  sed -i "s|^PRODUCTION_PATH = .*|PRODUCTION_PATH = \"$INTERCOM_VERIFY_TEST_LEDGER\"|" "$mirror/verify_ledger.py"
+  [ "$(diff "$real/verify_ledger.py" "$mirror/verify_ledger.py" | grep -c '^[<>]')" -eq 2 ]
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+
+  [ ! -e "$INTERCOM_VERIFY_TEST_LEDGER" ]
+  INTERCOM_VERIFY_TEST_LEDGER_HELPER="$mirror/verify_ledger.py" INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -2 send
+  [[ "$output" == *"the ledger read failed; refusing to send without the idempotency record."* ]]
+  [ "$(posts)" -eq 0 ]
+  [ ! -e "$INTERCOM_VERIFY_TEST_LEDGER" ]
+
+  # Control: the same send through the unmodified helper posts. For it this temp path is not the production path,
+  # so the refusal above is the rule and not the fixture.
+  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send
+  [[ "$output" == "POSTED email message=1001 credits=1" ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "the gate hands the ledger helper verify_ledger.PRODUCTION_PATH, and no env var moves it" {
+  # The rule is keyed to ONE path, so the gate must resolve to it. A stub helper records the --db it was handed and
+  # refuses; the expected value is read by running the real module, never by matching either source file.
+  local stub="$TEST_TMPDIR/stub-helper.py"
+  cat > "$stub" <<'PY'
+import sys
+from pathlib import Path
+argv = sys.argv[1:]
+Path(__file__ + ".seen").write_text(argv[argv.index("--db") + 1])
+print('{"error": "stub helper"}')
+sys.exit(2)
+PY
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_LEDGER= INTERCOM_VERIFY_TEST_LEDGER_HELPER="$stub" \
+    CREDIT_REVIEW_LEDGER=/tmp/elsewhere.sqlite3 CVO_LEDGER=/tmp/elsewhere.sqlite3 \
+    INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -2 send
+  [[ "$output" == *"the ledger read failed; refusing to send without the idempotency record."* ]]
+  [ "$(posts)" -eq 0 ]
+  local expected
+  expected="$(PYTHONPATH="$HYDRA_REPO/scripts" python3 -c 'from credit_review import verify_ledger as v; print(v.PRODUCTION_PATH)')"
+  [ -n "$expected" ]
+  [ "$(<"$stub.seen")" = "$expected" ]
+}
