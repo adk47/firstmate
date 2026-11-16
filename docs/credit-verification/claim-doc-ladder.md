@@ -6,14 +6,22 @@ contradiction, `claim-proof-check` reads a code on a bound page, and a document 
 `proof_intake` and nothing read it.
 
 `scripts/claim-doc-ladder.py` (rules in `scripts/claim_verify/doc_ladder.py`, reads in
-`scripts/claim_verify/doc_sources.py`) gives every open claim that has a document on file ONE
-recorded decision with a reason code. It is the claim twin of `credit_review/doc_approve.py` and
-has the same shape: extraction into a fixed schema, then coded predicates in rank order, then a
-decision.
+`scripts/claim_verify/doc_sources.py`) gives every open claim that has a document on file, or a
+form its claimant supplied, ONE recorded decision with a reason code. It is the claim twin of
+`credit_review/doc_approve.py` and has the same shape: extraction into a fixed schema, then coded
+predicates in rank order, then a decision.
 
 **Every decision is the ladder's own.** Captain, 2026-11-13: no verification path ends at a staff
-queue. The ladder (`cdl-2`) has four outcomes and each names who moves next: the claimant, who is
+queue. The ladder (`cdl-3`) has four outcomes and each names who moves next: the claimant, who is
 owed a specific ask, or a job of ours, which owes a read. Nothing is parked for somebody to look at.
+
+**Four forms, one verdict row.** Captain, 2026-11-16: "every row ends ASK (one specific ask) or NO
+... escalation may be by email address, phone number or collaborator proof from an existing Muso
+user". Until `cdl-3` the ladder knew one form (a document), so a claimant with no paperwork could
+only be asked for paperwork, and 8,167 of the 9,147 documents on the credit side were credits
+pages, none of which verified. A claim is now settled by a document, an email address, a phone
+number or a collaborator's Muso profile; the row says which form settled it or which form it asked
+in ("The four forms").
 
 **It records. It changes no claim, calls no admin API and sends nothing.** Every decision is in
 state `shadow`, the ask included: the row holds which ask the claimant is owed, and no claimant
@@ -78,6 +86,118 @@ The first predicate that fails is the reason. `policies/claim-doc-ladder.json` h
 | 5 | clean | the document is not forged, contradicted or filed by a second account; the profile is not a big one; the account is not held | `document_forged`, `document_contradicted`, `document_reused`, `catalog_unreadable`, `big_profile`, `account_hold_unmeasured`, `account_hold` |
 
 Passing all six is `approved` / `document_names_claimant_and_profile`.
+
+## The four forms
+
+`scripts/claim_verify/forms.py` is the one table of what a claim can be proved by, which ask each
+claim class is delivered in, and the check each supplied form gets. Nothing here reads a model, a
+page or a network: a check is a pure function of (form, value, the facts the reader delivered).
+
+| Form | What settles the claim | Offered for | State today |
+|---|---|---|---|
+| `document` | the ladder above: a document that names the claimant AND the profile | every class, every ask; the last rung of every ordering | read by doc-verify, unchanged |
+| `email_address` | the claimant ACCOUNT's own address (core's `users.email`, read with the claim, carried as a digest) at a host the profile itself publishes, never free mail or a platform host, AND a mailbox core confirmed (`users.emailconfirmed`) — the account answered for that address, so it is one the claimant holds, at the profile's organisation | `company_authority` (organization), `proof_naming_profile` (organization, artist, professional) | **offered, and it settles** only where `profile_hosts`, a confirmed account address AND a domain that address shares with the profile were all read (`account_email_unread` / `account_email_not_confirmed` otherwise); an unconfirmed account is never offered it |
+| `collaborator_proof` | another Muso user crediting the claimant on a release they share | `proof_naming_claimant`, `proof_naming_profile` (artist, professional) | **recognised, recorded and RESERVED**: nothing here can ask that user to confirm, and a public profile id anyone could paste is not their word, so `forms.FORMS_WITHOUT_A_CHECK` keeps it from being offered and a supplied one is a measured NO (`collaborator_attestation_not_recorded`) |
+| `phone_number` | a number the profile publishes (company website) | `company_authority` (organization) | **never offered, and a supplied one is a measured NO**: no source publishes a profile phone to us, so the form is in `forms.FORMS_WITHOUT_A_CHECK`, `forms.check` refuses it as `no_source_can_check_this_form` and the row is `refused` with the ask that can still settle the claim — never `awaiting_read`, which would wait on a fact no job can ever read |
+
+The rule is one sentence, and it is code (`forms.offered`, `forms.checkable`): **a claim is only
+ever asked in a form whose facts were READ, and the document is the last rung** — so every row is
+left with an ask its claimant can answer. The orders are in `forms.FORMS_BY_ASK` (per ask and
+class); a class no form was reviewed for gets the document alone.
+
+**What a typed string can never prove, and what settles instead.** Two of the four forms are ones
+anybody could fake by typing, and this ladder settles on evidence we hold:
+
+- **An address.** `madeup@novakane.com` is not proof of a mailbox. The address form settles only when
+  BOTH hold: the supplied address IS the claimant account's own address — the one core holds for
+  `users.email`, read with the claim and carried only as a digest (`account_email_sha256`) — at a
+  domain the profile publishes, AND core has **confirmed** that mailbox (`users.emailconfirmed`, read
+  as `account_email_confirmed`). An unconfirmed address is a typed string like any other, so an
+  account whose mailbox core never confirmed is **never offered this form at all** (`checkable`
+  needs both halves, and the document rung is the ask), and supplying one anyway is refused
+  (`account_email_not_confirmed`) rather than left waiting. The same is true of a confirmed mailbox
+  at a domain the profile does not publish (a `jane@gmail.com` account claiming a profile whose
+  website is `brightlabel.com`): no answer could pass the check, so `forms.settles_at` — the one
+  predicate the offer and the check share — keeps the document as the ask. **A mailbox challenge (a link we send and
+  they click) is a later change**; until then the settled fact is core's own confirmation, which is
+  what makes the address one the claimant's account answered.
+- **A collaborator.** A public profile id is not that user's word, and no reply path exists here to
+  ask them. So collaborator proof is **recognised, accepted by the intake and recorded**, never
+  offered and never approving: a supplied one is refused as `collaborator_attestation_not_recorded`
+  and its words sit in `reserved_form_asks`. **The collaborator's own confirmation is the missing
+  piece**, and shipping a form that claims it without that is exactly the offer we must not make.
+
+A read that does not answer (the account's address, the profile's host) is `awaiting_read`, never a
+pass.
+
+**A shared host never settles.** An address at a free-mail provider or at a platform or link hub
+(`forms.SHARED_HOSTS`, instagram.com and linktr.ee among them, subdomains included) is somebody's
+free account, not an organisation's own domain, so it is refused (`email_at_free_mail`,
+`email_at_a_shared_host`) even when the profile itself links to that platform.
+
+**Unmeasured is not a refusal, and a measured absence is not unmeasured.** A check whose fact could
+not be read answers `None`, the ladder records `form_unmeasured` (`awaiting_read`, route
+`doc-sources`) and the claimant is asked for nothing while the fact is unread. A profile we read
+that publishes no website is `[]`, not `None`: that is measured, and it refuses the address. A
+profile the catalog does not contain is credited on nothing, which refuses the collaborator.
+
+**A form that checks out is not an approval on its own.** It is held to the same claim-side stops a
+document is (`_contradiction_stop`, `_clean_stop`): the claim list's own contradiction rule, another
+account holding the profile, a bound code another claim already found, a big profile, an account
+hold. A document on file that is poisoned — forged, contradicted, or filed by a second account —
+poisons the form path too, so a form never launders a claim a document already made unsafe. Each
+stop's own reason is recorded, and an unread one is `awaiting_read`.
+
+**What the row says, and where the value is.** Worth knowing when reading a `list` line:
+`ask_form` is the form the ask is delivered in, `form` is the supplied form the decision stood on
+('' when a document settled it or nothing settled it), and `form_value_sha256` is the digest of what
+was supplied. **The address, the number and the collaborator's id are never on the verdict row**,
+never in the stored inputs and never in an event: the value lives on the append-only
+`claim_doc_supplies` row, and in the pass's own `snapshot.json` (0600, in the state directory) while
+the pass decides. `verify` re-reads the value from the supply row by that digest, so a decision is
+still re-derivable after a restore, and a decision whose supply row is missing is reported as a
+mismatch rather than guessed.
+
+### A form arrives through the intake, and the intake decides nothing
+
+```bash
+claim-doc-ladder.py supply --claim-id N --form email_address --value jane@novakane.com \
+    --intake-id <the reply's own id> --received-by <the channel it arrived on>
+```
+
+`supply` normalises the value (lower-cased address, `+`-and-digits number, profile id), refuses a
+malformed one and refuses a document, and appends a row to `claim_doc_supplies`. It **records only**:
+the next pass reads the supplies (`doc_sources.supplies`), attaches them to the claim with the facts
+their checks need (`doc_sources.form_facts`), and decides the claim as it decides any other. A claim
+whose only evidence is a form is in the population at all, and one with neither a document nor a form
+is still `no_evidence`.
+
+The collaborator facts are kept **per reference** (`collaborators: {ref: {in_catalog, titles}}`), so a
+claimant who sends two collaborators has each checked on its own record, and a reference is matched
+the one page-identity way (`lib/page_identity.same_page`), so a truncated id a ticket or a register
+row holds still finds its profile. The copy a verdict row stores keys the same facts by the value's
+digest, and `verify` re-keys them from the supply row, so the stored inputs hold no reference either.
+
+The table is **append-only** (triggers, like `claim_doc_events`): a wrong supply is answered by a
+new row and the check takes the best one, so nothing here needs anyone's approval to undo.
+
+**The live reads are bounded, and nothing is left out twice.** `profile_hosts` comes from the live
+admin profile (`gdpr_pipeline.sources.profile_sites`, never the catalog view, which ran four days
+behind). One pass reads at most `doc_sources.MAX_FORM_READS` profiles: a claimant who supplied an
+address is ALWAYS read (waiting on a fact we never read would wait forever), and the rest are taken
+oldest-supply-first after last pass's reads (`latest.json` → `form_hosts_read`), so a profile left
+out this pass is read on the next one. What stayed out is counted (`form_over_bound`), never
+silently dropped: the address form is simply not checkable for that claim, so `forms.offered`
+falls through to the next form whose facts were read, and the document — checkable always — is the
+last rung of every ordering.
+
+### The ask copy carries a line per form
+
+`policies/claim-doc-asks.json` is `cda-2`: the document lines are **byte-identical** to `cda-1`, and
+`form_asks` holds the words each ask is delivered in when it is not a document. The ladder refuses
+to load the file when a pair it can choose has no words, or when it carries a pair it never chooses,
+and the identity-document scan covers these lines too. **Nothing sends them**: same rule as the
+document asks, and their exact bytes are what a sender would put through the outbound copy gate.
 
 ## The four outcomes
 
@@ -211,7 +331,8 @@ Rules that are code, not prose:
 
 | Table | Holds | Changes |
 |---|---|---|
-| `claim_doc_decisions` | one row per claim: outcome, reason, ask, route, the deciding document's sha256, the extraction's sha256, every gate's result, the exact inputs | see below |
+| `claim_doc_decisions` | one row per claim: outcome, reason, ask, the form the ask is in, the form that settled it and that form's digest, route, the deciding document's sha256, the extraction's sha256, every gate's result, the exact inputs | see below |
+| `claim_doc_supplies` | each email address, phone number or collaborator a claimant supplied, normalised, with its digest, the intake it arrived on and the channel it was received on (never a person's name) | never: append-only |
 | `claim_doc_decisions_cdl1` | the rows the older ladder (`cdl-1`) recorded, set aside whole on the first `cdl-2` pass | never |
 | `claim_doc_extractions` | each extraction that was read, keyed by document sha256 + extraction sha256 | never: append-only |
 | `claim_doc_events` | `decided`, `superseded`, `drift`, `released`, `redecided`, `retired`, `reopened` | never: append-only |
@@ -226,20 +347,26 @@ One decision per claim (`claim_id` is the primary key). On a later pass:
   make this pass is not evidence against a claim a document proved. It is logged once as `drift`
   and the approval stands. A measured `refused` or `resend` does replace it;
 - a released row is decided again on the next pass (`redecided`);
-- a row whose claim is no longer open, or has no document on file any more, is `retired`
-  (`state = 'retired'`, reason `claim_not_open_or_no_document`). It is not deleted and it is no
-  longer listed. If the claim comes back it is decided on what is true then and stands again
+- a row whose claim is no longer open, or has no document and no supplied form on file any more, is
+  `retired` (`state = 'retired'`, reason `claim_not_open_or_no_document`). It is not deleted and it
+  is no longer listed. If the claim comes back it is decided on what is true then and stands again
   (`reopened`).
 
 No row waits for a release: `release` is an operator's undo and no claim's next step.
 
-**The first `cdl-2` pass on a store the older ladder wrote** renames its `claim_doc_decisions` to
-`claim_doc_decisions_cdl1` and decides every open claim again. The older rows hold outcomes this
-ladder does not have (`needs_human_review`, `unreadable`), so they are not carried over and none
-of them stands. Nothing is deleted; the event log and the extractions are untouched. A read-only
-open (`open_store_ro`) changes nothing and refuses an older store in words, telling the reader to
-run a pass: `report`, `list` and `verify` read the current schema only, so before the first
-`cdl-2` pass they say the store predates it rather than raising `no such column`.
+**`cdl-3` adds columns to a store it already has.** The first `cdl-2` pass on a store the oldest
+ladder wrote renamed its `claim_doc_decisions` to `claim_doc_decisions_cdl1` and decides every open
+claim again (those rows hold outcomes this ladder does not have, `needs_human_review` and
+`unreadable`). **`cdl-3` renames nothing**: `open_store` adds the three form columns in place
+(`migrate_form_columns`), no row is re-decided, and a row written before them says nothing about a
+form, which is exactly what "a document settled it" means. Nothing is deleted; the event log and
+the extractions are untouched. A read-only open (`open_store_ro`) changes nothing: it refuses, in
+words, only a store this ladder cannot read at all (one written before `cdl-2`, which has no
+`awaiting_read` outcome), telling the reader to run a pass. A store the ladder can read but which
+predates the form columns is read as it is - `_col` answers `''` for a column it lacks - so
+`report` and `list` show a row that says nothing about a form rather than raising `no such column`,
+and `verify` reports such a row as not reproduced rather than guessing at it (the decision key
+carries `doc_ladder.VERSION`).
 
 `run --snapshot FILE` retires the same way, so only give it a snapshot of the whole open
 population (`doc_sources --out`), never a hand-cut part of one. A wrong retirement undoes itself
@@ -253,10 +380,14 @@ claim-doc-ladder.py list --outcome resend     # or awaiting_read (each with the 
 claim-doc-ladder.py report                    # counts by outcome, reason, ask, route and state, and the age of each awaiting class
 claim-doc-ladder.py verify                    # re-derive every decision; exit 1 on a mismatch
 claim-doc-ladder.py release --claim-id N --by NAME --why "..."
+claim-doc-ladder.py supply --claim-id N --form email_address --value jane@novakane.com \
+    --intake-id <the reply's own id> --received-by <the channel it arrived on>   # record a supplied form
 ```
 
 `list` prints one JSON line per claim with the predicate it stopped at, that predicate's detail,
-the ask or the route, and for an asked row `ask_text`: the words a sender would use. A row we owe
+the ask or the route, `ask_form` (the form the ask is delivered in), `form` (the supplied form the
+decision stood on, '' for a document) and `form_value_sha256`, and for an asked row `ask_text`:
+the words a sender would use, in that form. A row we owe
 the read of carries `age_hours` instead: how long that decision has stood. It is a read
 of the record, not a worklist. To try a rule change against real rows without recording anything:
 
@@ -270,9 +401,11 @@ claim-doc-ladder.py plan --snapshot /dev/shm/snap.json --policy my-policy.json
 | What | How it is undone |
 |---|---|
 | a `claim_doc_decisions` row | `release --claim-id N --by NAME --why "..."` withdraws it with who and why; the next pass decides the claim again |
+| a `claim_doc_supplies` row | append a corrected supply; the check takes the best one, so nothing is undone in place |
+| the `cdl-3` store shape | nothing to run: the form columns are added in place and a row that says nothing about a form means a document settled it. Reverting the code leaves the columns, which the older ladder ignores |
 | the `cdl-2` store shape | with the timer stopped and the older code deployed: `ALTER TABLE claim_doc_decisions RENAME TO claim_doc_decisions_cdl2; ALTER TABLE claim_doc_decisions_cdl1 RENAME TO claim_doc_decisions;` |
 | an ask's words | revert the line in `policies/claim-doc-asks.json`; no row changes, the words are not in the decision key |
-| a retired row | nothing to run: it stands again on the first pass that finds the claim open with a document on file |
+| a retired row | nothing to run: it stands again on the first pass that finds the claim open with a document or a supplied form on file |
 | `claim_doc_extractions`, `claim_doc_events` | never changed; they are the record of what was read and decided |
 | a policy change | revert the PR; the next pass decides every claim under the restored policy and replaces the rows that differ |
 | the whole ladder | the stop switch above, then `systemctl disable --now claim-doc-ladder.timer`; the state directory can be deleted, nothing reads it |
@@ -324,5 +457,8 @@ Until the first exists, a `refused` row is a decision with an ask nobody has rec
 - **`claim_code_on_page` presumes a page to put the code on.** The ladder does not read whether
   the profile links to one.
 
-Measured on real rows under `cdl-1`: `data/claim-doc-ladder-v2/report.md`. The same population's
-shape under `cdl-2`, on a synthetic fixture: `data/claims-no-human-p1/report.md`.
+Measurement pointers: real rows under `cdl-1` → `data/claim-doc-ladder-v2/report.md`. The same
+population's shape under `cdl-2`, on a synthetic fixture: `data/claims-no-human-p1/report.md`.
+`cdl-3` is measured by `scripts/tests/test_claim_forms.py`; the ask copy is pinned by
+`doc_ladder.check_ask_copy`, which `claim-doc-ladder.py list` (`load_ask_copy`) and the tests load,
+so the policy file and the renderer cannot disagree.

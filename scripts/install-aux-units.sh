@@ -523,7 +523,8 @@ install -d -m 700 /var/lib/hydra-dr
    && -f "$HYDRA_ROOT/scripts/credit_review/claim_audience.py" ]] \
   || fail "$HYDRA_ROOT/scripts/claim-list-build.py or its credit_review modules are missing"
 [[ -f "$HYDRA_ROOT/scripts/claim-doc-ladder.py" && -f "$HYDRA_ROOT/scripts/claim_verify/doc_ladder.py" \
-   && -f "$HYDRA_ROOT/scripts/claim_verify/doc_sources.py" && -f "$HYDRA_ROOT/scripts/lib/page_identity.py" \
+   && -f "$HYDRA_ROOT/scripts/claim_verify/doc_sources.py" && -f "$HYDRA_ROOT/scripts/claim_verify/forms.py" \
+   && -f "$HYDRA_ROOT/scripts/lib/page_identity.py" \
    && -f "$HYDRA_ROOT/policies/claim-doc-ladder.json" ]] \
   || fail "$HYDRA_ROOT/scripts/claim-doc-ladder.py, its claim_verify modules or its policy are missing"
 [[ -f "$HYDRA_ROOT/scripts/established-claimant.py" && -f "$HYDRA_ROOT/scripts/credit_review/established_claimant.py" \
@@ -3271,12 +3272,14 @@ for mon in claim-list-build.timer claim-list-build.path; do
   log "  $mon: active"
 done
 
-# ─── Claim document ladder: one recorded decision per claim with a document on file ───
+# ─── Claim document ladder: one recorded decision per claim with a document or a supplied form ───
 # A claimant's document used to land in proof_intake and no rule ever read it against the claim.
-# claim-doc-ladder.py reads every open claim whose account has a document on file, runs the coded
-# predicates over the extraction doc-verify already recorded (no model call, no spend) and records
-# ONE decision per claim with a reason code, then re-derives every recorded decision from what it
-# stored. READ-ONLY against prod: it changes no claim, calls no admin API and sends nothing. Its only
+# claim-doc-ladder.py reads every open claim whose account has a document on file or a form the
+# claimant supplied (an email address, a phone number or a collaborator's Muso profile, through
+# `claim-doc-ladder.py supply`), runs the coded predicates over the extraction doc-verify already
+# recorded (no model call, no spend) and records ONE decision per claim with a reason code, then
+# re-derives every recorded decision from what it stored. READ-ONLY against prod: it changes no
+# claim, calls no admin API and sends nothing. Its only
 # writes are under /var/lib/hydra/claim-doc-ladder (NOT /opt/hydra, which the deploy rsync
 # overwrites). A read that does not answer is exit 1 with nothing recorded, and a recorded decision
 # that cannot be re-derived is exit 1 too: OnFailure (the table below) pages #clio_devops.
@@ -3286,7 +3289,7 @@ install -d -m 700 /var/lib/hydra/claim-doc-ladder
 
 cat > /etc/systemd/system/claim-doc-ladder.service << CLAIMDOCSVC
 [Unit]
-Description=HYDRA claim document ladder: decide and record every open claim with a document on file
+Description=HYDRA claim document ladder: decide and record every open claim with a document or a supplied form on file
 
 [Service]
 Type=oneshot

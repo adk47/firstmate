@@ -197,6 +197,9 @@ STUB
   [ -f "$HYDRA_REPO/scripts/claim-doc-ladder.py" ]
   [ -f "$HYDRA_REPO/scripts/claim_verify/doc_ladder.py" ]
   [ -f "$HYDRA_REPO/scripts/claim_verify/doc_sources.py" ]
+  [ -f "$HYDRA_REPO/scripts/claim_verify/forms.py" ]
   [ -f "$HYDRA_REPO/scripts/lib/page_identity.py" ]
   [ -f "$HYDRA_REPO/policies/claim-doc-ladder.json" ]
+  # The installer's own presence check must name every module the ladder imports.
+  grep -q 'scripts/claim_verify/forms.py' "$INSTALLER"
 }

@@ -1,5 +1,5 @@
 {
-  "version": "cda-1",
+  "version": "cda-3",
   "_doc": "docs/credit-verification/claim-doc-ladder.md. The words for each ask the claim document ladder can record (scripts/claim_verify/doc_ladder.py ASKS). The ladder refuses to load this file when an ask has no words, when the file names an ask the ladder does not have, or when any line names an identity document (a passport, a licence, an ID): a claim is proved by music paperwork. Each line says what to send and nothing else: no reason code, no reason for a refusal, no word about what a document was found to be. NOTHING SENDS THESE: the ladder records the ask in shadow. A sender is a separate change and its exact bytes pass the outbound copy gate (docs/credit-verification/outbound-copy-gate.md) before any claimant reads them.",
   "doc_type_labels": {
     "split_sheet": "a split sheet",
@@ -22,5 +22,27 @@
     "claim_code_on_page": "Please put your claim code on a page the profile already links to, such as its official website or social page, and send us the link to that page.",
     "company_authority": "Please send a letter or an email from the company, sent from the company's own email domain, saying that you manage this profile for it.",
     "readable_copy": "We could not read the document we have for this claim. Please send a clear copy of it, or a link to it."
+  },
+  "_form_asks": "The words for the asks the ladder delivers in a form other than a document (scripts/claim_verify/forms.py FORMS_BY_ASK). One line per reachable (ask, form) pair: the ladder refuses to load this file when a pair it can choose has no words, or carries a pair it never chooses. A claim is always left with an ask it can answer, so a form with no words here can never be offered.",
+  "form_asks": {
+    "proof_naming_claimant": {},
+    "proof_naming_profile": {
+      "email_address": "Please send us an email address at the domain of the website the profile links to, and we will check it against those links."
+    },
+    "company_authority": {
+      "email_address": "Please send us an email address at the company's own domain, the one its website uses, and we will check it against the links on the profile."
+    }
+  },
+  "_reserved_form_asks": "Words for a form nothing here can check yet. They are on file so a sender has reviewed copy the day the check exists, and NO sender reads them: `forms.FORMS_WITHOUT_A_CHECK` keeps the ladder from ever offering the form (a phone number has no source; a collaborator's public profile id is not that user's word), and `check_ask_copy` refuses a delivered pair the ladder cannot choose.",
+  "reserved_form_asks": {
+    "company_authority": {
+      "phone_number": "Please put the phone number on the company's website and send us that number, so we can check it against the page the profile links to."
+    },
+    "proof_naming_claimant": {
+      "collaborator_proof": "Please send us the Muso.AI profile link of another Muso.AI user who is credited on the same release as this profile and knows you as the person behind it. We will check that credit ourselves."
+    },
+    "proof_naming_profile": {
+      "collaborator_proof": "Please send us the Muso.AI profile link of another Muso.AI user who is credited on the same release as the profile you are claiming. We will check that credit ourselves."
+    }
   }
 }

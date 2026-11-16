@@ -2850,6 +2850,12 @@ jobs:
           # claim, every recorded decision re-derived from its stored extraction, and the one page-id
           # rule (lib/page_identity) that ops-intake reads too. Hermetic: no Trino, no model, temp stores.
           python3 scripts/tests/test_claim_doc_ladder.py
+          # The claim forms (claim_verify/forms): the four ways a claim can be settled, which ask
+          # each class is delivered in, the one check each supplied form gets (email at the
+          # profile's own domain, a number the profile publishes, a Muso user credited on the same
+          # release), and the intake - an offer we cannot check is never made, an unread fact is
+          # never a refusal, and the verdict row says which form settled it. Hermetic, temp stores.
+          python3 scripts/tests/test_claim_forms.py
           # Supporting-document forensics (scripts/credit_verify/proof). Synthetic
           # forgeries built in-test; uses the runner's PyMuPDF/Pillow/OpenCV/tesseract.
           python3 scripts/tests/test_credit_proof.py

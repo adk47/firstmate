@@ -100,14 +100,14 @@ _SCRIPTS = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
-from claim_verify import decline_rules  # noqa: E402
+from claim_verify import decline_rules, forms  # noqa: E402
 from credit_review import roles  # noqa: E402
 from lib import page_identity  # noqa: E402
 
-VERSION = "cdl-2"
+VERSION = "cdl-3"
 DEFAULT_POLICY = _SCRIPTS.parent / "policies" / "claim-doc-ladder.json"
 DEFAULT_ASK_COPY = _SCRIPTS.parent / "policies" / "claim-doc-asks.json"
-ASK_COPY_VERSION = "cda-1"
+ASK_COPY_VERSION = "cda-3"
 DEFAULT_STORE = "/var/lib/hydra/claim-doc-ladder/decisions.sqlite"
 KILL_FILE = "/etc/hydra/claim-doc-ladder.disabled"
 
@@ -230,6 +230,14 @@ REASONS: dict[str, Reason] = {
     # read, and it does not prove the claim: refused, with what to send instead
     "claimant_name_unknown": Reason(REFUSED, ask="account_name"),
     "claimant_not_named": Reason(REFUSED, ask="proof_naming_claimant"),
+    # a form the claimant supplied (email address, phone number, collaborator proof) settles the
+    # claim: it is evidence too, and the verdict row says which form settled it (docs/`form`)
+    "form_supplied_settles_claim": Reason(APPROVED),
+    # it does not prove the claim, or this class never accepts that form: the ask is the same need
+    # delivered in the form that can still settle it (`forms.FORM_REFUSAL_ASKS`, by class)
+    "form_supplied_does_not_settle": Reason(REFUSED, ask="by_class_form"),
+    # the facts the form's check reads were not read: ours, and the claim is asked for nothing
+    "form_unmeasured": Reason(AWAITING, route="doc-sources"),
     "profile_not_in_catalog": Reason(REFUSED, ask="claimed_profile_link"),
     "profile_not_named": Reason(REFUSED, ask="proof_naming_profile"),
     "doc_type_not_accepted": Reason(REFUSED, ask="accepted_document_type"),
@@ -265,6 +273,9 @@ def _check_reasons(table: Mapping[str, Reason] | None = None) -> None:
             if code == "contradiction":
                 if r.ask != "by_class":
                     raise ValueError("a contradiction takes its ask from its class")
+            elif code == "form_supplied_does_not_settle":
+                if r.ask != "by_class_form":
+                    raise ValueError("a supplied form that does not settle takes its ask from its class")
             elif r.ask not in ASKS:
                 raise ValueError(f"reason {code!r} is {r.outcome} and names no ask the claimant receives")
             if r.route:
@@ -278,6 +289,9 @@ def _check_reasons(table: Mapping[str, Reason] | None = None) -> None:
     for cls, ask in CONTRADICTION_ASKS.items():
         if ask not in ASKS:
             raise ValueError(f"contradiction {cls!r} names no ask the claimant receives")
+    for cls, ask in forms.FORM_REFUSAL_ASKS.items():
+        if ask not in ASKS:
+            raise ValueError(f"claim class {cls!r} names no ask a supplied form is answered with")
 
 
 _check_reasons()
@@ -351,6 +365,15 @@ IDENTITY_DOCUMENT = re.compile(
     r"bank statement|proof of (identity|address)|\bkyc\b", re.I)
 
 
+# The facts a claim can arrive with, at their most permissive: what a check needs to be able to read,
+# used only to ask "could `offered()` ever choose this form?" and never to check a claim.
+ALL_FACTS = {"profile_hosts": ["profile.example"], "profile_phones": ["+15551234567"],
+             "profile_titles": ["a track"], "claimed_profile_id": "0" * 8,
+             "account_email_sha256": "0" * 64, "account_email_confirmed": True,
+             "account_email_domain": "profile.example",
+             "collaborators": {}}
+
+
 def check_ask_copy(copy: Any) -> dict[str, Any]:
     if not isinstance(copy, dict) or copy.get("version") != ASK_COPY_VERSION:
         raise PolicyError(f"ask copy version must be {ASK_COPY_VERSION!r}")
@@ -365,18 +388,52 @@ def check_ask_copy(copy: Any) -> dict[str, Any]:
         raise PolicyError("doc_type_labels must map each document type to its words")
     if "{types}" not in asks["accepted_document_type"]:
         raise PolicyError("the accepted_document_type ask must name the types: it needs {types}")
-    for where, words in list(asks.items()) + list(labels.items()):
+    # every ask the ladder can deliver in a form other than a document has words in that form, and
+    # the file carries no pair the ladder never chooses: copy nobody can be sent reads like an offer
+    form_asks = copy.get("form_asks") or {}
+    if not isinstance(form_asks, dict) or not all(
+            isinstance(v, dict) and all(isinstance(w, str) and w.strip() for w in v.values())
+            for v in form_asks.values()):
+        raise PolicyError("form_asks must map each ask to its words in each form it is delivered in")
+    # `reachable` is derived from the SAME predicate that decides what `offered` returns, per the
+    # facts a claim can arrive with: a pair the ladder can never choose must have no words here (a
+    # line nobody can be sent reads like an offer), so the form with no source (a phone number) is
+    # kept in `reserved_form_asks` - words on file for the day a source exists, sent to nobody.
+    reachable = {(ask, form) for ask, by_class in forms.FORMS_BY_ASK.items() for cls in by_class
+                 for form in by_class[cls] if form != forms.FORM_DOCUMENT and forms.checkable(form, ALL_FACTS)}
+    carried = {(ask, form) for ask, by_form in form_asks.items() for form in by_form}
+    if carried != reachable:
+        raise PolicyError(f"form_asks must cover exactly the forms the ladder offers: missing "
+                          f"{sorted(reachable - carried)}, it never chooses {sorted(carried - reachable)}")
+    reserved = copy.get("reserved_form_asks") or {}
+    if not isinstance(reserved, dict) or not all(
+            isinstance(v, dict) and all(isinstance(w, str) and w.strip() for w in v.values())
+            for v in reserved.values()):
+        raise PolicyError("reserved_form_asks must map each ask to its words in each form it is reserved for")
+    if set(carried) & {(a, f) for a, b in reserved.items() for f in b}:
+        raise PolicyError("reserved_form_asks must not repeat a pair form_asks already delivers")
+    lines = (list(asks.items()) + list(labels.items())
+             + [(f"{a}.{f}", w) for a, b in form_asks.items() for f, w in b.items()]
+             + [(f"reserved.{a}.{f}", w) for a, b in reserved.items() for f, w in b.items()])
+    for where, words in lines:
         hit = IDENTITY_DOCUMENT.search(words)
         if hit:
             raise PolicyError(f"{where}: copy must not name an identity document ({hit.group(0)!r})")
     return copy
 
 
-def ask_text(ask: str, claim_class: str, policy: Mapping[str, Any], copy: Mapping[str, Any]) -> str:
-    """What the claimant is asked to send, in words: '' for a refusal no document cures. The
-    reason code is not an input - it cannot reach the claimant from here."""
+def ask_text(ask: str, claim_class: str, policy: Mapping[str, Any], copy: Mapping[str, Any],
+             form: str = forms.FORM_DOCUMENT) -> str:
+    """What the claimant is asked to send, in words, in the form the ladder offers this class: ''
+    for a refusal no form cures. The reason code is not an input - it cannot reach the claimant
+    from here. The document is the bytes in `asks` and no form ever rewrites them."""
     if ask == NO_ASK:
         return ""
+    if form != forms.FORM_DOCUMENT:
+        words = (copy.get("form_asks") or {}).get(ask, {}).get(form, "")
+        if not words:
+            raise PolicyError(f"ask {ask!r} has no words in form {form!r}")
+        return words
     if ask not in copy["asks"]:
         raise ValueError(f"unknown ask {ask!r}")
     text = copy["asks"][ask]
@@ -491,6 +548,12 @@ class ClaimFacts:
     decline_snapshot: dict[str, Any] | None       # decline_rules.snapshot(); None = catalog unreadable
     paid: bool | None = None
     profile_in_catalog: bool | None = None        # False = the catalog was read and has no such profile
+    # the facts each new form's check reads, as the reader delivered them (None = unread): profile
+    # hosts, the profile's published numbers, the profile's own titles and the collaborator's
+    form_facts: dict[str, Any] = field(default_factory=dict)
+    # the forms a claimant supplied (email address, phone number, collaborator proof), raw: the
+    # ladder checks them, so the verdict is re-derivable from what is stored here
+    supplied_forms: tuple[dict[str, Any], ...] = ()
     # document sha256 -> {"named": releases the document names, "on_profile": how many are the profile's};
     # None = the profile's catalog releases could not be read
     releases: dict[str, dict[str, int]] | None = None
@@ -510,6 +573,10 @@ class ClaimFacts:
             decline_snapshot=snap if isinstance(snap, dict) else None,
             paid=d.get("paid") if isinstance(d.get("paid"), bool) else None,
             profile_in_catalog=d.get("profile_in_catalog") if isinstance(d.get("profile_in_catalog"), bool) else None,
+            form_facts=dict(d["form_facts"]) if isinstance(d.get("form_facts"), dict) else {},
+            supplied_forms=tuple(s for s in (d.get("supplied_forms") or [])
+                                 if isinstance(s, dict) and s.get("form") in forms.FORMS
+                                 and s.get("form") != forms.FORM_DOCUMENT),
             releases={str(k): {"named": int(v.get("named") or 0), "on_profile": int(v.get("on_profile") or 0)}
                       for k, v in d["releases"].items() if isinstance(v, dict)}
             if isinstance(d.get("releases"), dict) else None)
@@ -518,6 +585,15 @@ class ClaimFacts:
     def profile(self) -> Mapping[str, Any]:
         p = (self.decline_snapshot or {}).get("profile")
         return p if isinstance(p, dict) else {}
+
+    @property
+    def account_email_domain(self) -> str | None:
+        """The domain of the claimant ACCOUNT's own address (core's users.email, read with the claim);
+        None when the snapshot carries no such fact - unread, which refuses nothing and approves
+        nothing."""
+        snap = (self.decline_snapshot or {}).get("claim")
+        domain = (snap or {}).get("email_domain") if isinstance(snap, Mapping) else None
+        return domain.strip().lower() if isinstance(domain, str) else None
 
     @property
     def profile_name(self) -> str:
@@ -660,9 +736,28 @@ def gate_doc_type(claim: ClaimFacts, doc: DocFacts, ex: Extraction, policy: Mapp
 
 
 def gate_no_contradiction(claim: ClaimFacts, doc: DocFacts, ex: Extraction, policy: Mapping[str, Any]) -> Gate:
-    """Catalog and bound code. The catalog half is the claim side's OWN contradiction rule, re-run
-    on its snapshot - not a second reading of the same facts."""
+    """Catalog and bound code, then the release the DOCUMENT names. The catalog half is the claim
+    side's OWN contradiction rule (`_contradiction_stop`), re-run on its snapshot - not a second
+    reading of the same facts - and it is what a supplied form is held to as well."""
     name = "no_contradiction"
+    stop = _contradiction_stop(claim, name)
+    if stop is not None:
+        return stop
+    rel = (claim.releases or {}).get(doc.source_sha256)
+    if rel is None:
+        return _fail(name, "releases_unmeasured")
+    if rel["named"] > 0 and rel["on_profile"] == 0:
+        return _fail(name, "releases_not_on_profile", named=rel["named"])
+    if rel["on_profile"] == 0 and policy["require_release_on_profile"]:
+        return _fail(name, "no_release_named")
+    found = decline_rules.reproduce(claim.decline_snapshot)
+    return _pass(name, rule_id=found.rule_id, releases_named=rel["named"], releases_on_profile=rel["on_profile"])
+
+
+def _contradiction_stop(claim: ClaimFacts, name: str = "no_contradiction") -> Gate | None:
+    """The claim-side holds a document must clear, and a supplied form must clear too: the claim
+    list's own contradiction rule, another account holding the profile, and a bound code another
+    claim already found. `None` when none of them stops the claim."""
     if claim.decline_snapshot is None:
         return _fail(name, "catalog_unreadable", what="decline snapshot")
     found = decline_rules.reproduce(claim.decline_snapshot)
@@ -677,14 +772,7 @@ def gate_no_contradiction(claim: ClaimFacts, doc: DocFacts, ex: Extraction, poli
         return _fail(name, "bound_code_unmeasured")
     if claim.code_found_other_claims:
         return _fail(name, "bound_code_other_claim", other_claims=list(claim.code_found_other_claims))
-    rel = (claim.releases or {}).get(doc.source_sha256)
-    if rel is None:
-        return _fail(name, "releases_unmeasured")
-    if rel["named"] > 0 and rel["on_profile"] == 0:
-        return _fail(name, "releases_not_on_profile", named=rel["named"])
-    if rel["on_profile"] == 0 and policy["require_release_on_profile"]:
-        return _fail(name, "no_release_named")
-    return _pass(name, rule_id=found.rule_id, releases_named=rel["named"], releases_on_profile=rel["on_profile"])
+    return None
 
 
 def poison_of(doc: DocFacts) -> str:
@@ -697,8 +785,13 @@ def poison_of(doc: DocFacts) -> str:
 
 
 def gate_clean(claim: ClaimFacts, doc: DocFacts, ex: Extraction, policy: Mapping[str, Any]) -> Gate:
-    name = "clean"
-    bad = poison_of(doc)
+    """`_clean_stop` (poison in the document, then the profile's own holds), which a supplied form
+    is held to as well - with the poison read off every document on file."""
+    return _clean_stop(claim, doc)
+
+
+def _clean_stop(claim: ClaimFacts, doc: DocFacts | None, name: str = "clean") -> Gate:
+    bad = poison_of(doc) if doc is not None else ""
     if bad:
         return _fail(name, bad, blocking_verdicts=list(doc.blocking_verdicts), other_filers=doc.other_filers)
     pop, credits = claim.profile.get("popularity"), claim.profile.get("creditCount")
@@ -722,10 +815,13 @@ def outcome_of(gate: Gate) -> str:
 
 def ask_of(gate: Gate) -> str:
     """The ask this stop carries: '' unless the claimant is owed one. A contradiction of a class
-    with no ask on file raises - it is never recorded without one."""
+    with no ask on file raises - it is never recorded without one. A supplied form that does not
+    settle is answered with the same need, in the form that can still settle it."""
     r = REASONS[gate.reason]
     if r.outcome not in ASKED:
         return ""
+    if gate.reason == "form_supplied_does_not_settle":
+        return forms.FORM_REFUSAL_ASKS.get(str(gate.detail.get("claim_class") or ""), "accepted_document_type")
     if gate.reason != "contradiction":
         return r.ask
     cls = gate.detail.get("contradiction")
@@ -789,23 +885,91 @@ class Decision:
     paid: bool | None = None
     ask: str = ""                              # refused / resend: what the claimant is asked to send
     route: str = ""                            # awaiting_read: the job that owes the read
+    # The form the ask is delivered in (`forms.offered`) and, when a form settled the claim, which
+    # form it was and the digest of what was supplied. Both are on the verdict row, so a settled row
+    # says what settled it and an asked row says which form it asked for.
+    ask_form: str = ""
+    form: str = ""
+    form_value_sha256: str = ""
 
     @property
     def key(self) -> str:
-        """What this decision IS. The outcome and the evidence are in it, so a decision that
-        changes gets a new key and is never mistaken for the one already recorded."""
+        """What this decision IS. The outcome, the evidence and the form are in it, so a decision
+        that changes gets a new key and is never mistaken for the one already recorded."""
         return hashlib.sha256("|".join((
             str(self.claim_id), VERSION, self.policy_sha256, self.outcome, self.reason,
-            self.source_sha256, self.extraction_sha256, self.ask, self.route)).encode()).hexdigest()
+            self.source_sha256, self.extraction_sha256, self.ask, self.route, self.ask_form,
+            self.form, self.form_value_sha256)).encode()).hexdigest()
 
     def as_dict(self) -> dict[str, Any]:
         return {"claim_id": self.claim_id, "user_id": self.user_id, "profile_id": self.profile_id,
                 "outcome": self.outcome, "reason": self.reason, "ask": self.ask, "route": self.route,
+                "ask_form": self.ask_form, "form": self.form, "form_value_sha256": self.form_value_sha256,
                 "intake_id": self.intake_id,
                 "source_sha256": self.source_sha256, "extraction_sha256": self.extraction_sha256,
                 "gates": [g.as_dict() for g in self.gates], "documents": list(self.documents),
                 "ladder_version": VERSION, "policy_sha256": self.policy_sha256, "decision_key": self.key,
                 "paid": self.paid}
+
+
+@dataclass(frozen=True)
+class SupplyVerdict:
+    """What the check made of one form a claimant supplied. It is evidence like a document is: it
+    can approve the claim, refuse it (with the next form to offer) or wait on a fact of ours."""
+    outcome: str
+    reason: str
+    form: str
+    value_sha256: str
+    extraction_sha256: str
+    gates: tuple[Gate, ...]
+    ask: str = ""
+    route: str = ""
+    supplied_at: str = ""
+    intake_id: str = ""
+
+    @property
+    def depth(self) -> int:
+        return sum(1 for g in self.gates if g.ok)
+
+
+def evaluate_supply(claim: ClaimFacts, raw: Mapping[str, Any], docs: Iterable[DocFacts] = ()) -> SupplyVerdict:
+    """One supplied form, checked. A form this claim class never accepts is refused with the same
+    need offered again; a form whose facts we have not read is ours (`form_unmeasured`).
+
+    A form that checks out is NOT an approval on its own: it is held to the same claim-side stops a
+    document is (`_contradiction_stop`, `_clean_stop` - another account holding the profile, a bound
+    code another claim found, a big profile, an account hold), and a document on file that is
+    poisoned (forged, contradicted, filed by another account) poisons the claim here too. A form
+    never launders a claim a document has already made unsafe."""
+    form = str(raw.get("form") or "")
+    supplied_at = _text(raw.get("supplied_at"))
+    intake_id = _text(raw.get("intake_id")) or f"form:{form}"
+    if not forms.refusable(form, claim.profile_type):
+        g = _fail("form", "form_supplied_does_not_settle", form=form, claim_class=claim.profile_type,
+                  why="class_does_not_accept_this_form")
+        digest = sha256_of({"form": form, "why": "class_does_not_accept_this_form"})
+        return SupplyVerdict(outcome_of(g), reason_code(g), form, "", digest, (g,), ask_of(g), route_of(g),
+                             supplied_at, intake_id)
+    sup = forms.check(form, raw.get("value"), claim.form_facts)
+    evidence = {"form": form, "ok": sup.ok, "why": sup.reason, **sup.evidence}
+    digest = sha256_of(evidence)
+    if sup.ok is None:
+        g = _fail("form", "form_unmeasured", form=form, why=sup.reason)
+    elif sup.ok:
+        g = Gate("form", True, "form_supplied_settles_claim", dict(sup.evidence, why=sup.reason))
+        holds = (_contradiction_stop(claim) or _pass("no_contradiction"),
+                 _clean_stop(claim, poisoned(claim, docs)))
+        stop = next((h for h in holds if not h.ok), None)
+        if stop is not None:
+            return SupplyVerdict(outcome_of(stop), reason_code(stop), form, sup.value_sha256, digest,
+                                 (g,) + holds, ask_of(stop), route_of(stop), supplied_at, intake_id)
+        return SupplyVerdict(outcome_of(g), reason_code(g), form, sup.value_sha256, digest, (g,) + holds,
+                             ask_of(g), route_of(g), supplied_at, intake_id)
+    else:
+        g = _fail("form", "form_supplied_does_not_settle", form=form, claim_class=claim.profile_type,
+                  why=sup.reason)
+    return SupplyVerdict(outcome_of(g), reason_code(g), form, sup.value_sha256, digest, (g,), ask_of(g),
+                         route_of(g), supplied_at, intake_id)
 
 
 # Which document speaks for the claim. An approval wins. Short of one, a document that is still
@@ -815,30 +979,78 @@ class Decision:
 _RANK = {APPROVED: 0, AWAITING: 1, REFUSED: 2, RESEND: 3}
 
 
-def decide_claim(claim: ClaimFacts, docs: Iterable[DocFacts], policy: Mapping[str, Any]) -> Decision | None:
-    """ONE decision for a claim over every document on file for its claimant; None when there is no
-    document (no document, no decision) or the claim is no longer open (nothing left to decide)."""
-    docs = sorted(docs, key=lambda d: (d.received_at, d.source_sha256, d.intake_id))
-    if not docs or claim.status not in decline_rules.OPEN_STATUSES:
+def doc_case(claim: ClaimFacts, docs: list[DocFacts], policy: Mapping[str, Any]) -> DocVerdict | None:
+    """The best document verdict for a claim, with a poisoning document downgrading an approval.
+    Unchanged by the new forms: a document is still read by the ladder's own six predicates."""
+    if not docs:
         return None
     verdicts = [evaluate_document(claim, d, policy) for d in docs]
     # best outcome first; among equals the document that got furthest, then the oldest
     best = min(verdicts, key=lambda v: (_RANK[v.outcome], -v.depth, v.doc.received_at, v.doc.source_sha256))
-    outcome, reason, gates, ask, route = best.outcome, best.reason, best.gates, best.ask, best.route
-    if outcome == APPROVED:
+    if best.outcome == APPROVED:
         bad = next((v for v in verdicts if poison_of(v.doc)), None)
         if bad is not None:
             stop = _fail("clean_across_documents", poison_of(bad.doc), intake_id=bad.doc.intake_id,
                          source_sha256=bad.doc.source_sha256)
-            outcome, reason, ask, route = outcome_of(stop), reason_code(stop), ask_of(stop), route_of(stop)
-            gates = gates + (stop,)
+            return DocVerdict(outcome_of(stop), reason_code(stop), best.doc, best.extraction_sha256,
+                              best.gates + (stop,), ask_of(stop), route_of(stop))
+    return best
+
+
+def refused_forms(claim: ClaimFacts) -> tuple[str, ...]:
+    """Every form this claimant supplied that was read and refused. The ask is never delivered in
+    one of them: asking again for an address we already read and refused asks for a second no."""
+    return tuple(sorted({v.form for v in (evaluate_supply(claim, raw) for raw in claim.supplied_forms)
+                         if v.outcome == REFUSED and v.form}))
+
+
+def poisoned(claim: ClaimFacts, docs: Iterable[DocFacts]) -> DocFacts | None:
+    """The first document on file that poisons this claim, if any: a form is never approved over one."""
+    return next((d for d in docs if poison_of(d)), None)
+
+
+def supply_case(claim: ClaimFacts, docs: Iterable[DocFacts] = ()) -> SupplyVerdict | None:
+    """The best supplied form for a claim: an approval first, then a waiting check, then a refusal."""
+    verdicts = [evaluate_supply(claim, raw, docs) for raw in claim.supplied_forms]
+    if not verdicts:
+        return None
+    return min(verdicts, key=lambda v: (_RANK[v.outcome], -v.depth, v.supplied_at, v.form))
+
+
+def decide_claim(claim: ClaimFacts, docs: Iterable[DocFacts], policy: Mapping[str, Any]) -> Decision | None:
+    """ONE decision for a claim over every document on file for its claimant and every form it
+    supplied; None when there is neither (no evidence, no decision) or the claim is no longer open.
+
+    A supplied form and a document are evidence of the same kind: the best outcome wins, and among
+    equals the reading that got furthest. Nothing about the document ladder is re-ranked by this."""
+    docs = sorted(docs, key=lambda d: (d.received_at, d.source_sha256, d.intake_id))
+    if claim.status not in decline_rules.OPEN_STATUSES:
+        return None
+    doc = doc_case(claim, docs, policy)
+    sup = supply_case(claim, docs)
+    if doc is None and sup is None:
+        return None
+    cases = ([] if doc is None else [(_RANK[doc.outcome], -doc.depth, doc.doc.received_at, doc.doc.source_sha256,
+                                      "document", doc)]) + (
+        [] if sup is None else [(_RANK[sup.outcome], -sup.depth, sup.supplied_at, sup.form, "form", sup)])
+    best = min(cases, key=lambda c: c[:5])[5]
+    verdicts = [evaluate_document(claim, d, policy) for d in docs]
     summary = tuple({"intake_id": v.doc.intake_id, "source_sha256": v.doc.source_sha256,
                      "extraction_sha256": v.extraction_sha256, "outcome": v.outcome, "reason": v.reason,
                      "ask": v.ask, "route": v.route}
                     for v in verdicts)
-    return Decision(claim.claim_id, claim.user_id, claim.profile_id, outcome, reason, best.doc.intake_id,
-                    best.doc.source_sha256, best.extraction_sha256, gates, summary, sha256_of(policy), claim.paid,
-                    ask, route)
+    if isinstance(best, SupplyVerdict):
+        return Decision(claim.claim_id, claim.user_id, claim.profile_id, best.outcome, best.reason,
+                        best.intake_id, best.value_sha256 or best.extraction_sha256, best.extraction_sha256,
+                        best.gates, summary, sha256_of(policy), claim.paid, best.ask, best.route,
+                        ask_form=(forms.offered(best.ask, claim.profile_type, claim.form_facts,
+                                                exclude=refused_forms(claim)) if best.ask else ""),
+                        form=best.form, form_value_sha256=best.value_sha256)
+    ask_form = (forms.offered(best.ask, claim.profile_type, claim.form_facts, exclude=refused_forms(claim))
+                if best.ask else "")
+    return Decision(claim.claim_id, claim.user_id, claim.profile_id, best.outcome, best.reason, best.doc.intake_id,
+                    best.doc.source_sha256, best.extraction_sha256, best.gates, summary, sha256_of(policy),
+                    claim.paid, best.ask, best.route, ask_form=ask_form)
 
 
 # --------------------------------------------------------------------------------------------
@@ -852,13 +1064,13 @@ def plan(snapshot: Mapping[str, Any], policy: Mapping[str, Any]) -> tuple[list[t
     function of the snapshot alone, so two runs over one snapshot are byte-identical."""
     documents = snapshot.get("documents") or {}
     out: list[tuple[Decision, dict[str, Any]]] = []
-    skipped = {"no_document": 0, "not_open": 0}
+    skipped = {"no_evidence": 0, "not_open": 0}
     for raw in sorted(snapshot.get("claims") or [], key=lambda c: paid_first(c.get("paid"), c["claim_id"])):
         claim = ClaimFacts.from_dict(raw)
         docs = [DocFacts.from_dict(d) for d in documents.get(str(claim.user_id)) or []]
         decision = decide_claim(claim, docs, policy)
         if decision is None:
-            skipped["no_document" if not docs else "not_open"] += 1
+            skipped["no_evidence" if not docs and not claim.supplied_forms else "not_open"] += 1
             continue
         out.append((decision, inputs_of(raw, docs, policy)))
     return out, skipped
@@ -870,17 +1082,79 @@ def paid_first(paid: Any, claim_id: Any) -> tuple[int, int]:
     return (0 if paid is True else 1, int(claim_id))
 
 
+def redacted_claim(claim_raw: Mapping[str, Any]) -> dict[str, Any]:
+    """The claim as it is stored: every supplied form keeps WHICH form was supplied and the digest of
+    what it was, never the address, the number or the collaborator's id. `reproduce` re-reads the
+    value from the append-only supply row by that digest, so a decision is still re-derivable."""
+    out = dict(claim_raw)
+    supplied = claim_raw.get("supplied_forms")
+    digests: dict[str, str] = {}
+    if supplied:
+        kept = []
+        for raw in supplied:
+            form = str(raw.get("form") or "")
+            value, _ = forms.normalise(form, raw.get("value")) if form != forms.FORM_DOCUMENT else ("", "")
+            digest = forms.value_digest(form, value) if value else ""
+            kept.append({"form": form, "value_sha256": digest,
+                         "supplied_at": _text(raw.get("supplied_at")), "intake_id": _text(raw.get("intake_id"))})
+            if form == forms.FORM_COLLABORATOR and digest:
+                digests[_text(raw.get("value")).strip().lower()] = digest
+        out["supplied_forms"] = kept
+    facts = claim_raw.get("form_facts")
+    collaborators = facts.get("collaborators") if isinstance(facts, Mapping) else None
+    if isinstance(collaborators, Mapping):
+        out["form_facts"] = {**facts, "collaborators": {
+            digest: entry for ref, entry in collaborators.items()
+            if (digest := digests.get(str(ref).strip().lower()))}}
+    return out
+
+
+def hydrated(db: sqlite3.Connection, claim_id: int, stored: Mapping[str, Any]) -> dict[str, Any]:
+    """A stored claim with each supplied form's value put back from the supply row it names, and each
+    collaborator's facts re-keyed by the reference that value names."""
+    out = dict(stored)
+    supplied = stored.get("supplied_forms")
+    if not supplied:
+        return out
+    out["supplied_forms"] = []
+    collabs: dict[str, str] = {}
+    for raw in supplied:
+        digest = _text(raw.get("value_sha256"))
+        row = None
+        if digest:
+            row = db.execute("SELECT value FROM claim_doc_supplies WHERE claim_id = ? AND value_sha256 = ? "
+                             "ORDER BY id DESC LIMIT 1", (claim_id, digest)).fetchone()
+        if row is None:
+            raise NotReproducible(f"claim {claim_id}: supplied form {raw.get('form')!r} "
+                                  f"{(digest or '<no digest>')[:12]} is not on the supply row")
+        out["supplied_forms"].append({**raw, "value": row[0]})
+        if str(raw.get("form") or "") == forms.FORM_COLLABORATOR and digest:
+            ref = forms.normalise(forms.FORM_COLLABORATOR, row[0])[0]
+            if ref:
+                collabs[digest] = ref
+    facts = stored.get("form_facts")
+    collaborators = facts.get("collaborators") if isinstance(facts, Mapping) else None
+    if collabs and isinstance(collaborators, Mapping):
+        out["form_facts"] = {**facts, "collaborators": {
+            collabs[key]: entry for key, entry in collaborators.items() if collabs.get(key)}}
+    return out
+
+
 def inputs_of(claim_raw: Mapping[str, Any], docs: Iterable[DocFacts], policy: Mapping[str, Any]) -> dict[str, Any]:
-    """Exactly what `decide_claim` read, minus the extraction bodies (stored once, by hash)."""
-    return {"claim": dict(claim_raw), "policy": dict(policy),
+    """Exactly what `decide_claim` read, minus the extraction bodies (stored once, by hash) and minus
+    the value of a supplied form (stored once, on its supply row, by digest)."""
+    return {"claim": redacted_claim(claim_raw), "policy": dict(policy),
             "documents": [d.stored(sha256_of(d.extraction) if d.extraction is not None else "") for d in docs]}
 
 
 def split(decisions: Iterable[Decision]) -> dict[str, Any]:
-    """The report: how many of each outcome, and under each its reason codes."""
+    """The report: how many of each outcome, and under each its reason codes, plus the forms the
+    claims were asked in and the forms that settled them."""
     by: dict[str, dict[str, int]] = {o: {} for o in OUTCOMES}
     asks: dict[str, int] = {}
     routes: dict[str, int] = {}
+    offered: dict[str, int] = {}
+    supplied: dict[str, int] = {}
     n = 0
     for d in decisions:
         n += 1
@@ -889,13 +1163,21 @@ def split(decisions: Iterable[Decision]) -> dict[str, Any]:
             asks[d.ask] = asks.get(d.ask, 0) + 1
         if d.route:
             routes[d.route] = routes.get(d.route, 0) + 1
+        if d.ask_form:
+            offered[d.ask_form] = offered.get(d.ask_form, 0) + 1
+        if d.form:
+            supplied[d.form] = supplied.get(d.form, 0) + 1
+    def ranked(counts: dict[str, int]) -> dict[str, int]:
+        return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
     return {"claims": n,
             "verdicts": sum(by[APPROVED].values()) + sum(by[REFUSED].values()),
             "asked": sum(by[REFUSED].values()) + sum(by[RESEND].values()),
             "awaiting_read": sum(by[AWAITING].values()),
-            "asks": dict(sorted(asks.items(), key=lambda kv: (-kv[1], kv[0]))),
-            "awaiting_by_route": dict(sorted(routes.items(), key=lambda kv: (-kv[1], kv[0]))),
-            "by_outcome": {o: {"n": sum(r.values()), "reasons": dict(sorted(r.items(), key=lambda kv: (-kv[1], kv[0])))}
+            "asks": ranked(asks),
+            "asks_by_form": ranked(offered),
+            "supplied_forms": ranked(supplied),
+            "awaiting_by_route": ranked(routes),
+            "by_outcome": {o: {"n": sum(r.values()), "reasons": ranked(r)}
                            for o, r in by.items()}}
 
 
@@ -924,8 +1206,14 @@ CREATE TABLE IF NOT EXISTS claim_doc_decisions (
   reason TEXT NOT NULL CHECK (reason != ''),             -- never a bare outcome
   ask TEXT NOT NULL DEFAULT '',           -- refused / resend: what the claimant is asked to send
   route TEXT NOT NULL DEFAULT '',         -- awaiting_read: the job that owes the read
+  ask_form TEXT NOT NULL DEFAULT '',      -- the form the ask is delivered in (forms.offered), '' if no ask
+  form TEXT NOT NULL DEFAULT '',          -- the supplied form a decision stood on, '' if none
+  form_value_sha256 TEXT NOT NULL DEFAULT '',   -- sha256 of what was supplied; the value is on the
+                                                 -- append-only claim_doc_supplies row and in the 0600
+                                                 -- snapshot a pass decides on, never in this row
   intake_id TEXT NOT NULL,
-  source_sha256 TEXT NOT NULL CHECK (source_sha256 != ''),   -- no document, no decision
+  source_sha256 TEXT NOT NULL CHECK (source_sha256 != ''),   -- the deciding document's bytes, or the
+                                                 -- digest of the supplied form that settled the claim
   extraction_sha256 TEXT NOT NULL,
   decision_key TEXT NOT NULL,
   ladder_version TEXT NOT NULL,
@@ -943,6 +1231,23 @@ CREATE TABLE IF NOT EXISTS claim_doc_decisions (
   CHECK ((outcome IN ('refused', 'resend')) = (ask != '')),
   CHECK ((outcome = 'awaiting_read') = (route != ''))
 );
+CREATE TABLE IF NOT EXISTS claim_doc_supplies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  claim_id INTEGER NOT NULL,
+  -- a document is not supplied here: documents arrive as files and are read by proof_intake/doc-verify
+  form TEXT NOT NULL CHECK (form IN ('email_address', 'phone_number', 'collaborator_proof')),
+  value TEXT NOT NULL CHECK (value != ''),        -- normalised: what the check is given, and re-given
+  value_sha256 TEXT NOT NULL CHECK (value_sha256 != ''),
+  supplied_at TEXT NOT NULL,
+  intake_id TEXT NOT NULL,                        -- where it arrived: the reply's own id
+  received_by TEXT NOT NULL DEFAULT '',           -- the channel it arrived on, never a person's name
+  note TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS claim_doc_supplies_claim ON claim_doc_supplies(claim_id);
+CREATE TRIGGER IF NOT EXISTS claim_doc_supplies_no_update BEFORE UPDATE ON claim_doc_supplies
+BEGIN SELECT RAISE(ABORT, 'claim_doc_supplies is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS claim_doc_supplies_no_delete BEFORE DELETE ON claim_doc_supplies
+BEGIN SELECT RAISE(ABORT, 'claim_doc_supplies is append-only'); END;
 CREATE TABLE IF NOT EXISTS claim_doc_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   at TEXT NOT NULL,
@@ -971,7 +1276,31 @@ def open_store(path: str) -> sqlite3.Connection:
     db.row_factory = sqlite3.Row
     archive_older_decisions(db, path)
     db.executescript(SCHEMA)
+    migrate_form_columns(db, path)
     return db
+
+
+# Every column the form verdicts added, in the order they were added. A store the earlier cdl-2
+# ladder wrote keeps its rows: the columns default to '', which is exactly "no form was supplied",
+# so nothing has to be set aside and nothing is decided again.
+FORM_COLUMNS = (("ask_form", "TEXT NOT NULL DEFAULT ''"),
+                ("form", "TEXT NOT NULL DEFAULT ''"),
+                ("form_value_sha256", "TEXT NOT NULL DEFAULT ''"))
+
+
+def migrate_form_columns(db: sqlite3.Connection, path: str = "") -> list[str]:
+    """Add the form columns to a store written before them (`CREATE TABLE IF NOT EXISTS` leaves an
+    existing table as it is). Returns what it added. Nothing is deleted and no row is re-decided:
+    a row that says nothing about a form stood on a document."""
+    have = {r[1] for r in db.execute("PRAGMA table_info(claim_doc_decisions)").fetchall()}
+    added = []
+    with db:
+        for name, decl in FORM_COLUMNS:
+            if name in have:
+                continue
+            db.execute(f"ALTER TABLE claim_doc_decisions ADD COLUMN {name} {decl}")
+            added.append(name)
+    return added
 
 
 ARCHIVE_TABLE = "claim_doc_decisions_cdl1"
@@ -1026,6 +1355,48 @@ def record_extractions(db: sqlite3.Connection, docs: Iterable[DocFacts], at: str
                    (d.source_sha256, sha256_of(d.extraction), d.extractor, canonical(d.extraction), at))
 
 
+# The forms a claimant can supply us (a document arrives as a file, not here).
+SUPPLIED_FORMS = tuple(f for f in forms.FORMS if f != forms.FORM_DOCUMENT)
+
+
+def _check_schema_forms() -> None:
+    """The store's CHECK names exactly the forms this code accepts: a form added to `forms.FORMS`
+    must not be storable before the store knows it, and a form removed must not stay storable."""
+    missing = [f for f in SUPPLIED_FORMS if f"'{f}'" not in SCHEMA]
+    if missing:
+        raise RuntimeError(f"claim_doc_supplies does not accept {missing}: the store and forms.FORMS disagree")
+
+
+_check_schema_forms()
+
+
+def supply(db: sqlite3.Connection, claim_id: int, form: str, value: Any, *, supplied_at: str | None = None,
+           intake_id: str = "", received_by: str = "", note: str = "") -> dict[str, Any]:
+    """Accept one form a claimant supplied. The value is stored in the form's own shape (a bad shape is
+    refused here, never stored to be read later), with its digest, when and where it arrived.
+
+    It decides nothing: the next pass checks it (`forms.check` against the facts the reader delivers)
+    and records WHICH form a claim stood on. Append-only - a wrong supply is answered by a new row,
+    and the check takes the best one - so nothing here needs anyone's approval to undo."""
+    form = str(form or "").strip()
+    if form == forms.FORM_DOCUMENT:
+        raise ValueError("a document is not supplied here: it arrives as a file and doc-verify reads it")
+    normalised, why = forms.normalise(form, value)
+    if why or not normalised:
+        raise ValueError(f"{form}: {why or 'empty'}")
+    at = supplied_at or utcnow()
+    row = {"claim_id": int(claim_id), "form": form, "value": normalised,
+           "value_sha256": forms.value_digest(form, normalised), "supplied_at": at,
+           "intake_id": str(intake_id or f"{form}:{int(claim_id)}"), "received_by": str(received_by or ""),
+           "note": str(note or "")}
+    with db:
+        db.execute("INSERT INTO claim_doc_supplies (claim_id, form, value, value_sha256, supplied_at, intake_id, "
+                   "received_by, note) VALUES (?,?,?,?,?,?,?,?)",
+                   (row["claim_id"], row["form"], row["value"], row["value_sha256"], row["supplied_at"],
+                    row["intake_id"], row["received_by"], row["note"]))
+    return row
+
+
 def record(db: sqlite3.Connection, decision: Decision, inputs: Mapping[str, Any], docs: Iterable[DocFacts],
            *, at: str | None = None) -> str:
     """Write one decision. Returns what happened:
@@ -1048,11 +1419,13 @@ def record(db: sqlite3.Connection, decision: Decision, inputs: Mapping[str, Any]
         values = (decision.user_id, decision.profile_id, decision.outcome, decision.reason, decision.ask,
                   decision.route, decision.intake_id,
                   decision.source_sha256, decision.extraction_sha256, decision.key, VERSION,
-                  canonical([g.as_dict() for g in decision.gates]), canonical(inputs), at, at)
+                  canonical([g.as_dict() for g in decision.gates]), canonical(inputs), at, at,
+                  decision.ask_form, decision.form, decision.form_value_sha256)
         if row is None:
             db.execute("INSERT INTO claim_doc_decisions (claim_id, user_id, profile_id, outcome, reason, ask, route, "
                        "intake_id, source_sha256, extraction_sha256, decision_key, ladder_version, gates_json, "
-                       "inputs_json, decided_at, state, state_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'shadow',?)",
+                       "inputs_json, decided_at, state, state_at, ask_form, form, form_value_sha256) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'shadow',?,?,?,?)",
                        (decision.claim_id,) + values)
             _event(db, at, decision, "decided")
             return "decided"
@@ -1068,7 +1441,8 @@ def record(db: sqlite3.Connection, decision: Decision, inputs: Mapping[str, Any]
         event = {"released": "redecided", RETIRED: "reopened"}.get(row["state"], "superseded")
         db.execute("UPDATE claim_doc_decisions SET user_id=?, profile_id=?, outcome=?, reason=?, ask=?, route=?, "
                    "intake_id=?, source_sha256=?, extraction_sha256=?, decision_key=?, ladder_version=?, gates_json=?, "
-                   "inputs_json=?, decided_at=?, state='shadow', state_at=?, state_by='', state_reason='' "
+                   "inputs_json=?, decided_at=?, state='shadow', state_at=?, state_by='', state_reason='', "
+                   "ask_form=?, form=?, form_value_sha256=? "
                    "WHERE claim_id=?", values + (decision.claim_id,))
         _event(db, at, decision, event, before=before)
         return event
@@ -1142,7 +1516,8 @@ def reproduce(db: sqlite3.Connection, claim_id: int) -> Decision:
                 raise NotReproducible(f"claim {claim_id}: extraction {d['extraction_sha256'][:12]} does not hash "
                                       "to its key")
         docs.append(DocFacts.from_dict({**d, "extraction": body}))
-    decision = decide_claim(ClaimFacts.from_dict(inputs["claim"]), docs, check_policy(inputs["policy"]))
+    claim_raw = hydrated(db, claim_id, inputs["claim"])
+    decision = decide_claim(ClaimFacts.from_dict(claim_raw), docs, check_policy(inputs["policy"]))
     if decision is None:
         raise NotReproducible(f"claim {claim_id}: the stored inputs support no decision")
     return decision
@@ -1181,6 +1556,8 @@ def standing(db: sqlite3.Connection, outcome: str = REFUSED) -> list[dict[str, A
         out.append({"claim_id": r["claim_id"], "user_id": r["user_id"], "profile_id": r["profile_id"],
                     "paid": paid if isinstance(paid, bool) else None,
                     "outcome": r["outcome"], "reason": r["reason"], "ask": r["ask"], "route": r["route"],
+                    "ask_form": _col(r, "ask_form"), "form": _col(r, "form"),
+                    "form_value_sha256": _col(r, "form_value_sha256"),
                     "claim_class": str((inputs.get("claim") or {}).get("profile_type") or "").strip().lower(),
                     "decided_at": r["decided_at"],
                     "intake_id": r["intake_id"], "source_sha256": r["source_sha256"],
@@ -1188,6 +1565,12 @@ def standing(db: sqlite3.Connection, outcome: str = REFUSED) -> list[dict[str, A
                     "documents_on_file": len(inputs["documents"])})
     out.sort(key=lambda row: paid_first(row["paid"], row["claim_id"]))
     return out
+
+
+def _col(row: sqlite3.Row, name: str) -> str:
+    """A stored column, or '' on a store that predates it: a read never migrates a store, and
+    "this store has no such column yet" must not read as a value."""
+    return str(row[name]) if name in row.keys() and row[name] is not None else ""
 
 
 def _age_hours(since: str, now: datetime) -> float | None:
@@ -1259,6 +1642,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--outcome", default=REFUSED, choices=OUTCOMES)
     p.add_argument("--policy", default=str(DEFAULT_POLICY))
     p.add_argument("--ask-copy", default=str(DEFAULT_ASK_COPY))
+    p = sub.add_parser("supply", help="accept one form a claimant supplied (nothing is decided by it)")
+    p.add_argument("--store", default=DEFAULT_STORE)
+    p.add_argument("--claim-id", type=int, required=True)
+    p.add_argument("--form", required=True, choices=list(SUPPLIED_FORMS))
+    p.add_argument("--value", required=True)
+    p.add_argument("--supplied-at", default="")
+    p.add_argument("--intake-id", default="")
+    p.add_argument("--received-by", default="")
+    p.add_argument("--note", default="")
     p = sub.add_parser("release")
     p.add_argument("--store", default=DEFAULT_STORE)
     p.add_argument("--claim-id", type=int, required=True)
@@ -1278,6 +1670,13 @@ def main(argv: list[str] | None = None) -> int:
             return 3
         print(json.dumps(run(_load(args.snapshot), load_policy(args.policy), open_store(args.store)), indent=2))
         return 0
+    if args.cmd == "supply":
+        row = supply(open_store(args.store), args.claim_id, args.form, args.value,
+                     supplied_at=args.supplied_at or None, intake_id=args.intake_id,
+                     received_by=args.received_by, note=args.note)
+        # the value itself is not echoed: the digest is what a log may carry
+        print(canonical({k: v for k, v in row.items() if k != "value"}))
+        return 0
     if args.cmd == "release":
         done = release(open_store(args.store), args.claim_id, by=args.by, why=args.why)
         print("released" if done else "nothing to release")
@@ -1288,8 +1687,10 @@ def main(argv: list[str] | None = None) -> int:
         now = datetime.now(timezone.utc)
         for row in standing(db, args.outcome):
             if row["ask"]:
-                # the words a sender would use; nothing here sends them
-                row["ask_text"] = ask_text(row["ask"], row["claim_class"], policy, copy)
+                # the words a sender would use, in the form the ask is offered in (row['ask_form']);
+                # nothing here sends them
+                row["ask_text"] = ask_text(row["ask"], row["claim_class"], policy, copy,
+                                          form=row["ask_form"] or forms.FORM_DOCUMENT)
             else:
                 row["age_hours"] = _age_hours(row["decided_at"], now)
                 if row["route"] in ROUTES:
@@ -1302,8 +1703,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if out["mismatch"] else 0
     rows = db.execute("SELECT outcome, reason, ask, route, state, COUNT(*) FROM claim_doc_decisions "
                       "GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 6 DESC, 2").fetchall()
+    by_form = [] if "ask_form" not in {c[1] for c in db.execute("PRAGMA table_info(claim_doc_decisions)")} else \
+        db.execute("SELECT COALESCE(ask_form, '') AS f, outcome, COUNT(*) FROM claim_doc_decisions "
+                   "WHERE state = 'shadow' GROUP BY 1, 2 ORDER BY 1, 2").fetchall()
     print(json.dumps({"outcomes": [{"outcome": r[0], "reason": r[1], "ask": r[2], "route": r[3],
                                      "state": r[4], "n": r[5]} for r in rows],
+                      "standing_by_ask_form": [{"form": r[0] or forms.FORM_DOCUMENT, "outcome": r[1], "n": r[2]}
+                                               for r in by_form],
                       "awaiting": awaiting_age(db)}, indent=2))
     return 0
 

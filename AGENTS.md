@@ -814,8 +814,9 @@ evidence build, which it does not skip (that is not equivalent, and needs a ruli
 ## Claim documents get one recorded decision, in shadow, and none of them is a person's
 
 `scripts/claim-doc-ladder.py` (`claim-doc-ladder.timer`, every 4 h) is the claim twin of `doc_approve.py`: every open
-claim with a document on file gets ONE row in `/var/lib/hydra/claim-doc-ladder/decisions.sqlite` with an outcome, a
-reason code and who moves next. Operator doc, the reason-to-ask table and the revert per field:
+claim with a document on file, or a form its claimant supplied, gets ONE row in
+`/var/lib/hydra/claim-doc-ladder/decisions.sqlite` with an outcome, a reason code and who moves next.
+Operator doc, the reason-to-ask table and the revert per field:
 `docs/credit-verification/claim-doc-ladder.md`; the measured population under these rules, on a fixture:
 `data/claims-no-human-p1/report.md`.
 
@@ -823,6 +824,34 @@ reason code and who moves next. Operator doc, the reason-to-ask table and the re
   prove the claim: the row carries the internal reason AND the ask, what to send instead); `resend` (doc-verify's
   last answer read nothing: the ask is a copy we can read, and it is no refusal); `awaiting_read` (WE have not read
   the document or a fact: no verdict, no ask, and the row names the job that owes the read).
+- **Four forms, and an offer we cannot check is worse than no offer** (captain 2026-11-16). A claim is settled by a
+  document, an email address, a phone number or a collaborator's Muso profile, and `claim_verify/forms.py` is the one
+  table of which ask each class is delivered in and what check each form gets: an address at a host the profile
+  itself publishes (never free mail), a number the profile publishes (no source publishes one, so the phone form is
+  never offered), a Muso user credited on a release the profile is credited on. **A form is only ever offered where
+  its fact was READ** (`forms.checkable`), the document is the last rung of every order, and an unread fact is
+  `awaiting_read`, never a refusal — while a form NOTHING can check (a phone number, no source publishes
+  one; a collaborator's public profile id, which is not that user's word and no reply path asks for it:
+  `forms.FORMS_WITHOUT_A_CHECK`) is a measured NO the moment it is supplied, refused with the ask that
+  still settles the claim and never left waiting on a fact no job can read. **Two of the four forms are
+  ones anybody could fake by typing, so each settles only on evidence we hold**: an address is not a
+  mailbox, so the email form settles only when the supplied address IS the claimant account's own core
+  address (`users.email`, carried as `account_email_sha256`) at a host the profile publishes AND core has
+  confirmed that mailbox (`users.emailconfirmed`, `account_email_confirmed`); an unconfirmed or unread
+  account mailbox means the form is never offered (`checkable` needs both halves, the document is the
+  ask) and a supplied address is refused `account_email_not_confirmed`, never left waiting; a confirmed
+  mailbox at a domain the profile does not publish is never offered either (`forms.settles_at` is the
+  one predicate the offer and the check share, so a form is never offered over an answer its own check
+  would refuse). A
+  collaborator is not attested, so that form is recognised, recorded and reserved until a channel can ask
+  them. A mailbox challenge and the collaborator's own confirmation are later changes, not claims this
+  code makes. A form that
+  checks out is still held to the claim-side stops a document clears (`_contradiction_stop`, `_clean_stop`)
+  and a poisoned document poisons the form path. Supplied forms arrive through ONE intake that decides nothing
+  (`claim-doc-ladder.py supply` → append-only `claim_doc_supplies`), are checked by pure functions on facts the
+  reader delivered, and merge into the SAME one verdict row per claim, whose `form` / `form_value_sha256` say what
+  settled it (never the address, the number or the id itself). `cdl-3` adds those columns in place: a row that says
+  nothing about a form is a document's.
 - **A new reason needs its ask or its route in `doc_ladder.REASONS`, or the module does not import.** The reason
   code is never an input to the words a claimant reads (`ask_text`); the words are `policies/claim-doc-asks.json`,
   which does not load with an ask missing, an unknown ask, or copy that names an identity document.
@@ -855,7 +884,8 @@ reason code and who moves next. Operator doc, the reason-to-ask table and the re
   They get the room the credit filings leave and a floor of 5 per worker on top of `--max-docs`
   (`runner.claim_only_room`; the room alone read 0 of 116). A failed open-claims read selects none and is a run
   error, never "nobody claims".
-- **No document, no decision; unmeasured is its own reason, never a pass and never a refusal.**
+- **No document and no supplied form, no decision; unmeasured is its own reason, never a pass and never a
+  refusal.**
 - **A credits page is not accepted and a document must name a release on the profile**
   (`policies/claim-doc-ladder.json`): without those two the first real run approved 15 claims, 11 on a public page.
 - **Page ids are compared by `scripts/lib/page_identity.py` only** (equality, or a truncated prefix of 8+

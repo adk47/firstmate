@@ -46,8 +46,10 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from claim_verify import decline_rules, doc_ladder  # noqa: E402
+from claim_verify import forms as forms_mod  # noqa: E402
 from credit_review import doc_approve  # noqa: E402
 from credit_verify.docverify import extract, gate, runner  # noqa: E402
+from lib import page_identity  # noqa: E402
 
 TRINO = "/opt/hydra/scripts/trino-query.sh"
 CHUNK = 400
@@ -187,6 +189,201 @@ def profile_titles(run: Run, profile_ids: Iterable[str]) -> dict[str, set[str]]:
     return out
 
 
+SUPPLY_TABLE = "claim_doc_supplies"
+
+
+def supplies(path: str, claim_ids: Iterable[int]) -> dict[int, list[dict[str, Any]]]:
+    """claim id -> the forms its claimant supplied (email address, phone number, collaborator proof),
+    oldest first, read read-only from the ladder's own store. A store that has never taken one has no
+    such table, which is "nothing supplied", never an error."""
+    ids = sorted({int(c) for c in claim_ids})
+    out: dict[int, list[dict[str, Any]]] = {}
+    if not ids or not os.path.exists(path):
+        return out
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        db.row_factory = sqlite3.Row
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                          (SUPPLY_TABLE,)).fetchone():
+            return out
+        for part in _chunks(ids):
+            marks = ",".join("?" * len(part))
+            for r in db.execute(f"SELECT claim_id, form, value, supplied_at, intake_id FROM {SUPPLY_TABLE} "
+                                f"WHERE claim_id IN ({marks}) ORDER BY id", part):
+                out.setdefault(int(r["claim_id"]), []).append(
+                    {"form": r["form"], "value": r["value"], "supplied_at": r["supplied_at"],
+                     "intake_id": r["intake_id"]})
+    finally:
+        db.close()
+    return out
+
+
+# How many live admin profiles one pass may read for a form's facts. The ask's form is chosen from
+# these facts (`forms.offered`), so a claim we could not read is asked for a document - the form we
+# can always check - never for a form nobody read.
+MAX_FORM_READS = 500
+
+
+def live_sites(profile_ids: list[str]) -> dict[str, str]:
+    """{profile id: the website on the live admin profile}; the house reader for it (`profile_sites`
+    reads the admin profile, never the catalog view, which ran four days behind)."""
+    from gdpr_pipeline import sources as gdpr_sources  # noqa: PLC0415
+    return gdpr_sources.profile_sites(list(profile_ids))
+
+
+def collaborator_facts(run: Run, refs: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """{the reference a claimant sent: whether it is a Muso user, and the titles it is credited on}.
+
+    A reference is matched the one way two page ids name one page (`page_identity.same_page`: equality,
+    or a truncated id of 8+ characters, which is what a register row, a ticket or a pasted link holds),
+    never by equality - a truncated id could never match one otherwise."""
+    out: dict[str, dict[str, Any]] = {}
+    for ref in sorted({(r or "").strip().lower() for r in refs}):
+        if not ref or not forms_mod.PROFILE_ID.match(ref):
+            continue
+        rows = decline_rules._rows(run(
+            "select lower(profile_id) from postgresql_catalog.public.catalog_profile "
+            f"where lower(profile_id) like '{ref}%'"))
+        hits = [r[0] for r in rows if len(r) == 1 and page_identity.same_page(ref, r[0])]
+        if not hits:
+            out[ref] = {"in_catalog": False, "held_by_account": None, "titles": []}   # measured: no user
+            continue
+        out[ref] = {"in_catalog": True, "held_by_account": held(ref, run),
+                    "titles": sorted(profile_titles(run, [hits[0]]).get(hits[0], set()))}
+    return out
+
+
+def held(ref: str, run: Run) -> bool | None:
+    """Whether that profile is HELD by an account - an existing Muso user, not a public catalog row.
+    Core keeps the claim it granted on the profile (`claiming.status = 'processed'`); a read that
+    fails answers None (unmeasured), never False, because 'we could not read it' is not 'nobody
+    holds it'."""
+    try:
+        rows = decline_rules._rows(run(
+            "select lower(profileid) from postgresql_core.public.claiming "
+            f"where deletedat is null and status = 'processed' and lower(profileid) like '{ref}%'"))
+    except Exception:  # noqa: BLE001 - unread is unread
+        return None
+    return any(len(r) == 1 and page_identity.same_page(ref, r[0]) for r in rows)
+
+
+def account_emails(run: Run, user_ids: Iterable[str]) -> dict[str, tuple[str, bool]]:
+    """{account user id: (its own address lower-cased, whether core CONFIRMED it)} - core's
+    `users.email` / `users.emailconfirmed`, the mailbox the claimant signed up with, which is what the
+    email form settles on (a domain alone only proves a domain, and an unconfirmed address is a typed
+    string). A read that fails raises, so the caller records it unread rather than as "no address"."""
+    ids = decline_rules._ids_sql((u for u in user_ids if str(u).isdigit()), quote=False)
+    if not ids:
+        return {}
+    out: dict[str, tuple[str, bool]] = {}
+    for rec in decline_rules._rows(run(
+            "select cast(id as varchar), lower(coalesce(email, '')), cast(coalesce(emailconfirmed, false) as varchar) "
+            f"from postgresql_core.public.users where id in ({ids})")):
+        if len(rec) == 3:
+            out[str(rec[0])] = (rec[1] or "", str(rec[2]).strip().lower() == "true")
+    return out
+
+
+def form_facts(run: Run, claims: list[dict[str, Any]], known: set[str], titles: dict[str, set[str]], *,
+               sites: Callable[[list[str]], dict[str, str]] = live_sites,
+               budget: int = MAX_FORM_READS, rotate: Iterable[str] = ()) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
+    """claim id -> the facts each new form's check reads, plus what the read cost.
+
+    The facts are the profile's own host (the website on the live admin profile), its credited titles,
+    and - for each collaborator a claimant named - whether that profile is a Muso user at all and the
+    titles it is credited on, kept PER REF so a second collaborator is checked on its own facts.
+    NOTHING publishes a profile phone number to us, so `profile_phones` is `None` (unread), and
+    `forms.FORMS_WITHOUT_A_SOURCE` is what turns a supplied number into a measured NO.
+
+    The live reads are bounded per pass (`budget`) and nothing is starved: a claim whose claimant
+    supplied an address is always read (waiting on a fact we never read would wait forever), and the
+    rest are taken oldest-supply-first, after last pass's reads (`rotate`), so a profile left out this
+    pass is read on the next one. A claim whose profile was left out has no address facts, so
+    `forms.offered` falls through to the next form whose facts were read (the document is the last
+    rung of every order), and the count of them is reported, never silently dropped."""
+    out: dict[int, dict[str, Any]] = {}
+    spent: dict[str, Any] = {"hosts_read": 0, "hosts_unread": 0, "collaborators_read": 0,
+                             "over_bound": 0, "claims": len(claims)}
+    must: dict[str, str] = {}          # profile id -> the earliest supply that needs its host
+    optional: dict[str, str] = {}
+    for c in claims:
+        pid = str(c.get("profile_id") or "").lower()
+        if not pid:
+            continue
+        when = min((str(s.get("supplied_at") or "") for s in c.get("supplied_forms") or ()), default="")
+        supplied = c.get("supplied_forms") or ()
+        if any(s.get("form") == forms_mod.FORM_EMAIL for s in supplied):
+            must[pid] = min(must.get(pid, when or "~"), when or "~")
+        elif pid in known:
+            optional[pid] = min(optional.get(pid, when or "~"), when or "~")
+    read_before = {str(p).lower() for p in rotate}
+    room = max(0, int(budget) - len(must))
+    rest = sorted((p for p in optional if p not in must),
+                  key=lambda p: (p in read_before, optional[p], p))[:room]
+    asked = list(must) + rest
+    # a profile the budget did not reach only if it was not also read for a claim that had to be:
+    # `optional` includes a profile already in `must`, whose facts were delivered above
+    spent["over_bound"] = max(0, len([p for p in optional if p not in must]) - len(rest))
+    hosts: dict[str, str | None] = {}
+    answer: dict[str, Any] = {}
+    if asked:
+        try:
+            answer = sites(list(asked))
+        except Exception:  # noqa: BLE001 - the whole batch unread is unread, never "no website"
+            answer = {}
+        if not isinstance(answer, dict):
+            answer = {}
+    for pid in asked:
+        site = answer.get(pid, None)
+        if isinstance(site, str):
+            hosts[pid] = site
+            spent["hosts_read"] += 1
+        else:                          # absent from the answer, or the batch failed for it
+            hosts[pid] = None
+            spent["hosts_unread"] += 1
+    refs = [str(s.get("value") or "").strip().lower() for c in claims
+            for s in c.get("supplied_forms") or () if s.get("form") == forms_mod.FORM_COLLABORATOR]
+    collabs = collaborator_facts(run, refs) if refs else {}
+    # the account's own mailbox, READ BEFORE the offer: a verified address is half of what the email
+    # check needs, so offering the form without it would ask for an answer that can never pass. One
+    # batched read for every claim, not one per profile.
+    emails: dict[str, tuple[str, bool]] | None = None
+    try:
+        emails = account_emails(run, [str(c.get("user_id") or "") for c in claims])
+    except Exception:  # noqa: BLE001 - unread is unread, never "no address"
+        emails = None
+    spent["collaborators_read"] = len(collabs)
+    spent["hosts_asked"] = list(asked)
+    for c in claims:
+        pid = str(c.get("profile_id") or "").lower()
+        site = hosts.get(pid)
+        facts: dict[str, Any] = {"claimed_profile_id": pid, "profile_phones": None,
+                                 # a titles read is a catalog read: not in the catalog is a measured
+                                 # "credited on nothing", never unread (that would wait forever)
+                                 "profile_titles": sorted(titles.get(pid, ())),
+                                 "collaborators": {}}
+        facts["profile_hosts"] = None if site is None else ([forms_mod.host_of(site)] if forms_mod.host_of(site) else [])
+        got = emails.get(str(c.get("user_id") or "")) if emails is not None else None
+        # only the DIGEST travels: the check needs equality with the supplied address, and a digest
+        # answers that without putting the account's address on a verdict row. `confirmed` is core's
+        # own word that the mailbox answered, and an unread is `None`, never `False`.
+        facts["account_email_confirmed"] = None if emails is None or got is None else bool(got[1])
+        facts["account_email_sha256"] = (forms_mod.value_digest(forms_mod.FORM_EMAIL, got[0])
+                                        if got and got[0] else None)
+        # the DOMAIN, never the local part: the offer and the check both need to know whether this
+        # mailbox's domain is one the profile publishes, and the domain is the readable half
+        facts["account_email_domain"] = (got[0].rsplit("@", 1)[1]
+                                         if got and got[0] and "@" in got[0] else None)
+        for s in c.get("supplied_forms") or ():
+            if s.get("form") != forms_mod.FORM_COLLABORATOR:
+                continue
+            ref = str(s.get("value") or "").strip().lower()
+            if ref in collabs:
+                facts["collaborators"][ref] = collabs[ref]
+        out[int(c["claim_id"])] = facts
+    return out, spent
+
+
 def named_titles(extraction: Any, min_confidence: float) -> set[str]:
     """The title keys of the tracks a stored extraction names, at or above the confidence bar."""
     tracks = extraction.get("tracks") if isinstance(extraction, dict) else None
@@ -220,17 +417,27 @@ def held_accounts() -> tuple[set[str] | None, str]:
 def build(run: Run, proof_db: sqlite3.Connection, doc_db: sqlite3.Connection, *,
           listed: tuple[dict[int, dict[str, Any]] | None, str], held: tuple[set[str] | None, str],
           snapshots: Callable[[list[int], Run], dict[int, dict]] = decline_rules.live_snapshots,
-          min_confidence: float, now: datetime | None = None) -> dict[str, Any]:
-    claims, no_account = open_claims(run)
+          min_confidence: float, now: datetime | None = None,
+          supplied: dict[int, list[dict[str, Any]]] | None = None,
+          sites: Callable[[list[str]], dict[str, str]] = live_sites,
+          claims_read: tuple[list[dict[str, Any]], list[int]] | None = None,
+          rotate: Iterable[str] = ()) -> dict[str, Any]:
+    claims, no_account = claims_read if claims_read is not None else open_claims(run)
     if not proof_db.execute("SELECT 1 FROM proof_intake LIMIT 1").fetchone():
         raise RuntimeError("proof_intake read: no rows")       # an empty store is not "no documents"
     docs = documents(proof_db, doc_db, (c["user_id"] for c in claims))
-    with_docs = [c for c in claims if docs.get(str(c["user_id"]))]
+    forms_by_claim = supplied or {}
+    # a claim is decided on its documents or on a form its claimant supplied: one with neither is not
+    # in the population (no evidence, no decision) and is counted, never silently dropped
+    with_docs = [c for c in claims if docs.get(str(c["user_id"])) or forms_by_claim.get(c["claim_id"])]
     decline: dict[int, dict] = {}
     for part in _chunks([c["claim_id"] for c in with_docs]):
         decline.update(snapshots(part, run))
     known = profiles_in_catalog(run, (c["profile_id"] for c in with_docs))
     titles = profile_titles(run, known)
+    for c in with_docs:
+        c["supplied_forms"] = list(forms_by_claim.get(c["claim_id"]) or [])
+    facts, form_reads = form_facts(run, with_docs, known, titles, sites=sites, rotate=rotate)
     rows, list_why = listed
     held_ids, held_why = held
     found_by_profile: dict[str, list[int]] = {}
@@ -242,12 +449,16 @@ def build(run: Run, proof_db: sqlite3.Connection, doc_db: sqlite3.Connection, *,
         c["decline_snapshot"] = decline.get(cid)
         c["profile_in_catalog"] = c["profile_id"] in known
         mine = titles.get(c["profile_id"], set())
+        # a claim whose only evidence is a supplied form has no documents of its own: that is
+        # "no document names a release", never a missing key in the read
         c["releases"] = None if c["profile_id"] not in known else {
             d["source_sha256"]: {"named": len(n), "on_profile": len(n & mine)}
-            for d in docs[str(c["user_id"])] for n in [named_titles(d["extraction"], min_confidence)]}
+            for d in docs.get(str(c["user_id"])) or []
+            for n in [named_titles(d["extraction"], min_confidence)]}
         c["account_hold"] = None if held_ids is None else str(c["user_id"]) in held_ids
         c["code_found_other_claims"] = None if rows is None else sorted(
             x for x in found_by_profile.get(c["profile_id"], []) if x != cid)
+        c["form_facts"] = facts.get(cid) or {}
         paid = (rows or {}).get(cid, {}).get("paid")
         c["paid"] = paid if isinstance(paid, bool) else None
     users = {str(c["user_id"]) for c in with_docs}
@@ -258,10 +469,15 @@ def build(run: Run, proof_db: sqlite3.Connection, doc_db: sqlite3.Connection, *,
         "documents": {u: d for u, d in docs.items() if u in users},
         "sources": {
             "open_claims": len(claims) + len(no_account), "open_claims_without_account": len(no_account),
-            "open_claims_with_document": len(with_docs),
-            "open_claims_without_document": len(claims) - len(with_docs),
+            "open_claims_with_document": sum(1 for c in with_docs if docs.get(str(c["user_id"]))),
+            "open_claims_without_document": len(claims) - sum(1 for c in with_docs if docs.get(str(c["user_id"]))),
+            "open_claims_with_supplied_form": sum(1 for c in with_docs if c["supplied_forms"]),
+            "open_claims_decidable": len(with_docs),
+            "form_hosts_read": form_reads.pop("hosts_asked", []),
+            "form_hosts_answered": form_reads.pop("hosts_read", 0),
+            **{f"form_{k}": v for k, v in form_reads.items()},
             "claimants_with_document": len(users),
-            "documents": sum(len(docs[u]) for u in users),
+            "documents": sum(len(docs.get(u) or []) for u in users),
             "profile_not_in_catalog": sum(1 for c in with_docs if not c["profile_in_catalog"]),
             "decline_snapshots_unread": sum(1 for c in with_docs
                                             if c["decline_snapshot"] is None and c["profile_in_catalog"]),
@@ -308,10 +524,28 @@ def tick(state_dir: str, policy: dict[str, Any], read: Callable[[], dict[str, An
     return (1 if check["mismatch"] else 0), summary
 
 
+def last_host_reads(state_dir: str) -> list[str]:
+    """The profiles the previous pass read a website for, so the next pass reads the others: the
+    bound on live reads must not starve the same profiles every pass."""
+    try:
+        with open(Path(state_dir) / "latest.json", encoding="utf-8") as fh:
+            ids = (json.load(fh).get("sources") or {}).get("form_hosts_read")
+    except (OSError, ValueError):
+        return []
+    return [str(i) for i in ids] if isinstance(ids, list) else []
+
+
 def read_live(args: argparse.Namespace, policy: dict[str, Any]) -> dict[str, Any]:
-    return build(trino, doc_approve._ro(args.proof_store), doc_approve._ro(args.doc_store),
+    """Read everything a pass decides on. The forms a claimant supplied are read from the ladder's own
+    store first, so a claim whose only evidence is a form is in the population at all."""
+    store = str(Path(args.state_dir) / "decisions.sqlite")
+    proof_db, doc_db = doc_approve._ro(args.proof_store), doc_approve._ro(args.doc_store)
+    claims_read = open_claims(trino)          # read once: the supplies are keyed by claim id
+    supplied = supplies(store, (c["claim_id"] for c in claims_read[0]))
+    return build(trino, proof_db, doc_db,
                  listed=claim_list_facts(args.claim_list), held=held_accounts(),
-                 min_confidence=float(policy["min_confidence"]))
+                 min_confidence=float(policy["min_confidence"]), supplied=supplied,
+                 claims_read=claims_read, rotate=last_host_reads(args.state_dir))
 
 
 def main(argv: list[str] | None = None) -> int:

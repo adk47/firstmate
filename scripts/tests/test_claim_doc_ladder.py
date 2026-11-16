@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from claim_verify import decline_rules as dr  # noqa: E402
 from claim_verify import doc_ladder as L  # noqa: E402
 from claim_verify import doc_sources as S  # noqa: E402
+from claim_verify import forms  # noqa: E402
 from lib import page_identity  # noqa: E402
 from ops_intake import lens_sources  # noqa: E402
 
@@ -466,9 +467,12 @@ class ManyDocumentsTests(unittest.TestCase):
 
 class ReasonCodeTests(unittest.TestCase):
     def test_every_reason_has_exactly_one_outcome_and_only_one_approves(self):
+        """Two reasons approve, and both mean the same thing: something on file names the claimant
+        AND the profile. One is a document doc-verify read; the other is a form the claimant
+        supplied, which is checked against facts we hold (`forms.check`)."""
         self.assertLessEqual({r.outcome for r in L.REASONS.values()}, set(L.OUTCOMES))
         self.assertEqual([k for k, r in L.REASONS.items() if r.outcome == L.APPROVED],
-                         ["document_names_claimant_and_profile"])
+                         ["document_names_claimant_and_profile", "form_supplied_settles_claim"])
 
     def test_no_outcome_is_a_persons_to_work(self):
         self.assertEqual(set(L.OUTCOMES), {L.APPROVED, L.REFUSED, L.RESEND, L.AWAITING})
@@ -488,7 +492,7 @@ class ReasonCodeTests(unittest.TestCase):
                 elif r.outcome in L.ASKED:
                     self.assertTrue(r.ask)
                     self.assertEqual(r.route, "")
-                    self.assertTrue(r.ask in L.ASKS or key == "contradiction")
+                    self.assertTrue(r.ask in L.ASKS or key in ("contradiction", "form_supplied_does_not_settle"))
                 else:
                     self.assertEqual(r.outcome, L.AWAITING)
                     self.assertEqual(r.ask, "")
@@ -510,10 +514,15 @@ class ReasonCodeTests(unittest.TestCase):
 
     def test_every_reason_in_the_code_is_registered(self):
         body = (ROOT / "scripts/claim_verify/doc_ladder.py").read_text()
-        used = set(re.findall(r'_fail\(name, "([a-z_]+)"', body)) | set(L.BLOCKING.values()) | set(L.POISON)
+        used = (set(re.findall(r'_fail\((?:name|"form"), "([a-z_]+)"', body)) | set(L.BLOCKING.values())
+                | set(L.POISON))
         self.assertLessEqual(used, set(L.REASONS))
-        self.assertEqual(set(L.REASONS) - used - {"document_names_claimant_and_profile", "not_extracted",
-                                                  "no_bytes_on_file", "extraction_gave_up", "document_not_readable"},
+        # the two approvals are built outside `_fail`, and so are the reasons doc-verify and the
+        # reader produce; nothing else may exist without the ladder writing it down
+        self.assertEqual(set(L.REASONS) - used - {"document_names_claimant_and_profile",
+                                                  "form_supplied_settles_claim",
+                                                  "not_extracted", "no_bytes_on_file", "extraction_gave_up",
+                                                  "document_not_readable"},
                          set())
 
     def test_an_unregistered_reason_cannot_be_given(self):
@@ -571,11 +580,15 @@ class PlanTests(unittest.TestCase):
         snap = snapshot([claim(), claim(claim_id=8, user_id=12), claim(claim_id=9, status="processed"),
                          claim(claim_id=10, claimant_names=["Nobody Here"])])
         decisions, skipped = L.plan(snap, POLICY)
-        self.assertEqual(skipped, {"no_document": 1, "not_open": 1})
+        self.assertEqual(skipped, {"no_evidence": 1, "not_open": 1})
         s = L.split(d for d, _ in decisions)
         self.assertEqual((s["claims"], s["verdicts"], s["asked"], s["awaiting_read"]), (2, 2, 1, 0))
         self.assertEqual(s["by_outcome"][L.REFUSED]["reasons"], {"claimant_not_named": 1})
         self.assertEqual(s["asks"], {"proof_naming_claimant": 1})
+        # a claim with no document of its own is still decided when it supplied a form, and the
+        # report says which form the ask went out in and which form settled what was settled
+        self.assertEqual(s["asks_by_form"], {"document": 1})
+        self.assertEqual(s["supplied_forms"], {})
         self.assertEqual(s["awaiting_by_route"], {})
         self.assertNotIn("needs_human_review", L.canonical(s))
 
@@ -904,18 +917,29 @@ class AskCopyTests(unittest.TestCase):
         self.assertEqual(COPY["version"], L.ASK_COPY_VERSION)
 
     def test_every_reason_reaches_words_or_a_job_through_the_real_renderer(self):
-        """reason -> ask -> the sentence, for every reason and every claim class the policy names."""
+        """reason -> ask -> the sentence, for every reason, every claim class the policy names, and
+        every form that ask can be delivered in. A form with no words on file fails the import."""
         for cls in list(POLICY["accepted_doc_types"]) + ["venue"]:
             for key, r in L.REASONS.items():
-                asks = sorted(set(L.CONTRADICTION_ASKS.values())) if key == "contradiction" else [r.ask]
+                if key == "form_supplied_does_not_settle":
+                    # the ask is this class's own form-refusal ask, resolved off the refusal
+                    asks = [L.ask_of(L._fail("form", key, form=forms.FORM_EMAIL, claim_class=cls))]
+                elif key == "contradiction":
+                    asks = sorted(set(L.CONTRADICTION_ASKS.values()))
+                else:
+                    asks = [r.ask]
                 for a in asks:
-                    with self.subTest(cls=cls, reason=key, ask=a):
-                        if r.outcome not in L.ASKED:
-                            self.assertEqual(a, "")
-                            continue
-                        said = L.ask_text(a, cls, POLICY, COPY)
-                        self.assertEqual(said == "", a == L.NO_ASK)
-                        self.assertNotIn("{", said)
+                    # only a form the ladder can actually deliver needs words on file: a form with no
+                    # source (`FORMS_WITHOUT_A_SOURCE`, e.g. a phone number) is reserved copy
+                    deliverable = [f for f in forms.forms_of(a, cls) if forms.checkable(f, L.ALL_FACTS)]
+                    for form in deliverable or [forms.FORM_DOCUMENT]:
+                        with self.subTest(cls=cls, reason=key, ask=a, form=form):
+                            if r.outcome not in L.ASKED:
+                                self.assertEqual((a, form), ("", forms.FORM_DOCUMENT))
+                                continue
+                            said = L.ask_text(a, cls, POLICY, COPY, form=form)
+                            self.assertEqual(said == "", a == L.NO_ASK)
+                            self.assertNotIn("{", said)
 
     def test_no_reason_code_and_no_refusal_reaches_the_claimant(self):
         internal = set(L.REASONS) | set(L.CONTRADICTION_ASKS) | set(L.ASKS) | set(L.OUTCOMES) | set(L.ROUTES)
@@ -1106,7 +1130,7 @@ class NoPersonTests(unittest.TestCase):
         self.assertEqual(L.ROUTES["doc-sources"].unit, "claim-doc-ladder.timer")
         src = {code for code, reason in L.REASONS.items() if reason.route == "doc-sources"}
         self.assertEqual(src, {"catalog_unreadable", "bound_code_unmeasured", "releases_unmeasured",
-                               "account_hold_unmeasured"})
+                               "account_hold_unmeasured", "form_unmeasured"})
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         db = L.open_store(os.path.join(tmp.name, "d.sqlite"))
@@ -1131,6 +1155,25 @@ class NoPersonTests(unittest.TestCase):
                   claim(profile={"name": "Nova Kane", "popularity": dr.BIG_POPULARITY, "creditCount": 1}),
                   claim(profile={"name": "Nova Kane", "popularity": None, "creditCount": None}),
                   claim(account_hold=True), claim(account_hold=None)]
+        form_claims = [
+            # a form we can check settles or refuses; a form whose facts we have not read is ours
+            claim(supplied_forms=[{"form": "email_address", "value": "jane@novakane.com"}],
+                  form_facts={"profile_hosts": ["novakane.com"],
+                              "account_email_sha256": forms.value_digest(forms.FORM_EMAIL, "jane@novakane.com"),
+                              "account_email_confirmed": True}),
+            claim(supplied_forms=[{"form": "email_address", "value": "jane@gmail.com"}],
+                  form_facts={"profile_hosts": ["gmail.com"],
+                              "account_email_sha256": forms.value_digest(forms.FORM_EMAIL, "jane@gmail.com"),
+                              "account_email_confirmed": True}),
+            # a mailbox core never confirmed is the claimant's word, so the form cannot settle
+            claim(supplied_forms=[{"form": "email_address", "value": "jane@novakane.com"}],
+                  form_facts={"profile_hosts": ["novakane.com"],
+                              "account_email_sha256": forms.value_digest(forms.FORM_EMAIL, "jane@novakane.com"),
+                              "account_email_confirmed": False}),
+            claim(supplied_forms=[{"form": "email_address", "value": "jane@novakane.com"}],
+                  form_facts={"profile_hosts": ["novakane.com"]}),
+            claim(profile_type="venue", supplied_forms=[{"form": "phone_number", "value": "+15551234567"}],
+                  form_facts={"profile_phones": None})]
         docs = [doc(), doc(extraction=None, extract_status=""), doc(extraction=None, extract_status="", has_bytes=False),
                 doc(extract_status="error", extraction=failed), doc(extract_status="error", extraction=failed, read_final=True),
                 doc(extract_status="error", extraction=failed, read_final=True, tooling_error=True),
@@ -1149,7 +1192,17 @@ class NoPersonTests(unittest.TestCase):
                     self.assertEqual(got.outcome == L.AWAITING, bool(got.route))
                     self.assertEqual(got.outcome == L.APPROVED, not got.ask and not got.route)
                     self.assertIn(got.route, set(L.ROUTES) | {""})
-                    self.assertIn(got.ask, set(L.ASKS) | {""})
+                    self.assertIn(got.ask, set(L.ASKS) | {"", "by_class_form"})
+        # a supplied form is evidence on its own: decided with no document on file at all
+        for c in form_claims:
+            got = L.decide_claim(L.ClaimFacts.from_dict(c), [], POLICY)
+            with self.subTest(reason=got.reason):
+                seen.add(got.reason.split(":")[0])
+                self.assertIn(got.outcome, L.OUTCOMES)
+                self.assertEqual(got.outcome in L.ASKED, bool(got.ask))
+                self.assertEqual(got.outcome == L.AWAITING, bool(got.route))
+                self.assertEqual(got.outcome == L.APPROVED, not got.ask and not got.route)
+                self.assertIn(got.ask, set(L.ASKS) | {"", "by_class_form"})
         self.assertEqual(seen, set(L.REASONS), "every reason in the table was reached by a real decision")
 
 
@@ -1353,22 +1406,29 @@ class SourcesTests(unittest.TestCase):
         titles = S.profile_titles(lambda sql: trino_out([[PID, "Night Drive"], [PID, "Love Again"]]), [PID])
         self.assertEqual(len(keys & titles[PID]), 1, '"Love" is not "Love Again"')
 
-    def build(self, listed=({}, ""), held=(set(), ""), snapshots=None, known=(PID,)):
+    def build(self, listed=({}, ""), held=(set(), ""), snapshots=None, known=(PID,), supplied=None,
+              sites=None):
         def run(sql):
             if "claiming c left join" in sql:
                 return trino_out([["7", "11", PID, "artist", "pending", "Jane", "Doe", ""],
                                   ["8", "12", PID, "artist", "pending", "No", "Docs", ""],
                                   ["9", "", PID, "organization", "pending", "", "", ""]])
+            if "postgresql_core.public.users" in sql:
+                return trino_out([["11", "jane@novakane.com", "true"]])
             if "matvw_profile_credit" in sql:
                 return trino_out([[p, "Night Drive"] for p in known])
             if "catalog_profile" in sql:
                 return trino_out([[p] for p in known])
             raise AssertionError(sql)
         core = {"id": 7, "userId": 11, "profileId": PID, "profileType": "artist", "reason": None, "status": "pending",
-                "createdAt": None, "email_domain": "example.org"}
+                "createdAt": None, "email_domain": "novakane.com"}
         snaps = snapshots or (lambda ids, run: {7: dr.snapshot(core, {"name": "Nova Kane", "popularity": 1,
                                                                     "creditCount": 1})})
-        return S.build(run, self.proof, self.docs, listed=listed, held=held, snapshots=snaps, min_confidence=0.6)
+        kw = {"supplied": supplied} if supplied is not None else {}
+        if sites is not None:
+            kw["sites"] = sites
+        return S.build(run, self.proof, self.docs, listed=listed, held=held, snapshots=snaps,
+                       min_confidence=0.6, **kw)
 
     def test_build_keeps_only_claims_with_a_document_and_counts_the_rest(self):
         self.intake(11, SHA)
@@ -1384,6 +1444,38 @@ class SourcesTests(unittest.TestCase):
                          (False, [], {SHA: {"named": 1, "on_profile": 1}}))
         decisions, _ = L.plan(snap, POLICY)
         self.assertEqual([(d.claim_id, d.outcome) for d, _ in decisions], [(7, L.APPROVED)])
+
+    def test_a_claim_whose_only_evidence_is_a_supplied_form_is_decided_by_the_pass(self):
+        """The pass's own reader is where a form-only claim enters the population at all: it has no
+        document, so its releases are "no document names one", not a missing entry in the read."""
+        self.intake(99, SHA)      # a row to read at all; nobody this pass decides on has a document
+        supplied = {7: [{"form": forms.FORM_EMAIL, "value": "jane@novakane.com",
+                         "supplied_at": "2026-11-16T01:00:00Z", "intake_id": "ops:7"}]}
+        snap = self.build(supplied=supplied, sites=lambda ids: {PID: "https://novakane.com"})
+        self.assertEqual([c["claim_id"] for c in snap["claims"]], [7])
+        c = snap["claims"][0]
+        self.assertEqual(c["releases"], {})
+        self.assertEqual(c["supplied_forms"], supplied[7])
+        self.assertEqual(c["form_facts"]["profile_hosts"], ["novakane.com"])
+        decisions, _ = L.plan(snap, POLICY)
+        self.assertEqual([(d.claim_id, d.outcome, d.form) for d, _ in decisions],
+                         [(7, L.APPROVED, forms.FORM_EMAIL)])
+
+    def test_the_profiles_a_pass_read_are_listed_so_the_next_pass_reads_the_others(self):
+        """`latest.json` -> `form_hosts_read` is the whole rotation: the pass must publish the ids it
+        read (a list), not only how many it read, or the next pass reads the same profiles forever."""
+        self.intake(11, SHA)      # a document on the account, so the read is reached at all
+        self.step(SHA, "ok", extraction())
+        supplied = {7: [{"form": forms.FORM_EMAIL, "value": "jane@novakane.com",
+                         "supplied_at": "2026-11-16T01:00:00Z", "intake_id": "ops:7"}]}
+        snap = self.build(supplied=supplied, sites=lambda ids: {PID: "https://novakane.com"})
+        self.assertEqual(snap["sources"]["form_hosts_read"], [PID])
+        state = tempfile.mkdtemp()
+        # the tick's own verify re-reads a supply row the harness never wrote, so this pass records
+        # no decision and lands the read's `sources` block in latest.json
+        rc, summary = S.tick(state, POLICY, lambda: dict(snap, claims=[], documents={}))
+        self.assertEqual(rc, 0, summary)
+        self.assertEqual(S.last_host_reads(state), [PID], "the next pass reads the profiles this one did not")
 
     def test_an_unread_source_is_recorded_as_unread_never_as_clean(self):
         self.intake(11, SHA)

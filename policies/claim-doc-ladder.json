@@ -1,5 +1,5 @@
 {
-  "version": "cdl-2",
+  "version": "cdl-3",
   "_doc": "docs/credit-verification/claim-doc-ladder.md. Read by scripts/claim_verify/doc_ladder.py; pinned by scripts/tests/test_claim_doc_ladder.py.",
   "min_confidence": 0.6,
   "_min_confidence": "Same bar as doc-verify (credit_verify/docverify/extract.py MIN_CONFIDENCE): a name the extractor was not sure of names nobody.",
