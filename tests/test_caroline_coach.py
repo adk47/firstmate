@@ -565,6 +565,417 @@ class GuardReasonTests(unittest.TestCase):
         self.assertTrue(doc["window"]["conversations"][0]["guard_why"].startswith("not measured: "))
         self.assertEqual(list(doc["window"]["by_guard_why"]), [doc["window"]["conversations"][0]["guard_why"]])
 
+class CensusTests(unittest.TestCase):
+    """Item D: every open conversation in one terminal state, or none.
+
+    Every Caroline line below is a real one, read from node-8's open conversations on 2026-11-15 (the ids are
+    dropped). They are the shapes that decide the number: the drain's holding line and the hand-off line look
+    like answers and are not, and a line no rule matches is `none`, never `answered`.
+    """
+
+    HOLDING = ("Sorry, we did not reply to this message when you sent it. If you still need help, reply here and "
+               "tell us what you need, and you will get an answer in this conversation.")
+    HANDOFF = ("I'm pulling in a teammate to take this from here. You'll hear from us in this conversation and by "
+               "email. Reference: 1amvh5572qg.")
+    DECIDED = ("Sorry for the slow reply. Every credit request on your account has been reviewed. The approved "
+               "credits are on your Muso profile. The others were denied for now. You can resubmit for those "
+               "credits again later. If you need help with anything else, reply here and tell us what you need.")
+    WHICH_ONE = ("Just to be sure, which one did you mean: withdraw the credit-removal request, or stop receiving "
+                 "profile owner notices?")
+    STATUS = ("I'm sorry this has taken longer than it should. I understand. Your request is in the verification "
+              "queue and the outcome comes to this conversation and to your email; if the team needs anything "
+              "from you they will ask here.")
+    GDPR_ACK = ("Thank you, we have your request to remove your personal data from Muso, received November 15, "
+                "2026. Here is how it works. **1. Confirm it's you.** The quickest way: open the page in the Muso "
+                "app and claim it, that proves it on the spot. Or reply from the email address on your Muso "
+                "account, if you have one.")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        patch = mock.patch.object(coach.collect, "reduce_thread", lambda detail: detail["__reduced__"])
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def census(self, threads, rows=(), **kw):
+        api = Intercom(threads, **{k: kw.pop(k) for k in ("total", "fail") if k in kw})
+        db = kw.pop("db", None) or facts_db(self.tmp, rows or [(t["id"], [], True) for t in threads])
+        cache = kw.pop("cache", os.path.join(self.tmp, "census.sqlite"))
+        return coach.census("tok", NOW, db, cache, request=api), api
+
+    def facts(self, threads, taken=NOW - 1800):
+        """A monitor facts file carrying each thread's own `updated_at`, which is the census cache's key.
+
+        `facts.updated_at` is Intercom's thread timestamp, not the row's write time: the monitor keeps it so a
+        thread whose `updated_at` has not moved is not fetched again. The events are the monitor's own shape -
+        `[[ts, code], ...]` with c/a/h for who spoke.
+        """
+        path = os.path.join(tempfile.mkdtemp(), "monitor.sqlite")
+        db = sqlite3.connect(path)
+        db.execute("CREATE TABLE facts (id TEXT PRIMARY KEY, created_at INTEGER, updated_at INTEGER, open INTEGER, "
+                   "rules TEXT, shape TEXT, outbound INTEGER, events TEXT)")
+        db.execute("CREATE TABLE readings (taken_at INTEGER, kind TEXT, payload TEXT)")
+        for t in threads:
+            events = [[int(p["ts"]), {"user": "c", "admin": "a"}.get(p["at"], "h")] for p in t["parts"]]
+            db.execute("INSERT INTO facts VALUES (?,?,?,?,?,?,?,?)",
+                       (t["id"], t["created_at"], t["updated_at"], 1, "r", "other", 0, json.dumps(events)))
+        db.execute("INSERT INTO readings VALUES (?,?,?)", (taken, "week", "{}"))
+        db.commit()
+        db.close()
+        return path
+
+    def state(self, last, who="a", ago=60, **kw):
+        t = thread([part(ago, who, last)], cid="1", **kw)
+        doc, _ = self.census([t])
+        return doc["by_state"], doc["by_reason"]
+
+    def test_the_drains_holding_line_is_none_and_never_waiting_on_the_customer(self):
+        # It asks the customer to restate a question we already have. Counting it as waiting-on-customer would
+        # make the lingering number fall while nothing was answered.
+        states, reasons = self.state(self.HOLDING)
+        self.assertEqual(states["none"], 1)
+        self.assertEqual(states["waiting_on_customer"], 0)
+        self.assertEqual(reasons, {"holding_line": 1})
+
+    def test_the_handoff_line_is_none_because_the_person_it_promises_does_not_exist(self):
+        states, reasons = self.state(self.HANDOFF)
+        self.assertEqual(states["none"], 1)
+        self.assertEqual(reasons, {"promise_no_person": 1})
+
+    def test_a_refuse_with_its_reason_and_what_would_change_it_is_decided(self):
+        states, reasons = self.state(self.DECIDED)
+        self.assertEqual(states["decided"], 1)
+        self.assertEqual(reasons, {"decision": 1})
+
+    def test_a_question_naming_one_item_is_waiting_on_the_customer(self):
+        states, _ = self.state(self.WHICH_ONE)
+        self.assertEqual(states["waiting_on_customer"], 1)
+
+    def test_a_gdpr_acknowledgement_that_asks_for_the_identity_step_waits_on_the_customer(self):
+        states, _ = self.state(self.GDPR_ACK)
+        self.assertEqual(states["waiting_on_customer"], 1)
+
+    def test_a_status_answer_owes_nothing_and_is_answered(self):
+        states, reasons = self.state(self.STATUS)
+        self.assertEqual(states["answered"], 1)
+        self.assertEqual(reasons, {"fact_given": 1})
+
+    def test_a_closing_line_is_answered(self):
+        states, _ = self.state("Anytime, Ricardo!")
+        self.assertEqual(states["answered"], 1)
+
+    def test_a_line_in_a_language_these_rules_cannot_read_is_none_and_named(self):
+        # Caroline answers in the customer's language, so a third of her outbound lines are not English. The
+        # fail-closed direction: an unread line counted as answered is a conversation nobody looks at again.
+        states, reasons = self.state("Здравствуйте, Руслан! В Muso нельзя загрузить аудиотрек для публикации.")
+        self.assertEqual(states["none"], 1)
+        self.assertEqual(reasons, {"not_english": 1})
+
+    def test_a_spanish_reply_is_not_read_as_an_english_answer(self):
+        states, reasons = self.state("Tienes razón, Dao. He añadido a tu solicitud una petición concreta: que te "
+                                     "indiquen si falta algún paso de tu parte o que resuelvan el acceso al perfil.")
+        self.assertEqual(reasons, {"not_english": 1})
+
+    def test_a_short_english_closing_line_is_still_an_answer(self):
+        states, _ = self.state("You got it, Gadzu.")
+        self.assertEqual(states["answered"], 1)
+
+    def test_a_cannot_with_no_next_step_behind_it_is_none(self):
+        # The Joel Ward shape: a dead end is not an answer.
+        states, reasons = self.state("I haven't received a human response about your request, and I can't tell "
+                                     "you when one will come.")
+        self.assertEqual(states["none"], 1)
+        self.assertEqual(reasons, {"only_cannot": 1})
+
+    def test_a_cannot_that_names_where_the_outcome_comes_from_is_an_answer(self):
+        states, _ = self.state("I can't promise the songs will be removed. Any outcome on the original request "
+                               "will appear here and by email.")
+        self.assertEqual(states["answered"], 1)
+
+    def test_the_customer_speaking_last_is_none(self):
+        states, reasons = self.state(ASK, who="c")
+        self.assertEqual(states["none"], 1)
+        self.assertEqual(reasons, {"customer_last": 1})
+
+    def test_we_spoke_last_and_the_customer_has_been_silent_ninety_days_is_closed_stale(self):
+        states, reasons = self.state("Anytime, Ricardo!", ago=coach.STALE_DAYS * 24 * 60 + 60,
+                                      first_ago=coach.STALE_DAYS * 24 * 60 + 200)
+        self.assertEqual(states["closed_stale"], 1)
+        self.assertEqual(reasons, {"silent_90d": 1})
+
+    def test_a_person_holding_a_thread_the_customer_spoke_last_on_is_counted_apart(self):
+        t = thread([part(60, "c", ASK)], cid="1", admin_assignee=PERSON)
+        doc, _ = self.census([t])
+        self.assertEqual(doc["humans_assigned"], 1)
+        self.assertEqual(doc["by_reason"], {"held_by_person": 1})
+
+    def test_the_line_puts_none_first_and_carries_humans_assigned_and_the_hours_frustration(self):
+        threads = [thread([part(60, "c", ASK)], cid="1"),
+                   thread([part(60, "a", "Anytime, Ricardo!")], cid="2"),
+                   thread([part(5, "c", "This is ridiculous, I have been waiting for weeks")], cid="3")]
+        doc, _ = self.census(threads)
+        text = coach.census_line(doc)
+        self.assertLess(text.index("none "), text.index("answered "))
+        self.assertIn("humans-assigned 0", text)
+        self.assertIn("frustrated this hour 1", text)
+        self.assertTrue(doc["frustrated_top"] and doc["frustrated_top"][0]["count"] == 1)
+
+    def test_the_output_carries_no_message_text(self):
+        doc, _ = self.census([thread([part(60, "a", self.DECIDED)], cid="1")])
+        blob = json.dumps(doc)
+        self.assertNotIn("resubmit", blob)
+        self.assertNotIn("Muso profile", blob)
+
+    def test_a_second_run_reads_only_the_threads_that_changed(self):
+        t1 = thread([part(60, "a", "Anytime, Ricardo!")], cid="1")
+        t2 = thread([part(60, "a", "Anytime, Ricardo!")], cid="2")
+        db = self.facts([t1, t2])
+        first, api1 = self.census([t1, t2], db=db)
+        self.assertEqual(first["read"], 2)
+        self.assertEqual(first["cached"], 0)
+        second, api2 = self.census([t1, t2], db=db)
+        self.assertEqual(second["read"], 0)
+        self.assertEqual(second["cached"], 2)
+        self.assertEqual(second["by_state"], first["by_state"])
+        self.assertEqual([c for c in api2.calls if c[0] == "GET"], [])
+
+    def test_the_hours_frustration_is_read_against_now_and_never_frozen_by_the_cache(self):
+        # The row is cached until the thread changes, so a boolean decided at read time would carry last hour's
+        # answer into every hour after it: the window is applied when the reading is put together.
+        t = thread([part(30, "c", "This is ridiculous, I have been waiting for weeks"), part(20, "a", "Anytime!")],
+                   cid="1", first_ago=90)
+        db = self.facts([t])
+        cache = os.path.join(self.tmp, "census.sqlite")
+        api = Intercom([t])
+        first = coach.census("tok", NOW, db, cache, request=api)
+        self.assertEqual(first["frustrated_this_hour"], 1)
+        later = coach.census("tok", NOW + 2 * coach.HOUR, db, cache, request=api)
+        self.assertEqual(later["cached"], 1)
+        self.assertEqual(later["frustrated_this_hour"], 0)
+
+    def test_a_reassignment_with_no_new_message_invalidates_the_cache(self):
+        # A thread handed from a person to automation writes an assignment part and no message, so the last
+        # event timestamp does not move while `held` does. The key is the thread's own `updated_at`, which
+        # Intercom moves on the reassignment - the monitor's own rule for "this thread changed".
+        t = thread([part(60, "a", "Anytime, Ricardo!")], cid="1")
+        db = self.facts([t])
+        cache = os.path.join(self.tmp, "census.sqlite")
+        api = Intercom([t])
+        first = coach.census("tok", NOW, db, cache, request=api)
+        self.assertEqual(first["humans_assigned"], 0)
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE facts SET updated_at = updated_at + 30 WHERE id = '1'")
+        conn.commit()
+        conn.close()
+        again = coach.census("tok", NOW, db, cache, request=api)
+        self.assertEqual(again["read"], 1)
+        self.assertEqual(again["cached"], 0)
+
+    def test_a_thread_that_changed_is_read_again_and_its_new_state_wins(self):
+        t = thread([part(60, "a", "Anytime, Ricardo!")], cid="1")
+        db = self.facts([t])
+        self.census([t], db=db)
+        moved = dict(t, updated_at=t["updated_at"] + 60,
+                     parts=[part(60, "a", "Anytime, Ricardo!"), part(1, "c", ASK)])
+        db2 = self.facts([moved])
+        doc, _ = self.census([moved], db=db2)
+        self.assertEqual(doc["read"], 1)
+        self.assertEqual(doc["by_reason"], {"customer_last": 1})
+
+    def test_facts_that_cannot_be_read_are_not_measured_and_never_zero(self):
+        doc, _ = self.census([], db=os.path.join(self.tmp, "nope.sqlite"))
+        self.assertIn("not_measured_reason", doc)
+        self.assertNotIn("by_state", doc)
+        self.assertTrue(coach.census_line(doc).startswith("NOT MEASURED"))
+
+    def test_a_cache_that_cannot_be_written_still_gives_a_reading(self):
+        t = thread([part(60, "a", "Anytime, Ricardo!")], cid="1")
+        doc, _ = self.census([t], cache=os.path.join(self.tmp, "nope", "deep", "census.sqlite"))
+        self.assertEqual(doc["by_state"]["answered"], 1)
+
+    def test_a_line_no_rule_matches_is_none_and_never_answered(self):
+        # "We are looking into this." gives no fact and names no next step. Counting it as answered would lower
+        # the lingering number while nothing was answered, which is the one thing this census must not do.
+        states, reasons = self.state("We are looking into this.")
+        self.assertEqual(states["none"], 1)
+        self.assertEqual(states["answered"], 0)
+        self.assertEqual(reasons, {"unclassified": 1})
+
+    def test_a_real_answer_shape_is_answered(self):
+        states, reasons = self.state("You're right to call it out. I offered one month free on the subscription "
+                                     "and I can see it is still active on your account.")
+        self.assertEqual(states["answered"], 1)
+        self.assertEqual(reasons, {"fact_given": 1})
+
+    def test_a_question_in_another_language_is_not_read_as_a_named_ask(self):
+        # It carries a question mark, and the question-mark rule must not read it as a named ask in a language
+        # these English rules cannot parse.
+        states, reasons = self.state("\u00bfPuedes ayudarme?")
+        self.assertEqual(states["waiting_on_customer"], 0)
+        self.assertEqual(reasons, {"not_english": 1})
+
+    def test_a_cached_answer_becomes_closed_stale_when_the_ninety_days_pass(self):
+        # The boundary is time, not a change to the thread: a row cached as answered on day 89 would otherwise
+        # be served unchanged on day 90 forever.
+        t = thread([part(89 * 24 * 60, "a", "Anytime, Ricardo!")], cid="1", first_ago=90 * 24 * 60)
+        db = self.facts([t])
+        cache = os.path.join(self.tmp, "census.sqlite")
+        api = Intercom([t])
+        first = coach.census("tok", NOW, db, cache, request=api)
+        self.assertEqual(first["by_state"]["answered"], 1)
+        later = coach.census("tok", NOW + 2 * coach.DAY, db, cache, request=api)
+        self.assertEqual(later["cached"], 1)
+        self.assertEqual(later["by_state"]["closed_stale"], 1)
+        self.assertEqual(later["by_state"]["answered"], 0)
+
+    def test_a_thread_that_could_not_be_read_is_counted_apart_and_never_a_zero(self):
+        # A partial reading must never be readable as a complete one with a lower `none`.
+        t1 = thread([part(60, "a", "Anytime, Ricardo!")], cid="1")
+        t2 = thread([part(60, "a", "Anytime, Ricardo!")], cid="2")
+        doc, _ = self.census([t1, t2], fail=("2",))
+        self.assertEqual(doc["unread"], 1)
+        self.assertFalse(doc["complete"])
+        self.assertEqual(doc["classified"], 1)
+        self.assertIn("PARTIAL: 1 unread, in no state", coach.census_line(doc))
+
+    def test_the_line_says_how_old_the_facts_it_read_are(self):
+        # The census reads the monitor's facts, so it is only as fresh as the monitor's last pass. A reading
+        # served from an hour-old facts file is not a reading of the last hour, and the line has to say so.
+        doc, _ = self.census([thread([part(60, "a", "Anytime, Ricardo!")], cid="1")])
+        self.assertEqual(doc["facts_age_min"], 30)
+        self.assertIn("| facts 30m old", coach.census_line(doc))
+
+    def test_a_bare_refusal_is_none_and_never_a_decision(self):
+        # "Your request was denied." gives no way forward: a dead end, not a decision. The approved decline
+        # paragraph carries what would change it, and that is what makes it one. A reason is never required:
+        # the doctrine forbids explaining why a request failed.
+        self.assertEqual(coach.classify_last("Your request was denied."), ("none", "refusal_no_way_forward"))
+        self.assertEqual(
+            coach.classify_last("A request is closed when the supporting information we received wasn't "
+                                "enough to confirm the credit. You can resubmit for the credit again later."),
+            ("decided", "decision"))
+
+    def test_the_approved_decline_copy_is_a_decision(self):
+        # The one refusal copy the answer bank approves: a process reason and a way forward, no judgement
+        # about their document. If this is not `decided`, the most common refusal in the inbox reads as a
+        # dead end.
+        states, reasons = self.state(
+            "A request is closed when the supporting information we received wasn't enough to confirm the "
+            "credit. You can submit it again with your supporting documents and a fresh review starts from "
+            "the beginning. I can't see the review itself, so I can't tell you more than that.")
+        self.assertEqual(states["decided"], 1)
+        self.assertEqual(reasons, {"decision": 1})
+
+    def test_a_refusal_that_names_an_item_to_send_is_waiting_on_the_customer(self):
+        # QA round 3 on #2049: the refusal guard ran before the ask rules, so a refusal that names exactly
+        # what to send was counted as a dead end. The customer has one named item, which is the definition
+        # of waiting_on_customer, and counting it as `none` inflated the lingering number.
+        self.assertEqual(
+            coach.classify_last("We cannot approve this without proof. Could you send us your agreement?"),
+            ("waiting_on_customer", "asks_customer"))
+        states, reasons = self.state("We cannot approve this without proof. Could you send us your agreement?")
+        self.assertEqual(states["waiting_on_customer"], 1)
+        self.assertEqual(reasons, {"asks_customer": 1})
+
+    def test_a_refusal_ending_on_a_courtesy_question_is_still_a_dead_end(self):
+        # The bare question mark is deliberately not a named ask: "Any other questions?" is politeness, not
+        # an item the customer owes us, and reading it as one would hide the dead end.
+        self.assertEqual(coach.classify_last("Your request was denied. Any other questions?"),
+                         ("none", "refusal_no_way_forward"))
+
+    def test_a_refusal_with_no_way_forward_is_not_a_decision(self):
+        # "Your request was denied." alone leaves the customer with nothing to do, so it is a dead end and
+        # not a decision. A refusal is never required to carry a REASON: the doctrine forbids explaining why
+        # a request failed ("Never explain the JUDGEMENT"), so a way forward is the whole of what it can say.
+        states, reasons = self.state("Your request was denied.")
+        self.assertEqual(states["decided"], 0)
+        self.assertEqual(reasons, {"refusal_no_way_forward": 1})
+
+    def test_the_approved_mixed_outcome_line_is_a_decision_without_a_reason(self):
+        # The answer bank's own batch-decision copy: a way forward and no reason, because a reason is
+        # forbidden. If this reads as `none`, the most common refusal in the inbox reads as a dead end.
+        states, reasons = self.state(
+            "Every credit request on your account has been reviewed. The approved credits are on your Muso "
+            "profile. The others were denied for now. You can resubmit for those credits again later.")
+        self.assertEqual(states["decided"], 1)
+        self.assertEqual(reasons, {"decision": 1})
+
+    def test_a_dead_end_cannot_is_not_answered_by_the_courtesy_line_after_it(self):
+        # "Thanks for the details" is a courtesy, not a fact given. The dead-end check runs before the
+        # generic answer patterns, or this lowers the lingering count with nothing answered.
+        states, reasons = self.state("I cannot remove this. Thanks for the details.")
+        self.assertEqual(states["answered"], 0)
+        self.assertEqual(reasons, {"only_cannot": 1})
+
+    def test_a_courtesy_invitation_never_settles_a_thread_that_said_nothing(self):
+        # QA round 6 on #2049. "We are looking into this." is neither a fact nor a task, and the courtesy
+        # sentence after it must not make it one: the question mark would read as a named ask and "let me
+        # know" as a fact given. Both settle a thread nobody resolved, which is the number this census exists
+        # to report. The courtesy sentence is removed before any rule reads the line.
+        self.assertEqual(coach.classify_last("We are looking into this. Any other questions?"),
+                         ("none", "unclassified"))
+        self.assertEqual(coach.classify_last("We are looking into this. Let me know if you need anything else."),
+                         ("none", "unclassified"))
+        # A real answer in front of the same courtesy sentence is still an answer.
+        self.assertEqual(coach.classify_last("Your profile is now verified. Let me know if you need anything else."),
+                         ("answered", "fact_given"))
+        # QA round 7 on #2049: a comma is as much a clause boundary as a full stop. The match starts at the
+        # nearest CLAUSE, so an answer joined to the courtesy by a comma keeps its first clause. Starting at the
+        # previous full stop erased the answer with the courtesy.
+        for joined in ("Your profile is now verified, let me know if you need anything else.",
+                       "Your profile is now verified, let me know if you need anything else"):
+            self.assertEqual(coach.classify_last(joined), ("answered", "fact_given"), joined)
+        self.assertEqual(coach.classify_last("Your profile is now verified! Any other questions?"),
+                         ("answered", "fact_given"))
+        # A refusal keeps its verdict on the comma form too.
+        self.assertEqual(coach.classify_last("Your request was denied, let me know if you need anything else."),
+                         ("none", "refusal_no_way_forward"))
+
+    def test_a_courtesy_invitation_never_turns_a_cannot_into_an_answer_or_a_wait(self):
+        # QA round 4 on #2049, both variants. "Let me know if you have any other questions" is not a place the
+        # outcome comes from, and "Reply here if you need anything else" is not an item the customer owes us.
+        # Either reading hides a request nobody resolved, which is the number this census exists to report.
+        self.assertEqual(
+            coach.classify_last("I cannot tell you when the review will finish. Let me know if you have any "
+                                "other questions."),
+            ("none", "only_cannot"))
+        self.assertEqual(
+            coach.classify_last("I cannot remove this. Reply here if you need anything else."),
+            ("none", "only_cannot"))
+
+    def test_a_bare_could_you_is_not_a_named_ask(self):
+        # QA round 5 on #2049. The verb after "could you" decides everything: "Could you send us your
+        # agreement?" asks for an item, and "Could you let us know if you have any other questions?" asks
+        # for nothing. A bare "could you" read as an ask turns a dead end into a wait.
+        self.assertEqual(
+            coach.classify_last("I cannot remove this. Could you let me know if you need anything else?"),
+            ("none", "only_cannot"))
+        self.assertEqual(
+            coach.classify_last("Your request was denied. Could you let us know if you have any other "
+                                "questions?"),
+            ("none", "refusal_no_way_forward"))
+        # The concrete asks still count, including one that names a choice rather than a document.
+        self.assertEqual(coach.classify_last("Could you tell us which track you meant?"),
+                         ("waiting_on_customer", "asks_customer"))
+
+    def test_a_name_or_a_title_inside_an_english_reply_does_not_make_it_unreadable(self):
+        # QA round 4 on #2049. "de" and "la" are ordinary Spanish words and also ordinary name and title
+        # tokens, so a vocabulary check that runs on every line counts resolved music-profile threads as
+        # lingering. A long line is decided by its English function words; only a line too short for a ratio
+        # is judged by its vocabulary.
+        self.assertEqual(coach.classify_last("Your profile for De La Cruz is now verified."),
+                         ("answered", "fact_given"))
+        self.assertEqual(coach.classify_last("The track La Vida is now on your profile."),
+                         ("answered", "fact_given"))
+        # The short-line path still refuses a line that is only foreign words.
+        self.assertEqual(coach.classify_last("Merci beaucoup!"), ("none", "not_english"))
+        self.assertEqual(coach.classify_last("Gern, Franz!"), ("none", "not_english"))
+
+    def test_every_state_and_reason_is_named(self):
+        self.assertEqual(coach.CENSUS_STATES, ("none", "answered", "decided", "waiting_on_customer", "closed_stale"))
+        for state, reason, pattern in coach.CENSUS_RULES:
+            self.assertIn(state, coach.CENSUS_STATES)
+            self.assertTrue(reason and pattern.pattern)
+
 
 if __name__ == "__main__":
     unittest.main()
