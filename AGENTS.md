@@ -639,6 +639,12 @@ already wrote (`scripts/qa-handoff-publish.sh`, which used to report a landed PO
 "this head now has NO hand-off"). Timing-bound suites also miss deadlines on a 2-CPU
 pod; fix the shard/`--jobs` budget, not the assertion.
 
+**A gate that compares a PR with its base reads the tree's OWN base, never main's tip.** The checkout is
+`refs/pull/N/merge` at depth 1, and a re-run (or `pr-rerun-sweep`) checks that same old merge commit out again, so
+main's tip at job time is newer than the tree. On 2026-11-16 the answer-bank gate fetched main's tip and failed
+PRs that touch no bank file once main bumped `BANK_VERSION`. Use the merge commit's first parent (fetch it:
+`git fetch --depth=2 origin "$(git rev-parse HEAD)"`), as `scripts/check-caroline-answer-bank.sh --pr-base` does.
+
 **A test class defined below `unittest.main()` never runs in CI.** PR Validation invokes most
 Python suites as `python3 scripts/tests/<file>.py`, and `unittest.main()` discovers only the
 classes that exist when it is called — so a class appended after the `__main__` block is

@@ -120,3 +120,124 @@ _edit_copy_and_repin() {
   [ "$status" -eq 2 ]
   [[ "$output" == *"cannot be skipped"* ]]
 }
+
+# --- --pr-base: the tree's OWN base, never main's moving tip (al-answer-bank-base-a2, 2026-11-16) -------------
+# GitHub checks out refs/pull/N/merge, a merge commit whose first parent is main AS IT WAS when the merge was made;
+# a re-run or the re-run sweep checks that same commit out again hours later. Comparing against main's tip then
+# failed PRs that touch no bank file the moment main bumped the bank (#2126 vs #2040's bump). Each case builds the
+# history for real: main, a PR branch, GitHub's merge commit on the OLD main, then main moving on.
+
+_g() { git -C "$FAKE" -c user.email=t@t -c user.name=t "$@"; }
+
+# main = the real bank; pr = the PR branch off it; HEAD = detached merge commit (pr into the old main);
+# then main moves on and bumps the bank. Optional $1: a function run on the PR branch before its commit.
+_pr_fixture() {
+  git -C "$FAKE" init -q -b main
+  _g add -A && _g commit -qm base
+  _g checkout -qb pr
+  echo "unrelated" > "$FAKE/UNRELATED.md"
+  [ -z "${1:-}" ] || "$1"
+  _g add -A && _g commit -qm "pr: work"
+  _g checkout -q --detach main
+  _g merge -q --no-ff -m "Merge pr into main" pr
+  MERGE="$(git -C "$FAKE" rev-parse HEAD)"
+  _g checkout -q main
+  # main bumps the bank after the merge commit was made (a later copy PR such as #2040)
+  sed -i.bak -e 's/BANK_VERSION = "\([0-9-]*\)\.\([0-9]*\)"/BANK_VERSION = "\1.9\2"/' \
+             -e 's/We never ask for ID\./We never ask for any ID./' "$BANK"
+  sed -i.bak 's/We never ask for ID\./We never ask for any ID./' "$FAQ"
+  rm -f "$BANK.bak" "$FAQ.bak"
+  _g add -A && _g commit -qm "main: bank bump"
+  _g checkout -q --detach "$MERGE"
+}
+
+@test "--pr-base: a PR that touches no bank file passes after main bumped the bank" {
+  _pr_fixture
+  run env REPO_ROOT="$FAKE" bash "$GATE" --pr-base main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"first parent of the merge commit HEAD"* ]]
+  [[ "$output" == *"OK: Caroline answer bank"* ]]
+}
+
+@test "CAN FAIL: the same tree against main's tip (the old --base) fails -- the fixture reproduces #2126" {
+  _pr_fixture
+  run env REPO_ROOT="$FAKE" bash "$GATE" --base main
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"is not greater than"* ]]
+}
+
+@test "MUTATION: a gate whose --pr-base resolves to main's tip turns the untouched PR red" {
+  _pr_fixture
+  local mutant="$BATS_TEST_TMPDIR/mutant.sh"
+  sed 's|BASE="${parents\[1\]}"|BASE="$(git -C "$ROOT" rev-parse "$MAIN_REF")"|' "$GATE" > "$mutant"
+  ! cmp -s "$GATE" "$mutant"                # the mutation applied (the resolver line still exists)
+  run env REPO_ROOT="$FAKE" bash "$mutant" --pr-base main
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"is not greater than"* ]]
+}
+
+@test "--pr-base: a PR head checked out directly (no merge commit) uses the merge base, and passes" {
+  _pr_fixture
+  _g checkout -q pr
+  run env REPO_ROOT="$FAKE" bash "$GATE" --pr-base main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"merge base of HEAD and main"* ]]
+}
+
+_pr_edits_line_no_bump() { _edit_copy_and_repin; }
+
+@test "CAN FAIL: --pr-base: a PR that edits a bank line (anchor + pin too) without a bump still fails" {
+  _pr_fixture _pr_edits_line_no_bump
+  run env REPO_ROOT="$FAKE" bash "$GATE"
+  [ "$status" -eq 0 ]                       # the pin alone is satisfied ...
+  run env REPO_ROOT="$FAKE" bash "$GATE" --pr-base main
+  [ "$status" -eq 1 ]                       # ... the comparison with the PR's own base is not
+  [[ "$output" == *"is not greater than"* ]]
+}
+
+_pr_lowers_version() {
+  sed -i.bak 's/BANK_VERSION = "[^"]*"/BANK_VERSION = "2000-01-01.1"/' "$BANK"; rm -f "$BANK.bak"
+  local gate="$BATS_TEST_TMPDIR/gate.sh"
+  sed 's/PINNED_VERSION="[^"]*"/PINNED_VERSION="2000-01-01.1"/' "$GATE" > "$gate"
+  GATE="$gate"
+}
+
+@test "CAN FAIL: --pr-base: a PR whose BANK_VERSION goes backwards still fails" {
+  _pr_fixture _pr_lowers_version
+  run env REPO_ROOT="$FAKE" bash "$GATE"
+  [ "$status" -eq 0 ]
+  run env REPO_ROOT="$FAKE" bash "$GATE" --pr-base main
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"went backwards"* ]]
+}
+
+@test "CAN FAIL: --pr-base with a main ref that does not resolve fails, never skips" {
+  _pr_fixture
+  run env REPO_ROOT="$FAKE" bash "$GATE" --pr-base no-such-ref
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"cannot be skipped"* ]]
+}
+
+@test "CAN FAIL: a depth-1 checkout of the merge commit fails until its parents are fetched (the CI steps)" {
+  _pr_fixture
+  _g update-ref refs/pull/1/merge "$MERGE"
+  local ci="$BATS_TEST_TMPDIR/ci"
+  git init -q "$ci"
+  git -C "$ci" fetch -q --no-tags --depth=1 "file://$FAKE" "+$MERGE:refs/remotes/pull/1/merge"
+  git -C "$ci" checkout -q --detach "$MERGE"
+  git -C "$ci" fetch -q --no-tags --depth=1 "file://$FAKE" "+refs/heads/main:refs/remotes/origin/answer-bank-base"
+  run env REPO_ROOT="$ci" bash "$GATE" --pr-base origin/answer-bank-base
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"shallow boundary"* ]]
+  git -C "$ci" fetch -q --no-tags --depth=2 "file://$FAKE" "$(git -C "$ci" rev-parse HEAD)"
+  run env REPO_ROOT="$ci" bash "$GATE" --pr-base origin/answer-bank-base
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"first parent of the merge commit HEAD"* ]]
+}
+
+@test "the CI step passes --pr-base and fetches the merge commit's parents, never --base at main's tip" {
+  local wf="$REAL_ROOT/.github/workflows/pr-validate.yml"
+  grep -q 'git fetch --no-tags --depth=2 origin "$(git rev-parse HEAD)"' "$wf"
+  grep -q 'check-caroline-answer-bank.sh --pr-base origin/answer-bank-base' "$wf"
+  ! grep -q 'check-caroline-answer-bank.sh --base' "$wf"
+}

@@ -3026,12 +3026,16 @@ jobs:
       - name: Caroline answer-bank doctrine gate (one versioned set of approved lines)
         # caroline-guard-g1: every line in plugins/intercom/src/answer-bank.ts is in its workspace anchor
         # verbatim, pending copy PRs are not already live, and a copy change bumps BANK_VERSION + the pin.
-        # Needs node >= 22.6 (--experimental-strip-types), hence this job. --base: the bank at the PR base is the
-        # independent monotonic source, so changed lines without a BANK_VERSION bump fail even when the pin moved.
+        # Needs node >= 22.6 (--experimental-strip-types), hence this job. --pr-base: the bank at the PR's OWN base
+        # (the first parent of the checked-out merge commit) is the independent monotonic source, so changed lines
+        # without a BANK_VERSION bump fail even when the pin moved. Never main's current tip: a re-run checks out
+        # the same old merge commit, and main bumping the bank since then failed PRs that touch no bank file
+        # (#2120, #2126 on 2026-11-16). Checkout is depth 1, so fetch the merge commit's parents first.
         run: |
           set -euo pipefail
+          git fetch --no-tags --depth=2 origin "$(git rev-parse HEAD)"
           git fetch --no-tags --depth=1 origin "+refs/heads/${{ github.base_ref || 'main' }}:refs/remotes/origin/answer-bank-base"
-          bash scripts/check-caroline-answer-bank.sh --base origin/answer-bank-base
+          bash scripts/check-caroline-answer-bank.sh --pr-base origin/answer-bank-base
       - name: deploy install path matches CI (pnpm --frozen-lockfile)
         # Guards the #385 / Deploy HYDRA #217 class-of-bug: this CI job
         # installs plugins with `pnpm install --frozen-lockfile` (pinned,

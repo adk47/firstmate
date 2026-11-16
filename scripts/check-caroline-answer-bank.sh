@@ -24,12 +24,49 @@ BANK="$ROOT/$REL"
 WS="$ROOT/workspaces/support"
 [ -f "$BANK" ] || { echo "Missing $BANK" >&2; exit 2; }
 
-# --base REF (CI passes the PR base): the bank at REF is the independent monotonic source. If the
-# lines differ from REF, BANK_VERSION must be strictly greater than REF's -- editing the copy, the
-# anchor AND the pin together still cannot skip the bump. A --base that does not resolve FAILS
-# (never silently skipped); a bank absent at REF is a first introduction.
+# --base REF: the bank at REF is the independent monotonic source. If the lines differ from REF,
+# BANK_VERSION must be strictly greater than REF's -- editing the copy, the anchor AND the pin
+# together still cannot skip the bump. A --base that does not resolve FAILS (never silently
+# skipped); a bank absent at REF is a first introduction.
+#
+# --pr-base MAIN_REF (what CI passes): REF is the commit THIS TREE was built on, never MAIN_REF's
+# tip. When HEAD is a merge (GitHub's refs/pull/N/merge, which a re-run or the re-run sweep
+# checks out again hours later) that is its first parent, main as it stood when the merge was
+# made; otherwise it is `git merge-base HEAD MAIN_REF`. Against main's moving tip, a PR that
+# touches no bank file read as "lines changed without a bump" as soon as main bumped the bank
+# after its merge commit was made (2026-11-16: #2126 failed on #2040's bump). A shallow HEAD
+# (parents not fetched) or a MAIN_REF that does not resolve FAILS: we never guess the base.
 BASE=""
-[ "${1:-}" = "--base" ] && BASE="${2:?--base needs a git ref}"
+MAIN_REF=""
+case "${1:-}" in
+  --base) BASE="${2:?--base needs a git ref}" ;;
+  --pr-base) MAIN_REF="${2:?--pr-base needs the main ref (e.g. origin/main)}" ;;
+  "") ;;
+  *) echo "usage: $0 [--base REF | --pr-base MAIN_REF]" >&2; exit 2 ;;
+esac
+
+if [ -n "$MAIN_REF" ]; then
+  git -C "$ROOT" rev-parse --verify --quiet "$MAIN_REF^{commit}" >/dev/null \
+    || { echo "FAIL: --pr-base $MAIN_REF does not resolve in $ROOT (fetch it first); the version check cannot be skipped" >&2; exit 2; }
+  head="$(git -C "$ROOT" rev-parse --verify --quiet 'HEAD^{commit}')" \
+    || { echo "FAIL: HEAD does not resolve in $ROOT; the version check cannot be skipped" >&2; exit 2; }
+  shallow_file="$(cd "$ROOT" && git rev-parse --path-format=absolute --git-path shallow)"
+  if [ -f "$shallow_file" ] && grep -qx "$head" "$shallow_file"; then
+    echo "FAIL: HEAD $head is a shallow boundary, so its parents are unknown; fetch them first" \
+         "(git fetch --depth=2 origin $head). The version check cannot be skipped" >&2
+    exit 2
+  fi
+  read -r -a parents <<<"$(git -C "$ROOT" rev-list --parents -n 1 "$head")"
+  if [ "${#parents[@]}" -ge 3 ]; then
+    BASE="${parents[1]}"  # the first parent: the base this merge commit was made on
+    why="first parent of the merge commit HEAD"
+  else
+    BASE="$(git -C "$ROOT" merge-base "$head" "$MAIN_REF")" \
+      || { echo "FAIL: no merge base of HEAD and $MAIN_REF (fetch more history); the version check cannot be skipped" >&2; exit 2; }
+    why="merge base of HEAD and $MAIN_REF"
+  fi
+  echo "BASE: $BASE ($why)"
+fi
 
 dump_bank() {  # dump_bank <file>
   node --experimental-strip-types --no-warnings -e "
