@@ -54,11 +54,10 @@ sys.exit(int(os.environ.get("VERIFIER_RC", "0")))
 STUB
   export VERIFIER_ARGV
   export VERIFIER_RC=0
-  # BOTH writes - an approval and a duplicate close - are gated on a token file at ONE
-  # pinned path, /etc/hydra/scale-drain.token, and the wrapper REFUSES a
-  # SCALE_DRAIN_TOKEN_FILE override (QA review 4 of hydra#1883: a caller-selected file
-  # proved only that the caller could read back a file it had just written; review 5
-  # bound the approval to the same identity). So a test cannot aim the real text at a
+  # The drain's one write, an approval, is gated on a token file at ONE pinned path,
+  # /etc/hydra/scale-drain.token, and the wrapper REFUSES a SCALE_DRAIN_TOKEN_FILE
+  # override (QA review 4 of hydra#1883: a caller-selected file proved only that the
+  # caller could read back a file it had just written). So a test cannot aim the real text at a
   # scratch file through the environment - that seam was the hole. The cases that need a
   # token instead run a copy in which that ONE literal is rewritten to $TOKEN_FILE
   # (materialise's third argument). The pin and the refusal of an override are asserted
@@ -246,9 +245,6 @@ denied_both() {
   denied_both is_scale_drain_approval /admin/credit-requests "$BODY" \
     "drain-signal:precedent;precedent_match;v1;$UUID_ANCHOR;$PROFILE_ID" \
     "cannot be redirected" CREDIT_APPROVAL_REGISTRY="$mine"
-  denied_both is_scale_drain_duplicate_close /admin/credit-requests/conditional-status "$DUP_BODY" \
-    "drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" \
-    "cannot be redirected" CREDIT_APPROVAL_REGISTRY="$mine"
 }
 
 @test "a caller-supplied HYDRA_ROOT is DENIED as a registry source" {
@@ -258,9 +254,6 @@ denied_both() {
   unapprove_deployed_registry
   denied_both is_scale_drain_approval /admin/credit-requests "$BODY" \
     "drain-signal:precedent;precedent_match;v1;$UUID_ANCHOR;$PROFILE_ID" \
-    "cannot be redirected" HYDRA_ROOT="$mine"
-  denied_both is_scale_drain_duplicate_close /admin/credit-requests/conditional-status "$DUP_BODY" \
-    "drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" \
     "cannot be redirected" HYDRA_ROOT="$mine"
 }
 
@@ -272,9 +265,6 @@ denied_both() {
   check_both "drain-signal:precedent;precedent_match;v1;$UUID_ANCHOR;$PROFILE_ID" pass
   denied_both is_scale_drain_approval /admin/credit-requests "$BODY" \
     "drain-signal:precedent;precedent_match;v1;$UUID_ANCHOR;$PROFILE_ID" \
-    "cannot be redirected" CREDIT_APPROVAL_REGISTRY="$mine"
-  denied_both is_scale_drain_duplicate_close /admin/credit-requests/conditional-status "$DUP_BODY" \
-    "drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" \
     "cannot be redirected" CREDIT_APPROVAL_REGISTRY="$mine"
 }
 
@@ -295,10 +285,10 @@ denied_both() {
   done
 }
 
-@test "neither predicate takes the registry path from the environment" {
+@test "the approval does not take the registry path from the environment" {
   local f fn body
   for f in "$CANONICAL" "$WORKSPACE"; do
-    for fn in is_scale_drain_approval is_scale_drain_duplicate_close; do
+    for fn in is_scale_drain_approval; do
       body="$(sed -n "/^${fn}() {\$/,/^}\$/p" "$f")"
       [[ -n "$body" ]] || { echo "$f: $fn not found" >&2; return 1; }
       ! grep -qE 'CREDIT_APPROVAL_REGISTRY|HYDRA_ROOT' <<<"$body" || {
@@ -389,53 +379,6 @@ denied_both() {
     "must be mode 600"
 }
 
-# ── duplicate close: autonomous, but only with a decided original ────────────
-
-DUP_BODY='{"expectedStatus":"user_verification_needed","requestIds":["11111111-1111-1111-1111-111111111111"],"status":"rejected"}'
-
-check_dup_both() {
-  local excerpt="$1" expect="$2"
-  local f script
-  for f in "$CANONICAL" "$WORKSPACE"; do
-    script="$(materialise "$f" is_scale_drain_duplicate_close "$TOKEN_FILE")"
-    EVIDENCE_EXCERPT="$excerpt" run bash "$script" /admin/credit-requests/conditional-status "$DUP_BODY"
-    if [[ "$expect" == "pass" ]]; then
-      [ "$status" -eq 0 ] || { echo "$f refused: $output" >&2; return 1; }
-    elif [[ "$expect" == "owner" ]]; then
-      [ "$status" -ne 0 ] || { echo "$f accepted without a root-owned token" >&2; return 1; }
-      [[ "$output" == *"must be mode 600 owned by the drain's user"* ]] || {
-        echo "$f refused for the wrong reason: $output" >&2; return 1; }
-    else
-      [ "$status" -ne 0 ] || { echo "$f accepted a bad duplicate close" >&2; return 1; }
-    fi
-  done
-}
-
-@test "duplicate close: accepts a digest naming the decided original" {
-  check_dup_both "drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" "$TOKEN_OK"
-}
-
-@test "duplicate close: refuses when the token file is missing" {
-  local f script
-  for f in "$CANONICAL" "$WORKSPACE"; do
-    script="$(materialise "$f" is_scale_drain_duplicate_close "$BATS_TEST_TMPDIR/absent.token")"
-    EVIDENCE_EXCERPT="drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" run bash "$script" /admin/credit-requests/conditional-status "$DUP_BODY"
-    [ "$status" -ne 0 ] || { echo "$f closed a duplicate with no token" >&2; return 1; }
-    [[ "$output" == *"root-only token"* ]] || { echo "$f refused for the wrong reason: $output" >&2; return 1; }
-  done
-}
-
-@test "duplicate close: refuses a token file that is readable by others" {
-  local f script
-  chmod 644 "$TOKEN_FILE"
-  for f in "$CANONICAL" "$WORKSPACE"; do
-    script="$(materialise "$f" is_scale_drain_duplicate_close "$TOKEN_FILE")"
-    EVIDENCE_EXCERPT="drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" run bash "$script" /admin/credit-requests/conditional-status "$DUP_BODY"
-    [ "$status" -ne 0 ] || { echo "$f accepted a mode-644 token" >&2; return 1; }
-    [[ "$output" == *"must be mode 600"* ]] || { echo "$f refused for the wrong reason: $output" >&2; return 1; }
-  done
-}
-
 # ── the token source is pinned: an override is DENIED, not merely ignored ────
 #
 # QA review 4 of hydra#1883. These run in two forms on purpose. Against the UNMODIFIED
@@ -443,8 +386,10 @@ check_dup_both() {
 # scratch token they prove the refusal is the override's doing: the same call passes one
 # line earlier, so "ignored" and "denied" cannot be confused.
 
-@test "the wrapper pins the token path once, for both writes, and reads it from no variable" {
-  local f body fn
+APPROVE_DIGEST_PARTS="drain-signal:precedent;precedent_match;v1"
+
+@test "the wrapper pins the token path once and reads it from no variable" {
+  local f body
   for f in "$CANONICAL" "$WORKSPACE"; do
     body="$(sed -n '/^scale_drain_token_ok() {$/,/^}$/p' "$f")"
     [[ "$body" == *"local drain_token_file=\"$PINNED_TOKEN_FILE\""* ]] || {
@@ -453,45 +398,56 @@ check_dup_both() {
       echo "$f assigns the token path more than once" >&2; return 1; }
     ! grep -qE 'drain_token_file=.*\$' "$f" || {
       echo "$f derives the token path from a variable" >&2; return 1; }
-    # both writes go through that one check, before anything else is consulted
-    for fn in is_scale_drain_approval is_scale_drain_duplicate_close; do
-      [ "$(sed -n "/^${fn}() {\$/,/^}\$/p" "$f" | grep -c '^    scale_drain_token_ok ".*" || return 1$')" -eq 1 ] || {
-        echo "$f: $fn does not require the token" >&2; return 1; }
-    done
+    # the approval goes through that one check
+    [ "$(sed -n '/^is_scale_drain_approval() {$/,/^}$/p' "$f" | grep -c '^    scale_drain_token_ok ".*" || return 1$')" -eq 1 ] || {
+      echo "$f: is_scale_drain_approval does not require the token" >&2; return 1; }
   done
 }
 
-@test "duplicate close: a caller-supplied SCALE_DRAIN_TOKEN_FILE is DENIED (the attack)" {
+@test "approve: refuses when the token file is missing" {
+  local f script
+  for f in "$CANONICAL" "$WORKSPACE"; do
+    rm -f "$VERIFIER_ARGV"
+    script="$(materialise "$f" is_scale_drain_approval "$BATS_TEST_TMPDIR/absent.token")"
+    EVIDENCE_EXCERPT="$APPROVE_DIGEST_PARTS;$UUID_ANCHOR;$PROFILE_ID" run bash "$script" /admin/credit-requests "$BODY"
+    [ "$status" -ne 0 ] || { echo "$f approved with no token file" >&2; return 1; }
+    [[ "$output" == *"root-only token"* ]] || { echo "$f refused for the wrong reason: $output" >&2; return 1; }
+    [[ ! -e "$VERIFIER_ARGV" ]] || { echo "$f reached the verifier with no token file" >&2; return 1; }
+  done
+}
+
+@test "approve: a caller-supplied SCALE_DRAIN_TOKEN_FILE is DENIED against the unmodified text (the attack)" {
   # The caller writes its own mode-600 file and presents its contents back: every check
   # the old gate made is satisfied, by a caller who holds no protected identity at all.
   local f script forged="$BATS_TEST_TMPDIR/forged.token"
   printf 'forged\n' > "$forged"
   chmod 600 "$forged"
   for f in "$CANONICAL" "$WORKSPACE"; do
-    script="$(materialise "$f" is_scale_drain_duplicate_close)"
+    rm -f "$VERIFIER_ARGV"
+    script="$(materialise "$f" is_scale_drain_approval)"
     SCALE_DRAIN_TOKEN_FILE="$forged" SCALE_DRAIN_TOKEN="forged" \
-      EVIDENCE_EXCERPT="drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" \
-      run bash "$script" /admin/credit-requests/conditional-status "$DUP_BODY"
-    [ "$status" -ne 0 ] || { echo "$f closed a duplicate on a caller-selected token file" >&2; return 1; }
+      EVIDENCE_EXCERPT="$APPROVE_DIGEST_PARTS;$UUID_ANCHOR;$PROFILE_ID" \
+      run bash "$script" /admin/credit-requests "$BODY"
+    [ "$status" -ne 0 ] || { echo "$f approved on a caller-selected token file" >&2; return 1; }
     [[ "$output" == *"SCALE_DRAIN_TOKEN_FILE is set"*"cannot be redirected"* ]] || {
       echo "$f refused for the wrong reason: $output" >&2; return 1; }
     [[ ! -e "$VERIFIER_ARGV" ]] || { echo "$f reached the verifier on a forged token" >&2; return 1; }
   done
 }
 
-@test "duplicate close: a caller-supplied SCALE_DRAIN_TOKEN_FILE is DENIED even beside a valid token" {
+@test "approve: a caller-supplied SCALE_DRAIN_TOKEN_FILE is DENIED even beside a valid token" {
   local f script
   for f in "$CANONICAL" "$WORKSPACE"; do
-    script="$(materialise "$f" is_scale_drain_duplicate_close "$TOKEN_FILE")"
+    script="$(materialise "$f" is_scale_drain_approval "$TOKEN_FILE")"
     # the control: this exact call is accepted...
-    EVIDENCE_EXCERPT="drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" \
-      run bash "$script" /admin/credit-requests/conditional-status "$DUP_BODY"
+    EVIDENCE_EXCERPT="$APPROVE_DIGEST_PARTS;$UUID_ANCHOR;$PROFILE_ID" \
+      run bash "$script" /admin/credit-requests "$BODY"
     [ "$status" -eq 0 ] || { echo "$f refused the control: $output" >&2; return 1; }
     # ...and setting the variable is the ONLY difference, even to the very same file.
     rm -f "$VERIFIER_ARGV"
     SCALE_DRAIN_TOKEN_FILE="$TOKEN_FILE" \
-      EVIDENCE_EXCERPT="drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" \
-      run bash "$script" /admin/credit-requests/conditional-status "$DUP_BODY"
+      EVIDENCE_EXCERPT="$APPROVE_DIGEST_PARTS;$UUID_ANCHOR;$PROFILE_ID" \
+      run bash "$script" /admin/credit-requests "$BODY"
     [ "$status" -ne 0 ] || { echo "$f ignored SCALE_DRAIN_TOKEN_FILE instead of refusing it" >&2; return 1; }
     [[ "$output" == *"SCALE_DRAIN_TOKEN_FILE is set"*"cannot be redirected"* ]] || {
       echo "$f refused for the wrong reason: $output" >&2; return 1; }
@@ -499,162 +455,72 @@ check_dup_both() {
   done
 }
 
-@test "duplicate close: an empty SCALE_DRAIN_TOKEN_FILE is still an override, and is DENIED" {
-  local f script
-  for f in "$CANONICAL" "$WORKSPACE"; do
-    script="$(materialise "$f" is_scale_drain_duplicate_close "$TOKEN_FILE")"
-    SCALE_DRAIN_TOKEN_FILE="" \
-      EVIDENCE_EXCERPT="drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" \
-      run bash "$script" /admin/credit-requests/conditional-status "$DUP_BODY"
-    [ "$status" -ne 0 ] || { echo "$f accepted an empty SCALE_DRAIN_TOKEN_FILE" >&2; return 1; }
-    [[ "$output" == *"cannot be redirected"* ]] || { echo "$f refused for the wrong reason: $output" >&2; return 1; }
-  done
+# ── the drain writes no `rejected`: there is no duplicate close ──────────────
+#
+# The drain used to close a duplicate of a decided request as `rejected` through a
+# predicate of its own. core sends its rejection notice on every move to `rejected`
+# and the closed row was read back as a refusal of the claim, so that write is gone.
+# These cases hold the REAL reject gate, sourced whole from each wrapper: the drain's
+# full identity (requester, SCALE_DRAIN, the digest the old predicate accepted) buys
+# nothing, on either route the old close could have taken.
+
+DUP_DIGEST_PARTS="drain-dup"
+
+# The whole wrapper, copied into the scratch tree (stub verifier that says yes, the
+# registry that approves the drain) with the pinned token literal rewritten to the
+# scratch token. Everything the old predicate asked for is therefore PRESENT and valid:
+# a refusal here is the gate's, not a missing token's or a failed verification's.
+whole_wrapper_with_token() {
+  local wrapper="$1" rel target
+  rel="${wrapper#"$REPO_ROOT"/}"
+  target="$TREE/$rel"
+  mkdir -p "$(dirname "$target")"
+  cp "$wrapper" "$target"
+  sed -i "s#local drain_token_file=\"$PINNED_TOKEN_FILE\"#local drain_token_file=\"$TOKEN_FILE\"#" "$target"
+  grep -qF "local drain_token_file=\"$TOKEN_FILE\"" "$target" || {
+    echo "whole_wrapper_with_token: $wrapper no longer pins the token path as a literal" >&2; return 1; }
+  printf '%s' "$target"
 }
 
-@test "duplicate close: a caller-supplied SCALE_DRAIN_TOKEN is DENIED" {
-  # The token is checked against the PINNED file, so a value the caller chose - rather
-  # than one it read from that file - is refused whatever else it supplies.
-  local f script chosen
+drain_reject_refused() {
+  # $1 = wrapper, $2 = path, $3 = body. The wrapper is sourced whole, in its own shell.
+  local wrapper="$1" path="$2" body="$3" audit="$BATS_TEST_TMPDIR/reject-audit.jsonl" script
+  script="$(whole_wrapper_with_token "$wrapper")"
+  rm -f "$audit" "$VERIFIER_ARGV"
+  # The wrapper clears the requester and the evidence at file scope (they are CLI
+  # flags), so they are set AFTER the source, as its own flag parsing would leave them.
+  run env -u CONFIRMED_BY -u APPROVAL_MSG_ID \
+    SCALE_DRAIN=1 SCALE_DRAIN_TOKEN=s3cret CREDIT_REJECT_AUDIT_PATH="$audit" \
+    DRAIN_DIGEST="$DUP_DIGEST_PARTS:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" \
+    bash -c 'source "$1"
+             REQUESTER_EMAIL="scale-drain@hydra-ops"; EVIDENCE_EXCERPT="$DRAIN_DIGEST"
+             CONFIRMED_BY=""; APPROVAL_MSG_ID=""
+             enforce_credit_reject_gate PUT "$2" "$3"' _ "$script" "$path" "$body"
+  [ "$status" -ne 0 ] || { echo "$wrapper let the drain reject on $path" >&2; return 1; }
+  [[ "$output" == *"MUSO_CREDIT_REJECT_APPROVAL_REQUIRED"* ]] || {
+    echo "$wrapper refused for the wrong reason: $output" >&2; return 1; }
+  [[ ! -e "$audit" ]] || { echo "$wrapper audited a drain reject as allowed: $(cat "$audit")" >&2; return 1; }
+  [[ ! -e "$VERIFIER_ARGV" ]] || { echo "$wrapper asked the verifier about a reject" >&2; return 1; }
+}
+
+@test "a rejected body from the drain's identity is refused by the reject gate" {
+  local f path
+  local one='{"expectedStatus":"user_verification_needed","requestIds":["11111111-1111-1111-1111-111111111111"],"status":"rejected"}'
+  local plain='{"requestIds":["11111111-1111-1111-1111-111111111111"],"status":"rejected"}'
   for f in "$CANONICAL" "$WORKSPACE"; do
-    script="$(materialise "$f" is_scale_drain_duplicate_close "$TOKEN_FILE")"
-    for chosen in "attacker-chosen" "s3cret " "S3CRET" ""; do
-      rm -f "$VERIFIER_ARGV"
-      SCALE_DRAIN_TOKEN="$chosen" \
-        EVIDENCE_EXCERPT="drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" \
-        run bash "$script" /admin/credit-requests/conditional-status "$DUP_BODY"
-      [ "$status" -ne 0 ] || { echo "$f accepted the caller's token '$chosen'" >&2; return 1; }
-      [[ "$output" == *"SCALE_DRAIN_TOKEN does not match"* ]] || {
-        echo "$f refused '$chosen' for the wrong reason: $output" >&2; return 1; }
-      [[ ! -e "$VERIFIER_ARGV" ]] || { echo "$f reached the verifier on '$chosen'" >&2; return 1; }
+    for path in /admin/credit-requests/conditional-status /admin/credit-requests; do
+      drain_reject_refused "$f" "$path" "$one"
+      drain_reject_refused "$f" "$path" "$plain"
     done
   done
 }
 
-@test "duplicate close: an unset SCALE_DRAIN_TOKEN is refused" {
-  local f script
+@test "no wrapper defines a duplicate-close predicate" {
+  local f names
   for f in "$CANONICAL" "$WORKSPACE"; do
-    script="$(materialise "$f" is_scale_drain_duplicate_close "$TOKEN_FILE")"
-    EVIDENCE_EXCERPT="drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" \
-      run env -u SCALE_DRAIN_TOKEN bash "$script" /admin/credit-requests/conditional-status "$DUP_BODY"
-    [ "$status" -ne 0 ] || { echo "$f closed a duplicate with no token presented" >&2; return 1; }
-    [[ "$output" == *"SCALE_DRAIN_TOKEN does not match"* ]] || {
-      echo "$f refused for the wrong reason: $output" >&2; return 1; }
+    names="$(bash -c 'source "$1"; declare -F' _ "$f" | awk '{print $3}')"
+    grep -qx 'is_scale_drain_approval' <<<"$names" || { echo "$f: the approval predicate is gone" >&2; return 1; }
+    ! grep -qi 'duplicate' <<<"$names" || {
+      echo "$f still defines: $(grep -i duplicate <<<"$names")" >&2; return 1; }
   done
-}
-
-@test "duplicate close: a caller's own token is DENIED against the real pinned path" {
-  # The unmodified text, the caller's own token, no override: the caller has nothing at
-  # $PINNED_TOKEN_FILE it could have placed. Skipped only on a host that carries the real
-  # token, where this would be reading a production secret's presence.
-  [[ ! -e "$PINNED_TOKEN_FILE" ]] || skip "$PINNED_TOKEN_FILE exists on this host"
-  local f script
-  for f in "$CANONICAL" "$WORKSPACE"; do
-    script="$(materialise "$f" is_scale_drain_duplicate_close)"
-    SCALE_DRAIN_TOKEN="attacker-chosen" \
-      EVIDENCE_EXCERPT="drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" \
-      run bash "$script" /admin/credit-requests/conditional-status "$DUP_BODY"
-    [ "$status" -ne 0 ] || { echo "$f closed a duplicate with no pinned token" >&2; return 1; }
-    [[ "$output" == *"$PINNED_TOKEN_FILE is missing"* ]] || {
-      echo "$f refused for the wrong reason: $output" >&2; return 1; }
-  done
-}
-
-@test "duplicate close: refuses a digest with no original" {
-  check_dup_both "drain-dup:;duplicate_of_decided;v1;$PROFILE_ID" fail
-}
-
-@test "duplicate close: refuses a malformed original" {
-  check_dup_both "drain-dup:not-a-uuid;duplicate_of_decided;v1;$PROFILE_ID" fail
-}
-
-@test "duplicate close: refuses the plain approve digest" {
-  check_dup_both "drain-signal:precedent;precedent_match;v1;$UUID_ANCHOR;$PROFILE_ID" fail
-}
-
-@test "duplicate close: refuses a body that is not a conditional close" {
-  local f script
-  for f in "$CANONICAL" "$WORKSPACE"; do
-    script="$(materialise "$f" is_scale_drain_duplicate_close "$TOKEN_FILE")"
-    EVIDENCE_EXCERPT="drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" run bash "$script" /admin/credit-requests/conditional-status \
-      "{\"requestIds\":[\"11111111-1111-1111-1111-111111111111\"],\"status\":\"rejected\"}"
-    [ "$status" -ne 0 ] || { echo "$f accepted a body with no expectedStatus" >&2; return 1; }
-  done
-}
-
-@test "duplicate close: a second request id is DENIED (one digest names one original)" {
-  # QA review 6 of hydra#1883: the predicate took up to 50 ids and handed the verifier
-  # only the first, so a valid duplicate in front closed every unrelated pending request
-  # behind it. Everything here is valid except the count.
-  local digest="drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID"
-  local first="11111111-1111-1111-1111-111111111111" other="33333333-3333-3333-3333-333333333333"
-  local want="exactly one requestId per duplicate close"
-  # the control: the same call with the one id passes
-  check_dup_both "$digest" pass
-  # a valid duplicate first, an unrelated request second
-  denied_both is_scale_drain_duplicate_close /admin/credit-requests/conditional-status \
-    "{\"expectedStatus\":\"user_verification_needed\",\"requestIds\":[\"$first\",\"$other\"],\"status\":\"rejected\"}" \
-    "$digest" "$want"
-  # the same id twice is still two writes named by one digest
-  denied_both is_scale_drain_duplicate_close /admin/credit-requests/conditional-status \
-    "{\"expectedStatus\":\"user_verification_needed\",\"requestIds\":[\"$first\",\"$first\"],\"status\":\"rejected\"}" \
-    "$digest" "$want"
-  # the old ceiling
-  local many
-  many="$(jq -cn --arg first "$first" '[$first] + [range(2; 51) | tostring | "00000000-0000-4000-8000-0000000000" + (if length < 2 then "0" + . else . end)]')"
-  [ "$(jq 'length' <<< "$many")" -eq 50 ]
-  denied_both is_scale_drain_duplicate_close /admin/credit-requests/conditional-status \
-    "{\"expectedStatus\":\"user_verification_needed\",\"requestIds\":$many,\"status\":\"rejected\"}" \
-    "$digest" "$want"
-}
-
-@test "duplicate close: an empty id list is refused" {
-  local f script
-  for f in "$CANONICAL" "$WORKSPACE"; do
-    rm -f "$VERIFIER_ARGV"
-    script="$(materialise "$f" is_scale_drain_duplicate_close "$TOKEN_FILE")"
-    EVIDENCE_EXCERPT="drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" run bash "$script" \
-      /admin/credit-requests/conditional-status \
-      '{"expectedStatus":"user_verification_needed","requestIds":[],"status":"rejected"}'
-    [ "$status" -ne 0 ] || { echo "$f accepted a close of nothing" >&2; return 1; }
-    [[ ! -e "$VERIFIER_ARGV" ]] || { echo "$f reached the verifier" >&2; return 1; }
-  done
-}
-
-@test "duplicate close: refuses when the drain is not the requester" {
-  export REQUESTER_EMAIL="someone-else@hydra-ops"
-  check_dup_both "drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" fail
-}
-
-@test "duplicate close: refuses when the registry entry is not approved" {
-  unapprove_deployed_registry
-  check_dup_both "drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" fail
-}
-
-@test "duplicate close: delegates the original to the verifier" {
-  check_dup_both "drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" "$TOKEN_OK"
-  local argv
-  argv="$(cat "$VERIFIER_ARGV")"
-  [[ "$argv" == *'"--rule", "duplicate"'* ]] || { echo "rule not passed: $argv" >&2; return 1; }
-  [[ "$argv" == *"$UUID_ANCHOR"* ]] || { echo "original not passed: $argv" >&2; return 1; }
-  [[ "$argv" == *"$PROFILE_ID"* ]] || { echo "profile not passed: $argv" >&2; return 1; }
-}
-
-@test "duplicate close: refuses when the original is not a decided duplicate" {
-  VERIFIER_RC=1 check_dup_both "drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" fail
-}
-
-@test "duplicate close: refuses when the verifier is missing" {
-  local f script saved="$TREE/scripts/credit_review/verify_anchor.py"
-  mv "$saved" "$saved.off"
-  for f in "$CANONICAL" "$WORKSPACE"; do
-    script="$(materialise "$f" is_scale_drain_duplicate_close "$TOKEN_FILE")"
-    EVIDENCE_EXCERPT="drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1;$PROFILE_ID" run bash "$script" /admin/credit-requests/conditional-status "$DUP_BODY"
-    [ "$status" -ne 0 ] || { echo "$f closed a duplicate with no verifier" >&2; return 1; }
-    [[ "$output" == *"cannot be located"* ]] || { echo "$f refused for the wrong reason: $output" >&2; return 1; }
-  done
-  mv "$saved.off" "$saved"
-}
-
-@test "duplicate close: refuses a digest with no profile id" {
-  check_dup_both "drain-dup:$UUID_ANCHOR;duplicate_of_decided;v1" fail
 }

@@ -35,7 +35,7 @@ The rank order (stop at the first match):
 
   | # | rule            | outcome                            | share of the 92,861 |
   |---|-----------------|------------------------------------|---------------------|
-  | 1 | duplicate       | close DUPLICATE                    | 6,631               |
+  | 1 | duplicate       | no write: left unmatched           | 6,631               |
   | 2 | precedent       | approve / cannot_confirm           | ~9,465              |
   | 3 | proof_verdict   | approve / ask on the verdict       | 1,755               |
   | 4 | expired         | cannot_confirm, with a reason code | the aged tail       |
@@ -115,15 +115,20 @@ RULES: tuple[str, ...] = ("duplicate", "precedent", "proof_verdict", "expired", 
 #:
 #: NO OUTCOME IS A PERSON (captain 2026-11-14: "there should be no humans involved except
 #: the customers giving proof and their statements"). This ladder emits ``approve``,
-#: ``ask``, ``cannot_confirm`` and ``close_duplicate``, and a wait is only ever on the
-#: customer. It does NOT emit ``reject``: the vocabulary has one, but no rule below
-#: produces it yet, and this module sends nothing to a customer - ``apply`` writes the API
-#: statuses in WRITE_STATUS and posts no message. A refusal becomes an autonomous outcome
-#: in a separate change, once the refusal guard exists. A duplicate close is
-#: autonomous - deduplication is not a new decision, the original decision stands, and the
-#: customer's outcome is unchanged (captain decision 2026-11-11).
+#: ``ask`` and ``cannot_confirm``, and a wait is only ever on the customer. It does NOT
+#: emit ``reject``: the vocabulary has one, but no rule below produces it yet, and this
+#: module sends nothing to a customer - ``apply`` writes the API statuses in WRITE_STATUS
+#: and posts no message. A refusal becomes an autonomous outcome in a separate change,
+#: once the refusal guard exists.
+#:
+#: The ``duplicate`` rule has no outcome of its own. It used to close the request as core
+#: ``rejected``. Core has no status for a duplicate, sends its rejection notice on every
+#: move to ``rejected`` and refuses ``notify: false`` on that move, and the next snapshot
+#: read the closed row as a refusal of the claim: a duplicate close told the customer
+#: "rejected" and became a refuse precedent. So a request that names a DECIDED original is
+#: not matched by the rule at all (the precedent rule reads that same decision by claim
+#: key), and what the rule still matches is ``unmatched``.
 OUTCOME_OF: dict[str, str] = {
-    "duplicate": "close_duplicate",
     "precedent": "approve",
     "proof_verdict": "verdict",     # approve | ask, from the computed verdict
     # An expiry is the clearest case for a definitive answer, not a queue: the customer
@@ -135,12 +140,19 @@ OUTCOME_OF: dict[str, str] = {
 #: Outcomes that perform an API write. ``ask`` belongs to need_asks.py, and
 #: ``cannot_confirm`` is recorded here but not written yet: a refusal becomes an
 #: autonomous API write only once the refusal guard exists.
-WRITING_OUTCOMES: tuple[str, ...] = ("approve", "close_duplicate")
+WRITING_OUTCOMES: tuple[str, ...] = ("approve",)
+
+#: Outcomes an older plan file may carry that this drain no longer performs, each with why.
+#: ``apply`` refuses a plan that holds one before it writes or records anything: recorded
+#: as applied, the row would say a close happened that did not.
+RETIRED_OUTCOMES: dict[str, str] = {
+    "close_duplicate": "a duplicate close wrote core 'rejected', which notifies the customer "
+                       "and reads as a refusal of the claim; plan again from a new snapshot",
+}
 
 #: The reason code a refusal names. A refusal without a code is not a refusal we can
 #: audit, so every refuse outcome carries one of these.
 REASON_CODES: dict[str, str] = {
-    "duplicate": "duplicate_of_decided",
     "precedent": "precedent_match",
     "proof_verdict_approve": "proof_verdict_approve",
     "proof_verdict_refuse": "proof_verdict_refuse",
@@ -159,8 +171,8 @@ REASON_CODES: dict[str, str] = {
     "unmatched_precedent": "unmatched_precedent",
     "unmatched_proof_verdict": "unmatched_proof_verdict",
     # ``verificationData.duplicate_of`` names credits ALREADY ON THE PROFILE, not a decided
-    # request: in core it is a map ``{"<track>|<role>": "<credit id>"}``. There is no
-    # original request for the gate to verify, so the drain cannot close it, and
+    # request: in core it is a map ``{"<track>|<role>": "<credit id>"}``. It names no
+    # request for a rule below to decide on, and
     # ``uvn_status.ask_class`` already rules such a request is never asked about. Counted,
     # never written, never asked.
     "already_on_profile": "already_on_profile",
@@ -396,8 +408,8 @@ CREATE TABLE IF NOT EXISTS requests (
   expires_at        TEXT,          -- derived from created_at when core carries none
   duplicate_of      TEXT,          -- the request this one duplicates
   -- What ``duplicate_of`` WAS in the source: 'request' (an id, in duplicate_of),
-  -- 'profile_credit' (core's {track|role: credit id} map) or 'other'. Only 'request' can
-  -- be closed; the other two are a duplicate FACT with nothing for the gate to verify.
+  -- 'profile_credit' (core's {track|role: credit id} map) or 'other'. A 'request' whose
+  -- original is decided is left to the rules below; everything else is unmatched.
   duplicate_kind    TEXT,
   -- JSON list from ``verify_anchor.uncovered_holds``: the verdict's hold codes when core's
   -- guard holds on none of its three facts; NULL = none. Such a row is never an ``approve``.
@@ -557,8 +569,8 @@ def classify_duplicate(value: Any) -> tuple[str | None, str | None]:
 
     Nothing here guesses. A string is taken as the request id it claims to be (and is
     ``unmatched`` if no decided request has that id). Anything else truthy is a duplicate
-    fact of another kind: it is recorded as such, so the row is neither closed - there is
-    no decided original to verify - nor silently treated as a fresh ask.
+    fact of another kind: it is recorded as such, so the row is not silently treated as a
+    fresh ask.
     """
     if value is None or value == "" or value == {} or value == []:
         return None, None
@@ -711,7 +723,13 @@ SELECT
     -- ``duplicate_kind`` without ``duplicate_of`` is a duplicate fact that names no
     -- request (core's map of credits already on the profile). It still takes rank 1: it
     -- must not slide down to an ask.
-    WHEN r.duplicate_of IS NOT NULL OR r.duplicate_kind IS NOT NULL THEN 'duplicate'
+    --
+    -- A request that names a DECIDED original is not matched here. Closing it wrote core
+    -- 'rejected': a rejection notice to the customer and, on the next snapshot, a refusal
+    -- of the claim. The original's decision is read by the rules below instead - when it
+    -- is this claimant's own decision of the same track and roles it is the precedent.
+    WHEN (r.duplicate_of IS NOT NULL OR r.duplicate_kind IS NOT NULL)
+         AND NOT (r.duplicate_of IS NOT NULL AND d.decision IS NOT NULL) THEN 'duplicate'
     -- A REFUSE precedent is this claimant's own earlier refusal of the same claim. It
     -- binds only while nothing on file is newer than it. Evidence dated after the refusal
     -- (a proof verdict, a document filed against this request, a DSP anchor) is something
@@ -776,9 +794,9 @@ class Decision:
     #: The row-specific evidence an approve cites (a precedent request id or a proof id).
     #: ``None`` on a row the ladder wanted to approve means the row is not auto-approvable.
     evidence_anchor: str | None = None
-    #: For a duplicate close: the already-decided request this row duplicates. The close
-    #: is only autonomous because that original decision stands, so the ledger row and
-    #: the audit trail both name it.
+    #: On a row the ``duplicate`` rule matched: the request it names as its original, when
+    #: it names one. That original is undecided (a decided one sends the row to the rules
+    #: below), and nothing is written on the strength of it.
     duplicate_of: str | None = None
     #: On an approve or an ask: why the validator holds the request, from the snapshot
     #: (see ``hold_causes``). ``()`` = it holds nothing, ``None`` = not measured. It
@@ -842,9 +860,10 @@ def _resolve(rule: str, proof_verdict: str | None,
     if rule == "duplicate":
         if duplicate_kind == DUP_PROFILE_CREDIT:
             return UNMATCHED, REASON_CODES["already_on_profile"]
-        if not (duplicate_decision or "").strip():
-            return UNMATCHED, REASON_CODES["unmatched_duplicate"]
-        return OUTCOME_OF["duplicate"], REASON_CODES["duplicate"]
+        # The ladder does not send a request with a decided original here, so what is
+        # left names an original nobody has decided, or names none this rule can read.
+        # There is no duplicate close: this rule writes nothing.
+        return UNMATCHED, REASON_CODES["unmatched_duplicate"]
     if rule == "precedent":
         outcome = (precedent_outcome or "").strip().lower()
         if outcome == "refuse":
@@ -1516,11 +1535,11 @@ class Abandon(DrainError):
 #: merge-reverse/enrich-link/bulk-destructive gates.
 ADMIN_WRITER_SCRIPT = "/opt/hydra/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh"
 
-#: The token BOTH drain writes must present - an approval and a duplicate close. It is the
+#: The token the drain's one write, an approval, must present. It is the
 #: drain's execution identity: the wrapper refuses a file that is not mode 600 owned by
 #: the drain's own user, and refuses a token that does not match. It raises the bar to
 #: "can read that file" and is not claimed to be non-forgeable; an approval is ALSO gated
-#: on its verified per-row anchor, a close on its verified original.
+#: on its verified per-row anchor.
 #:
 #: The path is FIXED, here and in the wrapper. It used to be overridable with
 #: ``SCALE_DRAIN_TOKEN_FILE``, which let a caller name a file it had just written and
@@ -1534,28 +1553,12 @@ DRAIN_TOKEN_FILE_ENV = "SCALE_DRAIN_TOKEN_FILE"
 #: is not a write either: this ladder does not emit it (a refusal becomes an autonomous
 #: outcome only once the refusal guard exists), and a refuse proof verdict is emitted as
 #: ``ask`` instead.
-WRITE_STATUS = {"approve": "approved", "close_duplicate": "rejected"}
-
-#: The duplicate-close route. A close is a reject at the API, but it is NOT the reject
-#: gate's business: deduplication is not a new decision, the original decision stands and
-#: the customer's outcome is unchanged. It goes through the conditional-status route with
-#: the original request named in the evidence, so the wrapper can prove the row it closes
-#: points at a decided original before it writes.
-DUPLICATE_CLOSE_PATH = "/admin/credit-requests/conditional-status"
-
-
-def duplicate_evidence(d: Decision) -> str:
-    """The digest the duplicate-close predicate CHECKS.
-
-    ``drain-dup:<original request id>;<reason>;v<version>;<profile>``. The original is the
-    whole justification for closing without a human: it is the decision that already
-    stands. The trailing profile id is what lets the wrapper VERIFY that claim - it fetches
-    that profile's requests in one GET and checks the original is decided and matches this
-    request on claimant, track and roles. Without it the digest only asserted a duplicate
-    (QA review 2 of hydra#1883).
-    """
-    return (f"drain-dup:{d.duplicate_of};{d.reason_code};v{RULE_VERSION};"
-            f"{d.profile_id or '-'}")
+#:
+#: ``approved`` is the ONLY status this drain writes. Every move to core ``rejected``
+#: sends core's rejection notice (``notify: false`` is refused on that move) and is read
+#: back by ``DECIDED_SQL`` as a refusal of the claim, so no outcome maps to it, and
+#: ``admin_writer`` refuses any other status before it spawns the wrapper.
+WRITE_STATUS = {"approve": "approved"}
 
 
 def drain_evidence(d: Decision) -> str:
@@ -1685,7 +1688,7 @@ def admin_preflight(script: str | None = None, *, token_file: str = DRAIN_TOKEN_
         problems.append((
             "admin_env_missing",
             f"{', '.join(needed)} not set: the wrapper refuses every call without the "
-            "admin env, so no approve or duplicate close can land. Start apply with the "
+            "admin env, so no approve can land. Start apply with the "
             "environment the admin wrapper is given on this host (a bare shell does not "
             "carry it)"))
     if approves:
@@ -1742,9 +1745,9 @@ def admin_writer(script: str | None = None, *, timeout: int = 120,
     run = runner or subprocess.run
 
     def present_token(d: Decision, env: dict[str, str], what: str) -> None:
-        """Put the drain's execution identity in ``env``, for BOTH writes.
+        """Put the drain's execution identity in ``env``.
 
-        The wrapper gates an approval and a duplicate close alike on the token file. It
+        The wrapper gates an approval on the token file. It
         raises the bar to "can read that file"; it is not non-forgeable and is not claimed
         to be (captain decision, 2026-11-11). The per-row control is the verified anchor.
         """
@@ -1771,56 +1774,35 @@ def admin_writer(script: str | None = None, *, timeout: int = 120,
         env.pop("CV_APPROVE_GATE_DISABLED", None)
         env["OPS_DRY_RUN"] = "0"
         argv = ["bash", script]
-        if d.outcome == "close_duplicate":
-            if not d.duplicate_of:
-                # The ladder only reaches 'duplicate' when the original is decided, so a
-                # missing original means a hand-edited plan. Refuse rather than close a
-                # row we cannot point at a standing decision for.
-                raise DrainWriteError(
-                    f"{d.request_id}: duplicate close with no decided original",
-                    layer=LAYER_LOCAL)
-            if d.status not in PENDING_STATUSES:
-                raise DrainWriteError(
-                    f"{d.request_id}: duplicate close with unknown expected status {d.status!r}",
-                    layer=LAYER_LOCAL)
-            evidence = duplicate_evidence(d)
-            env["SCALE_DRAIN"] = "1"
-            env["EVIDENCE_EXCERPT"] = evidence
-            present_token(d, env, "duplicate close")
-            body = json.dumps({"expectedStatus": d.status,
-                               "requestIds": [d.request_id],
-                               "status": "rejected"}, sort_keys=True)
-            argv += ["--evidence-excerpt", evidence, "--requester", SERVICE_REQUESTER,
-                     "call", "PUT", DUPLICATE_CLOSE_PATH, body]
-            proc = run(argv, capture_output=True, text=True, timeout=timeout, env=env,
-                       check=False)
-            if proc.returncode != 0:
-                raise _wrapper_failure(d.request_id, proc)
-            _assert_written(d, proc.stdout, account=_account(env))
-            return
+        if status != "approved":
+            # The one status this drain writes. A move to ``rejected`` sends core's
+            # rejection notice and is read back as a refusal of the claim, so a mapping
+            # that names any other status is refused here, before the wrapper is spawned.
+            raise DrainWriteError(
+                f"{d.request_id}: {d.outcome!r} maps to {status!r}, and this drain writes "
+                "only 'approved'", layer=LAYER_LOCAL)
         body = json.dumps({"requestIds": [d.request_id], "status": status}, sort_keys=True)
-        if status == "approved":
-            if d.rule not in AUTO_APPROVABLE_RULES or not d.evidence_anchor:
-                # Belt and braces: the ladder already downgrades these to ask, so reaching
-                # here means a plan file was hand-edited. Refuse rather than approve blind.
-                raise DrainWriteError(
-                    f"{d.request_id}: rule {d.rule!r} with anchor {d.evidence_anchor!r} "
-                    "is not auto-approvable", layer=LAYER_LOCAL)
-            evidence = drain_evidence(d)
-            # The drain's OWN registered predicate in the wrapper, NOT the blanket
-            # CV_APPROVE_GATE_DISABLED bypass. That variable skips every evidence
-            # requirement and must not be set by an agent; this one admits exactly one
-            # caller (this requester, this env flag, this registry entry, this digest
-            # shape) and the gate parses the digest before returning 0.
-            env["SCALE_DRAIN"] = "1"
-            env["EVIDENCE_EXCERPT"] = evidence
-            # The approve signs in as the drain's OWN account. core binds the
-            # verification-scale-drain automation to it, and the wrapper sends the
-            # automation header under no other login. A missing identity file fails
-            # in the wrapper before any request: there is no fallback account.
-            env["MUSO_ADMIN_IDENTITY"] = ADMIN_IDENTITY
-            present_token(d, env, "approve")
-            argv += ["--evidence-excerpt", evidence]
+        if d.rule not in AUTO_APPROVABLE_RULES or not d.evidence_anchor:
+            # Belt and braces: the ladder already downgrades these to ask, so reaching
+            # here means a plan file was hand-edited. Refuse rather than approve blind.
+            raise DrainWriteError(
+                f"{d.request_id}: rule {d.rule!r} with anchor {d.evidence_anchor!r} "
+                "is not auto-approvable", layer=LAYER_LOCAL)
+        evidence = drain_evidence(d)
+        # The drain's OWN registered predicate in the wrapper, NOT the blanket
+        # CV_APPROVE_GATE_DISABLED bypass. That variable skips every evidence
+        # requirement and must not be set by an agent; this one admits exactly one
+        # caller (this requester, this env flag, this registry entry, this digest
+        # shape) and the gate parses the digest before returning 0.
+        env["SCALE_DRAIN"] = "1"
+        env["EVIDENCE_EXCERPT"] = evidence
+        # The approve signs in as the drain's OWN account. core binds the
+        # verification-scale-drain automation to it, and the wrapper sends the
+        # automation header under no other login. A missing identity file fails
+        # in the wrapper before any request: there is no fallback account.
+        env["MUSO_ADMIN_IDENTITY"] = ADMIN_IDENTITY
+        present_token(d, env, "approve")
+        argv += ["--evidence-excerpt", evidence]
         argv += ["--requester", SERVICE_REQUESTER, "call", "PUT", "/admin/credit-requests", body]
         proc = run(argv, capture_output=True, text=True, timeout=timeout, env=env, check=False)
         if proc.returncode != 0:
@@ -1856,10 +1838,7 @@ def live_reconciler(admin: Any = None) -> Reconciler:
     from . import verify_anchor as va  # noqa: PLC0415 - only a resumed apply needs it
 
     def reconcile(d: Decision, planned_at: str) -> str:
-        if d.outcome == "close_duplicate":
-            rule, anchor = "duplicate", d.duplicate_of
-        else:
-            rule, anchor = d.rule, d.evidence_anchor
+        rule, anchor = d.rule, d.evidence_anchor
         if d.outcome not in WRITE_STATUS or not anchor:
             raise DrainError(f"{d.request_id}: an intent for {d.outcome!r} with anchor "
                              f"{anchor!r} is not one this drain writes")
@@ -2036,7 +2015,15 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
 
     ``report`` receives one dict per row that reached a write, a hold or a settlement:
     the request, its user and what happened (``granted`` only when read back).
+
+    A plan that carries a retired outcome (``RETIRED_OUTCOMES``) is refused whole, before
+    any row is written or recorded.
     """
+    retired = sorted({d.outcome for d in decisions} & set(RETIRED_OUTCOMES))
+    if retired:
+        raise DrainError("; ".join(
+            f"the plan carries {sum(d.outcome == o for d in decisions)} {o!r} row(s): "
+            f"{RETIRED_OUTCOMES[o]}" for o in retired))
     stamp = now or datetime.now(timezone.utc)
     clock: Callable[[], datetime] = (lambda: now) if now else (lambda: datetime.now(timezone.utc))
     ids = [d.request_id for d in decisions]
@@ -2300,7 +2287,7 @@ def apply(decisions: Sequence[Decision], db: sqlite3.Connection, *, shards: int 
                     committed[0] += 1
                     if side_effect:
                         tell(d, "written_unread" if readback is None
-                             else "granted" if d.outcome == "approve" else "closed")
+                             else "granted")
                     # KNOWN GAP (Fable review 2026-11-14 item 3). The line that lived here
                     # called mark_told() for every refusal the ladder then queued for a
                     # person, and it ran: the production ledger holds 1,324 `told` rows
@@ -2404,7 +2391,7 @@ WHERE status IN ('user_verification_needed', 'unverified') AND deletedat IS NULL
 """
 
 #: The already-decided population. It is the ONLY source of precedent (there is no
-#: precedent table in core) and of the duplicate closes' standing decisions. Read from
+#: precedent table in core) and of whether the original a request names is decided. Read from
 #: the same replica as the pending rows, so one snapshot carries both halves.
 DECIDED_SQL = """
 SELECT CAST(id AS varchar), status, CAST(userid AS varchar), CAST(trackid AS varchar), credits,

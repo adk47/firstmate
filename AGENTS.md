@@ -1322,7 +1322,7 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
 `muso-admin-api.sh` did three round trips per user (token resolve, account resolve, route).
 
 - **`scripts/credit_review/scale_drain.py`** is the decider: a single SQL ladder
-  (`LADDER_SQL`) in rank order — duplicate of a decided request → close; precedent →
+  (`LADDER_SQL`) in rank order — a duplicate the ladder cannot resolve → `unmatched`; precedent →
   approve on a per-claimant prior approval, or `cannot_confirm` on a refuse precedent
   that nothing on file postdates; a
   readable proof verdict → approve, or ask on a refuse; **asked** and expired with no
@@ -1342,7 +1342,7 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
 - **`apply` performs a real API side effect** through the one reviewed path
   `muso-admin-api.sh` already exposes: `PUT /admin/credit-requests
   {"requestIds":[…],"status":…}` through the wrapper, so the full gate chain still runs.
-  `approve` → `approved`, `close_duplicate` → `rejected` via `conditional-status`,
+  `approve` → `approved` and no other status (`WRITE_STATUS`),
   `ask` → no write (the send is `need_asks.py`'s), `cannot_confirm` → no write and no
   message. **Intent, write, confirm**: `apply` commits an `intents` row BEFORE
   the API call and confirms it after. An intent left open (a kill between the two, or a
@@ -1427,11 +1427,13 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   on file with no decisive verdict keeps `proof_received_at`, so it is
   `ask`/`proof_on_file_undecided` and never `expired_no_proof`. Run a ladder change
   against a real snapshot before believing a fixture.
-- **A duplicate close is a write; no outcome is a person** (captain 2026-11-14).
-  A duplicate of an already-decided request is deduplication, not a new decision, so it
-  closes through `is_scale_drain_duplicate_close` with
-  `EVIDENCE_EXCERPT=drain-dup:<original-uuid>;<reason>;v<n>;<profile-uuid>` and is audited like a human
-  reject with the original as the approval reference. The ladder no longer emits
+- **The drain writes `approved` and nothing else; no outcome is a person** (captain
+  2026-11-14). There is no duplicate close: core sends its rejection notice on every move
+  to `rejected` and refuses `notify: false` on it, and `DECIDED_SQL` reads a `rejected`
+  row back as the claimant's refusal of the claim, dated the day of the close. A request
+  that names a decided original is decided by precedent like any other; `apply` refuses a
+  plan that still carries `close_duplicate` (`RETIRED_OUTCOMES`), and neither wrapper
+  has a drain exception to the reject gate. Never add a drain write of `rejected`. The ladder no longer emits
   `queue_tier2`: expired-with-no-proof and a refuse precedent are `cannot_confirm`, a
   refuse proof verdict is `ask`, and `tier2-queue` lists no row. **`cannot_confirm` is
   interim and is not a decision**: a ledger row, no write, no message. The request stays
@@ -1459,17 +1461,14 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   `proof_verdict` (the newest verdict of every claim **for the request** must be a
   decision on the anchored proof, and **every role the LIVE request claims needs its own
   verdict** - a check that walks only the store approves on whatever happens to be on
-  file). A verifier that cannot run refuses the write. A duplicate close is not an
-  approval, so it needs the token **and** a verified original: the same verifier checks
-  the named original is decided and matches on claimant, track and roles. **Both writes
-  carry exactly ONE request id**: one digest names one anchor, so a second id is a write
-  nothing verified (the close predicate once took 50 and checked the first). **Both writes present the token**
+  file). A verifier that cannot run refuses the write. **An approve
+  carries exactly ONE request id**: one digest names one anchor, so a second id is a write
+  nothing verified. **It presents the token**
   (`/etc/hydra/scale-drain.token`, mode 600, owned by the drain's own user; one check,
   `scale_drain_token_ok`). It raises the bar to "can read that file" and is not claimed to
   be non-forgeable - any root process on node-8 can read it - and **nothing creates it**:
   until an operator places the file, `apply` refuses every write. The verified anchor is
-  what makes an approval per-row true; the verified original is what stops a
-  caller closing an unrelated pending request as a "duplicate". A row with no anchor is **not**
+  what makes an approval per-row true. A row with no anchor is **not**
   downgraded to an ask: it is `unmatched` (`unmatched_precedent` /
   `unmatched_proof_verdict`), counted and never written, so a user who was already
   decided is never sent a fresh "please verify" ask. `scripts/check-credit-approval-automation.sh`
@@ -1530,7 +1529,7 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   a `CREDIT_APPROVAL_REGISTRY` or `HYDRA_ROOT` resolving to another file is refused (QA
   review 5: a caller's own `approved: true` registry was honoured). The older predicates
   in the operations wrapper still read that variable.
-- **Both gates' trust sources are pinned, and an override is REFUSED, not ignored** (QA
+- **The gate's trust sources are pinned, and an override is REFUSED, not ignored** (QA
   review 4 of hydra#1883). The verifier reads the admin API only through the operations
   wrapper found from its own location (`verify_anchor.ADMIN_SCRIPT`); a
   `CREDIT_REVIEW_ADMIN_SCRIPT` resolving elsewhere fails the write. The token
@@ -1553,7 +1552,7 @@ at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
   unapproved anchor, different claimant/track/roles, newest-soft-verdict-wins, unreadable
   store is a refusal), `scripts/tests/muso-admin-api-scale-drain-gate.bats` (both wrapper
   copies: digest shape, delegation to the verifier, missing verifier refuses, batch body
-  refuses, duplicate-close token and its pinned path) and `scripts/tests/muso-admin-api-call-batch.bats` (one
+  refuses, the pinned token path, a drain `rejected` refused by the reject gate) and `scripts/tests/muso-admin-api-call-batch.bats` (one
   token resolve, per-item failure isolation, writes serialised after reads, gates still
   run).
 

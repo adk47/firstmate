@@ -420,14 +420,14 @@ scale_drain_registry() {
     printf '%s' "$pinned"
 }
 
-# The drain's execution identity: a token file only the drain's own user can read. BOTH
-# drain write paths present it - an approval as well as a duplicate close. SCALE_DRAIN,
+# The drain's execution identity: a token file only the drain's own user can read. The
+# drain's one write, an approval, presents it. SCALE_DRAIN,
 # REQUESTER_EMAIL and EVIDENCE_EXCERPT are things a caller simply asserts, so without
 # this the approve exception was open to anyone who could invoke the wrapper and name a
 # real approved same-claim anchor (QA review 5 of hydra#1883).
 #
 # This RAISES THE BAR from "can invoke the wrapper" to "can read that file". It does not
-# make either path non-forgeable, and it is not claimed to: any process running as the
+# make that path non-forgeable, and it is not claimed to: any process running as the
 # file's owner (root on node-8) can read it (captain decision, 2026-11-11).
 #
 # The token lives at ONE path, and the caller does not get to name another. With a
@@ -786,98 +786,11 @@ EOF
 # --approval-msg-id. Deliberately NO env off-switch and NO dry-run skip — the
 # actor this gate restrains controls its own env, and a dry-run preview of an
 # unauthorized reject should fail loudly too.
-# is_scale_drain_duplicate_close -> 0 when this is the verification scale drain closing a
-# DUPLICATE of an already-decided request. A duplicate close is NOT a new decision: the
-# original decision stands and the customer's outcome is unchanged, so it does not need a
-# tier-2 approver the way a refusal does (captain decision 2026-11-11). It is still a
-# reject at the API, so it is audited exactly like one, with the ORIGINAL request id as
-# the approval reference - that id is the whole justification, and the gate refuses a
-# digest that does not name one.
-#
-#   * SCALE_DRAIN=1, requester scale-drain@hydra-ops, PUT conditional-status
-#   * the kill file is absent and the registry entry is approved
-#   * the body is {expectedStatus, requestIds, status:"rejected"} with exactly ONE UUID
-#   * the evidence excerpt is drain-dup:<original-uuid>;<reason>;v<n>
-is_scale_drain_duplicate_close() {
-    local method="$1" path="$2" body="$3"
-    [[ "${SCALE_DRAIN:-0}" == "1" ]] || return 1
-    [[ "${REQUESTER_EMAIL:-}" == "scale-drain@hydra-ops" ]] || return 1
-    [[ "$method" == "PUT" ]] || return 1
-    [[ "$path" == "/admin/credit-requests/conditional-status" ]] || return 1
-    if [[ -e /etc/hydra/scale-drain.disabled ]]; then
-        echo "scale_drain: /etc/hydra/scale-drain.disabled is present - refusing" >&2
-        return 1
-    fi
-    # A duplicate close is NOT an approval: it is gated on the drain's execution identity
-    # (see scale_drain_token_ok) and, below, on a verified original.
-    scale_drain_token_ok "a duplicate close" || return 1
-    local registry
-    registry="$(scale_drain_registry)" || return 1
-    jq -e '.automations["verification-scale-drain"]
-           | .approved == true
-             and ((.approved_by // "") | tostring | length > 0)
-             and ((.approval_ref // "") | tostring | length > 0)' \
-        "$registry" >/dev/null 2>&1 || {
-        echo "scale_drain: verification-scale-drain is not approved in $registry - refusing" >&2
-        return 1
-    }
-    printf '%s' "$body" | jq -e '
-        type == "object"
-        and ((keys | sort) == ["expectedStatus", "requestIds", "status"])
-        and .status == "rejected"
-        and (.expectedStatus == "unverified" or .expectedStatus == "user_verification_needed")
-        and (
-            .requestIds as $ids
-            | ($ids | type) == "array"
-            and ($ids | length) > 0
-            and all($ids[];
-                type == "string"
-                and length == 36
-                and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-            )
-        )
-    ' >/dev/null 2>&1 || return 1
-    # ONE request per close. The digest names one original and the verifier below checks
-    # one target against it, so every further id in the body would be rejected on the
-    # strength of a check that never looked at it: a valid duplicate first and an
-    # unrelated pending request second closed both (QA review 6 of hydra#1883). The drain
-    # writes one row per call; a batch is not this path.
-    local dup_ids
-    dup_ids="$(printf '%s' "$body" | jq -r '.requestIds | length' 2>/dev/null)" || return 1
-    if [[ "$dup_ids" != "1" ]]; then
-        echo "scale_drain: exactly one requestId per duplicate close (one digest names one original) - refusing" >&2
-        return 1
-    fi
-    # The evidence is CHECKED: the digest must name the decided ORIGINAL this row
-    # duplicates. Without it there is no standing decision and no autonomous close.
-    local dup_re='^drain-dup:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\;[a-z_]+\;v[0-9]+\;([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|-)$'
-    if [[ ! "${EVIDENCE_EXCERPT:-}" =~ $dup_re ]]; then
-        echo "scale_drain: --evidence-excerpt must be drain-dup:<original-request-uuid>;<reason>;v<n>;<profile-uuid> - refusing" >&2
-        return 1
-    fi
-    local dup_original="${BASH_REMATCH[1]}" dup_profile="${BASH_REMATCH[2]}"
-    # ...and the claim is VERIFIED, not trusted: the named original must be a DECIDED
-    # request for the same claimant, track and roles. The token alone let a caller close an
-    # unrelated pending request as a "duplicate" (QA review 2 of hydra#1883).
-    local dup_root dup_verifier
-    dup_root="$(scale_drain_root)" || dup_root=""
-    dup_verifier="${dup_root:-/nonexistent}/scripts/credit_review/verify_anchor.py"
-    if [[ ! -f "$dup_verifier" ]]; then
-        echo "scale_drain: anchor verifier $dup_verifier is missing - refusing (an unverifiable close is not a close)" >&2
-        return 1
-    fi
-    local dup_target
-    dup_target="$(printf '%s' "$body" | jq -r '.requestIds[0]')" || return 1
-    # python3 -I, as on the approve path: no caller PYTHONPATH, no working directory.
-    if ! python3 -I "$dup_verifier" \
-            --rule duplicate --anchor "$dup_original" --request-id "$dup_target" \
-            --profile-id "$dup_profile"; then
-        echo "scale_drain: duplicate verification failed for $dup_target -> $dup_original - refusing" >&2
-        return 1
-    fi
-    return 0
-}
-
+# There is no scale-drain exception to this gate. The drain used to close a duplicate of a
+# decided request as `rejected` through a predicate of its own. core sends its rejection
+# notice on every move to `rejected` and refuses notify:false there, and the closed row was
+# read back as a refusal of the claim, so that write is gone (2026-11-15): a `rejected`
+# body from the drain's requester meets the gate below like any other caller's.
 enforce_credit_reject_gate() {
     local method="$1" path="$2" body="$3"
 
@@ -901,24 +814,6 @@ enforce_credit_reject_gate() {
     status_val="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)"
     if [[ "$status_val" != "rejected" ]] \
         && ! echo "$body" | grep -q '"status"[[:space:]]*:[[:space:]]*"rejected"'; then
-        return 0
-    fi
-
-    # The verification scale drain closing a DUPLICATE of an already-decided request.
-    # Deduplication is not a new decision, so it does not need a tier-2 approver - but it
-    # is audited like one, with the original request id as the approval reference.
-    if is_scale_drain_duplicate_close "$method" "$path" "$body"; then
-        if ! mkdir -p "$(dirname "$CREDIT_REJECT_AUDIT_PATH")" 2>/dev/null \
-            || ! jq -n -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg method "$method" --arg path "$path" \
-                --arg requester "${REQUESTER_EMAIL:-}" --arg original "${EVIDENCE_EXCERPT}" \
-                --argjson n "$(printf '%s' "$body" | jq '.requestIds | length')" \
-                '{ts:$ts, gate:"credit_reject", method:$method, path:$path, requester:$requester,
-                  confirmed_by:"scale-drain-duplicate-close", approval_msg_id:$original,
-                  automation:"verification-scale-drain", rows:$n}' \
-                >> "$CREDIT_REJECT_AUDIT_PATH"; then
-            echo "MUSO_CREDIT_REJECT_AUDIT_UNWRITABLE: scale-drain duplicate close not audited - refusing." >&2
-            return 1
-        fi
         return 0
     fi
 

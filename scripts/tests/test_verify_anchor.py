@@ -122,18 +122,6 @@ class PrecedentTests(unittest.TestCase):
         self.assertNotIsInstance(ctx.exception, va.AlreadyWritten)
         self.assertIn("not pending", str(ctx.exception))
 
-    def test_a_duplicate_close_of_an_already_rejected_target_is_already_written(self):
-        """For a close, the status the write sets is ``rejected`` - so that is the one
-        that reads as 'already written', and ``approved`` is the one that does not."""
-        with self.assertRaises(va.AlreadyWritten):
-            va.verify_duplicate(FakeAdmin([request(TARGET, status="rejected"),
-                                           request(ANCHOR, status="approved")]),
-                                TARGET, ANCHOR, PROFILE)
-        with self.assertRaises(va.Refused) as ctx:
-            va.verify_duplicate(FakeAdmin([request(TARGET, status="approved"),
-                                           request(ANCHOR, status="approved")]),
-                                TARGET, ANCHOR, PROFILE)
-        self.assertNotIsInstance(ctx.exception, va.AlreadyWritten)
 
     def test_a_missing_profile_id_is_refused(self):
         with self.assertRaises(va.Refused):
@@ -232,11 +220,6 @@ class HoldTests(unittest.TestCase):
         """The anchor is a decision already made; only the request being approved counts."""
         va.verify_precedent(FakeAdmin([request(TARGET),
                                        request(ANCHOR, status="approved", vd=PENDING_CAPTURE)]),
-                            TARGET, ANCHOR, PROFILE)
-
-    def test_a_duplicate_close_is_not_an_approval_and_is_not_held(self):
-        va.verify_duplicate(FakeAdmin([request(TARGET, vd=PENDING_CAPTURE),
-                                       request(ANCHOR, status="approved")]),
                             TARGET, ANCHOR, PROFILE)
 
     def test_the_refusal_says_the_guard_does_not_stop_it(self):
@@ -533,6 +516,20 @@ class DispatchTests(unittest.TestCase):
         with self.assertRaises(va.Refused):
             va.verify("ask", ANCHOR, TARGET, PROFILE, admin=FakeAdmin([]))
 
+    def test_there_is_no_duplicate_rule_to_verify_a_close_with(self):
+        """A duplicate close wrote ``rejected``, which notifies the customer. The rule is
+        refused by name, on a pair the old check passed, before the API is read."""
+        admin = FakeAdmin([request(TARGET, status="unverified"),
+                           request(ANCHOR, status="approved")])
+        with self.assertRaises(va.Refused) as ctx:
+            va.verify("duplicate", ANCHOR, TARGET, PROFILE, admin=admin)
+        self.assertIn("not auto-approvable", str(ctx.exception))
+        with mock.patch.object(va, "pinned_admin", return_value=admin):
+            self.assertEqual(va.main(["--rule", "duplicate", "--anchor", ANCHOR,
+                                      "--request-id", TARGET, "--profile-id", PROFILE]), 1)
+        self.assertEqual(admin.calls, [])
+        self.assertNotIn("rejected", va.RULE_WRITES.values())
+
     def test_the_cli_exit_codes_are_distinct(self):
         self.assertEqual(va.main(["--rule", "ask", "--anchor", ANCHOR,
                                   "--request-id", TARGET]), 1)
@@ -547,8 +544,7 @@ class DispatchTests(unittest.TestCase):
         ``profilesIds=-``; with no profile there is nothing to read the request through."""
         admin = FakeAdmin([request(TARGET)])
         with mock.patch.object(va, "pinned_admin", return_value=admin):
-            for rule, anchor in (("proof_verdict", PROOF), ("precedent", ANCHOR),
-                                 ("duplicate", ANCHOR)):
+            for rule, anchor in (("proof_verdict", PROOF), ("precedent", ANCHOR)):
                 with self.subTest(rule=rule):
                     self.assertEqual(va.main(["--rule", rule, "--anchor", anchor,
                                               "--request-id", TARGET,
@@ -650,22 +646,17 @@ class ReconcileTests(unittest.TestCase):
         with self.assertRaises(va.Elsewhere) as ctx:
             self._reconcile([decided(TARGET, "rejected"), request(ANCHOR, status="approved")])
         self.assertEqual(ctx.exception.reason_code, "target_rejected")
-        with self.assertRaises(va.Elsewhere) as ctx:
-            self._reconcile([decided(TARGET, "approved"), request(ANCHOR, status="approved")],
-                            rule="duplicate")
-        self.assertEqual(ctx.exception.reason_code, "target_approved")
 
-    def test_a_duplicate_close_that_landed_is_ours(self):
+    def test_a_rejected_request_is_never_reconciled_as_a_close_of_ours(self):
+        """An intent left by the retired duplicate close: the request reads ``rejected``
+        and its original is decided. No rule writes ``rejected`` any more, so it is not
+        reported as landed - and nothing is read to find that out."""
         for original in ("approved", "rejected"):
             with self.subTest(original=original):
-                self.assertEqual(
+                with self.assertRaises(va.Refused):
                     self._reconcile([decided(TARGET, "rejected"),
-                                     request(ANCHOR, status=original)], rule="duplicate"),
-                    va.LANDED)
-        with self.assertRaises(va.Elsewhere) as ctx:
-            self._reconcile([decided(TARGET, "rejected"),
-                             request(ANCHOR, status="unverified")], rule="duplicate")
-        self.assertEqual(ctx.exception.reason_code, "anchor_unverified")
+                                     request(ANCHOR, status=original)], rule="duplicate")
+                self.assertEqual(self.admin.calls, [])
 
     def test_what_cannot_be_read_is_neither_landed_nor_abandoned(self):
         """Unavailable, every time: an unread request is not a verdict in either
@@ -782,13 +773,6 @@ class PinnedAdminSourceTests(unittest.TestCase):
         self.assertIn("CREDIT_REVIEW_ADMIN_SCRIPT", str(ctx.exception))
         self.assertFalse(self.marker.exists(), "the caller's admin script was executed")
 
-    def test_a_caller_supplied_admin_script_is_denied_for_a_duplicate(self):
-        with self._env(str(self.script)):
-            with self.assertRaises(va.Refused) as ctx:
-                va.verify("duplicate", ANCHOR, TARGET, PROFILE)
-        self.assertIn("CREDIT_REVIEW_ADMIN_SCRIPT", str(ctx.exception))
-        self.assertFalse(self.marker.exists())
-
     def test_an_empty_or_dangling_override_is_denied_too(self):
         for value in ("", "/nonexistent/muso-admin-api.sh", "muso-admin-api.sh"):
             with self.subTest(value=value), self._env(value):
@@ -855,7 +839,6 @@ class ScriptEntrypointTests(unittest.TestCase):
                         "workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh"):
             text = (SCRIPTS.parent / wrapper).read_text()
             self.assertIn('python3 -I "$drain_verifier"', text, wrapper)
-            self.assertIn('python3 -I "$dup_verifier"', text, wrapper)
             for line in text.splitlines():
                 if "_verifier\"" in line and "python3" in line:
                     self.assertNotIn("PYTHONPATH", line, f"{wrapper}: {line.strip()}")
@@ -899,12 +882,9 @@ class ScriptEntrypointTests(unittest.TestCase):
         }
 
     def test_the_admin_backed_rules_verify_when_run_as_a_script(self):
-        """The two rules that need the batch client are the two that raised ImportError.
-        Run as the wrapper runs them, they read the claimant's profile through the pinned
-        wrapper and exit 0."""
-        cases = (("precedent", request(TARGET), request(ANCHOR, status="approved")),
-                 ("duplicate", request(TARGET, status="unverified"),
-                  request(ANCHOR, status="approved")))
+        """The rule that needs the batch client raised ImportError. Run as the wrapper
+        runs it, it reads the claimant's profile through the pinned wrapper and exits 0."""
+        cases = (("precedent", request(TARGET), request(ANCHOR, status="approved")),)
         for rule, target, anchor in cases:
             with self.subTest(rule=rule):
                 log, env = self._api_env([target, anchor])
@@ -918,7 +898,7 @@ class ScriptEntrypointTests(unittest.TestCase):
 
     def test_the_script_refuses_what_the_api_does_not_confirm(self):
         """The twin: same invocation, the API reports the anchor still pending."""
-        for rule in ("precedent", "duplicate"):
+        for rule in ("precedent",):
             with self.subTest(rule=rule):
                 log, env = self._api_env([request(TARGET, status="unverified"),
                                           request(ANCHOR, status="unverified")])
@@ -971,8 +951,7 @@ class ScriptEntrypointTests(unittest.TestCase):
         wrapper refuses on any non-zero code, so this loosens nothing - it is how the
         drain's operator tells 'a write of ours that was never confirmed' from 'a
         decision that is not ours to overwrite' without reading prose."""
-        cases = (("precedent", "approved", 3), ("precedent", "rejected", 1),
-                 ("duplicate", "rejected", 3), ("duplicate", "approved", 1))
+        cases = (("precedent", "approved", 3), ("precedent", "rejected", 1))
         for rule, target_status, code in cases:
             with self.subTest(rule=rule, target=target_status):
                 log, env = self._api_env([request(TARGET, status=target_status),
@@ -986,7 +965,7 @@ class ScriptEntrypointTests(unittest.TestCase):
     def test_a_caller_supplied_admin_script_is_denied_at_the_entrypoint(self):
         """The API would confirm this approve; the redirect attempt alone refuses it, and
         neither the caller's script nor the API is consulted."""
-        for rule in ("precedent", "duplicate"):
+        for rule in ("precedent",):
             with self.subTest(rule=rule):
                 log, env = self._api_env([request(TARGET, status="unverified"),
                                           request(ANCHOR, status="approved")])

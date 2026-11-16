@@ -20,8 +20,10 @@ is about to write, and it answers from a source the caller does not control:
     verdict of every claim must be a decision (``GENUINE``/``VERIFIED``) resting on the
     anchored proof. A caller cannot write those rows, and cannot make the API drop a role
     from the request.
-  * **duplicate** - the same GET; the named original must be decided and must be the same
-    claim.
+
+There is no ``duplicate`` rule. A duplicate close wrote core ``rejected``, which notifies the
+customer and is read back as a refusal of the claim, so the drain no longer makes that write
+and this verifier refuses the rule by name: no caller can have a close verified here.
 
 Cost: one GET per verified row, and only rows that write are verified. Measured on the
 real snapshot of 2026-11-11 that is 3,294 approves out of 96,703 pending requests.
@@ -93,13 +95,13 @@ APPROVE_VERDICTS = ("GENUINE", "VERIFIED")
 #: pending row the drain should be writing.
 PENDING_STATUSES = ("user_verification_needed", "unverified")
 
-#: A status that means a human (or a registered automation) already decided the request.
-#: A duplicate close may only point at one of these.
+#: A status that means the request is already decided.
 DECIDED_STATUSES = ("approved", "rejected")
 
 #: The status each rule's write sets. It is what tells "this write already happened" from
 #: "somebody decided this request differently".
-RULE_WRITES = {"precedent": "approved", "proof_verdict": "approved", "duplicate": "rejected"}
+#: Every rule here writes ``approved``: no rule this verifier knows writes ``rejected``.
+RULE_WRITES = {"precedent": "approved", "proof_verdict": "approved"}
 
 #: ``reconcile`` verdicts.
 LANDED = "landed"            # the request holds our status, and the evidence says it is ours
@@ -270,14 +272,6 @@ def _anchor_supports_precedent(anchor: dict[str, Any], target: dict[str, Any],
     _same_claim(anchor, target, anchor_id)
 
 
-def _original_supports_duplicate(original: dict[str, Any], target: dict[str, Any],
-                                 original_id: str) -> None:
-    status = _status(original)
-    if status not in DECIDED_STATUSES:
-        raise Refused(f"original {original_id} is {status or 'unknown'}, not decided")
-    _same_claim(original, target, original_id)
-
-
 #: What ``uncovered_holds`` returns for a verdict it cannot read. Unreadable is a hold:
 #: "could not read the holds" must never come out as "there are none".
 HOLD_UNREADABLE = "verdict_unreadable"
@@ -378,14 +372,6 @@ def verify_precedent(admin: Any, request_id: str, anchor_id: str, profile_id: st
     target, anchor = _pair(admin, request_id, anchor_id, profile_id, "precedent")
     _no_uncovered_hold(target, request_id)
     _anchor_supports_precedent(anchor, target, anchor_id)
-
-
-def verify_duplicate(admin: Any, request_id: str, original_id: str, profile_id: str) -> None:
-    """A duplicate close is only justified if the named original is a DECIDED request for
-    the same claim. QA review 2 of hydra#1883: the token alone let a caller close an
-    unrelated pending request as a 'duplicate'."""
-    target, original = _pair(admin, request_id, original_id, profile_id, "duplicate")
-    _original_supports_duplicate(original, target, original_id)
 
 
 #: How the proof store names a claim: ``<request id>#<Role>``. A request that claims no
@@ -576,10 +562,7 @@ def reconcile(rule: str, anchor: str, request_id: str, profile_id: str, *,
             cited = by_id.get(anchor)
             if cited is None:
                 raise Refused(f"anchor {anchor} is not on profile {profile_id}")
-            if rule == "precedent":
-                _anchor_supports_precedent(cited, target, anchor)
-            else:
-                _original_supports_duplicate(cited, target, anchor)
+            _anchor_supports_precedent(cited, target, anchor)
     except Refused as exc:
         raise Elsewhere("anchor_unverified",
                         f"request {request_id} is {status}, but this decision could not "
@@ -595,9 +578,6 @@ def verify(rule: str, anchor: str, request_id: str, profile_id: str, *,
     elif rule == "proof_verdict":
         verify_proof_live(pinned_admin() if admin is None else admin,
                           request_id, anchor, profile_id, store_path)
-    elif rule == "duplicate":
-        verify_duplicate(pinned_admin() if admin is None else admin,
-                         request_id, anchor, profile_id)
     else:
         raise Refused(f"rule {rule!r} is not auto-approvable")
 

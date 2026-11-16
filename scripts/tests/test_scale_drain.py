@@ -126,20 +126,21 @@ class DecisionKeyTests(unittest.TestCase):
 class RankOrderTests(unittest.TestCase):
     """Stop at the first match. The order IS the specification."""
 
-    def test_duplicate_beats_everything(self):
+    def test_a_request_naming_a_decided_original_is_decided_by_the_rules_below(self):
+        """There is no duplicate close. A request that names a decided original is not
+        matched by rule 1 at all: its own precedent decides it, and the plan row carries
+        no original for a writer to act on."""
         db = snapshot(
             [row(1, duplicate_of=rid(99), precedent_key="k", proof_verdict="approve",
                  expires_at="2020-01-01T00:00:00Z")],
             decided=[{"request_id": rid(99), "decision": "approved"}],
             precedent=[{"precedent_key": "k", "outcome": "approve", "request_id": rid(9)}])
         d = sd.plan(db, now=NOW)[0]
-        self.assertEqual(d.rule, "duplicate")
-        self.assertEqual(d.outcome, "close_duplicate")
-        self.assertEqual(d.reason_code, "duplicate_of_decided")
-        # The close is only autonomous because the original decision stands, so the
-        # decision carries it and the ledger row names it.
-        self.assertEqual(d.duplicate_of, rid(99))
-        self.assertEqual(d.as_row()["duplicate_of"], rid(99))
+        self.assertEqual((d.rule, d.outcome, d.reason_code),
+                         ("precedent", "approve", "precedent_match"))
+        self.assertEqual(d.evidence_anchor, rid(9))
+        self.assertIsNone(d.duplicate_of)
+        self.assertIsNone(d.as_row()["duplicate_of"])
 
     def test_duplicate_of_an_undecided_request_is_unmatched_not_asked(self):
         db = snapshot([row(1, duplicate_of=rid(99))])
@@ -719,8 +720,8 @@ class HeldRowTests(unittest.TestCase):
             self.assertEqual(sd.refused_asks(db), [])
 
     def test_the_hold_changes_only_an_approve(self):
-        """A row that cannot be confirmed, a duplicate close and an ask are not approvals:
-        unchanged."""
+        """A row that cannot be confirmed, a request naming a decided original and an ask
+        are not approvals: unchanged."""
         held = {"uncovered_holds": ["track_pending_capture"]}
         db = snapshot(
             [row(1, precedent_key="no", **held), row(2, duplicate_of=rid(8), **held),
@@ -728,7 +729,7 @@ class HeldRowTests(unittest.TestCase):
             decided=[{"request_id": rid(8), "decision": "approved"}],
             precedent=[{"precedent_key": "no", "outcome": "refuse"}])
         self.assertEqual([d.outcome for d in sd.plan(db, now=NOW)],
-                         ["cannot_confirm", "close_duplicate", "ask"])
+                         ["cannot_confirm", "ask", "ask"])
 
     def test_a_snapshot_made_before_the_column_gains_it(self):
         with tempfile.TemporaryDirectory() as td:
@@ -786,10 +787,10 @@ class ReviewedWritePathTests(unittest.TestCase):
 
     def _writer(self, rc=0, stdout=None):
         calls = []
-        # The duplicate-close path reads the root-only token file. The path is pinned, so
-        # the scratch file is handed over as an in-process argument: there is no
-        # environment variable that selects it, and setting one is refused (see
-        # test_a_caller_supplied_token_file_is_denied_before_any_write).
+        # The approve reads the root-only token file. The path is pinned, so the scratch
+        # file is handed over as an in-process argument: there is no environment variable
+        # that selects it, and setting one is refused (see
+        # test_a_caller_supplied_token_file_is_denied_for_an_approve).
         token = Path(tempfile.mkdtemp()) / "scale-drain.token"
         token.write_text("s3cret\n")
 
@@ -807,11 +808,6 @@ class ReviewedWritePathTests(unittest.TestCase):
         return sd.admin_writer("/opt/hydra/scripts/muso-admin-api.sh", runner=run,
                                token_file=str(token)), calls
 
-    def _duplicate(self):
-        return sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
-                           sd.decision_key(rid(1), "duplicate", "close_duplicate"),
-                           status="unverified", duplicate_of=rid(9))
-
     def _with_env(self, name: str, value: str) -> None:
         saved = os.environ.get(name)
         os.environ[name] = value
@@ -826,50 +822,7 @@ class ReviewedWritePathTests(unittest.TestCase):
         self.assertNotIn("--token-file", source)
         self.assertNotIn('environ.get("SCALE_DRAIN_TOKEN_FILE"', source)
 
-    def test_a_caller_supplied_token_file_is_denied_before_any_write(self):
-        """QA review 4, finding 1: SCALE_DRAIN_TOKEN_FILE let a caller name the file the
-        gate compares against. It is DENIED - the close raises and nothing is spawned -
-        not quietly ignored in favour of the pinned path."""
-        w, calls = self._writer()
-        own = Path(tempfile.mkdtemp()) / "mine.token"
-        own.write_text("attacker\n")
-        own.chmod(0o600)
-        self._with_env("SCALE_DRAIN_TOKEN_FILE", str(own))
-        with self.assertRaises(sd.DrainWriteError) as ctx:
-            w(self._duplicate())
-        self.assertIn("SCALE_DRAIN_TOKEN_FILE is set", str(ctx.exception))
-        self.assertIn("cannot be redirected", str(ctx.exception))
-        self.assertEqual(calls, [])
-
-    def test_an_empty_token_file_override_is_still_denied(self):
-        w, calls = self._writer()
-        self._with_env("SCALE_DRAIN_TOKEN_FILE", "")
-        with self.assertRaises(sd.DrainWriteError):
-            w(self._duplicate())
-        self.assertEqual(calls, [])
-
-    def test_a_caller_supplied_token_never_reaches_the_wrapper(self):
-        """The drain presents what the pinned file holds. A SCALE_DRAIN_TOKEN already in
-        its environment is replaced, so the caller's value is never the one compared; the
-        wrapper's own refusal of a wrong value is pinned in
-        WrapperAcceptsTheRealDigestTests and in the bats suite."""
-        w, calls = self._writer()
-        self._with_env("SCALE_DRAIN_TOKEN", "attacker-chosen")
-        w(self._duplicate())
-        self.assertEqual(calls[0]["env"]["SCALE_DRAIN_TOKEN"], "s3cret")
-        self.assertNotIn("SCALE_DRAIN_TOKEN_FILE", calls[0]["env"])
-
-    def test_a_missing_token_file_refuses_the_close(self):
-        calls = []
-        w = sd.admin_writer("/opt/hydra/scripts/muso-admin-api.sh",
-                            runner=lambda *a, **k: calls.append(a),
-                            token_file=str(Path(tempfile.mkdtemp()) / "absent.token"))
-        with self.assertRaises(sd.DrainWriteError) as ctx:
-            w(self._duplicate())
-        self.assertIn("duplicate close needs", str(ctx.exception))
-        self.assertEqual(calls, [])
-
-    # ── the approve presents the same identity (QA review 5) ────────────────
+    # ── the approve presents the drain's identity (QA review 5) ─────────────
     def _approve(self):
         return sd.Decision(rid(1), "precedent", "approve", "precedent_match",
                            sd.decision_key(rid(1), "precedent", "approve"),
@@ -938,8 +891,7 @@ class ReviewedWritePathTests(unittest.TestCase):
 
     def test_approve_signs_in_as_the_drains_own_account(self):
         """core binds verification-scale-drain to agent-scale-drain@ and to no other
-        account, so the approve names that identity whatever the caller's env says. A
-        duplicate close is not an approval and does not take it."""
+        account, so the approve names that identity whatever the caller's env says."""
         w, calls = self._writer()
         with mock.patch.dict(os.environ, {"MUSO_ADMIN_IDENTITY": "credit-decider"}):
             w(sd.Decision(rid(1), "precedent", "approve", "precedent_match",
@@ -947,14 +899,6 @@ class ReviewedWritePathTests(unittest.TestCase):
                           evidence_anchor=rid(9)))
         self.assertEqual(sd.ADMIN_IDENTITY, "scale-drain")
         self.assertEqual(calls[0]["env"]["MUSO_ADMIN_IDENTITY"], "scale-drain")
-        w, calls = self._writer()
-        with mock.patch.dict(os.environ):
-            os.environ.pop("MUSO_ADMIN_IDENTITY", None)
-            w(sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
-                          sd.decision_key(rid(1), "duplicate", "close_duplicate"),
-                          status="unverified", duplicate_of=rid(9)))
-        self.assertNotIn("MUSO_ADMIN_IDENTITY", calls[0]["env"])
-
     def test_an_approve_without_an_anchor_is_refused(self):
         """A row the ladder could not anchor is not auto-approvable - never approve blind."""
         w, calls = self._writer()
@@ -977,35 +921,32 @@ class ReviewedWritePathTests(unittest.TestCase):
                       sd.decision_key(rid(1), "expired", "cannot_confirm")))
         self.assertEqual(calls, [])
 
-    def test_close_duplicate_goes_through_the_conditional_close_route(self):
+    def test_a_duplicate_close_decision_performs_no_write(self):
+        """The outcome is retired: handed one anyway, the writer spawns nothing."""
         w, calls = self._writer()
         w(sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
                       sd.decision_key(rid(1), "duplicate", "close_duplicate"), status="unverified",
                       duplicate_of=rid(9)))
-        argv = calls[0]["argv"]
-        self.assertIn(sd.DUPLICATE_CLOSE_PATH, argv)
-        body = json.loads(argv[-1])
-        self.assertEqual(body["status"], "rejected")
-        self.assertEqual(body["expectedStatus"], "unverified")
-        self.assertEqual(calls[0]["env"]["EVIDENCE_EXCERPT"],
-                         f"drain-dup:{rid(9)};duplicate_of_decided;v{sd.RULE_VERSION};-")
-        self.assertEqual(calls[0]["env"]["SCALE_DRAIN"], "1")
-        self.assertEqual(calls[0]["env"]["SCALE_DRAIN_TOKEN"], "s3cret")
-        self.assertNotIn("CV_APPROVE_GATE_DISABLED", calls[0]["env"])
-
-    def test_a_duplicate_close_without_its_real_status_is_refused(self):
-        w, calls = self._writer()
-        with self.assertRaises(sd.DrainWriteError):
-            w(sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
-                          sd.decision_key(rid(1), "duplicate", "close_duplicate"), duplicate_of=rid(9)))
         self.assertEqual(calls, [])
 
-    def test_a_duplicate_close_with_no_original_is_refused(self):
-        w, calls = self._writer()
-        with self.assertRaises(sd.DrainWriteError):
-            w(sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
-                          sd.decision_key(rid(1), "duplicate", "close_duplicate")))
-        self.assertEqual(calls, [])
+    def test_the_writer_writes_no_status_but_approved(self):
+        """``rejected`` notifies the customer and reads back as a refusal of the claim. A
+        mapping that brought it back - for any outcome - is refused before the wrapper is
+        spawned, whatever the decision carries."""
+        self.assertEqual(sd.WRITE_STATUS, {"approve": "approved"})
+        for outcome, status in (("close_duplicate", "rejected"), ("cannot_confirm", "rejected"),
+                                ("ask", "unverified")):
+            with self.subTest(outcome=outcome, status=status):
+                w, calls = self._writer()
+                with mock.patch.dict(sd.WRITE_STATUS, {outcome: status}):
+                    with self.assertRaises(sd.DrainWriteError) as ctx:
+                        w(sd.Decision(rid(1), "precedent", outcome, "precedent_match",
+                                      sd.decision_key(rid(1), "precedent", outcome),
+                                      status="unverified", evidence_anchor=rid(9),
+                                      duplicate_of=rid(9)))
+                self.assertIn("writes only 'approved'", str(ctx.exception))
+                self.assertEqual(ctx.exception.layer, sd.LAYER_LOCAL)
+                self.assertEqual(calls, [])
 
     def test_ask_performs_no_write(self):
         w, calls = self._writer()
@@ -1456,7 +1397,9 @@ class ReplicaSnapshotTests(unittest.TestCase):
             full_rows = sd.replica_snapshot_rows(q, proof_store_path=proofs)
             full = self._plan_of(td, full_rows)
             self.assertEqual(full[rid(1)].reason_code, "precedent_match")
-            self.assertEqual(full[rid(2)].outcome, "close_duplicate")
+            # r2 names an approved request of another track: nothing is closed, and a
+            # decision on another track is no precedent for this claim
+            self.assertEqual((full[rid(2)].rule, full[rid(2)].outcome), ("ask", "ask"))
             self.assertEqual(full[rid(3)].reason_code, "precedent_refuse")
             full_precedent = {r["precedent_key"]: r for r in full_rows
                               if r["__kind"] == "precedent"}
@@ -1671,9 +1614,9 @@ class ReplicaSnapshotTests(unittest.TestCase):
 class RealSourcesTests(unittest.TestCase):
     """The documented `snapshot` then `plan --snapshot` contract, over real sources.
 
-    The three highest-volume rules (duplicate, precedent, proof verdict) each depend on a
-    fact that lives OUTSIDE the pending row: the original's decision, the decided history,
-    and the proof store. A fixture that feeds those facts in `verificationData` proves
+    The rules that decide (precedent, proof verdict) and the one that only sets a row aside
+    (duplicate) each depend on a fact that lives OUTSIDE the pending row: the decided
+    history, the proof store, and whether the original a request names is decided. A fixture that feeds those facts in `verificationData` proves
     nothing, so this drives the snapshot builder's real queries and then the ladder.
     """
 
@@ -1689,19 +1632,20 @@ class RealSourcesTests(unittest.TestCase):
         db.close()
         return path
 
-    def test_the_documented_two_command_contract_matches_all_three_decided_classes(self):
+    def test_the_documented_two_command_contract_decides_from_the_real_sources(self):
         with tempfile.TemporaryDirectory() as td:
             proofs = self._proof_store(td, [
                 # the store keys a verdict by CLAIM, "<request>#<Role>", never by request
                 ("f" * 64, f"{rid(4)}#Songwriter", "GENUINE", "2026-11-05T00:00:00Z")])
             pending = [
-                # r1 duplicates r10, already approved: close it
+                # r1 names r10, approved on another track: nothing is closed, and r10 is
+                # no precedent for this claim, so r1 is asked
                 (rid(1), "1001", "p1", "user_verification_needed", "2026-11-01T00:00:00Z",
                  json.dumps({"duplicate_of": rid(10)}), "{}", "trk-1", '{Mixing Engineer}'),
                 # r2 is the SAME claimant as approved r11, same claim: approve on precedent
                 (rid(2), "1002", "p2", "user_verification_needed", "2026-11-01T00:00:00Z",
                  "{}", "{}", "trk-1", '{Mixing Engineer}'),
-                # r3 is the same claimant as rejected r12: queue for a human, never ask
+                # r3 is the same claimant as rejected r12: cannot confirm, no write
                 (rid(3), "1003", "p3", "unverified", "2026-11-01T00:00:00Z",
                  "{}", "{}", "trk-2", '{Producer}'),
                 # r4 has a genuine proof: approve
@@ -1727,7 +1671,7 @@ class RealSourcesTests(unittest.TestCase):
                     fh.write(json.dumps(r, sort_keys=True) + "\n")
             db = sd._build_snapshot(_args(snapshot=path))
         decisions = {d.request_id: d for d in sd.plan(db, now=NOW)}
-        self.assertEqual(decisions[rid(1)].outcome, "close_duplicate")
+        self.assertEqual((decisions[rid(1)].rule, decisions[rid(1)].outcome), ("ask", "ask"))
         self.assertEqual(decisions[rid(2)].outcome, "approve")
         self.assertEqual(decisions[rid(2)].reason_code, "precedent_match")
         self.assertEqual(decisions[rid(3)].outcome, "cannot_confirm")
@@ -1776,8 +1720,8 @@ class WrapperAcceptsTheRealDigestTests(unittest.TestCase):
 
     The bats suite feeds literal ``v1`` digests, so it cannot catch a version string the
     drain formats differently (``v`` + ``r1`` = ``vr1``). This runs the real predicate
-    from both wrapper copies against the real ``drain_evidence`` / ``duplicate_evidence``
-    output, which is the contract that decides whether a write is allowed.
+    from both wrapper copies against the real ``drain_evidence`` output, which is the
+    contract that decides whether a write is allowed.
     """
 
     WRAPPERS = (
@@ -1810,12 +1754,12 @@ class WrapperAcceptsTheRealDigestTests(unittest.TestCase):
         self.registry.parent.mkdir()
         self.registry.write_text(REGISTRY.read_text())
 
-    #: The one line, in each wrapper, that names the token file - shared by the approve
-    #: and the duplicate gate. A positive test cannot write /etc/hydra, so it rewrites
+    #: The one line, in each wrapper, that names the token file the approve gate reads.
+    #: A positive test cannot write /etc/hydra, so it rewrites
     #: THIS literal in its scratch copy. There is deliberately no environment seam to do
     #: it with: that seam was the finding. The denial tests run the text unmodified.
     TOKEN_PIN = 'local drain_token_file="/etc/hydra/scale-drain.token"'
-    #: The helpers both predicates call. Extracted with them, so what runs is their real
+    #: The helpers the predicate calls. Extracted with it, so what runs is their real
     #: text and nothing a test wrote.
     HELPERS = ("scale_drain_root", "scale_drain_registry", "scale_drain_token_ok")
 
@@ -1926,85 +1870,6 @@ class WrapperAcceptsTheRealDigestTests(unittest.TestCase):
                                    sd.drain_evidence(d), body)
             self.assertEqual(proc.returncode, 0, f"{wrapper} refused {sd.drain_evidence(d)!r}: {proc.stderr}")
 
-    def test_the_emitted_duplicate_digest_passes_both_wrappers(self):
-        d = sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
-                        sd.decision_key(rid(1), "duplicate", "close_duplicate"), status="unverified",
-                        duplicate_of=rid(9))
-        body = json.dumps({"expectedStatus": "unverified", "requestIds": [rid(1)],
-                           "status": "rejected"})
-        for wrapper in self.WRAPPERS:
-            proc = self._predicate(wrapper, "is_scale_drain_duplicate_close",
-                                   sd.duplicate_evidence(d), body,
-                                   path=sd.DUPLICATE_CLOSE_PATH)
-            self.assertEqual(proc.returncode, 0,
-                             f"{wrapper} refused {sd.duplicate_evidence(d)!r}: {proc.stderr}")
-            # ...and the claim is delegated, not trusted
-            argv = json.loads(self.argv_log.read_text())
-            self.assertEqual(argv[argv.index("--rule") + 1], "duplicate")
-            self.assertEqual(argv[argv.index("--anchor") + 1], rid(9))
-            self.assertEqual(argv[argv.index("--request-id") + 1], rid(1))
-
-    def test_a_duplicate_close_whose_original_is_not_decided_is_refused(self):
-        """QA review 2: the token alone let a caller close an unrelated pending request."""
-        d = sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
-                        sd.decision_key(rid(1), "duplicate", "close_duplicate"),
-                        status="unverified", duplicate_of=rid(9))
-        body = json.dumps({"expectedStatus": "unverified", "requestIds": [rid(1)],
-                           "status": "rejected"})
-        (self.root / "scripts/credit_review/verify_anchor.py").write_text("import sys; sys.exit(1)\n")
-        for wrapper in self.WRAPPERS:
-            proc = self._predicate(wrapper, "is_scale_drain_duplicate_close",
-                                   sd.duplicate_evidence(d), body,
-                                   path=sd.DUPLICATE_CLOSE_PATH)
-            self.assertEqual(proc.returncode, 1, f"{wrapper} closed an unverified duplicate")
-            self.assertIn("duplicate verification failed", proc.stderr)
-
-    def test_a_duplicate_close_without_the_token_is_refused(self):
-        d = sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
-                        sd.decision_key(rid(1), "duplicate", "close_duplicate"), status="unverified",
-                        duplicate_of=rid(9))
-        body = json.dumps({"expectedStatus": "unverified", "requestIds": [rid(1)],
-                           "status": "rejected"})
-        self.token.unlink()
-        for wrapper in self.WRAPPERS:
-            proc = self._predicate(wrapper, "is_scale_drain_duplicate_close",
-                                   sd.duplicate_evidence(d), body,
-                                   path=sd.DUPLICATE_CLOSE_PATH)
-            self.assertEqual(proc.returncode, 1, f"{wrapper} closed a duplicate with no token")
-            self.assertIn("scale-drain.token", proc.stderr)
-            self.assertIn("root-only token", proc.stderr)
-            self.assertFalse(self.argv_log.exists(), "the verifier ran with no token")
-
-    def _dup_call(self):
-        d = sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
-                        sd.decision_key(rid(1), "duplicate", "close_duplicate"),
-                        status="unverified", duplicate_of=rid(9))
-        body = json.dumps({"expectedStatus": "unverified", "requestIds": [rid(1)],
-                           "status": "rejected"})
-        return sd.duplicate_evidence(d), body
-
-    def test_a_duplicate_close_names_exactly_one_request(self):
-        """One digest names one original, so one call closes one request. The verifier
-        was only ever handed the first id (QA review 6 of hydra#1883)."""
-        excerpt, body = self._dup_call()
-        one = json.loads(body)
-        for wrapper in self.WRAPPERS:
-            proc = self._predicate(wrapper, "is_scale_drain_duplicate_close", excerpt, body,
-                                   sd.DUPLICATE_CLOSE_PATH)
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            for ids in ([rid(1), rid(2)], [rid(1), rid(1)], [],
-                        [rid(n) for n in range(1, 51)]):
-                with self.subTest(wrapper=wrapper, ids=len(ids)):
-                    self.argv_log.unlink(missing_ok=True)
-                    proc = self._predicate(
-                        wrapper, "is_scale_drain_duplicate_close", excerpt,
-                        json.dumps({**one, "requestIds": ids}), sd.DUPLICATE_CLOSE_PATH)
-                    self.assertEqual(proc.returncode, 1, f"{wrapper} closed {len(ids)} ids")
-                    self.assertFalse(self.argv_log.exists(), "the verifier was reached")
-                    if ids:
-                        self.assertIn("exactly one requestId per duplicate close",
-                                      proc.stderr)
-
     def _approve_call(self):
         d = sd.Decision(rid(1), "precedent", "approve", "precedent_match",
                         sd.decision_key(rid(1), "precedent", "approve"),
@@ -2012,14 +1877,11 @@ class WrapperAcceptsTheRealDigestTests(unittest.TestCase):
         return sd.drain_evidence(d), json.dumps({"requestIds": [rid(1)], "status": "approved"})
 
     def _gates(self):
-        """Both drain writes, as ``(wrapper, fn, excerpt, body, path)``. An approval is
-        gated on the same identity as a close (QA review 5), so every identity and
-        registry case below runs against both, in both wrapper copies."""
+        """The drain's one write, as ``(wrapper, fn, excerpt, body, path)``: every identity
+        and registry case below runs against it in both wrapper copies."""
         for wrapper in self.WRAPPERS:
             yield (wrapper, "is_scale_drain_approval", *self._approve_call(),
                    "/admin/credit-requests")
-            yield (wrapper, "is_scale_drain_duplicate_close", *self._dup_call(),
-                   sd.DUPLICATE_CLOSE_PATH)
 
     def test_a_caller_supplied_token_file_is_denied_by_the_wrapper(self):
         """QA review 4, finding 1. The attack, on the UNMODIFIED gate: the caller writes
@@ -2084,20 +1946,18 @@ class WrapperAcceptsTheRealDigestTests(unittest.TestCase):
                 self.assertIn("/etc/hydra/scale-drain.token is missing", proc.stderr)
                 self.assertFalse(self.argv_log.exists())
 
-    def test_an_approval_presents_the_same_identity_as_a_close(self):
+    def test_the_approval_checks_the_drains_identity_first(self):
         """QA review 5: the approve exception had no identity at all - the requester, the
-        flag and the digest are all things a caller asserts. One helper, called by both
-        predicates, in both wrapper copies; neither predicate carries a path of its own."""
+        flag and the digest are all things a caller asserts. The predicate calls the one
+        helper, in both wrapper copies, and carries no token path of its own."""
         for wrapper in self.WRAPPERS:
             real = (SCRIPTS.parent / wrapper).read_text()
-            for fn, what in (("is_scale_drain_approval", "an approval"),
-                             ("is_scale_drain_duplicate_close", "a duplicate close")):
-                body = real.split(f"\n{fn}() {{", 1)[1].split("\n}\n", 1)[0]
-                self.assertIn(f'scale_drain_token_ok "{what}" || return 1', body, wrapper)
-                self.assertNotIn("drain_token_file", body, wrapper)
-                # the identity is checked before the registry, the digest or the verifier
-                self.assertLess(body.index("scale_drain_token_ok"),
-                                body.index("scale_drain_registry"), wrapper)
+            body = real.split("\nis_scale_drain_approval() {", 1)[1].split("\n}\n", 1)[0]
+            self.assertIn('scale_drain_token_ok "an approval" || return 1', body, wrapper)
+            self.assertNotIn("drain_token_file", body, wrapper)
+            # the identity is checked before the registry, the digest or the verifier
+            self.assertLess(body.index("scale_drain_token_ok"),
+                            body.index("scale_drain_registry"), wrapper)
 
     # ── the approval registry (QA review 5) ──────────────────────────────────
     def _callers_registry(self, approved: bool = True) -> Path:
@@ -2183,7 +2043,7 @@ class WrapperAcceptsTheRealDigestTests(unittest.TestCase):
     def test_no_drain_predicate_reads_the_registry_path_from_the_environment(self):
         for wrapper in self.WRAPPERS:
             real = (SCRIPTS.parent / wrapper).read_text()
-            for fn in ("is_scale_drain_approval", "is_scale_drain_duplicate_close"):
+            for fn in ("is_scale_drain_approval",):
                 body = real.split(f"\n{fn}() {{", 1)[1].split("\n}\n", 1)[0]
                 self.assertIn('registry="$(scale_drain_registry)" || return 1', body, wrapper)
                 self.assertNotIn("CREDIT_APPROVAL_REGISTRY", body, wrapper)
@@ -2967,8 +2827,8 @@ class FailureClassTests(unittest.TestCase):
     def test_an_approve_without_the_drains_own_identity_file_fails_the_preflight(self):
         """node-8 on 2026-11-13: credit-decider.env, fable.env and uvn-cron.env exist and
         scale-drain.env does not. The wrapper refuses that before any request, for every
-        approve alike, so it is asked once. A plan with only duplicate closes left signs
-        in with the admin env and needs no identity file."""
+        approve alike, so it is asked once. A plan with no approve left makes no write
+        and needs no identity file."""
         problems = self._preflight(dict(self.GOOD_ENV), identity=False)
         self.assertEqual([c for c, _ in problems], ["admin_env_missing"])
         self.assertIn("scale-drain.env", problems[0][1])
@@ -3245,7 +3105,7 @@ class RealEntrypointTests(unittest.TestCase):
     their real relative paths - in which exactly one line of each wrapper differs: the
     token literal names a scratch file. ``test_the_mirror_is_the_real_tree_but_for_the_
     token_path`` holds that claim to the diff. The checked-in files themselves, unmodified,
-    are exercised by the two ``callers_own_token`` tests, which is the half that can run
+    are exercised by the ``callers_own_token`` test, which is the half that can run
     anywhere: against the real pinned path they must refuse.
     """
 
@@ -3610,100 +3470,48 @@ class RealEntrypointTests(unittest.TestCase):
                 self.assertIn("claims lyricist with no verdict on file", str(ctx.exception))
                 self.assertEqual(self.api.requests("PUT"), [])
 
-    def _duplicate(self) -> "sd.Decision":
-        return sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
-                           sd.decision_key(rid(1), "duplicate", "close_duplicate"),
-                           status="unverified", duplicate_of=rid(9), profile_id=rid(7))
+    def _reject(self, wrapper: str, ids: list[str], path: str) -> subprocess.CompletedProcess:
+        """A ``rejected`` body sent as the drain would have sent a duplicate close: its
+        requester, its flag, its token, an approved registry entry and the old digest.
+        ``wrapper`` is a path to run, so the mirror and the checked-in file both serve."""
+        evidence = f"drain-dup:{rid(9)};duplicate_of_decided;v{sd.RULE_VERSION};{rid(7)}"
+        body = json.dumps({"expectedStatus": "unverified", "requestIds": ids,
+                           "status": "rejected"}, sort_keys=True)
+        env = {**self._env(), "SCALE_DRAIN": "1", "SCALE_DRAIN_TOKEN": "s3cret",
+               "EVIDENCE_EXCERPT": evidence, "OPS_DRY_RUN": "0"}
+        return subprocess.run(
+            ["bash", wrapper, "--evidence-excerpt", evidence, "--requester",
+             sd.SERVICE_REQUESTER, "call", "PUT", path, body],
+            capture_output=True, text=True, env=env, check=False)
 
-    def _close(self, wrapper: str, extra_ids: tuple[str, ...] = ()) -> None:
-        """The drain's own duplicate close through the mirrored real wrapper. With
-        ``extra_ids`` the body - and only the body - gains more request ids on its way
-        to the wrapper: the argv, environment, token and digest stay the ones production
-        builds for the first id."""
-        def run(argv, **kwargs):
-            if extra_ids:
-                body = json.loads(argv[-1])
-                body["requestIds"] = body["requestIds"] + list(extra_ids)
-                argv = argv[:-1] + [json.dumps(body, sort_keys=True)]
-            return subprocess.run(argv, **kwargs)
-
-        writer = sd.admin_writer(str(self.mirror / wrapper), token_file=str(self.token),
-                                 runner=run)
-        saved = dict(os.environ)
-        os.environ.clear()
-        os.environ.update(self._env())
-        try:
-            writer(self._duplicate())
-        finally:
-            os.environ.clear()
-            os.environ.update(saved)
-
-    def test_a_duplicate_close_of_a_decided_original_reaches_the_api(self):
-        """The control for the denial below: one id, a pending target, an approved
-        original of the same claim. One read, one conditional close."""
+    def test_a_rejected_body_from_the_drains_identity_never_reaches_the_api(self):
+        """The wrapper has no drain exception to the reject gate. This is the call that
+        used to close a duplicate - a pending target, an approved original of the same
+        claim, the token, the registry, the digest - and it stops at the reject gate
+        before any request: core would have told the customer "rejected"."""
         for wrapper in self.WRAPPERS:
-            with self.subTest(wrapper=wrapper):
-                self.api.serve([_api_request(rid(1), status="unverified"),
-                                _api_request(rid(9), status="approved")], [rid(1)])
-                self._close(wrapper)
-                self.assertEqual(len(self.api.requests("GET")), 1)
-                writes = self.api.requests("PUT")
-                self.assertEqual(len(writes), 1, writes)
-                self.assertIn("/admin/credit-requests/conditional-status", writes[0])
-                self.assertIn(rid(1), writes[0])
+            for path in ("/admin/credit-requests/conditional-status", "/admin/credit-requests"):
+                for ids in ([rid(1)], [rid(1), rid(2)]):
+                    with self.subTest(wrapper=wrapper, path=path, ids=len(ids)):
+                        self.api.serve([_api_request(rid(1), status="unverified"),
+                                        _api_request(rid(9), status="approved")], ids)
+                        proc = self._reject(str(self.mirror / wrapper), ids, path)
+                        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                        self.assertIn("MUSO_CREDIT_REJECT_APPROVAL_REQUIRED", proc.stderr)
+                        self.assertEqual(self.api.requests("PUT"), [])
+                        self.assertEqual(self.api.requests("GET"), [])
 
-    def test_a_second_request_in_a_duplicate_close_never_reaches_the_api(self):
-        """QA review 6 of hydra#1883, against both real entrypoints. The predicate took
-        up to 50 ids and verified only the first, so a real duplicate in front carried
-        every other pending request in the body to ``rejected`` - a customer-facing
-        denial of a request nobody examined. Everything here is valid for the first id:
-        the token, the registry, the digest, the decided original. The second id is an
-        unrelated pending request on another claim, and the API would have taken both."""
-        other = _api_request(rid(2), status="unverified", user="u2", track="t2",
-                             roles=("Producer",))
+    def test_no_wrapper_carries_a_duplicate_close_predicate(self):
+        """The registry check enumerates ``is_*_approval`` only, so a close predicate
+        that came back would be registered nowhere. Neither copy defines one."""
         for wrapper in self.WRAPPERS:
-            for extra in ((rid(2),), (rid(1),), tuple(rid(n) for n in range(2, 51))):
-                with self.subTest(wrapper=wrapper, ids=1 + len(extra)):
-                    self.api.serve([_api_request(rid(1), status="unverified"),
-                                    _api_request(rid(9), status="approved"), other],
-                                   [rid(1), *extra])
-                    with self.assertRaises(sd.DrainWriteError) as ctx:
-                        self._close(wrapper, extra)
-                    self.assertIn("exactly one requestId per duplicate close",
-                                  str(ctx.exception))
-                    self.assertEqual(self.api.requests("PUT"), [],
-                                     "a close the gate did not verify reached the API")
-                    self.assertEqual(self.api.requests("GET"), [])
-
-    @unittest.skipIf(os.path.exists("/etc/hydra/scale-drain.token"),
-                     "this host carries the real drain token")
-    def test_a_duplicate_close_with_a_callers_own_token_never_reaches_the_api(self):
-        """The whole duplicate path, real wrapper, real pinned path: the drain is handed
-        a token file the caller wrote, and the wrapper - which reads only
-        /etc/hydra/scale-drain.token - refuses before any request is made."""
-        own = self.api.root / "mine.token"
-        own.write_text("attacker\n")
-        own.chmod(0o600)
-        dup = sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
-                          sd.decision_key(rid(1), "duplicate", "close_duplicate"),
-                          status="unverified", duplicate_of=rid(9), profile_id=rid(7))
-        for wrapper in self.WRAPPERS:
-            with self.subTest(wrapper=wrapper):
-                self.api.serve([_api_request(rid(1), status="unverified"),
-                                _api_request(rid(9), status="approved")], [rid(1)])
-                saved = dict(os.environ)
-                os.environ.clear()
-                os.environ.update(self.api.env())
-                try:
-                    with self.assertRaises(sd.DrainWriteError) as ctx:
-                        sd.admin_writer(str(SCRIPTS.parent / wrapper),
-                                        token_file=str(own))(dup)
-                finally:
-                    os.environ.clear()
-                    os.environ.update(saved)
-                self.assertIn("scale-drain.token", str(ctx.exception))
-                self.assertEqual(self.api.requests("GET"), [])
-                self.assertEqual(self.api.requests("PUT"), [])
+            proc = subprocess.run(
+                ["bash", "-c", 'main() { :; }; source "$1" >/dev/null 2>&1; '
+                               "declare -F | awk '{print $3}'", "_", str(SCRIPTS.parent / wrapper)],
+                capture_output=True, text=True, check=False)
+            names = proc.stdout.split()
+            self.assertIn("is_scale_drain_approval", names, proc.stderr)
+            self.assertEqual([n for n in names if "duplicate" in n], [], wrapper)
 
     @unittest.skipIf(os.path.exists("/etc/hydra/scale-drain.token"),
                      "this host carries the real drain token")
@@ -5467,6 +5275,214 @@ class RefusePrecedentIsNotFinalTests(unittest.TestCase):
 
     def test_a_missing_store_is_no_evidence_of_that_kind(self):
         self.assertEqual(sd.evidence_times("/nonexistent/proof.sqlite", NO_DSP_STORE), {})
+
+
+
+class _FakeCore:
+    """A core that does with a status write what core does: it moves the row, stamps
+    ``updatedat``, and sends its notice on every move to ``approved`` or ``rejected``
+    (core refuses ``notify: false`` on a move to ``rejected``). The replica reads are
+    answered from the same rows, so a write is visible to the next snapshot."""
+
+    WRITE_CLOCK = "2026-11-11 12:00:00.000000 UTC"
+
+    def __init__(self):
+        self.rows: dict[str, dict] = {}
+        self.writes: list[tuple[str, str, str]] = []
+        self.notices: list[tuple[str, str]] = []
+
+    def add(self, n, status, *, user, track, roles="{Producer}", updated=None,
+            duplicate_of=None):
+        self.rows[rid(n)] = {"status": status, "user": user, "track": track, "roles": roles,
+                             "updated": updated, "duplicate_of": duplicate_of}
+
+    def query(self, sql):
+        decided = "status IN ('approved', 'rejected')" in sql
+        out = []
+        for request_id, r in self.rows.items():
+            if decided and r["status"] in ("approved", "rejected"):
+                out.append((request_id, r["status"], r["user"], r["track"], r["roles"],
+                            r["updated"]))
+            elif not decided and r["status"] in ("user_verification_needed", "unverified"):
+                vd = {"duplicate_of": r["duplicate_of"]} if r["duplicate_of"] else {}
+                out.append((request_id, r["user"], "p1", r["status"], "2026-11-01T00:00:00Z",
+                            json.dumps(vd), "{}", r["track"], r["roles"]))
+        return out
+
+    def run(self, argv, **_kw):
+        path, body = argv[-2], json.loads(argv[-1])
+        for request_id in body["requestIds"]:
+            row = self.rows[request_id]
+            row["status"], row["updated"] = body["status"], self.WRITE_CLOCK
+            self.writes.append((path, request_id, body["status"]))
+            if body["status"] in ("approved", "rejected"):
+                self.notices.append((body["status"], request_id))
+
+        class Proc:
+            returncode = 0
+            stderr = ""
+            stdout = json.dumps({"http_status": 200, "body": json.dumps(
+                {"data": {"updatedIds": body["requestIds"]}})})
+        return Proc()
+
+    def writer(self, td):
+        token = Path(td) / "scale-drain.token"
+        token.write_text("s3cret\n")
+        return sd.admin_writer("/opt/hydra/scripts/muso-admin-api.sh", runner=self.run,
+                               token_file=str(token))
+
+
+class DuplicateIsNeverARefusalTests(unittest.TestCase):
+    """A request that names a decided request as its duplicate is never closed.
+
+    The close was a core ``rejected``. core tells the customer "rejected" on that move,
+    and the next snapshot read the closed row as this claimant's refusal of the claim,
+    dated the day of the close: a refuse precedent newer than everything the customer had
+    filed. So the drain makes no such write. These cases run plan -> apply -> plan again
+    against a core that applies what it is sent and notifies as core does, through the
+    real replica reads, the real writer and a real ledger."""
+
+    USER, OTHER = "1001", "2002"
+    T1 = "00000001-1111-4111-8111-111111111111"
+    T2 = "00000002-1111-4111-8111-111111111111"
+    T3 = "00000003-1111-4111-8111-111111111111"
+    REFUSED = "2026-10-12 05:13:28.100333 UTC"
+    AFTER = "2026-11-02T00:00:00Z"
+
+    def _proofs(self, td, intake=()):
+        proofs = str(Path(td) / "proof.sqlite")
+        db = sqlite3.connect(proofs)
+        db.execute("CREATE TABLE verdicts (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                   " proof_id TEXT, request_id TEXT, verdict TEXT, created_at TEXT)")
+        db.execute(INTAKE_DDL)
+        db.executemany("INSERT INTO proof_intake VALUES (?,?,?)",
+                       [(f"i{n}", json.dumps(ids), at) for n, (ids, at) in enumerate(intake)])
+        db.commit()
+        db.close()
+        return proofs
+
+    def _plan(self, td, core, proofs, name):
+        rows = sd.replica_snapshot_rows(core.query, proof_store_path=proofs,
+                                        dsp_store_path=NO_DSP_STORE)
+        path = Path(td) / f"{name}.jsonl"
+        path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+        plan = sd.plan(sd._build_snapshot(_args(snapshot=str(path))), now=NOW)
+        return plan, {d.request_id: (d.rule, d.outcome, d.reason_code) for d in plan}
+
+    def test_naming_ones_own_refused_request_leaves_the_claim_reopenable(self):
+        core = _FakeCore()
+        core.add(100, "rejected", user=self.USER, track=self.T1, updated=self.REFUSED)
+        # 1 names the refused request as its duplicate; 2 is the same claim again and
+        # names nothing. Both have a document filed after the refusal.
+        core.add(1, "user_verification_needed", user=self.USER, track=self.T1,
+                 duplicate_of=rid(100))
+        core.add(2, "user_verification_needed", user=self.USER, track=self.T1)
+        ask = ("ask", "ask", "proof_on_file_undecided")
+        with tempfile.TemporaryDirectory() as td:
+            proofs = self._proofs(td, [([rid(1)], self.AFTER), ([rid(2)], self.AFTER)])
+            plan, first = self._plan(td, core, proofs, "first")
+            self.assertEqual(first, {rid(1): ask, rid(2): ask})
+            by_id = {d.request_id: d for d in plan}
+            self.assertEqual(by_id[rid(1)].superseded_precedent, rid(100))
+            self.assertIsNone(by_id[rid(1)].duplicate_of)
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            stats = sd.apply(plan, db, shards=1, write_pool=1, writer=core.writer(td), now=NOW)
+            self.assertEqual(stats["applied"], 2)
+            self.assertEqual(core.writes, [], "no status is written for either request")
+            self.assertEqual(core.notices, [], "and the customer is told nothing by core")
+            self.assertEqual(core.rows[rid(1)]["status"], "user_verification_needed")
+            self.assertEqual(core.rows[rid(100)]["updated"], self.REFUSED)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM intents").fetchone()[0], 0)
+            _, second = self._plan(td, core, proofs, "second")
+        self.assertEqual(second, first, "the refusal is no newer after the run than before it")
+
+    def test_naming_ones_own_approved_request_is_approved_and_never_rejected(self):
+        core = _FakeCore()
+        core.add(200, "approved", user=self.USER, track=self.T2,
+                 updated="2026-09-01 00:00:00.000000 UTC")
+        core.add(3, "user_verification_needed", user=self.USER, track=self.T2,
+                 duplicate_of=rid(200))
+        with tempfile.TemporaryDirectory() as td:
+            plan, got = self._plan(td, core, self._proofs(td), "first")
+            self.assertEqual(got, {rid(3): ("precedent", "approve", "precedent_match")})
+            self.assertEqual(plan[0].evidence_anchor, rid(200))
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            sd.apply(plan, db, shards=1, write_pool=1, writer=core.writer(td), now=NOW)
+        self.assertEqual(core.writes, [("/admin/credit-requests", rid(3), "approved")])
+        self.assertEqual(core.notices, [("approved", rid(3))])
+        self.assertEqual(core.rows[rid(3)]["status"], "approved")
+
+    def test_naming_a_request_that_decides_nothing_about_this_claim_writes_nothing(self):
+        core = _FakeCore()
+        # 300 is another account's refusal on the same track; 400 is still pending.
+        core.add(300, "rejected", user=self.OTHER, track=self.T3, updated=self.REFUSED)
+        core.add(400, "unverified", user=self.OTHER, track=self.T3)
+        core.add(4, "user_verification_needed", user=self.USER, track=self.T3,
+                 duplicate_of=rid(300))
+        core.add(5, "user_verification_needed", user=self.USER, track=self.T3,
+                 duplicate_of=rid(400))
+        with tempfile.TemporaryDirectory() as td:
+            plan, got = self._plan(td, core, self._proofs(td), "first")
+            self.assertEqual(got[rid(4)], ("ask", "ask", "no_rule_matched"),
+                             "another account's refusal is no precedent for this claimant")
+            self.assertEqual(got[rid(5)], ("duplicate", "unmatched", "unmatched_duplicate"),
+                             "an undecided original sets the row aside, unwritten")
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            sd.apply(plan, db, shards=1, write_pool=1, writer=core.writer(td), now=NOW)
+        self.assertEqual((core.writes, core.notices), ([], []))
+
+    def test_no_request_is_planned_as_a_close_whatever_its_original_decided(self):
+        for decided in ("approved", "rejected"):
+            for same_claimant in (True, False):
+                with self.subTest(decided=decided, same_claimant=same_claimant):
+                    core = _FakeCore()
+                    core.add(100, decided, updated=self.REFUSED, track=self.T1,
+                             user=self.USER if same_claimant else self.OTHER)
+                    core.add(1, "unverified", user=self.USER, track=self.T1,
+                             duplicate_of=rid(100))
+                    with tempfile.TemporaryDirectory() as td:
+                        plan, _ = self._plan(td, core, self._proofs(td), "p")
+                    self.assertNotIn(plan[0].outcome, sd.RETIRED_OUTCOMES)
+                    self.assertNotIn(plan[0].outcome, ("reject", "close_duplicate"))
+                    self.assertNotEqual(sd.WRITE_STATUS.get(plan[0].outcome), "rejected")
+
+    def test_a_plan_file_made_before_this_change_is_refused_whole(self):
+        """An older plan may still carry a close. Applying it would write ``rejected``."""
+        keep = sd.plan(snapshot([row(2)]), now=NOW)[0]
+        old = dict(keep.as_row(), request_id=rid(1), rule="duplicate", outcome="close_duplicate",
+                   reason_code="duplicate_of_decided", duplicate_of=rid(9), status="unverified",
+                   decision_key=sd.decision_key(rid(1), "duplicate", "close_duplicate"))
+        text = "".join(json.dumps(r, sort_keys=True) + "\n" for r in (keep.as_row(), old))
+        core = _FakeCore()
+        core.add(1, "unverified", user=self.USER, track=self.T1)
+        with tempfile.TemporaryDirectory() as td:
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            with self.assertRaises(sd.DrainError) as ctx:
+                sd.apply(sd.parse_plan(text), db, shards=1, write_pool=1,
+                         writer=core.writer(td), now=NOW)
+            self.assertIn("'close_duplicate'", str(ctx.exception))
+            self.assertIn("plan again", str(ctx.exception))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM applied").fetchone()[0], 0,
+                             "the row beside it is not recorded either")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM intents").fetchone()[0], 0)
+        self.assertEqual((core.writes, core.notices), ([], []))
+
+    def test_the_cli_refuses_that_plan_and_exits_non_zero(self):
+        keep = sd.plan(snapshot([row(2)]), now=NOW)[0]
+        old = dict(keep.as_row(), request_id=rid(1), rule="duplicate", outcome="close_duplicate",
+                   reason_code="duplicate_of_decided", duplicate_of=rid(9), status="unverified",
+                   decision_key=sd.decision_key(rid(1), "duplicate", "close_duplicate"))
+        with tempfile.TemporaryDirectory() as td:
+            plan = Path(td) / "plan.jsonl"
+            plan.write_text(json.dumps(old, sort_keys=True) + "\n")
+            ledger = Path(td) / "l.sqlite"
+            proc = subprocess.run(cli("apply", "--plan", str(plan), "--ledger", str(ledger),
+                                      "--no-write"), cwd=SCRIPTS, capture_output=True, text=True)
+            self.assertNotEqual(proc.returncode, 0, proc.stdout)
+            self.assertIn("close_duplicate", proc.stdout + proc.stderr)
+            db = sqlite3.connect(str(ledger))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM applied").fetchone()[0], 0)
+            db.close()
 
 
 if __name__ == "__main__":

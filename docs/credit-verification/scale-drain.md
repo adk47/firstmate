@@ -29,6 +29,9 @@ the verify ledger and the proof store, the plan over all 96,703 pending requests
 | `expired` | | | 0 | |
 | `duplicate` | `close_duplicate` | | 0 | |
 
+`close_duplicate` is an outcome the ladder had on that date too. It is gone (see "A
+duplicate is never closed" below), and it never matched a row.
+
 `queue_tier2` is the outcome name the ladder had on 2026-11-11; it no longer emits it (see
 "No outcome is a person" below). The 1,324 rows applied under that name are still in the
 ledger's `applied` table, each with a `told` row and no message behind it.
@@ -39,10 +42,10 @@ as asks. It is not a pass that decides the backlog**, and an `ask` row is not a 
 
 - **`expired` is genuinely zero today.** The earliest ask on record is 2026-10-24, so the
   first 30-day window closes on 2026-11-23.
-- **The `duplicate` rule's request-id predicate matches nothing in production.** No
-  pending row carries a request id in `verificationData.duplicate_of`: the only non-null
-  values are 856 maps of `{"<track uuid>|<role>": "<credit id>"}`, the credits already
-  on the profile. `close_duplicate` therefore closes nothing on this data. The
+- **No pending row names a request as its duplicate.** `verificationData.duplicate_of` is
+  never a request id in production: the only non-null values are 856 maps of
+  `{"<track uuid>|<role>": "<credit id>"}`, the credits already on the profile (measured
+  again 2026-11-15: every non-null value in core, pending or decided, is a map). The
   same-claimant-already-decided population the census called DUPLICATE is what
   `precedent` catches (4,456 rows).
 
@@ -80,8 +83,8 @@ The snapshot is one document carrying **all** the ladder's facts, so the documen
 
 - the pending population (status `user_verification_needed` / `unverified`, not deleted)
   with its `trackid` and `credits` role array;
-- the **decided** population (`approved` / `rejected`), which is both the duplicate index
-  and the source of precedent;
+- the **decided** population (`approved` / `rejected`), which is the source of precedent
+  and of whether the request a row names as its original is decided;
 - **proof verdicts**, joined read-only from the proof store
   (`scripts/credit_verify/proof/store.py`, table `verdicts`). A verdict that is a
   decision (`GENUINE` / `VERIFIED` → approve, `FORGED_LIKELY` / `INCONSISTENT` → refuse)
@@ -115,9 +118,8 @@ The snapshot is one document carrying **all** the ladder's facts, so the documen
 - **`duplicate_of` is classified, not trusted to be a request id**
   (`classify_duplicate`). A string is the request id it claims to be. The production
   map means "already a credit on this profile": the row keeps rank one, comes out
-  `unmatched` / `already_on_profile`, and is neither written (there is no decided
-  original for the gate to verify) nor asked (the same call `uvn_status.ask_class`
-  makes). Bound raw, that map crashed the whole plan.
+  `unmatched` / `already_on_profile`, and is neither written nor asked (the same call
+  `uvn_status.ask_class` makes). Bound raw, that map crashed the whole plan.
 
 There is no precedent table in the tree, and the original precedent matcher never
 recorded its key. **Precedent is per-claimant, never per-class**: it means "this claimant
@@ -157,7 +159,7 @@ Stop at the first match. Every rule is a SQL predicate (`scale_drain.LADDER_SQL`
 
 | Rank | Rule | Condition | Outcome | Reason code |
 |---|---|---|---|---|
-| 1 | `duplicate` | `duplicate_of` names a request that is already decided | close | `duplicate_of_decided` |
+| 1 | `duplicate` | `duplicate_of` is a map of credits already on the profile, or names a request that is **not** decided | **`unmatched`: counted, never written, never asked** | `already_on_profile` / `unmatched_duplicate` |
 | 2 | `precedent` | `precedent_key` has a recorded outcome, and for a `refuse` outcome nothing on file is newer than that refusal | approve / **cannot confirm** | `precedent_match` / `precedent_refuse` |
 | 3 | `proof_verdict` | a readable verdict (`approve`/`refuse`) exists | approve / **ask** | `proof_verdict_approve` / `proof_verdict_refuse` |
 | 4 | `expired` | **asked** (`asked_at` set), `expires_at <= now`, no evidence on file (`evidence_at` empty) | **cannot confirm** | `expired_no_proof` |
@@ -235,20 +237,47 @@ same claim. It holds a request only while nothing on file is newer than that ref
 The same `evidence_at` is what stops an expiry, so a filed document with no verdict yet
 keeps an asked request out of `expired_no_proof`.
 
-### The split: a duplicate close is a write, a row the ladder cannot confirm is not
+### A duplicate is never closed
 
-A duplicate close writes `status:"rejected"`; no other negative outcome writes anything.
+The drain writes one status, `approved`. It writes no `rejected`, for a duplicate or for
+anything else (`WRITE_STATUS`; the writer refuses any other mapping before the wrapper is
+spawned).
 
-**A duplicate close is autonomous.** A duplicate of an already-decided request is not a
-new decision: the original decision stands and the customer's outcome is unchanged, so
-closing it is deduplication, not a denial. It goes through
-`PUT /admin/credit-requests/conditional-status` with
-`EVIDENCE_EXCERPT=drain-dup:<original-request-uuid>;<reason>;v<n>`, and the wrapper's
-`is_scale_drain_duplicate_close` refuses the write unless that digest names a UUID. The
-ladder only reaches the `duplicate` rule when `duplicate_of` points at a request that is
-already decided, so the original is provable, and the ledger row carries `duplicate_of`.
-The close is audited exactly like a human reject, with the original request id as the
-approval reference.
+Until 2026-11-15 a request whose `duplicate_of` named an already-decided request was
+closed: `PUT /admin/credit-requests/conditional-status` with `status: "rejected"`, on
+the reasoning that the original decision stood and the close was deduplication. Three
+things that reasoning did not hold against, each read in core or measured:
+
+- **core tells the customer "rejected".** core sends its rejection notice on every move
+  to `rejected` (`updateStatus.js`, `creditRequestsRejected`), and refuses
+  `notify: false` on that move (`parseNotifyFlag` allows it only for a move to
+  processing, unverified or verification-needed). The status enum has no duplicate
+  status, so there is no quieter way to close.
+- **The close came back as a refusal of the claim.** Precedent is read from core's
+  decided rows (`DECIDED_SQL`: `approved` / `rejected`). A close written as `rejected`
+  is one of them, so the next snapshot read it as this claimant's refusal of this claim,
+  dated the day of the close: newer than every document already on file, which is the
+  one thing that sets a refuse precedent aside.
+- **It added nothing the ladder did not already decide.** The close was accepted only
+  when the original matched on claimant, track and roles, and that is the precedent key.
+  Without the close an approved original approves the request on precedent, and a
+  refused original holds it at `cannot_confirm` until newer evidence is on file.
+
+So a request that names a decided original is decided by the rules below `duplicate`, as
+if it named nothing. The `duplicate` rule keeps only the rows it cannot resolve (the
+profile-credit map, an original that is not decided), and those stay `unmatched`.
+
+A plan made before this change may still carry `close_duplicate` rows. `apply` refuses
+such a plan whole, before it records or writes any row (`RETIRED_OUTCOMES`): make a new
+plan from a new snapshot. Neither wrapper copy has a duplicate-close predicate any
+longer, so a `rejected` body from the drain's identity meets the reject gate like any
+other caller's and is refused there.
+
+Measured on core's replica 2026-11-15 09:37Z: no request, pending or decided, carries a
+request id in `duplicate_of`, and the drain's ledger holds no `close_duplicate` row. The
+close had never written anything; this removes the path before it could. The reads behind
+that measurement, and core's own notification and status code, are in
+`data/nohumans-drain-n1/item1-duplicates.md`.
 
 **No outcome is a person** (captain 2026-11-14: "there should be no humans involved
 except the customers giving proof and their statements"). The ladder no longer emits
@@ -338,7 +367,6 @@ full gate chain still runs. No new endpoint, no direct HTTP client.
 | outcome | status written |
 |---|---|
 | `approve` | `approved`, with `--evidence-excerpt` set to a `drain-signal:` digest |
-| `close_duplicate` | `rejected` via `conditional-status`, with a `drain-dup:` digest naming the decided original |
 | `cannot_confirm` | **no write**, and no message: recorded in the ledger only |
 | `ask` | **no write** — the send belongs to `need_asks.py` |
 
@@ -468,9 +496,9 @@ the target will not be in that profile's list.
 caller sets, so before QA review 5 the only thing between "can invoke the wrapper" and an
 approval was the verified anchor. That is the stronger control - it is per row, and it is
 answered by the admin API or the proof store - but it left the approve path with no
-execution identity at all, while the less consequential duplicate close had one.
+execution identity at all.
 
-Both writes now go through one check, `scale_drain_token_ok`, before the registry or the
+An approval now goes through one check, `scale_drain_token_ok`, before the registry or the
 verifier is consulted: `SCALE_DRAIN_TOKEN` must equal the contents of
 `/etc/hydra/scale-drain.token`, **mode 600, owned by the user the wrapper runs as** (root
 in production). The path is one literal, in that one helper; `SCALE_DRAIN_TOKEN_FILE` set
@@ -489,45 +517,28 @@ credential), which is a host change, not something a wrapper can assert about it
 
 **An approve therefore needs the token file to exist.** Nothing creates it: not the
 deploy, not this PR. Until an operator places it (`install -m 600 -o root /dev/stdin
-/etc/hydra/scale-drain.token`), `apply` refuses every approve and every duplicate close
+/etc/hydra/scale-drain.token`), `apply` refuses every approve
 with `…/scale-drain.token is missing`, and writes nothing.
 
 **Cost.** Only approve rows are verified, and the approve population is small: 3,294 of
 96,703 on the 2026-11-11 snapshot (the precedent and proof-verdict approves), not the
 whole backlog. Measured locally, the verifier's own
 overhead is ~26 ms/row (python start + one indexed SQLite read); every verified row -
-precedent, proof verdict or duplicate - adds one admin GET. **The end-to-end pass time has not been measured on prod** — this
+precedent or proof verdict - adds one admin GET. **The end-to-end pass time has not been measured on prod** — this
 worktree has no prod access — so no figure is claimed here. The operator's first real run
 is what produces it.
 
-##### Duplicate closes: a token AND a verified original
+##### The token path is pinned
 
-A duplicate close is not an approval, so it does not need the approve gate's evidence. It
-needs two things, and it closes **exactly one request per call**: one digest names one
-original, and the verifier is handed one target. The predicate used to accept up to 50
-ids while verifying only the first, so a real duplicate in front carried every other
-pending request in the body to `rejected` - an unexamined customer-facing denial (QA
-review 6 of hydra#1883). A second id, the same id twice or an empty list now refuses
-before the verifier is consulted; the drain has always sent one id per close.
-
-1. **An execution identity** the caller cannot simply assert: the same token check an
-   approval makes (above) - a token file at
-   `/etc/hydra/scale-drain.token`, **mode 600, owned by the drain's own user** (root in
-   production), whose contents must equal `SCALE_DRAIN_TOKEN`. This **raises the bar** from
-   "can invoke the wrapper" to "can read that file". It does **not** make the path
-   non-forgeable, and it is not claimed to (captain decision, 2026-11-11).
-   **The path is a literal in the wrapper and in the drain.** It was overridable with
-   `SCALE_DRAIN_TOKEN_FILE`, which reduced the check to "the caller can write a mode-600
-   file and read it back" (QA review 4 of hydra#1883). Setting that variable - to anything,
-   including the real path or an empty string - now **refuses** the close, and a
-   `SCALE_DRAIN_TOKEN` that is not exactly the pinned file's contents is refused before the
-   verifier is consulted. Tests that need a passing close rewrite the literal in a scratch
-   copy of the predicate; there is no environment seam.
-2. **A verified original.** The `drain-dup:<original>;<reason>;v<n>;<profile>` digest is
-   handed to the same verifier, which fetches that profile in one GET and checks the named
-   original is **decided** (`approved`/`rejected`) and matches this request on claimant,
-   track and claimed roles. The token alone let a caller close an unrelated pending request
-   as a "duplicate" (QA review 2 of hydra#1883).
+**The path is a literal in the wrapper and in the drain.** It was overridable with
+`SCALE_DRAIN_TOKEN_FILE`, which reduced the check to "the caller can write a mode-600
+file and read it back" (QA review 4 of hydra#1883). Setting that variable - to anything,
+including the real path or an empty string - now **refuses** the write, and a
+`SCALE_DRAIN_TOKEN` that is not exactly the pinned file's contents is refused before the
+verifier is consulted. This **raises the bar** from "can invoke the wrapper" to "can
+read that file". It does **not** make the path non-forgeable, and it is not claimed to
+(captain decision, 2026-11-11). Tests that need a passing approve rewrite the literal in
+a scratch copy; there is no environment seam.
 
 To see how many rows that moves from approve to unmatched on a real snapshot:
 
@@ -838,7 +849,7 @@ no same-profile precedent, 1 removal (the last five overlap).
 wrapper signs in with `/etc/openclaw/agents/scale-drain.env` and sends
 `X-Credit-Automation-Id: verification-scale-drain`. The header goes out only with
 `SCALE_DRAIN=1`, the drain's requester, that identity, and `PUT /admin/credit-requests`.
-A duplicate close takes neither. The `skills-all` wrapper copy has no identity loader and
+The `skills-all` wrapper copy has no identity loader and
 sends no automation header for anyone, so it is unchanged.
 
 **Order, and what does not exist yet.** Nothing approves until all of these are true:
@@ -985,13 +996,9 @@ name (`scripts/tests/muso-admin-api-trailing-flag.bats`).
 
 ### Reading the plan before you apply it
 
-The plan is the whole forecast, so the two numbers that matter are one `jq` away:
+The plan is the whole forecast, so the numbers that matter are one `jq` away:
 
 ```bash
-# how many duplicates close on the first pass (0 on the 2026-11-11 snapshot: no pending
-# row names a request as its duplicate)
-jq -r 'select(.outcome=="close_duplicate") | .request_id' plan.jsonl | wc -l
-
 # what the pass actually does, by outcome and reason (`plan` prints the same as by_reason)
 jq -r '"\(.outcome)/\(.reason_code)"' plan.jsonl | sort | uniq -c
 
@@ -1002,10 +1009,9 @@ jq -r 'select(.outcome=="cannot_confirm") | .reason_code' plan.jsonl | sort | un
 jq -r 'select(.outcome=="unmatched") | .request_id' plan.jsonl | wc -l
 ```
 
-A duplicate whose `duplicate_of` points at a request that is not decided is **not** a
-duplicate by this ladder and is **not** asked either: it is `unmatched`
-(`unmatched_duplicate`), because there is no standing decision to deduplicate against and
-the user was already decided once. `apply` counts it and writes nothing.
+A request whose `duplicate_of` points at a request that is not decided is **not** asked:
+it is `unmatched` (`unmatched_duplicate`), and `apply` counts it and writes nothing. One
+that points at a decided request is decided by the rules below `duplicate`.
 
 ## The one reviewed ask path
 
@@ -1040,7 +1046,7 @@ no second sender.
 
 ## Guardrails
 
-- **Never lower a served number.** The ladder only closes duplicates, approves on
+- **Never lower a served number.** The ladder only approves on
   precedent or a verdict, records an expiry or a refuse precedent with nothing newer on file as
   `cannot_confirm`, or asks. It
   never reduces a credit.

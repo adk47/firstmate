@@ -1417,7 +1417,7 @@ class DrainReconciliationTest(NeedAsksTest):
         plan = self._plan([
             {"request_id": "r1", "rule": "ask", "outcome": "ask", "user_id": 1},
             {"request_id": "r2", "rule": "precedent", "outcome": "approve", "user_id": 1},
-            {"request_id": "r3", "rule": "duplicate", "outcome": "close_duplicate", "user_id": 2},
+            {"request_id": "r3", "rule": "duplicate", "outcome": "unmatched", "user_id": 2},
         ])
         res = na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying),
                        query=self.q, from_drain=plan)
