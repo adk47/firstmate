@@ -14,6 +14,19 @@ The rule (firstmate 2026-11-14, ruled 2026-11-15):
   validator-declined rows"): it is an ASK, the specific one, and an ask is not sent by
   this module either.
 
+  An approval is the ACCOUNT's too. A request the row rule would approve is barred when
+  its user or profile is on the decider's deny list (``decide.Policy``: the deny lists
+  and the fraud watchlist, one file read). Lists that were not read bar it as unmeasured.
+
+  The account gate (``account_gate.py``, the one every approver calls before a write) is
+  NOT asked here, and ``approve`` therefore means "before the account gate". Asking it is
+  not a read: for an account it holds, the gate appends a hold line to its own ledger
+  and, for an account new to it, adds the account to the fraud watch and queues a proof
+  ask. That is right for a job about to approve and wrong for one that only counts.
+  Measured 2026-11-16 on the 2,098 rows the row rule approved: of the 952 the running
+  score-approve job could judge it refused 11 on a deny list, which this stage now bars,
+  and 18 on the fraud watch, which only the gate reads.
+
 What this module is, and is not:
 
   * It has NO writer. There is no admin API call, no customer message and no ledger of
@@ -57,6 +70,9 @@ from . import verify_anchor as va
 from .policy import SERVER_PROOF_REQUEST_MARKER, hold_causes, never_ask, server_approval_refusal
 
 Query = Callable[[str], list[list[Any]]]
+#: (user id, profile id) -> the bar that stops this account's approvals, or None.
+#: Must be a pure read: the pass asks it about every request the row rule would approve.
+Account = Callable[[str, str], "str | None"]
 
 POLICY_PATH = Path(__file__).resolve().parents[2] / "policies" / "established-claimant.json"
 
@@ -278,6 +294,26 @@ BAR_HOLD = "hold:"
 
 APPROVE_REASON = "established_claimant"
 
+#: The account stage, applied to a request the row rule would approve. Each one bars.
+BAR_ACCOUNT_DENY = "account:deny_list"            # the decider's deny / fraud / hold list
+BAR_ACCOUNT_UNMEASURED = "account:unmeasured"     # the pass was given no deny lists
+
+
+def deny_reader(deny_users: Iterable[int], deny_profiles: Iterable[str]) -> Account:
+    """The decider's deny lists as the account stage. A pure lookup: no call leaves the process."""
+    denied_users = {int(u) for u in deny_users}
+    denied_profiles = {str(p).strip().lower() for p in deny_profiles}
+
+    def bar(user_id: str, profile_id: str) -> str | None:
+        user = str(user_id).strip()
+        if user.isdigit() and int(user) in denied_users:
+            return BAR_ACCOUNT_DENY
+        if str(profile_id).strip().lower() in denied_profiles:
+            return BAR_ACCOUNT_DENY
+        return None
+
+    return bar
+
 
 def decide(verdict: Any, removed: bool, roles: Sequence[str]) -> tuple[str, str, list[str]]:
     """(outcome, reason, every bar that applies) for an established request.
@@ -341,10 +377,15 @@ def core_guard(verdict: Any, proof_requested: bool) -> list[str]:
 
 # ── the run ─────────────────────────────────────────────────────────────────
 
-def run(query: Query, policy: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """(decision rows sorted by request id, funnel). Read-only: ``query`` is the only I/O."""
+def run(query: Query, policy: dict[str, Any] | None = None,
+        account: Account | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """(decision rows sorted by request id, funnel). Read-only: ``query`` is the only I/O.
+    ``account`` is asked only about a request the row rule would approve; with no ``account``
+    every such request is barred as unmeasured. The account gate is never asked (module doc)."""
     policy = policy or load_policy()
-    funnel: dict[str, Any] = {"mode": SHADOW, "policy": {k: policy[k] for k in sorted(policy)}}
+    funnel: dict[str, Any] = {"mode": SHADOW, "policy": {k: policy[k] for k in sorted(policy)},
+                              "deny_lists_read": account is not None,
+                              "account_gate_read": False}
 
     by_status = {str(s): _count(n, "pending count") for s, n in query(COUNT_SQL)}
     funnel["pending"] = sum(by_status.values())
@@ -398,7 +439,7 @@ def run(query: Query, policy: dict[str, Any] | None = None) -> tuple[list[dict[s
     outcomes: Counter[str] = Counter()
     reasons: Counter[str] = Counter()
     guards: Counter[str] = Counter()
-    left = unread = 0
+    left = unread = row_rule_approves = 0
     for chunk in _chunks(sorted(matched)):
         seen = set()
         for rid, status, deleted, *rest in query(VERDICT_SQL.format(ids=_uuids(chunk))):
@@ -415,6 +456,12 @@ def run(query: Query, policy: dict[str, Any] | None = None) -> tuple[list[dict[s
             verdict = read_verdict(parts)
             removed = any(str(x or "").strip() not in ("", "null") for x in (fraud_removal, precedent_revert))
             outcome, reason, row_bars = decide(verdict, removed, row["roles"])
+            if outcome == "approve":
+                row_rule_approves += 1
+                stop = (BAR_ACCOUNT_UNMEASURED if account is None
+                        else account(row["user_id"], row["profile_id"]))
+                if stop:
+                    outcome, reason, row_bars = "barred", stop, [stop]
             outcomes[outcome] += 1
             reasons[f"{outcome}:{reason}"] += 1
             bars.update(row_bars)
@@ -447,6 +494,7 @@ def run(query: Query, policy: dict[str, Any] | None = None) -> tuple[list[dict[s
     funnel["outcomes"] = {o: outcomes.get(o, 0) for o in OUTCOMES}
     funnel["reasons"] = dict(sorted(reasons.items()))
     funnel["bars"] = dict(sorted(bars.items()))
+    funnel["approve_before_deny_lists"] = row_rule_approves
     approve = [r for r in rows if r["outcome"] == "approve"]
     per_user = Counter(r["user_id"] for r in approve)
     funnel["approve_users"] = len(per_user)
@@ -497,7 +545,7 @@ def published(state_dir: Path | str | None = None) -> list[str]:
     return sorted(p.name for p in runs.iterdir() if p.is_dir() and _RUN_NAME.match(p.name))
 
 
-def tick(query: Query, policy: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def tick(query: Query, policy: dict[str, Any], account: Account | None = None) -> tuple[int, dict[str, Any]]:
     """One scheduled pass. Returns (exit code, what to print).
 
     0: published, or the stop switch is present and nothing was read.
@@ -506,7 +554,7 @@ def tick(query: Query, policy: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     """
     if os.path.exists(KILL_FILE):
         return 0, {"skipped": f"{KILL_FILE} is present", "published": None}
-    rows, funnel = run(query, policy)
+    rows, funnel = run(query, policy, account)
     if funnel["verdict_row_not_returned"]:
         return 1, {"published": None, "funnel": funnel,
                    "error": "the verdict read did not return every row it asked for"}
@@ -533,13 +581,26 @@ def tick(query: Query, policy: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     return 0, {"published": name, "funnel": funnel}
 
 
+def _live_account() -> Account:
+    """The deployed deny lists. Lists that cannot be read stop the pass: an unread list must
+    never read as "nobody is denied"."""
+    from . import decide as decider  # noqa: PLC0415 - only for a real run
+
+    try:
+        lists = decider.Policy.load()
+    except (OSError, ValueError) as exc:
+        raise EstablishedClaimantError(f"the decider's deny lists cannot be read: {exc}") from exc
+    return deny_reader(lists.deny_user_ids, lists.deny_profile_ids)
+
+
 def _cmd_tick(args: argparse.Namespace) -> int:
     from . import verify_notify  # noqa: PLC0415 - the replica client, only for a real run
 
     if os.path.exists(KILL_FILE):              # before the policy: a stopped pass reads nothing
         print(f"established_claimant: {KILL_FILE} is present; nothing read", file=sys.stderr)
         return 0
-    code, out = tick(verify_notify.trino, load_policy(args.policy))
+    policy = load_policy(args.policy)
+    code, out = tick(verify_notify.trino, policy, _live_account())
     print(json.dumps(out, sort_keys=True))
     if code:
         print(f"established_claimant: {out['error']}; nothing published", file=sys.stderr)
@@ -549,7 +610,8 @@ def _cmd_tick(args: argparse.Namespace) -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     from . import verify_notify  # noqa: PLC0415 - the replica client, only for a real run
 
-    rows, funnel = run(verify_notify.trino, load_policy(args.policy))
+    policy = load_policy(args.policy)
+    rows, funnel = run(verify_notify.trino, policy, _live_account())
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "decisions.jsonl").write_bytes(serialize(rows))

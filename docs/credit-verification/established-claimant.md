@@ -4,8 +4,9 @@
 Tests: `scripts/tests/test_established_claimant.py` (the rule and the scheduled pass) and
 `scripts/tests/install-aux-units-established-claimant.bats` (the timer).
 
-It reads the core replica, decides, and writes two files. It approves nothing, asks nobody and
-calls no API. `established-claimant.timer` runs it once a day on node-8; nobody starts it.
+It reads the core replica and the decider's deny lists, decides, and writes two files. It
+approves nothing, asks nobody and calls no API. `established-claimant.timer` runs it once a
+day on node-8; nobody starts it.
 
 ## The rule
 
@@ -22,7 +23,7 @@ An established request then gets one of three outcomes (`decide`):
 |---|---|---|
 | `approve` | the validator's own verdict says approved (`is_approved` is `true`) and nothing below applies | records it |
 | `ask` | the validator declined it, or recorded no decision, or holds it for a cause a document can clear | records it; the ask itself belongs to `need_asks.py` |
-| `barred` | a hold no document clears, an earlier removal or revert, or a verdict that is missing or cannot be read | records it; nobody is asked |
+| `barred` | a hold no document clears, an earlier removal or revert, a verdict that is missing or cannot be read, or an account on the decider's deny list | records it; nobody is asked |
 
 Two rulings fix the edges (firstmate, 2026-11-15):
 
@@ -40,6 +41,31 @@ case no approver here acts on: a request whose `metadata` carries `fraudRemoval`
 `precedentRevert`, a validator-approved request carrying a hold code that core's guard does
 not act on (`verify_anchor.uncovered_holds`; the drain's `held_by_validator`), and a verdict
 that is absent or unreadable.
+
+## The account stage
+
+An approval is the account's as well as the request's. A request the row rule would approve
+is barred as `account:deny_list` when its user or its profile is on the decider's deny lists
+(`decide.Policy.load()`: `deny_user_ids`, `deny_profile_ids` and the fraud watchlist merged
+into them). It is a local file read, two files and no call. Lists that cannot be read stop
+the pass before any statement is sent (exit 2); a pass handed no lists bars every such request
+as `account:unmeasured`.
+
+**The account gate is not asked, and `approve` means "before the account gate".**
+`account_gate.py check` is the check every approver calls before a write, and calling it is
+not a read: for an account it holds, the gate appends a hold line to its own ledger, and
+for an account it had not held before it adds the account to the fraud watch. That is right
+for a job about to approve and wrong for one that only counts. A trial of this pass that did
+ask it (2026-11-16 01:14Z, stopped after 9 minutes of gate calls) appended 9 hold lines, all
+on accounts that already had some, and added nobody to the watch. `funnel.json` says so on
+every pass (`account_gate_read: false`), and a test fails if a pass reaches the gate or
+starts any process of its own (the replica read it is handed is the only thing that leaves
+the process).
+
+Measured 2026-11-16 on the 2,098 requests the row rule approved: the running score-approve
+job could judge 952 of them and refused 29 on an account ground, 11 on a deny list (this
+stage now bars those) and 18 on the fraud watch (only the gate reads those; they stay
+`approve` here).
 
 ## The scheduled pass
 
@@ -73,13 +99,15 @@ writes the same two files into `DIR` and publishes nothing.
   approved the credits it rests on (`basis_via`), and on an `approve` row what core's approval
   guard would answer (`core_guard`, from `policy.server_approval_refusal`).
 - `funnel.json`: the count at each step, each outcome, each reason and each bar.
+  `approve_before_deny_lists` is what the row rule approved before the account stage;
+  `deny_lists_read` and `account_gate_read` say which account reads the pass made.
   `left_pending_between_reads` counts a request that stopped being pending, or was deleted,
   between the pending read and the verdict read: it is not decided, and it is not a failed
   read.
 
 Exit 0 when every read finished, 1 when the verdict read did not return a row it asked for
-(`verdict_row_not_returned`, which a deleted row is not), 2 when the policy cannot be read
-or asks for a mode other than `shadow`.
+(`verdict_row_not_returned`, which a deleted row is not), 2 when the policy or the decider's
+deny lists cannot be read, or the policy asks for a mode other than `shadow`.
 
 To read the newest answer:
 
@@ -159,6 +187,25 @@ A first run at 18:59Z with the same rule gave the same 2,078 requests.
 The 2026-11-14 count of 9,895 was the rule before the two rulings: it approved requests the
 validator had declined (7,909 of them).
 
+### With the deny lists read (2026-11-16)
+
+One pass of the module as changed here, on node-8 against the same replica, 01:39Z to 01:52Z,
+under the unit's own caps (12 min 36 s, 66 s of CPU, 196 MB). Nothing was written to core or
+to a customer, and the pass started no account-gate process.
+
+| | requests |
+|---|---|
+| pending | 102,864 |
+| established | 13,858 |
+| approve by the row rule, before the deny lists | 2,098 |
+| barred: user or profile on the decider's deny lists (5 users) | 27 |
+| **approve** | **2,071** (474 users) |
+| ask: the validator declined it | 7,952 |
+| barred, all reasons | 3,834 |
+
+Against the pass of 2026-11-15 23:40Z, the only outcome that changed is those 27 requests,
+from `approve` to `barred`. Core's guard would still refuse all 2,071 (`proof_required`).
+
 ## What arming it would take
 
 Nothing in this change approves. Before any `approve` row is written:
@@ -171,7 +218,18 @@ Nothing in this change approves. Before any `approve` row is written:
   that is nearly every `approve` row (`approve_core_would_refuse` in the funnel). These
   requests are pending because core asked the claimant for proof although the validator's
   score approved them. The rule approves them on the claimant's record instead; core will
-  refuse that write until the automation is registered there for it.
+  refuse that write until the automation is registered there for it. No scope core has
+  today admits one of them as an established-claimant approval (read from
+  `agentApprovalGuard.js` on core's `develop`, 2026-11-16; no write was tried).
+- **Most of what it can reach is already another job's.** Of the 2,098 measured on
+  2026-11-15, 952 pass score-approve's own row rule, and that job had held 913 of them for
+  one reason: the claimant has a document on file (the engaged-user clause, in hydra and in
+  core). Lifting that clause approves those 913 through the automation core already has
+  registered. 1,079 sit on a stored popularity of 0, which core reads as unknown and
+  therefore big; nothing reaches those.
+- **The account gate, asked at the write.** The pass does not ask it (above). A writer asks
+  it for each account before its first write, as score-approve does, and writes only on an
+  allow with a green band (`account_gate.watch_refusal`).
 - **A write gate that re-reads each row.** A decision file is a snapshot. The drain's gate
   (`verify_anchor.py`) re-reads the live request before each write; an established-claimant
   write needs the same check of its own facts (still pending, still validator-approved, still

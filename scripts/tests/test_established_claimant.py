@@ -134,8 +134,13 @@ class Replica:
         raise AssertionError(f"a statement the module is not known to send:\n{sql}")
 
 
-def decide(replica, policy=POLICY):
-    rows, funnel = ec.run(replica, policy)
+def GREEN(user_id, profile_id):
+    """An account stage that stops nobody: the row rule's answer stands."""
+    return None
+
+
+def decide(replica, policy=POLICY, account=GREEN):
+    rows, funnel = ec.run(replica, policy, account)
     return {r["request_id"]: r for r in rows}, funnel
 
 
@@ -386,8 +391,8 @@ class RunTests(unittest.TestCase):
         self.assertTrue(all(r["validator_approved"] is False for r in rows.values()))
 
     def test_two_runs_over_the_same_data_are_byte_identical(self):
-        first, _ = ec.run(self._mixed(), POLICY)
-        second, _ = ec.run(self._mixed(), POLICY)
+        first, _ = ec.run(self._mixed(), POLICY, GREEN)
+        second, _ = ec.run(self._mixed(), POLICY, GREEN)
         self.assertEqual(ec.serialize(first), ec.serialize(list(reversed(second))))
         self.assertEqual([r["request_id"] for r in first], sorted(r["request_id"] for r in first))
 
@@ -505,7 +510,140 @@ class CoreGuardTests(unittest.TestCase):
         self.assertIsNone(rows[rid(1)]["popularity"])
 
 
+class AccountTests(unittest.TestCase):
+    """An approval is the account's too: the decider's deny lists, on approve rows only. The
+    account gate is never asked by a pass that only counts."""
+
+    def _reader(self, deny_users=(), deny_profiles=()):
+        self.asked: list[tuple[str, str]] = []
+        lookup = ec.deny_reader(deny_users, deny_profiles)
+
+        def account(user_id, profile_id):
+            self.asked.append((user_id, profile_id))
+            return lookup(user_id, profile_id)
+        return account
+
+    def _one(self, account, target=None):
+        rows, funnel = decide(Replica([*history(), target or req(1)]), account=account)
+        return rows[rid(1)], funnel
+
+    def test_an_account_on_no_list_leaves_the_row_rules_approve_standing(self):
+        row, funnel = self._one(self._reader(deny_users=[8], deny_profiles=[pid(2)]))
+        self.assertEqual((row["outcome"], row["reason"], row["bars"]), ("approve", ec.APPROVE_REASON, []))
+        self.assertEqual((funnel["deny_lists_read"], funnel["approve_before_deny_lists"]), (True, 1))
+        self.assertEqual(self.asked, [("7", pid(1))])
+
+    def test_the_funnel_says_the_account_gate_was_not_asked(self):
+        _, funnel = self._one(self._reader())
+        self.assertIs(funnel["account_gate_read"], False)
+
+    def test_a_pass_given_no_deny_lists_approves_nothing(self):
+        row, funnel = self._one(None)
+        self.assertEqual((row["outcome"], row["reason"], row["bars"]),
+                         ("barred", ec.BAR_ACCOUNT_UNMEASURED, [ec.BAR_ACCOUNT_UNMEASURED]))
+        self.assertEqual((funnel["deny_lists_read"], funnel["approve_before_deny_lists"],
+                          funnel["outcomes"]["approve"]), (False, 1, 0))
+        self.assertIsNone(row["core_guard"])
+
+    def test_a_user_or_a_profile_on_the_deny_list_is_barred(self):
+        for kwargs in ({"deny_users": [7]}, {"deny_profiles": [pid(1)]},
+                       {"deny_profiles": ["  " + pid(1).upper() + " "]}):
+            with self.subTest(kwargs=kwargs):
+                row, funnel = self._one(self._reader(**kwargs))
+                self.assertEqual((row["outcome"], row["reason"], row["bars"]),
+                                 ("barred", ec.BAR_ACCOUNT_DENY, [ec.BAR_ACCOUNT_DENY]))
+                self.assertEqual((funnel["outcomes"]["approve"], funnel["bars"]),
+                                 (0, {ec.BAR_ACCOUNT_DENY: 1}))
+                self.assertIsNone(row["core_guard"])
+
+    def test_one_users_denial_does_not_bar_another_user(self):
+        other = history(profile=2, user="9", start=30_000)
+        requests = [*history(), *other, req(1), req(2), req(4, user="9", profile=2)]
+        rows, funnel = decide(Replica(requests), account=self._reader(deny_users=[9]))
+        self.assertEqual(funnel["outcomes"], {"approve": 2, "ask": 0, "barred": 1})
+        self.assertEqual(funnel["approve_before_deny_lists"], 3)
+        self.assertEqual(rows[rid(4)]["reason"], ec.BAR_ACCOUNT_DENY)
+
+    def test_the_lists_are_consulted_only_for_a_request_the_row_rule_approves(self):
+        requests = [*history(), req(2, vd=DECLINED), req(3, vd=None),
+                    req(4, meta={"fraudRemoval": {"at": "2026-10-01"}}), req(5, artists=(ARTIST_B,))]
+        rows, funnel = decide(Replica(requests), account=self._reader(deny_users=[7]))
+        self.assertEqual(self.asked, [])
+        self.assertEqual(funnel["approve_before_deny_lists"], 0)
+        self.assertEqual({k: (v["outcome"], v["reason"]) for k, v in rows.items()},
+                         {rid(2): ("ask", ec.BAR_DECLINED), rid(3): ("barred", ec.BAR_NO_VERDICT),
+                          rid(4): ("barred", ec.BAR_REMOVED)})
+
+    def _lists(self, users=(8,), profiles=None):
+        class Lists:
+            deny_user_ids = set(users)
+            deny_profile_ids = {pid(3)} if profiles is None else set(profiles)
+        return classmethod(lambda cls, path=None: Lists())
+
+    def test_the_real_pass_reads_the_deciders_deny_lists(self):
+        from credit_review import decide as decider
+        with unittest.mock.patch.object(decider.Policy, "load", self._lists()):
+            account = ec._live_account()
+        self.assertEqual(account("8", pid(1)), ec.BAR_ACCOUNT_DENY)
+        self.assertEqual(account("7", pid(3)), ec.BAR_ACCOUNT_DENY)
+        self.assertIsNone(account("7", pid(1)))
+
+    def test_the_real_pass_never_asks_the_account_gate(self):
+        """Asking the gate is not a read: it appends to the gate's hold ledger and can put an
+        account on the fraud watch. A pass that only counts must not reach it."""
+        from credit_review import account_gate, decide as decider, verify_notify
+        replica = Replica([*history(), *history(profile=2, user="8", start=30_000), req(1),
+                           req(2, user="8", profile=2)])
+        reached: list[str] = []
+
+        def boom(name):
+            def fail(*args, **kwargs):
+                reached.append(name)
+                raise AssertionError(f"the pass reached {name}")
+            return fail
+
+        for command in ("run", "tick"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as td, \
+                    unittest.mock.patch.object(decider.Policy, "load", self._lists()), \
+                    unittest.mock.patch.object(verify_notify, "trino", replica), \
+                    unittest.mock.patch.object(account_gate, "check", boom("account_gate.check")), \
+                    unittest.mock.patch.object(account_gate, "_run", boom("account_gate._run")), \
+                    unittest.mock.patch.object(subprocess, "run", boom("subprocess.run")), \
+                    unittest.mock.patch.object(subprocess, "Popen", boom("subprocess.Popen")), \
+                    unittest.mock.patch.object(ec, "STATE_DIR", str(Path(td) / "state")), \
+                    unittest.mock.patch.object(ec, "KILL_FILE", str(Path(td) / "disabled")), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                argv = ["run", "--out", str(Path(td) / "out")] if command == "run" else ["tick"]
+                self.assertEqual(ec._main(argv), 0)
+                printed = json.loads(out.getvalue())
+                funnel = printed if command == "run" else printed["funnel"]
+                self.assertEqual(funnel["outcomes"], {"approve": 1, "ask": 0, "barred": 1})
+                self.assertEqual(funnel["bars"], {ec.BAR_ACCOUNT_DENY: 1})
+        self.assertEqual(reached, [])
+
+    def test_deny_lists_that_cannot_be_read_stop_the_pass_before_any_read(self):
+        from credit_review import decide as decider, verify_notify
+        replica = Replica([*history(), req(1)])
+
+        def unreadable(cls, path=None):
+            raise ValueError("deny_user_ids must be a list of integer user ids")
+
+        with tempfile.TemporaryDirectory() as td, \
+                unittest.mock.patch.object(decider.Policy, "load", classmethod(unreadable)), \
+                unittest.mock.patch.object(verify_notify, "trino", replica), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(ec._main(["run", "--out", str(Path(td) / "out")]), 2)
+            self.assertFalse((Path(td) / "out").exists())
+        self.assertEqual(replica.calls, [])
+        self.assertIn("deny lists cannot be read", err.getvalue())
+
+
 class NoWriterTests(unittest.TestCase):
+    def setUp(self):
+        patcher = unittest.mock.patch.object(ec, "_live_account", lambda: GREEN)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_a_run_reaches_no_client_that_can_write(self):
         """The run succeeds with every writer path made to raise: it uses none of them."""
         from credit_review import verify_notify
@@ -580,6 +718,7 @@ class TickTests(unittest.TestCase):
         self.stamps = iter(f"202611{d:02d}T032000Z" for d in range(1, 29))
         for target, name, value in ((ec, "STATE_DIR", str(self.state)), (ec, "KILL_FILE", str(self.kill)),
                                     (ec, "_stamp", lambda: next(self.stamps)),
+                                    (ec, "_live_account", lambda: GREEN),
                                     (verify_notify, "trino", lambda sql: self.replica(sql))):
             patcher = unittest.mock.patch.object(target, name, value)
             patcher.start()
