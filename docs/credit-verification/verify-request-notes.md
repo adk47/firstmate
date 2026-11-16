@@ -1024,6 +1024,34 @@ the `uvn-status` body over the new rows only. Evidence and the measured audience
   `live` arms the free segment and `paid` the paid segment, so disarming takes BOTH set to false (`live: false` alone
   leaves paid armed); the stop that waits for no policy edit is `touch /etc/hydra/uvn-new-rows.disabled` (this
   campaign, at the gate) or `touch /etc/hydra/credit-verify-outbound.disabled` (the whole tick).
+- **The no-re-ask rule is per request; the digest is per customer** (firstmate 2026-11-15 01:38Z). Do not read
+  "never re-ask anyone with a sent row" as a rule about people: every user this family reaches has a sent row, so
+  that reading empties it.
+  - *What the request rule allows:* a person we asked about request A is asked about request B when no sent ask has
+    named B. A request a sent ask named is never named again (`owing_proof.new_rows` builds the list from the rows no
+    sent `uvn-status` ask named; `verify_ledger.blocked_ids` refuses a named row at the gate).
+  - *What the per-customer digest still prevents:* a customer with three un-named requests gets one note that lists
+    the three, never three notes. A list entry is one user with all of their un-named rows, the gate sends one note
+    per account per UTC day, and any note from this gate holds the next for 7 days.
+- **What it costs the free ask: a smaller page, or no page at all.** The two segments run before the free
+  `uvn-status` walk, and what that family gets depends on how far into the tick it starts (`family_run`, shipped
+  constants `TICK_BUDGET_S` 6,000, `TICK_HARD_S` 6,900, `PAGE_FLOOR` 20):
+  - before 1,800 s: its full 600-entry page;
+  - from 1,800 s to 6,000 s: a page cut to (6,600 - seconds elapsed) / 8 entries, one entry fewer for each 8 s
+    spent. The cursor still advances, from the smaller page;
+  - at 6,000 s or later: **skipped** (`not reached`, "tick budget reached"). It sends no ask that tick and its
+    cursor does not move. A page that would fit fewer than 20 entries is skipped the same way, never cut; with the
+    shipped constants the 6,000 s stop comes first.
+  The worst case of a 100-entry segment is 1,100 s, so the two together take up to 275 entries off the free ask's
+  page **only while it still starts before 6,000 s**. On the 2026-11-14 22:44Z tick, with the reminder alone in
+  front, the free ask was cut from 600 to 585, which puts its start about 1,920 s in; 2,200 s more would have left
+  it 310 entries, and about 4,080 s more would have skipped it. A skipped family logs `not reached`, and an armed
+  one pages on its second consecutive missed tick (`STARVED_PAGE_AT`). Read the first ticks' `tick.log` for the free
+  ask's start time and its `page cut` or `not reached` line before raising `NR_ENTRIES` or `NR_CAP`.
+- **It cannot take the day's note from a first ask.** The builder puts a user in class `uvn` (never told) or in
+  `uvn_new_rows` (told), never both: 0 users were on both lists in the 2026-11-14 20:43Z build. The overlap is with
+  the reminder (51 users on both lists in that build). The reminder runs first, so for those users it takes the
+  day's one note and the 7-day wait then holds the follow-up.
   A policy with no `daily_cap` row or no group for the campaign skips the family and does not end the tick.
 - **A build that writes no new-rows list is unmeasured, never "0 listed".** Every build of the tick asks for the
   class and the file is removed before each build, so a file on disk is the one that build wrote. No file, or a file
