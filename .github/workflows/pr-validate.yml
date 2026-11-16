@@ -2848,6 +2848,9 @@ jobs:
           # coded closes in the coded-close shape: C5 validator_reject (#1559, not wired before) and C3 junk_proof /
           # C8 fraud_document (credit_review/doc_close.py). Ledger, gate, V9 and core facts faked.
           python3 scripts/tests/test_credit_validator_reject_close.py
+          # The empty-track approve rule (ET1, scripts/credit_review/empty_track_approve.py): five conditions, its own
+          # ledger table, NO approve writer. "one credit on the track is never approved" is pinned by name. Stdlib only.
+          python3 scripts/tests/test_credit_empty_track_approve.py
           python3 scripts/tests/test_credit_doc_close.py
           python3 scripts/tests/test_credit_anchor_upload.py
           python3 scripts/tests/test_credit_forged_tray.py

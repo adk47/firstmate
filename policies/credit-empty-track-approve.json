@@ -1,0 +1,24 @@
+{
+  "rule": "ET1:empty_track_approve/v1",
+  "description": "Coded rule for the captain's empty-track case (2026-11-16 02:1xZ: 'if no credits are on a track we let those go on if it makes sense?'): approve a held credit request (unverified / user_verification_needed) sitting on a track that EXISTS in the catalog with a real ISRC or Spotify id and carries ZERO credits - there is nothing to verify because nobody is credited on it yet - provided the claimant's claim has no role conflict (no reject_* rule, no review_* hold at 30+, no one-person-role contradiction, no organization/label/publisher role), no watchlist hit on the account or the profile, no R8 account hold, and a green account gate. Never a track that already has ANY credit, whatever else is true of the row. This is a SEPARATE predicate from the validator low-risk path (score_approve: popularity 1-59, total risk under 30); it moves none of those thresholds and shares only the refusal predicates. Deterministic, no model; every unreadable input is a hold. SHADOW ONLY: this rule has no approve writer in code at all, so no edit to this file can approve a credit - apply is a separate reviewed change that adds a writer and its own Fable ruling (copy and arming are approved by Fable, not by the captain alone).",
+  "apply_enabled": false,
+  "approved_by": null,
+  "approval_ref": null,
+  "conditions": [
+    "track_in_catalog",
+    "zero_credits_on_track",
+    "no_role_conflict",
+    "no_watchlist_hit",
+    "no_r8_hold"
+  ],
+  "population": {
+    "statuses": [
+      "unverified",
+      "user_verification_needed"
+    ],
+    "excluded": "a request that is not open, is deleted, has no track id, sits on a deleted or merged track, or whose track document could not be read"
+  },
+  "kill_files": [
+    "/etc/hydra/empty-track-approve.disabled"
+  ]
+}

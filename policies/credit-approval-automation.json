@@ -285,6 +285,18 @@
       "approved_by": null,
       "approval_ref": null,
       "status_note": "Cannot approve by construction: no approval writer exists (policies/proof-review-route.json approval_route.mode is off), so a sufficient proof review waits for a captain decision. Turning that on is a captain decision and a reviewed PR that also sets approved/approved_by/approval_ref here."
+    },
+    "empty-track-approve": {
+      "description": "scripts/credit_review/empty_track_approve.py (ET1:empty_track_approve/v1): the captain's empty-track case (2026-11-16 02:1xZ, 'if no credits are on a track we let those go on if it makes sense?') - approve a held credit request sitting on a catalog track that carries ZERO credits, provided the track has a real ISRC or Spotify id, the claim has no role conflict (no reject_* rule, no review_* hold at 30+, no one-person-role contradiction, no organization role), there is no watchlist hit and no R8 account hold, and the account gate is a green allow. Never a track that already has ANY credit. A separate predicate from the validator low-risk path (score_approve thresholds untouched); deterministic, no model; every unreadable input is a hold. Registered here even though it ships UNAPPROVED and shadow-only, so a cron or loop that ever runs it cannot slip past this guard.",
+      "entrypoints": [
+        "credit-empty-track-approve.py",
+        "credit_review/empty_track_approve.py"
+      ],
+      "cron_names": [],
+      "approved": false,
+      "approved_by": null,
+      "approval_ref": null,
+      "status_note": "Cannot approve by construction: this module wires NO approve writer (empty_track_approve.NO_WRITER), so apply_refusal refuses even with the policy switch on and approved_by/approval_ref set. policies/credit-empty-track-approve.json ships apply_enabled:false with both fields null. Arming it is a separate reviewed change - a writer plus a Fable ruling on the copy and the arming - and that PR sets approved:true with approved_by/approval_ref here. Kill switch: /etc/hydra/empty-track-approve.disabled. It records in its own ledger table empty_track_decisions, never in the decider's decisions."
     }
   }
 }
