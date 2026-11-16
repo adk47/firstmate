@@ -284,7 +284,7 @@ done
 # 10-27 paid threads were told "I've passed your screenshots ... to our team" / "added to the
 # review already underway" with nothing behind it. Since 2026-10-28 Caroline never says a
 # document was received at all: "Thank you", the document ticket, the handoff line.
-require "$CV" "Q11 a document gets the approved thank-you paragraph (§2.2)" "Thank you. Everything you send here is recorded against your account and your open requests and goes to the verification team."
+require "$CV" "Q11 a document gets the approved thank-you paragraph (§2.2)" "Thank you. Everything you send here is recorded against your account and your open requests."
 # The marker line is excluded from normal matching, so check it raw: exactly one line that
 # carries the marker AND names the barred phrases.
 if [ "$(grep -F -- "$BARRED_MARKER" "$CV" | grep -cF -- '"nothing else is needed", "no need to resend", "passed to our team"' || true)" != "1" ]; then
@@ -390,6 +390,30 @@ forbid "$GDPR" "Q14 the hide carries no day count" "(within a day)"
 require "$GDPR" "Q14 hidden pages do not come back" "once a page is hidden it stays"
 forbid "$GDPR" "Q14 no tier-3 SLA quote" "quote the returned SLA once"
 forbid "$FAQ" "Q14 deletion goes through the acknowledgement" "Create a support ticket with category \"Account – Deletion Request\""
+
+# --- Q16 a promise of an action or a follow-up that nothing schedules (QA round 4 on #2040) ------
+# Two lines told Caroline to promise something no tool does. The rate-limit instruction said to tell the
+# customer their requests were submitted and that she would follow up, but on the third request inside the
+# window `create_ticket` returns `submitted:false, reason:"rate_limited"` and nothing is filed or scheduled.
+# The plaque answer said "I'll sort it out here", but the only order tools are `order_lookup` and
+# `order_address_update` (plugins/intercom/src/caroline-tool-capabilities.json): nothing changes the numbers on
+# a printed plaque. Both now say what was actually done and where the outcome comes from.
+require "$SOUL" "Q16 the rate-limited line describes only the request already on its way" \
+  'Use the rate-limited line above'
+require "$SOUL" "Q16 no follow-up is promised on a rate-limited request" \
+  'never promise a follow-up of your own: no follow-up is scheduled'
+forbid "$SOUL" "Q16 the old submitted-and-follow-up instruction is gone" \
+  'tell the customer their requests have been submitted and you will follow up here'
+require "$FAQ" "Q16 a plaque case is filed, not corrected" \
+  "I can't change the numbers on a plaque that has already been printed"
+forbid "$FAQ" "Q16 no plaque correction promise" "I'll sort it out here"
+# QA round 5 on #2040: the refund answer said "I'll review it and tell you the outcome". The live path reads
+# billing state and files a Tier-3 `subscription-refund` request; Operations decides and executes it, so
+# Caroline has no refund decision to report. The approved reply is the refund-retention skill's own line.
+BILLING="$WS/reference/subscriptions-and-billing.md"
+require "$BILLING" "Q16 a refund is filed, not decided" \
+  "I can't decide a refund myself: the outcome comes back in this conversation"
+forbid "$BILLING" "Q16 no refund decision promise" "I'll review it and tell you the outcome"
 
 # --- global: no human-review date promise anywhere in the support workspace ---------
 while IFS= read -r -d '' f; do

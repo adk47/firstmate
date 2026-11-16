@@ -25,7 +25,7 @@
  * `node --experimental-strip-types` to dump the bank, with no plugin build.
  */
 
-export const BANK_VERSION = "2026-11-14.2";
+export const BANK_VERSION = "2026-11-15.2";
 
 export interface BankEntry {
   /** Stable id: the guard's flags, the red-team cases and the ledger name it. */
@@ -105,8 +105,8 @@ export const ANSWER_BANK: readonly BankEntry[] = [
     anchor: "skills/verification-handoff/SKILL.md",
     lead: "Everything you send here is recorded",
     text:
-      "Thank you. Everything you send here is recorded against your account and your open requests and goes to the verification " +
-      "team. If anything else is needed, the message you get will say exactly what.",
+      "Thank you. Everything you send here is recorded against your account and your open requests. If anything else is needed, " +
+      "the message you get will say exactly what.",
   },
   {
     id: "claim_how",
@@ -130,9 +130,9 @@ export const ANSWER_BANK: readonly BankEntry[] = [
     lead: "Merges work like this",
     text:
       "Merges work like this: claim every profile that is yours first (so we know they're all you), then tell me which one should " +
-      "be the main profile. The merge is done by our verification team and you get a message in this conversation when it's " +
-      "complete; credits from the duplicates move onto the main profile. Profiles claimed by someone else, and company or label " +
-      "profiles, are handled differently: I'll pass those on.",
+      "be the main profile. The merge runs as a job and you get a message in this conversation when it's complete; credits from " +
+      "the duplicates move onto the main profile. Profiles claimed by someone else, and company or label profiles, are handled " +
+      "differently: I'll tell you here what can and cannot be done with them.",
   },
   {
     id: "removal_how",
@@ -165,7 +165,7 @@ export const ANSWER_BANK: readonly BankEntry[] = [
     requiresFact: "open_request",
     text:
       "I understand. Your request is in the verification queue and the outcome comes to this conversation and to your email; if " +
-      "the team needs anything from you they will ask here.",
+      "anything else is needed, the message you get will say exactly what.",
   },
   {
     id: "gdpr_ack_v2",

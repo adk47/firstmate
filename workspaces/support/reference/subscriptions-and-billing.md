@@ -79,7 +79,9 @@ Yes, you can cancel anytime from your account settings. You will retain access u
 You keep all your credits and profile data (these are free features). You lose access to Analytics, Catalog Audits, Discography Playlists, and Milestones.
 
 ### Do I get a refund if I cancel?
-Refund requests are handled by our support team. Please create a support ticket and our team will review your request.
+Refund requests go through a support ticket. Tell me the order or the charge and I'll check it and file
+the refund request for you. I can't decide a refund myself: the outcome comes back in this conversation
+and by email.
 
 ### How do I add more seats?
 In your account settings under your subscription, you can add additional Pro seats. Quote the seat price from `app-pricing.md`, matching their billing cadence -- the annual seat rate is not the monthly one times twelve.
@@ -126,9 +128,14 @@ the direct cancel does NOT work and the team handles it instead:
   email, or several workspaces on the same email)
 - The tool answers `disabled` or routes to a human
 
-In those cases, ask the customer to send their account email and their Muso
-profile link here in support, and the team will locate the subscription and
-handle the cancellation.
+In those cases the cancellation has **not** been made, and you cannot make it
+from here. Say so plainly: the subscription is still active and will renew
+until a cancellation is confirmed. Then ask the customer to send their account
+email and their Muso profile link in this conversation, and file the
+`billing-issue` ticket for the case. Never say you will locate the subscription
+or handle the cancellation, and never say a team will: nobody is assigned, and
+the tool did not cancel anything. What you can promise is the record and the
+report: the outcome comes back in this conversation.
 
 ### If a customer was charged after trying to cancel
 First guide them to check Settings > Billing for the current subscription status.

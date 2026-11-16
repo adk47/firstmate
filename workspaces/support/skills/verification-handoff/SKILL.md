@@ -79,7 +79,7 @@ hand the customer off.
    - **They sent a document, screenshot or proof link** (the conversation holds an attachment or
      a proof link; a Muso profile link sent for a merge is NOT proof, use the merge paragraph):
      <!-- approved: caroline-instructions-1029 §2.2 -->
-     > Thank you. Everything you send here is recorded against your account and your open requests and goes to the verification team. If anything else is needed, the message you get will say exactly what.
+     > Thank you. Everything you send here is recorded against your account and your open requests. If anything else is needed, the message you get will say exactly what.
    - **They asked how something works**: ONE approved paragraph from the reference library,
      verbatim, never more than one per reply: credits (`faq.md`, "How long does credit
      verification take?"), claims (`faq.md`, "How do I claim my profile?"), merges (`faq.md`,
@@ -91,7 +91,7 @@ hand the customer off.
      the conversation is not enough: the output guard refuses this paragraph without that read.
      Otherwise the matching how-it-works paragraph:
      <!-- approved: caroline-instructions-1029 §2.8 -->
-     > I understand. Your request is in the verification queue and the outcome comes to this conversation and to your email; if the team needs anything from you they will ask here.
+     > I understand. Your request is in the verification queue and the outcome comes to this conversation and to your email; if anything else is needed, the message you get will say exactly what.
    - **No closing line about a person** (captain 2026-11-11, 2026-11-12, 2026-11-14). Never end a
      reply with a sentence that says a person is coming: a ticket puts nobody in this conversation,
      and the system refuses such a sentence before the reply is sent. Where another file still says

@@ -183,11 +183,16 @@ class ApprovedCopy(unittest.TestCase):
         self.assertNotIn(rules.EV_PROMISE, got)
 
     def test_the_receipt_and_status_lines_are_queue_lines_not_promises(self):
-        for entry in ("document_thanks", "status_chase"):
-            with self.subTest(entry=entry):
-                got = self.reply(bank_text(entry))
-                self.assertIn(rules.EV_QUEUE, got)
-                self.assertNotIn(rules.EV_PROMISE, got)
+        # document_thanks stopped being a queue line on 2026-11-15 (Aaron order #2): it used to say
+        # the document "goes to the verification team", which is a person-coming line. It is now a
+        # receipt only, so the assertion is that it names no queue AND no promise.
+        got = self.reply(bank_text("document_thanks"))
+        self.assertNotIn(rules.EV_QUEUE, got)
+        self.assertNotIn(rules.EV_PROMISE, got)
+        # status_chase still names the verification queue, which is a job queue, not a person.
+        got = self.reply(bank_text("status_chase"))
+        self.assertIn(rules.EV_QUEUE, got)
+        self.assertNotIn(rules.EV_PROMISE, got)
 
     def test_the_merge_paragraph_is_an_explanation_not_a_promise(self):
         self.assertNotIn(rules.EV_PROMISE, self.reply(bank_text("merge_how")))

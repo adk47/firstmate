@@ -115,7 +115,7 @@ If you genuinely can't tell, treat it as the customer lane.
    the address against Prodigi's rules so the team sees exactly which lines are too
    long or missing.
 4. If the address is clearly incomplete (no name, no phone – as in the example), say
-   so in `whats_wrong`/`blocked_reason`: the team will need to get the correct
+   so in `whats_wrong`/`blocked_reason`: the correct
    address from the customer before replying to Prodigi.
 
 Caroline does not reply to the vendor herself in this phase – the team sends the

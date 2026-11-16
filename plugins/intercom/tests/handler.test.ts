@@ -554,7 +554,7 @@ describe("handleWebhookEvent", () => {
     // firstmate 028: §2.4 posted into the thread outside the plugin (the gate's fable-copy-1031-r5/w,
     // an operator re-contact) counts as sent, so the merge guard does not repeat it.
     describe("merge paragraph already in the thread", () => {
-      const S24 = "merges work like this: claim every profile that is yours first (so we know they’re all you), then tell me which one should be the main profile. The merge is done by our verification team and you get a message in this conversation when it’s complete; credits from the duplicates move onto the main profile. Profiles claimed by someone else, and company or label profiles, are handled differently: I’ll pass those on.";
+      const S24 = "merges work like this: claim every profile that is yours first (so we know they’re all you), then tell me which one should be the main profile. The merge runs as a job and you get a message in this conversation when it’s complete; credits from the duplicates move onto the main profile. Profiles claimed by someone else, and company or label profiles, are handled differently: I’ll tell you here what can and cannot be done with them.";
       const convWith = (parts: Array<{ type: string; id: string; body: string; part_type?: string }>) =>
         async (params: { conversationId: string }) => ({
           type: "conversation" as const, id: params.conversationId, title: null,
@@ -580,7 +580,7 @@ describe("handleWebhookEvent", () => {
         expect(await run([{ type: "admin", id: "human_admin_1", body: `Hi Sam, ${S24}` }], "evt_s24_human")).toBeNull();
         expect(await run([{ type: "user", id: "u1", body: `you said: ${S24}` }], "evt_s24_user")).toBeNull();
         expect(await run([{ type: "admin", id: BOT_ADMIN_ID, part_type: "note", body: `Hi Sam, ${S24}` }], "evt_s24_note")).toBeNull();
-        expect(await run([{ type: "admin", id: BOT_ADMIN_ID, body: `Hi Sam, ${S24.replace("verification team", "support team")}` }], "evt_s24_alt")).toBeNull();
+        expect(await run([{ type: "admin", id: BOT_ADMIN_ID, body: `Hi Sam, ${S24.replace("runs as a job", "is done by our support team")}` }], "evt_s24_alt")).toBeNull();
       });
     });
 

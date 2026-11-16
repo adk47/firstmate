@@ -59,7 +59,7 @@
   },
   {
    "id": "215476625525975",
-   "why": "the one good reply: §2.4 given on turn 2",
+   "why": "the one good reply: §2.4 given on turn 2, in the copy that was approved on 2026-10-30. The paragraph was rewritten on 2026-11-15 (Aaron order #2: no 'verification team', no 'I'll pass those on'), so the text in this transcript is no longer §2.4. The guard recognises it as the paragraph already given and does not repeat it, which is why the expected count is 0: the customer has had the merge explanation, in older words.",
    "turns": [
     {
      "customer": "Hi, this profile is also mine: https://muso.ai/profile/3d156d27-1899-4bb8-aa9d-7f3c201aadb5 Some songs are tied to that one so I can't add it to my credits. Can you merge those two please?",
@@ -69,7 +69,8 @@
      "customer": "Yes. I use this one: https://muso.ai/profile/65d63f5c-9a9c-4c49-bdfd-350a2864998d",
      "reply": "Merges work like this: claim every profile that is yours first (so we know they're all you), then tell me which one should be the main profile. The merge is done by our verification team and you get a message in this conversation when it's complete; credits from the duplicates move onto the main profile. Profiles claimed by someone else, and company or label profiles, are handled differently: I'll pass those on.  I'm pulling in a teammate to take this from here."
     }
-   ]
+   ],
+   "expectParagraphs": 0
   },
   {
    "id": "qa-1530-accounts-and-tracks",

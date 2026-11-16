@@ -474,3 +474,21 @@ PY
   [[ "$output" == *"no-profile users get claim/create first"* ]]
   [[ "$output" == *"claim-code: the code on one page is enough"* ]]
 }
+
+@test "CAN FAIL: Q16 - a rate-limit follow-up promise or a plaque correction promise is caught (QA round 4 on #2040)" {
+  SOUL_MD="$FAKE/workspaces/support/SOUL.md"
+  FAQ_MD="$FAKE/workspaces/support/reference/faq.md"
+  # The two lines QA found: a follow-up nothing schedules, and a correction no tool can make.
+  sed -i.bak 's/never promise a follow-up of your own: no follow-up is scheduled/tell the customer their requests have been submitted and you will follow up here/' "$SOUL_MD"
+  sed -i.bak "s/I can't change the numbers on a plaque that has already been printed/I'll sort it out here/" "$FAQ_MD"
+  BILLING_MD="$FAKE/workspaces/support/reference/subscriptions-and-billing.md"
+  sed -i.bak "s/I can't decide a refund myself: the outcome comes back in this conversation/I'll review it and tell you the outcome in this conversation/" "$BILLING_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q16 no follow-up is promised on a rate-limited request"* ]]
+  [[ "$output" == *"Q16 the old submitted-and-follow-up instruction is gone"* ]]
+  [[ "$output" == *"Q16 a plaque case is filed, not corrected"* ]]
+  [[ "$output" == *"Q16 no plaque correction promise"* ]]
+  [[ "$output" == *"Q16 a refund is filed, not decided"* ]]
+  [[ "$output" == *"Q16 no refund decision promise"* ]]
+}

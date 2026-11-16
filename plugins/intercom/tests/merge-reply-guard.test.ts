@@ -7,6 +7,7 @@ import {
   findJudgements,
   hasMergeIntent,
   MERGE_PARAGRAPH,
+  MERGE_PARAGRAPH_RETIRED,
   HANDOFF_LINE,
 } from "../src/merge-reply-guard.js";
 
@@ -290,7 +291,7 @@ describe("merge-reply guard on the 2026-10-30 transcripts (firstmate 017)", () =
   });
 
   it("a profile-link-only turn with NO recognised merge intent never gets the §2.2 thank-you (QA on #1530)", () => {
-    const docThanks = "Everything you send here is recorded against your account and your open requests and goes to the verification team. If anything else is needed, the message you get will say exactly what.";
+    const docThanks = "Everything you send here is recorded against your account and your open requests. If anything else is needed, the message you get will say exactly what.";
     for (const customer of ["https://muso.ai/profile/abc", "https://muso.ai/profile/abc https://muso.ai/profile/def"]) {
       expect(hasMergeIntent(customer)).toBe(false);
       const out = applyMergeReplyGuard({ customerText: customer, reply: `Thank you. ${docThanks} ${HANDOFF_LINE}`, paragraphAlreadySent: false });
@@ -326,10 +327,28 @@ describe("merge-reply guard on the 2026-10-30 transcripts (firstmate 017)", () =
     expect(containsMergeParagraph(MERGE_PARAGRAPH)).toBe(true);
     expect(containsMergeParagraph(`Hi Sam, m${MERGE_PARAGRAPH.slice(1)} Thank you, Caroline, Muso Support`)).toBe(true);
     expect(containsMergeParagraph(`<p>Hi Sam, ${MERGE_PARAGRAPH.replace(/'/g, "’").replace(/ /g, "&nbsp;")}</p>`)).toBe(true);
-    expect(containsMergeParagraph(MERGE_PARAGRAPH.replace("verification team", "support team"))).toBe(false);
+    expect(containsMergeParagraph(MERGE_PARAGRAPH.replace("runs as a job", "is done by our support team"))).toBe(false);
     expect(containsMergeParagraph(MERGE_PARAGRAPH.slice(0, 120))).toBe(false);
     expect(containsMergeParagraph(`X${MERGE_PARAGRAPH.slice(1)}`)).toBe(false);
     expect(containsMergeParagraph("")).toBe(false);
+  });
+
+  it("containsMergeParagraph: the retired paragraph still counts, so a thread that already got it is never sent the new one (QA round 2 on #2040)", () => {
+    // The paragraph is the only thing that stops a second insert. Changing its words without
+    // keeping the old ones as an anchor re-sends it to every conversation that already has it.
+    expect(containsMergeParagraph(MERGE_PARAGRAPH_RETIRED)).toBe(true);
+    expect(containsMergeParagraph(`Hi Sam, m${MERGE_PARAGRAPH_RETIRED.slice(1)} Thank you, Caroline, Muso Support`)).toBe(true);
+    expect(containsMergeParagraph(`<p>${MERGE_PARAGRAPH_RETIRED.replace(/'/g, "’")}</p>`)).toBe(true);
+    // And the guard does not insert the current paragraph on top of it. (The retired copy's own
+    // barred sentence, "I'll pass those on", is stripped by the hand-off rule, which is why the
+    // assertion is that the CURRENT paragraph is absent, not that the old one survives.)
+    const out = applyMergeReplyGuard({
+      customerText: "can you merge my two profiles?",
+      reply: `Thanks for the links.\n\n${MERGE_PARAGRAPH_RETIRED}`,
+      paragraphAlreadySent: containsMergeParagraph(MERGE_PARAGRAPH_RETIRED),
+    });
+    expect(out.body).not.toContain(MERGE_PARAGRAPH);
+    expect(out.body).not.toContain("I'll pass those on");
   });
 
   it("(c) benign sentences with no merge-family word pass on a merge thread", () => {

@@ -18,10 +18,16 @@ run_eval() { run node --experimental-strip-types --no-warnings "$EVAL" "$@"; }
 @test "the 4 failing conversations + the good one: §2.4 exactly once, no judgement; controls untouched" {
   run_eval "$FX"
   [ "$status" -eq 0 ]
-  for c in 215476571311441 215476626852900 215476625749758 215476627008983 215476625525975 \
+  for c in 215476571311441 215476626852900 215476625749758 215476627008983 \
            qa-1530-accounts-and-tracks qa-1530-altered-paragraph qa-1530-model-repeats; do
     [[ "$output" == *"ok $c: §2.4 exactly once, no judgement"* ]]
   done
+  # 215476625525975 is the one good reply: it already carried §2.4 on turn 2, in the copy approved
+  # on 2026-10-30. That paragraph was rewritten on 2026-11-15 (Aaron order #2: no "verification
+  # team", no "I'll pass those on"), so the transcript's text is no longer §2.4 and the expected
+  # count is 0 - the customer has had the merge explanation, in older words, and must not get it
+  # twice. Asserting "exactly once" here would demand the guard repeat itself.
+  [[ "$output" == *"ok 215476625525975: §2.4 not sent (no merge ask), no judgement"* ]]
   [[ "$output" == *"ok control untouched: not a profile merge: duplicate TRACKS"* ]]
 }
 

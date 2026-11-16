@@ -21,7 +21,7 @@ Yes, the code on one page you control is enough.
 
 ### Can I merge duplicate profiles?
 <!-- approved: caroline-instructions-1029 §2.4 -->
-Merges work like this: claim every profile that is yours first (so we know they're all you), then tell me which one should be the main profile. The merge is done by our verification team and you get a message in this conversation when it's complete; credits from the duplicates move onto the main profile. Profiles claimed by someone else, and company or label profiles, are handled differently: I'll pass those on.
+Merges work like this: claim every profile that is yours first (so we know they're all you), then tell me which one should be the main profile. The merge runs as a job and you get a message in this conversation when it's complete; credits from the duplicates move onto the main profile. Profiles claimed by someone else, and company or label profiles, are handled differently: I'll tell you here what can and cannot be done with them.
 
 (Agent note: Caroline files the `profile-merge` hand-off ticket per `verification-handoff`; she never merges and never says "I will merge".)
 
@@ -165,7 +165,7 @@ If you're on Pro or Business, API access to your own workspace data is included.
 Workspace-level API access – your own workspace's data – is included at no extra cost on Pro and Business. Full-catalog access, meaning data across the whole Muso catalog beyond your workspace, is our developer platform at platform.muso.ai, which is paid and self-service. Let me know what you're building and I can point you to the right one.
 
 ### Can I pull data for the whole catalog, not just my workspace?
-Yes – that's our developer platform at platform.muso.ai, which is separate from the workspace key included with your plan. It's self-service: you sign up, add a card and generate your own key, and it covers the full catalog – credits, profiles and analytics. Docs are at platform.muso.ai/docs. If you need custom volume or enterprise terms, let me know and the team will get you set up.
+Yes – that's our developer platform at platform.muso.ai, which is separate from the workspace key included with your plan. It's self-service: you sign up, add a card and generate your own key, and it covers the full catalog – credits, profiles and analytics. Docs are at platform.muso.ai/docs. If you need custom volume or enterprise terms, let me know and I'll tell you here what is available.
 
 ---
 
@@ -267,8 +267,9 @@ and correcting credits stay free on Lite. (Corrected 2026-10-15: every paid plaq
 last 30 days came from a paid workspace.)
 
 ### My plaque shows old stream numbers – can it be updated?
-If your plaque shows numbers that don't match what you'd expect, open a
-ticket with the order ID and the team will sort it out.
+If your plaque shows numbers that don't match what you'd expect, share the order ID and I'll look the
+order up and file the case for it. I can't change the numbers on a plaque that has already been printed,
+so I won't promise a correction: what I can do is record the case and tell you what was actually done.
 
 ### I need to fix / change the shipping address on my order
 Share your order ID and the full corrected address – recipient name,

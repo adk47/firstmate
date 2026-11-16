@@ -24,6 +24,18 @@
 
 export const MERGE_PARAGRAPH =
   "Merges work like this: claim every profile that is yours first (so we know they're all you), " +
+  "then tell me which one should be the main profile. The merge runs as a job and you get a " +
+  "message in this conversation when it's complete; credits from the duplicates move onto the " +
+  "main profile. Profiles claimed by someone else, and company or label profiles, are handled " +
+  "differently: I'll tell you here what can and cannot be done with them.";
+
+// The paragraph as it was sent before 2026-11-15, when it still named a verification team and a
+// hand-off. It is never sent again, but a conversation that already carries it must still be
+// recognised: `containsMergeParagraph` is the only thing that stops the paragraph being inserted
+// twice, and anchoring on the current text alone would re-send it to every thread that got the old
+// one (QA round 2 on #2040). Retired copy is kept here, not deleted.
+export const MERGE_PARAGRAPH_RETIRED =
+  "Merges work like this: claim every profile that is yours first (so we know they're all you), " +
   "then tell me which one should be the main profile. The merge is done by our verification team " +
   "and you get a message in this conversation when it's complete; credits from the duplicates move " +
   "onto the main profile. Profiles claimed by someone else, and company or label profiles, are " +
@@ -38,7 +50,7 @@ const HANDOFF_RE = /I['’]m pulling in a teammate to take this from here\./;
 
 // The §2.2 document thank-you, minus its leading "Thank you." (kept: it is just politeness).
 const DOC_THANKS =
-  /Everything you send here is recorded against your account and your open requests and goes to the verification team\.\s*(?:If anything else is needed, the message you get will say exactly what\.)?/i;
+  /Everything you send here is recorded against your account and your open requests(?: and goes to the verification team)?\.\s*(?:If anything else is needed, the message you get will say exactly what\.)?/i;
 
 const PROFILE_WORD = String.raw`(?:muso\s+)?(?:profiles?|pages?|accounts?)`;
 
@@ -402,11 +414,15 @@ export function containsMergeParagraph(text: string): boolean {
     .replace(/&#39;|&apos;|&rsquo;/g, "'")
     .replace(/[’]/g, "'")
     .replace(/\s+/g, " ");
-  const tail = MERGE_PARAGRAPH.slice(1);
-  let at = plain.indexOf(tail);
-  while (at > 0) {
-    if (plain[at - 1].toLowerCase() === MERGE_PARAGRAPH[0].toLowerCase()) return true;
-    at = plain.indexOf(tail, at + 1);
-  }
-  return false;
+  // Every paragraph this guard has ever sent. A thread that carries the retired copy has already
+  // had its merge explained, so inserting the current one would be the second time.
+  return [MERGE_PARAGRAPH, MERGE_PARAGRAPH_RETIRED].some((paragraph) => {
+    const tail = paragraph.slice(1);
+    let at = plain.indexOf(tail);
+    while (at > 0) {
+      if (plain[at - 1].toLowerCase() === paragraph[0].toLowerCase()) return true;
+      at = plain.indexOf(tail, at + 1);
+    }
+    return false;
+  });
 }
