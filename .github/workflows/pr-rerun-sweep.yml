@@ -62,11 +62,45 @@ permissions:
   pull-requests: read
   statuses: read
 
-# One pass per head (or one full sweep) at a time, and a pass is never cancelled half-way: a
-# re-run already requested stays requested. A second pass queued behind it re-reads the head.
+# One pass per PR at a time, and a superseded pass is CANCELLED rather than queued.
+#
+# The group is the PR, not the head. A pass for a head the PR has already moved past is stale work:
+# the pass for the newer head re-reads the same PR and covers it, and a re-run it had not requested
+# yet is requested by the newer pass. A dispatch names its PR; a scheduled `--all` pass is its own
+# group, so it never cancels a PR pass. The `pr-rerun-sweep-` prefix keeps this group out of every
+# other workflow's (deploy, validation, title check), so nothing here can cancel a run of main or a
+# deploy.
+#
+# The PR-supplied part of the key is NAMESPACED and identifies the PR, not just a branch name. A
+# branch name is not an identity: two fork PRs can both be `fix`, and a pass for one would cancel
+# the other's needed re-run (QA review of #2089). So the key is, in order:
+#   pr-<number>          the PR `workflow_run.pull_requests` names (absent for a fork PR)
+#   fork-<repo id>-<ref> its head repository's numeric id and its head branch (the id separates forks)
+#   pr-<number>          a `workflow_dispatch` that names a PR
+#   net                  the scheduled `--all` pass, and a bare `--all` dispatch
+# The `pr-`/`fork-` namespacing also keeps the net's own key unreachable: a branch is a name
+# anybody can choose, and the net is the one pass that is not cancellable, so a branch that joined
+# it would share the group's single slot and the net would wait behind a pass that keeps being
+# replaced.
+#
+# Residual, not removable in an expression: two branches of the SAME repository that differ only by
+# case (`Fix` and `fix`) can still alias if GitHub compares group names case-insensitively. That is
+# one repository, so both would be the same head repository id; a hash is not available to a
+# workflow expression, and lowercasing would merge two real branches instead of separating them.
+#
+# Measured 2026-11-16T04:5xZ: 18 sweep passes were queued on the fleet, 17 of them for 17 distinct
+# heads (12 open PRs, 5 heads whose PR had already closed). Each is ~8 s of python and API reads, so
+# a stale one is a queue slot spent on a verdict the newer pass is about to reach anyway.
+#
+# The scheduled `--all` net is deliberately NOT cancellable. In the 18 h to 2026-11-16T05:00Z the
+# scheduled pass waited 1h15m-2h38m for a runner (job created_at -> started_at) while the cron fires
+# every 2 h, so a cancellable net is a net each tick cancels while it is still waiting: it can be
+# starved for as long as the pool stays saturated. It is also the only trigger for a credit-guard
+# red that no PR Validation run follows. GitHub already holds a group to one running plus one
+# pending, so the net was never the pile-up and needs no cancellation to stay bounded.
 concurrency:
-  group: pr-rerun-sweep-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || 'all' }}
-  cancel-in-progress: false
+  group: pr-rerun-sweep-${{ github.event_name == 'workflow_run' && github.event.workflow_run.pull_requests[0].number && format('pr-{0}', github.event.workflow_run.pull_requests[0].number) || github.event_name == 'workflow_run' && format('fork-{0}-{1}', github.event.workflow_run.head_repository.id, github.event.workflow_run.head_branch) || github.event.inputs.pr != '' && format('pr-{0}', github.event.inputs.pr) || 'net' }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.pr != '') }}
 
 jobs:
   pr-rerun-sweep:

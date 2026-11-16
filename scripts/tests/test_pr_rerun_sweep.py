@@ -23,6 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 SCRIPT = os.path.join(ROOT, "scripts", "ci", "pr-rerun-sweep.py")
 WORKFLOW = os.path.join(ROOT, ".github", "workflows", "pr-rerun-sweep.yml")
 VALIDATE = os.path.join(ROOT, ".github", "workflows", "pr-validate.yml")
+TITLE_CHECK = os.path.join(ROOT, ".github", "workflows", "pr-title-check.yml")
 
 _spec = importlib.util.spec_from_file_location("pr_rerun_sweep", SCRIPT)
 sw = importlib.util.module_from_spec(_spec)
@@ -456,6 +457,236 @@ class OnlyAReRunTests(unittest.TestCase):
         self.assertEqual(self.src.count("rerun_failed("), 2)  # the method and its one call
 
 
+# Every workflow that can queue a run per PR must CANCEL a superseded run of the same PR instead of
+# queueing it behind the one it replaces. Measured 2026-11-16T04:5xZ on the hydra fleet: 43 queued
+# PR Validation runs over 21 refs, 12 queued PR Title Check runs over 12 refs, 18 queued sweep
+# passes over 17 heads. A superseded run is a queue slot spent on a verdict the newer run reaches
+# anyway, and the fleet is the bottleneck (9 hosts at 69-89% CPU, report-024-hydra-ci.md).
+PER_PR_WORKFLOWS = (
+    (WORKFLOW, "pr-rerun-sweep-"),
+    (TITLE_CHECK, "pr-title-check-"),
+    (VALIDATE, "pr-validate-"),
+)
+
+# The sweep's `cancel-in-progress` must cancel a per-PR pass and must NOT cancel the scheduled
+# `all-open-prs` net. In the 18 h to 2026-11-16T05:00Z the scheduled pass waited 1h15m-2h38m for a
+# runner while the cron fires every 2 h, so a cancellable net is one each tick cancels while it is
+# still waiting: it can be starved for as long as the pool stays saturated, and it is the only
+# trigger for a credit-guard red that no PR Validation run follows (Opus review of #2089).
+SWEEP_CANCEL = (
+    "${{ github.event_name == 'workflow_run'"
+    " || (github.event_name == 'workflow_dispatch' && inputs.pr != '') }}"
+)
+
+# The net's own group key. No branch name and no PR number may produce it: a branch is a name
+# anybody can choose, and the net is the one pass that is not cancellable, so a branch that joined
+# it would share the group's single slot and the net would wait behind a pass that keeps being
+# replaced (QA review of #2089).
+SWEEP_NET = "pr-rerun-sweep-net"
+
+
+def sweep_group(
+    head_branch: str | None = None,
+    pr: str = "",
+    event: str = "workflow_run",
+    head_pr: str = "",
+    head_repo_id: str = "",
+) -> str:
+    """`pr-rerun-sweep.yml`'s `group:` expression, evaluated.
+
+    Mirrors the workflow line; `sweep_group_problems` fails when the two disagree, so this cannot
+    drift into describing a shape the workflow no longer has.
+
+    A branch name is not an identity (QA review of #2089): two fork PRs can both be `fix`, and a
+    pass for one must not cancel the other's. So the PR is named by its number when the run names
+    it, and otherwise by its head repository's numeric id plus its branch.
+    """
+    if event == "workflow_run" and head_pr:
+        return f"pr-rerun-sweep-pr-{head_pr}"
+    if event == "workflow_run" and head_repo_id:
+        return f"pr-rerun-sweep-fork-{head_repo_id}-{head_branch}"
+    if pr:
+        return f"pr-rerun-sweep-pr-{pr}"
+    return SWEEP_NET
+
+
+def sweep_group_problems(text: str) -> list[str]:
+    """The key must name the PR, not just its branch, and never reach the net's own key."""
+    try:
+        block = concurrency_block(text)
+    except ValueError:
+        return ["the workflow has no workflow-level `concurrency:` block"]
+    group = re.search(r"^  group: (.+)$", block, flags=re.M)
+    if group is None:
+        return ["the concurrency block has no `group:`"]
+    key = group.group(1)
+    problems = []
+    if "format('pr-{0}'" not in key:
+        problems.append(f"the group {key!r} never keys on a PR number")
+    if "format('fork-{0}-{1}'" not in key or "head_repository.id" not in key:
+        problems.append(
+            f"the group {key!r} does not fall back to the head repository's id: a branch name is "
+            "not an identity, and two fork PRs both called `fix` would share one group"
+        )
+    if "'net'" not in key:
+        problems.append(f"the group {key!r} does not name the net's own key")
+    if "branch-" in key:
+        problems.append(
+            f"the group {key!r} still keys on a bare branch name: it is not a PR identity"
+        )
+    return problems
+
+
+def _without_comments(text: str) -> str:
+    """The workflow with its comment lines stripped: a comment is not a setting."""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def concurrency_block(text: str) -> str:
+    """The workflow-level `concurrency:` block, comments stripped."""
+    code = _without_comments(text)
+    start = code.index("\nconcurrency:\n")
+    return code[start : code.index("\njobs:\n", start)]
+
+
+def concurrency_problems(text: str, prefix: str, cancel: str = "true") -> list[str]:
+    """Everything wrong with this workflow's concurrency. Empty means: per PR, and it cancels.
+
+    `cancel` is the exact `cancel-in-progress` value this workflow must carry: the literal `true`
+    for a workflow whose only group is a PR, and `SWEEP_CANCEL` for the sweep, whose scheduled
+    `all-open-prs` net must survive the next tick.
+
+    The real files and every mutation go through THIS function, so a mutation that puts a
+    superseded run back in the queue fails for the same reason the real file would.
+    """
+    try:
+        block = concurrency_block(text)
+    except ValueError:
+        return ["the workflow has no workflow-level `concurrency:` block"]
+    problems = []
+    group = re.search(r"^  group: (.+)$", block, flags=re.M)
+    if group is None:
+        problems.append("the concurrency block has no `group:`")
+    else:
+        key = group.group(1)
+        if not key.startswith(prefix):
+            problems.append(f"the group {key!r} does not start with {prefix!r}: it could share a group with another workflow")
+        if not any(part in key for part in ("github.ref", "head_branch", "inputs.pr")):
+            problems.append(f"the group {key!r} is not keyed on the PR: a superseded run would queue, not cancel")
+    found = re.search(r"^  cancel-in-progress: (.+)$", block, flags=re.M)
+    if found is None:
+        problems.append("the concurrency block has no `cancel-in-progress:`")
+    elif found.group(1).strip() != cancel:
+        problems.append(f"cancel-in-progress is {found.group(1).strip()!r}, not {cancel!r}")
+    return problems
+
+
+def _top_block(text: str, key: str) -> str:
+    """The body of the top-level `key:` block, comments stripped, up to the next top-level key."""
+    code = _without_comments(text)
+    found = re.search(rf"(?ms)^{re.escape(key)}:\n(.*?)(?=^\S|\Z)", code)
+    return found.group(1) if found else ""
+
+
+# A `pull_request` `edited` event is a title or body change (or a retarget, which is why it is a
+# trigger at all). It must never RUN a code suite and must never DISPLACE one: on 2026-11-16 four
+# open PRs had a body edit land while their push-triggered suite was queued. The suite is 20-60
+# minutes of a saturated pool, and the edit can say nothing about the code it would test.
+#
+# The fix lives in `pr-validate.yml` since QA #1813 Critical (a metadata edit shared the code
+# group, so it cancelled the validation it could not replace) and has two halves, both load-bearing:
+#   1. the concurrency group keys on the ACTION, so an `edited` run lands in a `meta` bucket and
+#      never enters the code bucket's group;
+#   2. every code job carries `github.event.action != 'edited'` in its `if:`.
+# `scripts/tests/pr-validate-retarget.bats` pins both for that one workflow. What was missing is a
+# check over EVERY workflow: a new one on `edited` types would reintroduce the bug silently.
+EDITED_GUARD = "github.event.action != 'edited'"
+
+# The invocations that make a job a code suite. Deliberately about what a job RUNS, not about its
+# name: `validate` in pr-validate.yml reads the runs API (`scripts/ci/validate-mirror.py`) and is
+# not one of these, while `py-syntax` and `shellcheck` are.
+CODE_TOOL_MARKERS = (
+    "scripts/tests/",
+    "python3 -m pytest",
+    "python3 -m unittest",
+    "unittest.main",
+    "py_compile",
+    "shellcheck",
+    "vitest",
+    "bats ",
+)
+
+WORKFLOWS_DIR = os.path.join(ROOT, ".github", "workflows")
+
+
+def workflow_texts() -> dict[str, str]:
+    """Every workflow file in the repo, by name."""
+    out = {}
+    for name in sorted(os.listdir(WORKFLOWS_DIR)):
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        with open(os.path.join(WORKFLOWS_DIR, name), encoding="utf-8") as fh:
+            out[name] = fh.read()
+    return out
+
+
+def triggers_on_edited(text: str) -> bool:
+    """True when an `on:` trigger lists `edited` (a comment saying `edited` is not a trigger)."""
+    return re.search(r"\bedited\b", _top_block(text, "on")) is not None
+
+
+def job_blocks(text: str) -> dict[str, str]:
+    """{job id: its block} for every job declared under `jobs:`."""
+    out: dict[str, list[str]] = {}
+    current = None
+    for line in _top_block(text, "jobs").splitlines():
+        found = re.match(r"^  ([A-Za-z0-9_.-]+):\s*$", line)
+        if found:
+            current = found.group(1)
+            out[current] = []
+        elif current is not None:
+            out[current].append(line)
+    return {name: "\n".join(lines) for name, lines in out.items()}
+
+
+def code_jobs(text: str) -> list[str]:
+    """The jobs that run a suite, a linter or a compile check."""
+    return [
+        name
+        for name, block in job_blocks(text).items()
+        if any(marker in block for marker in CODE_TOOL_MARKERS)
+    ]
+
+
+def edited_event_problems(text: str) -> list[str]:
+    """Everything that would let an `edited` event run or displace a code suite. Empty is safe.
+
+    The real files and every mutation go through THIS function, so a mutation fails for the same
+    reason the real workflow would.
+    """
+    if not triggers_on_edited(text):
+        return []
+    suites = code_jobs(text)
+    if not suites:
+        return []  # a metadata-only workflow may run on `edited`; there is no suite to displace
+    problems = []
+    try:
+        group = re.search(r"^  group: (.+)$", concurrency_block(text), flags=re.M)
+    except ValueError:
+        group = None
+    if group is None or "github.event.action == 'edited'" not in group.group(1):
+        problems.append(
+            "the concurrency group does not key on the action, so an `edited` run enters the code "
+            "group and cancels the validation it cannot replace"
+        )
+    blocks = job_blocks(text)
+    for name in suites:
+        guard = re.search(rf"(?m)^    if: .*{re.escape(EDITED_GUARD)}", blocks[name])
+        if guard is None:
+            problems.append(f"{name}: a code job with no `if: {EDITED_GUARD} ...` guard")
+    return problems
+
+
 class WorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -493,9 +724,121 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("${{", script)
         self.assertIn('[[ "$INPUT_PR" =~ ^[0-9]+$ ]]', script)
 
-    def test_a_pass_is_never_cancelled_half_way(self):
-        conc = self.code[self.code.index("\nconcurrency:\n") : self.code.index("\njobs:\n")]
-        self.assertIn("cancel-in-progress: false", conc)
+    def test_a_superseded_pass_for_the_same_pr_is_cancelled(self):
+        # The group is the PR, not the head: a pass for a head the PR has already moved past is
+        # stale work, and the pass for the newer head covers it.
+        self.assertEqual(concurrency_problems(self.text, "pr-rerun-sweep-", SWEEP_CANCEL), [])
+        conc = concurrency_block(self.text)
+        self.assertIn("pull_requests[0].number", conc)
+        self.assertIn("head_repository.id", conc)
+        self.assertIn("github.event.inputs.pr", conc)
+        # Two runs of one PR land in one group, and two PRs never share one.
+        self.assertEqual(sweep_group(head_pr="2089"), sweep_group(head_pr="2089"))
+        self.assertNotEqual(sweep_group(head_pr="2089"), sweep_group(head_pr="2090"))
+
+    def test_a_fork_pr_is_keyed_by_repository_not_branch(self):
+        # `workflow_run.pull_requests` is empty for a fork PR, so the key falls back to the head
+        # repository's numeric id and its branch: two forks whose branches are both called `fix`
+        # are two groups, and one fork's pass cannot cancel the other's (QA review of #2089).
+        self.assertEqual(sweep_group_problems(self.text), [])
+        a = sweep_group(head_branch="fix", head_repo_id="1001")
+        b = sweep_group(head_branch="fix", head_repo_id="1002")
+        self.assertNotEqual(a, b)
+        self.assertIn("1001", a)
+        self.assertIn("1002", b)
+        # One fork, one branch, two runs: one group. That is the cancellation this PR wants.
+        self.assertEqual(a, sweep_group(head_branch="fix", head_repo_id="1001"))
+
+    def test_no_branch_name_can_join_the_nets_group(self):
+        # A branch is a name anybody can choose, and the net is the one pass that is not
+        # cancellable. Keyed bare, a branch called `net` (or whatever the net's key is) would sit in
+        # the net's group, and the two would share its one running plus one pending slot, so the net
+        # would wait behind a pass that keeps being replaced. QA review of #2089.
+        self.assertEqual(sweep_group_problems(self.text), [])
+        net = sweep_group(event="schedule")
+        self.assertEqual(net, SWEEP_NET)
+        # A bare `--all` dispatch is a net too, so it joins the net rather than making a second one.
+        self.assertEqual(sweep_group(event="workflow_dispatch"), net)
+        for name in ("net", "all-open-prs", "pr-rerun-sweep-net", "main"):
+            self.assertNotEqual(sweep_group(head_branch=name, head_repo_id="1"), net, name)
+        # The namespaced keys cannot equal a bare one whatever the branch is called.
+        for name in ("net", "all-open-prs", "-net", "net-"):
+            self.assertNotEqual(sweep_group(head_branch=name, head_repo_id="1"), net, name)
+            self.assertNotEqual(sweep_group(pr=name), net, name)
+        # A dispatch that names a PR and that PR's `workflow_run` pass are both per-PR, and neither
+        # is the net.
+        self.assertNotEqual(sweep_group(pr="2089", event="workflow_dispatch"), net)
+
+    def test_a_bare_branch_key_fails_this_test(self):
+        # The mutation is the shape this PR first shipped: `head_branch || inputs.pr || '<net>'`.
+        bare = re.sub(
+            r"(?m)^  group: .+$",
+            "  group: pr-rerun-sweep-${{ github.event.workflow_run.head_branch || github.event.inputs.pr || 'net' }}",
+            self.text,
+        )
+        self.assertNotEqual(bare, self.text)
+        self.assertTrue(sweep_group_problems(bare))
+        # ... and it is a real collision, not a wording problem: under that shape a branch named
+        # `net` produces exactly the net's own key.
+        bare_key = lambda head_branch=None, pr="": "pr-rerun-sweep-" + (head_branch or pr or "net")
+        self.assertEqual(bare_key(head_branch="net"), bare_key())
+        # The same bug with the prefix still on it: namespacing a BRANCH is not naming the PR, and
+        # two forks whose branches share a name would still share a group.
+        branch_only = re.sub(
+            r"(?m)^  group: .+$",
+            "  group: pr-rerun-sweep-${{ github.event.workflow_run.head_branch || github.event.inputs.pr "
+            "|| 'net' }}",
+            self.text,
+        )
+        self.assertTrue(sweep_group_problems(branch_only))
+        self.assertNotEqual(
+            "pr-rerun-sweep-branch-fix",
+            sweep_group(head_branch="fix", head_repo_id="1001"),
+        )
+
+    def test_the_scheduled_net_is_never_cancelled(self):
+        # The net is the only trigger for a credit-guard red that no PR Validation run follows, and
+        # in the 18 h to 2026-11-16T05:00Z it waited 1h15m-2h38m for a runner while the cron fires
+        # every 2 h. A cancellable net is one each tick cancels while it is still waiting.
+        conc = concurrency_block(self.text)
+        self.assertIn(SWEEP_CANCEL, conc)
+        # The expression is false for `schedule` and for a dispatch that names no PR, and true for
+        # the two events that carry a PR.
+        self.assertNotIn("schedule", SWEEP_CANCEL)
+        self.assertIn("github.event_name == 'workflow_run'", SWEEP_CANCEL)
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.pr != ''", SWEEP_CANCEL)
+
+    def test_making_the_net_cancellable_fails_this_test(self):
+        # The mutation is the tempting simplification: `cancel-in-progress: true` for every event.
+        mutated = re.sub(r"(?m)^  cancel-in-progress: .+$", "  cancel-in-progress: true", self.text)
+        self.assertNotEqual(mutated, self.text)
+        self.assertTrue(concurrency_problems(mutated, "pr-rerun-sweep-", SWEEP_CANCEL))
+
+    def test_queueing_a_superseded_pass_again_fails_this_test(self):
+        # The mutation is the revert: put `cancel-in-progress: false` back and the contract must go
+        # red for the same reason the real file would.
+        mutated = re.sub(r"(?m)^  cancel-in-progress: .+$", "  cancel-in-progress: false", self.text)
+        self.assertNotEqual(mutated, self.text)
+        self.assertTrue(concurrency_problems(mutated, "pr-rerun-sweep-", SWEEP_CANCEL))
+        # A group keyed on the head instead of the PR is the same bug in a different place.
+        head_keyed = re.sub(
+            r"(?m)^  group: .+$",
+            "  group: pr-rerun-sweep-${{ github.event.workflow_run.head_sha || 'all' }}",
+            self.text,
+        )
+        self.assertNotEqual(head_keyed, self.text)
+        self.assertTrue(concurrency_problems(head_keyed, "pr-rerun-sweep-", SWEEP_CANCEL))
+        # And a group that could collide with another workflow's is not per-PR either.
+        shared = re.sub(r"(?m)^  group: .+$", "  group: ci-${{ github.ref }}", self.text)
+        self.assertTrue(concurrency_problems(shared, "pr-rerun-sweep-", SWEEP_CANCEL))
+
+    def test_the_other_per_pr_workflows_already_cancel_a_superseded_run(self):
+        # PR Title Check was fixed on 2026-11-04 and PR Validation carries an event-aware per-ref
+        # group. Pinned here so a later edit cannot quietly put a superseded run back in the queue
+        # on either of them, and so this PR's claim about them is a test rather than a sentence.
+        for path, prefix in PER_PR_WORKFLOWS[1:]:
+            with open(path, encoding="utf-8") as fh:
+                self.assertEqual(concurrency_problems(fh.read(), prefix), [], path)
 
     def test_it_applies_unless_asked_for_a_dry_run(self):
         script = self.code[self.code.index("        run: |") :]
@@ -508,6 +851,93 @@ class WorkflowTests(unittest.TestCase):
     def test_pr_validation_runs_these_tests(self):
         with open(VALIDATE, encoding="utf-8") as fh:
             self.assertIn("python3 scripts/tests/test_pr_rerun_sweep.py", fh.read())
+
+
+class EditedEventTests(unittest.TestCase):
+    """A title or body edit must never run a code suite, and never displace the one it has."""
+
+    # Enumerated, not discovered: a NEW workflow on `edited` types has to be argued for here, so
+    # the next one cannot arrive with a code suite and nobody noticing. 2026-11-16T07:0xZ.
+    EDITED_WORKFLOWS = {
+        "credit-approval-guard.yaml",  # `types: [..., edited, ...]` — re-runs the guard on a body fix
+        "pr-title-check.yml",  # `types: [opened, edited, synchronize, reopened]` — the title check
+        "pr-validate.yml",  # `types: [..., edited]` — the only one with a code suite
+        "qa-tier-recheck.yml",  # `pull_request_target: types: [labeled, edited]`
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workflows = workflow_texts()
+
+    def test_only_the_expected_workflows_run_on_edited(self):
+        found = {name for name, text in self.workflows.items() if triggers_on_edited(text)}
+        self.assertEqual(found, self.EDITED_WORKFLOWS)
+
+    def test_no_workflow_lets_edited_run_or_displace_a_code_suite(self):
+        for name in sorted(self.EDITED_WORKFLOWS):
+            self.assertEqual(edited_event_problems(self.workflows[name]), [], name)
+
+    def test_pr_validation_is_the_code_suite_and_it_is_guarded_job_by_job(self):
+        text = self.workflows["pr-validate.yml"]
+        suites = code_jobs(text)
+        # The guard has to be on every suite, so the list has to be more than one job or this test
+        # would pass on a workflow that runs nothing.
+        self.assertGreaterEqual(len(suites), 7, suites)
+        for name in suites:
+            self.assertRegex(
+                job_blocks(text)[name],
+                rf"(?m)^    if: .*{re.escape(EDITED_GUARD)}",
+                f"{name} runs a suite on an `edited` event",
+            )
+
+    def test_a_code_job_without_the_guard_fails_this_test(self):
+        # The mutation is the one a future edit makes: add a job, forget the `if:`.
+        text = self.workflows["pr-validate.yml"]
+        mutated = re.sub(rf"(?m)^    if: .*{re.escape(EDITED_GUARD)}.*$", "    if: always()", text)
+        self.assertNotEqual(mutated, text)
+        problems = edited_event_problems(mutated)
+        self.assertEqual(len(problems), len(code_jobs(text)), problems)
+
+    def test_one_missing_guard_fails_this_test(self):
+        # One job is enough: break only `py-syntax`'s guard, in its own block.
+        text = self.workflows["pr-validate.yml"]
+        mutated = re.sub(
+            r"(?ms)(^  py-syntax:\n)(.*?)(?=^  [a-z0-9-]+:\s*$|\Z)",
+            lambda m: m.group(1) + m.group(2).replace(EDITED_GUARD, "true"),
+            text,
+        )
+        self.assertNotEqual(mutated, text)
+        self.assertEqual(
+            edited_event_problems(mutated),
+            [f"py-syntax: a code job with no `if: {EDITED_GUARD} ...` guard"],
+        )
+
+    def test_an_edited_run_in_the_code_group_fails_this_test(self):
+        # The QA #1813 regression: key the group on the ref alone and an `edited` run cancels the
+        # validation it cannot replace.
+        text = self.workflows["pr-validate.yml"]
+        mutated = re.sub(
+            r"(?m)^  group: .+$", "  group: pr-validate-${{ github.ref }}", text
+        )
+        self.assertNotEqual(mutated, text)
+        self.assertIn(
+            "the concurrency group does not key on the action",
+            " ".join(edited_event_problems(mutated)),
+        )
+
+    def test_a_code_suite_in_a_metadata_workflow_fails_this_test(self):
+        # PR Title Check runs on `edited` and is cheap because it only reads the title. Give it a
+        # suite and it must be refused, guard or no guard: it has no `meta` bucket to land in.
+        text = self.workflows["pr-title-check.yml"]
+        mutated = text.replace(
+            "jobs:\n",
+            "jobs:\n  suite:\n    runs-on: ovh-hydra\n    steps:\n      - run: python3 scripts/tests/test_pr_rerun_sweep.py\n",
+            1,
+        )
+        self.assertNotEqual(mutated, text)
+        problems = " ".join(edited_event_problems(mutated))
+        self.assertIn("suite: a code job with no", problems)
+        self.assertIn("does not key on the action", problems)
 
 
 if __name__ == "__main__":
