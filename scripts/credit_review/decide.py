@@ -100,6 +100,12 @@ Writes go through muso-admin-api.sh's conditional endpoint (compare-and-set
 and the server's per-row outcome (updated / skipped:<reason>) AFTER it. The
 server stays the authority: an approval it refuses comes back
 ``skipped:needs_human_review`` and is recorded, never retried blindly.
+
+A support@ contact is no longer a hold here (2026-11-14, firstmate 041): a row whose user
+emailed support@ in the last 90 days keeps the ladder's own verdict. The contact hold ends in
+the decider only; ``verify_notify``, ``claim_proof_ask``, ``uvn_status`` (stale Gmail part) and
+``score_approve`` each hold their own support@ contact, are unchanged, and are tracked separately
+(support-hold-sender-lift-r1). Nothing in this module posts on a support thread.
 """
 
 from __future__ import annotations
@@ -807,8 +813,9 @@ class ProofOnFile:
     request_ids: frozenset[str]
     approved_refs: dict[str, str] = field(default_factory=dict)  # request id -> ref of an APPROVED proof
 
-    # Users who emailed support@ in the last 90 days (top-level gmail_contacts_90d):
-    # firstmate 041 - always held for a human, never asked, whatever the Gmail scan found.
+    # Users who emailed support@ in the last 90 days (top-level gmail_contacts_90d). The decider's own
+    # filter holds no row on it (it did until 2026-11-14, firstmate 041); score_approve.engagement_checker
+    # reads it.
     support_contacts: frozenset[int] = frozenset()
     # Request ids an APPROVED proof entry names (APPROVED_PROOF_KINDS, with or without a ref).
     approved_requests: frozenset[str] = frozenset()
@@ -854,9 +861,6 @@ class ProofOnFile:
         rid = d.request_id.lower()
         return "" if rid in self.approved_requests else self.stage2_asks.get(rid, "")
 
-    def contacted_support(self, d: "Decision") -> bool:
-        return d.user_id is not None and d.user_id in self.support_contacts
-
 
 SUPPORT_CONTACTS_KEY = proof_parts.SUPPORT_CONTACTS
 
@@ -885,7 +889,7 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
     no other part flagged, entries well-formed and ``users`` consistent. On top of
     it the decider is stricter, never looser: the export's own stamp must be fresh,
     every user id must be a Muso (integer) id, and the support@ contact list must be
-    readable (firstmate 041: those users are held, never asked)."""
+    readable (the senders that read this export hold those users; the decider no longer does)."""
     path = Path(path or PROOF_ON_FILE)
     now = now or datetime.now(timezone.utc)
     try:
@@ -977,6 +981,10 @@ def with_intake(proof: ProofOnFile | None, path: str | None = None) -> ProofOnFi
 
 STAGE2_ASK_HOLD = f"{PROOF_ON_FILE_REASON}: stage 2 judged the document"
 DOC_ON_FILE_HOLD = f"{PROOF_ON_FILE_REASON}: human review"
+#: The reason prefix of the retired support@ hold. No decision is written with it any more: a row whose
+#: user emailed support@ keeps the ladder's own verdict and goes through the rest of `filter_support` like
+#: any other row. It stays defined because the ledger is append-only and still holds rows written with
+#: this text.
 SUPPORT_CONTACTED_HOLD = "emailed support@ in the last 90 days"
 REASKED_HOLD = "support already requested for this credit once"
 NO_ACCOUNT_DEFER = "no account user id on the request"
@@ -1053,7 +1061,7 @@ RUN_CAP_DEFER = "per-run ask cap: "
 #: decision and its roles, so the ask outcome lives in the reason; the sender reads these to know the ask
 #: was withheld (never re-ask, a document on file, the 24h window, the caps, unknown proof status).
 #: `PROOF_ON_FILE_REASON` alone is NOT one of them: the per-role split has its own prefix.
-ASK_HOLD_MARKERS = (STAGE2_ASK_HOLD, DOC_ON_FILE_HOLD, SUPPORT_CONTACTED_HOLD, REASKED_HOLD,
+ASK_HOLD_MARKERS = (STAGE2_ASK_HOLD, DOC_ON_FILE_HOLD, REASKED_HOLD,
                     WINDOW_DEFER, RUN_CAP_DEFER, ASK_CAP_DEFER, PROOF_UNKNOWN, NO_ACCOUNT_DEFER)
 
 
@@ -1104,10 +1112,6 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
                 res.held_stage2_in_held += 1
         elif proof.covers(d):
             note(d, "hold", f"{DOC_ON_FILE_HOLD} (a document is already on file; never ask again)")
-            res.held_proof += 1
-        elif proof.contacted_support(d):
-            note(d, "hold", f"{SUPPORT_CONTACTED_HOLD}: human review, never asked "
-                 "(when in doubt, don't send)")
             res.held_proof += 1
         elif d.request_id in asked:
             note(d, "hold", f"{REASKED_HOLD}: never re-ask; human review")

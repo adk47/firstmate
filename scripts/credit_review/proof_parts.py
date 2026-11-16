@@ -2,8 +2,9 @@
 
 THE one completeness rule for every Python reader of /var/lib/credit-trust/proof-on-file.json
 (verify_notify: the verify notes; credit_retro.takeback: the take-back gate; decide: the
-credit decider, which is stricter on top - integer user ids, a readable gmail_contacts_90d list
-whose users it never asks). Caroline's support tool (plugins/support-tools/src/tools/proof-on-file.ts)
+credit decider, which is stricter on top - integer user ids, and a readable gmail_contacts_90d
+list, because an unreadable one makes proof status UNKNOWN). Caroline's support tool
+(plugins/support-tools/src/tools/proof-on-file.ts)
 implements the same contract in TypeScript; scripts/tests/fixtures/proof-parts-contract.json
 pins both sides (scripts/tests/test_proof_parts_contract.py and the vitest suite). Parts, by their exact ``sources[].name`` (cs lane, firstmate 761/762/032/033),
 ALL required for everyone:
@@ -24,8 +25,10 @@ While ``cs-gmail`` is unusable EVERYONE is UNKNOWN: a snapshot of
 who emailed support@ cannot cover mail sent after it, so no contact list narrows the hold.
 UNKNOWN never asks and never removes. The live export also carries ``gmail_contacts_90d``
 ({generated_at, source, user_ids[]}): completeness never depends on it (it narrows nothing),
-but the readers that SEND (the decider's asks, the verify notes) hold every listed user for a
-human, read through ``support_contacts`` below, the one parser for it.
+but the readers that SEND (the verify notes and the other support@-contact senders) hold every
+listed user for a human, read through ``support_contacts`` below, the one parser for it. The
+credit decider does not hold on it any more (2026-11-14): it requires the list to be readable
+only, and the row keeps the ladder's verdict.
 
 A half-written export is UNKNOWN too: every entry must be an object with a user_id, a
 request_id that is null or a string and a known kind, and ``users`` must be the number of

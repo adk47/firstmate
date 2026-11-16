@@ -5,9 +5,10 @@ Caroline's support tool (plugins/support-tools/tests/proof-on-file.test.ts), so 
 answer every case the same way (captain via firstmate 034/035: one contract, strict). Both
 Python readers answer it too: verify_notify.load_proof_on_file (the verify notes),
 credit_retro.takeback's proof-on-file read (the take-back gate) and decide.proof_on_file
-(the credit decider), each through proof_parts. The decider additionally requires the
-gmail_contacts_90d list (it holds those users, firstmate 041), so the decider check adds
-one where a case has none; with it, the decider answers every case exactly the same."""
+(the credit decider), each through proof_parts. The decider additionally requires a readable
+gmail_contacts_90d list, because an unreadable one makes proof status UNKNOWN and nobody is asked,
+so the decider check adds one where a case has none; with it, the decider answers every case exactly
+the same."""
 
 from __future__ import annotations
 

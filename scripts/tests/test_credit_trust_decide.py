@@ -1398,15 +1398,34 @@ class NeverReAsk(Base):
             self.assertIn(why, d["reason"])
             self.assertEqual(res.deferred_proof_unknown, 1, why)
 
-    def test_support_contacts_are_held_never_asked(self):
-        """firstmate 041: everyone who emailed support@ in the last 90 days is held for
-        a human, even with no document found; everyone else may be asked."""
+    def test_a_support_contact_is_not_held_for_having_emailed_support(self):
+        """A user who emailed support@ in the last 90 days is no longer parked for a review nobody
+        does: the row keeps the ladder's own verdict, here the ask, exactly like the row of a user
+        who never wrote in. (Until 2026-11-14 it was held, firstmate 041.)"""
         self.proof(contacts=[781])
         res, w = self.go([req(uuid_of(160), uid=781, track="t1"), req(uuid_of(161), uid=782, track="t1")], self.RAWS)
         d = self.decisions()
-        self.assertEqual(d[uuid_of(160)]["decision"], "hold")
-        self.assertIn("emailed support@", d[uuid_of(160)]["reason"])
-        self.assertEqual(support_ids(w), [uuid_of(161)])
+        for n in (160, 161):
+            self.assertEqual(d[uuid_of(n)]["decision"], "support", n)
+            self.assertNotIn(decide.SUPPORT_CONTACTED_HOLD, d[uuid_of(n)]["reason"], n)
+        self.assertEqual(d[uuid_of(160)]["reason"], d[uuid_of(161)]["reason"])
+        self.assertEqual(sorted(support_ids(w)), [uuid_of(160), uuid_of(161)])
+        self.assertEqual(res.held_proof, 0)
+
+    def test_a_support_contact_still_reaches_every_ladder_decision(self):
+        """Having emailed support@ changes no verdict: the same contacts' rows are approved, asked and
+        held on a document on file, each for the reason any other user's row would be."""
+        doc = {"user_id": 784, "request_id": None, "kind": "pending_doc", "source": "intercom", "ref": "c1"}
+        self.proof([doc], contacts=[783, 784])
+        res, w = self.go([req(uuid_of(162), uid=783), req(uuid_of(163), uid=783, track="t1"),
+                          req(uuid_of(164), uid=784, track="t1")], self.RAWS)
+        d = self.decisions()
+        self.assertEqual(d[uuid_of(162)]["decision"], "approve")
+        self.assertEqual(d[uuid_of(163)]["decision"], "support")
+        self.assertEqual(d[uuid_of(164)]["decision"], "hold")
+        self.assertTrue(d[uuid_of(164)]["reason"].startswith(decide.DOC_ON_FILE_HOLD), d[uuid_of(164)]["reason"])
+        self.assertEqual(support_ids(w), [uuid_of(163)])
+        self.assertFalse(any(decide.SUPPORT_CONTACTED_HOLD in r["reason"] for r in d.values()))
 
     def test_a_missing_or_malformed_contact_list_asks_nobody(self):
         for bad in (None, {"user_ids": "x"}, [True], ["abc"]):
