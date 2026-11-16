@@ -5,10 +5,10 @@ Make sure Fable likes the messages that you're sending out. ... let them know if
 to tell them why. ... If there's fraud, you don't tell them there's fraud. You just say for now the credit's denied.
 You can always resubmit for a credit again later."*
 
-**The rule:** every customer message is reviewed by the reviewer (Fable) on its exact bytes, and the review is a signed
-statement anyone can re-check, not a log line. In **enforce** mode a message leaves only with an approval. In
-**observe** mode it leaves while the review is recorded. A refusal, a code-lint hit and a retired copy never leave, in
-either mode.
+**The rule:** every customer message is reviewed by the reviewer (Fable, or Opus when Fable is rate-limited) on its
+exact bytes, and the review is a signed statement anyone can re-check, not a log line. In **enforce** mode a message
+leaves only with an approval. In **observe** mode it leaves while the review is recorded. A refusal, a code-lint hit
+and a retired copy never leave, in either mode.
 
 ## Observe first, enforce one campaign at a time
 
@@ -61,7 +61,7 @@ refused it, and the sender already locks it with `LIVE_WINDOWED_COPY_APPROVED=0`
 |---|---|---|
 | 1. ask | the sender (node-8) | `scripts/outbound_copy/gate.py check` hashes the body it is about to POST and looks for a verdict on that hash |
 | 2. queue | the sender | no verdict: the body is written to `/var/lib/hydra/outbound-copy/pending/`; an enforced campaign **sends nothing** (exit 3), an observed one sends and says so (exit 4) |
-| 3. review | the reviewer host | `scripts/outbound_copy/review_pull.py` fetches the held bodies, asks Fable against `policies/outbound-copy-rubric.md`, signs each verdict |
+| 3. review | the reviewer host | `scripts/outbound_copy/review_pull.py` fetches the held bodies, asks Fable (Opus when Fable is rate-limited) against `policies/outbound-copy-rubric.md`, signs each verdict |
 | 4. store | the sender | `gate.py import-verdicts` keeps only statements signed by the key pinned in `policies/outbound-copy-reviewer.allowed_signers` |
 | 5. send | the sender | the next run finds an `approve` on the same bytes and sends; the ledger row carries `copy_verdict_id` + `copy_verdict_sha256` |
 
@@ -69,6 +69,46 @@ The sender can **verify** a verdict and cannot **mint** one: the signing key is 
 to the reviewer model. A verdict is bound to `body_sha256`, `subject_sha256`, the campaign, the frame the body is sent
 in (`copy`), the stage, the rubric's name and the rubric's sha256. Change one byte of the message or one byte of the
 rubric and the old approval is void.
+
+**When Fable is rate-limited, Opus reviews, and the verdict says so.** A batch whose Fable call fails with a rate
+limit (`429`, `rate_limit`, `rate limit`, `cooling down`, `usage limit`) is asked of `token-pool/claude-opus-5-5`
+(`gate.FALLBACK_REVIEWER_MODEL`), and so is every later batch of that round. Each verdict records the model that
+answered in `reviewer_model`; an Opus verdict also carries `reviewer_fallback: rate_limit:mac-pool/claude-fable-5-1`,
+and an Opus `approve` without that exact label is no send (`copy_verdict_invalid:fallback_approve_without_rate_limit`).
+The round's JSON carries `primary_rate_limited` and `by_model`, and `gate.py report` counts each campaign's verdicts
+by `reviewer_model` (`fallback_approve` counts the Opus approvals) so the downgrade is visible on the sender.
+
+The trigger is Fable's own rate-limit error, quoted from ak47 on 2026-11-16 03:05Z:
+
+```
+429 {"type":"error","error":{"type":"rate_limit_error","message":"All credentials for model claude-fable-5-1 are
+cooling down (last error: rate_limit_error: This request would exceed your account's rate limit. Please try again
+later.) (reset after 1m54s)"}}
+```
+
+**Any other Fable failure is not a fallback: the body keeps waiting.** `529 Overloaded`, a pool exhausted, a bare
+non-zero exit: the round reads `reviewer_unavailable` and the next round asks Fable again. Opus is a response to the
+rate limit's "try again later", never a substitute reviewer for an outage. Why: on 2026-11-16 the Fable pool was
+rate-limited account-wide and every round read `reviewer_unavailable 60, approve 0` while customer letters waited.
+
+**A standing fallback is paged once, and its end is paged once.** `review_pull.py` keeps a marker under the reviewer's
+state dir (`~/.local/state/muso/outbound-copy-review/reviewer-fallback.json`): the first rate-limited round prints one
+`PAGE:` line and fails the run (rc 1), later rate-limited rounds stay quiet while the marker stands, and the first
+round in which Fable answers again prints one `CLEARED:` line and removes it. **The page reaches a person through the
+page command** (`--page-cmd`, installed by `install-reviewer-host.sh` from `STANDING_REVIEW_PAGE_CMD` — the same pager
+ak47's other scheduled reviewers use; the page goes on its stdin), never through the journal alone. Only the fallback
+model's own verdicts count as "the fallback answered": the lint refuses a body without asking any model, so a round of
+lint refusals beside a failed fallback is a page saying nothing was reviewed. The "reviewed" count is the fallback's
+own verdicts as `by_model` measured, and the backlog is `pull_once`'s `waiting`; the batch this round asked
+(`queued`, after `--limit`) is never presented as reviewed — the answered-nothing page names it separately as
+`<n> attempted this round`. A round where Fable is rate-limited and the fallback answered nothing gets its own page
+saying so, and no marker, so it repeats every round. **A page that could not be
+delivered is not a page**: the run exits 2, says which failure it was (the command exited N, or this host has no page
+command installed), and writes no marker — an undelivered page never buys a day of silence. A marker older than 24 h is
+paged again and rewritten (a standing fallback says so daily, and a leftover marker silences at most one day); an
+unreadable marker is as old as time. A marker that cannot be written or removed pages every round and says so,
+instead of dropping the one signal. Without that, the fallback is indistinguishable from a healthy round: the bodies
+keep being reviewed, so nothing ages and nothing else notices.
 
 **Every visible byte is copy.** The lint and the reviewer read everything a person would see: text in any element
 (a list item included), bare text, and the attribute values a reader sees or hears (`alt`, `title`, `placeholder`,
@@ -115,7 +155,8 @@ also hold an observed campaign:
 - the reviewer said `refuse` *(either mode)*
 - a retired frame (`copy_retired`) *(either mode)*
 - a verdict signed by any other key, a verdict for other bytes, another campaign, another frame, another rubric
-- an `approve` that did not come from the reviewer model (the test stand-in can sign a refusal, never a send)
+- an `approve` that did not come from a reviewer model, Fable or its rate-limit fallback Opus (the test stand-in
+  can sign a refusal, never a send)
 - a body that trips the code lint (accusation words anywhere; a reason word or a missing resubmit line in a denial;
   "nothing is needed from you" on a received or verifying note), whatever the model said *(either mode)*
 - a gate that cannot run (missing rubric, missing signers file, missing or malformed mode table, unreadable store)

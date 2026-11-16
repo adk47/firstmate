@@ -19,6 +19,10 @@
 #   install-reviewer-host.sh --remote 'ssh -o BatchMode=yes -J root@JUMP root@10.0.0.8' [--enable]
 #   install-reviewer-host.sh --uninstall
 #
+# --page-cmd is the command that receives each fallback page on stdin (ak47's pager). Without one a rate-limited
+# round cannot tell anyone: it fails and says so, and no dedupe marker is written, so the next round says it again.
+# Its default is STANDING_REVIEW_PAGE_CMD (the page command ak47's other scheduled reviewers are installed with).
+#
 # Refuses when the signing key is not the one policies/outbound-copy-reviewer.allowed_signers pins: every verdict
 # such a host signed would be dropped by node-8, and the queue would never drain.
 #
@@ -35,11 +39,12 @@ KEY="$HOME/.config/muso/outbound-copy-reviewer/id_ed25519"
 REMOTE=""
 INTERVAL="15min"
 LIMIT=60
+PAGE_CMD="${STANDING_REVIEW_PAGE_CMD:-}"
 ENABLE=0
 UNINSTALL=0
 SYSTEMCTL=1
 
-usage() { sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() { printf 'install-reviewer-host: %s\n' "$*" >&2; exit 2; }
 
 while [ "$#" -gt 0 ]; do
@@ -50,6 +55,7 @@ while [ "$#" -gt 0 ]; do
     --remote)       REMOTE="${2:?}"; shift 2 ;;
     --interval)     INTERVAL="${2:?}"; shift 2 ;;
     --limit)        LIMIT="${2:?}"; shift 2 ;;
+    --page-cmd)     PAGE_CMD="${2:?}"; shift 2 ;;
     --enable)       ENABLE=1; shift ;;
     --no-systemctl) SYSTEMCTL=0; shift ;;   # write the files only (tests, or a host without a user manager)
     --uninstall)    UNINSTALL=1; shift ;;
@@ -74,6 +80,7 @@ fi
 
 [ -n "$REMOTE" ] || die "--remote is required (the command prefix that reaches the sender, e.g. 'ssh -J root@jump root@10.0.0.8')"
 case "$REMOTE" in *"'"*) die "--remote must not contain a single quote" ;; esac
+case "$PAGE_CMD" in *"'"*) die "--page-cmd must not contain a single quote" ;; esac
 case "$LIMIT" in ''|*[!0-9]*) die "--limit must be a number" ;; esac
 [ -f "$KEY" ] || die "signing key not found: $KEY"
 case "$KEY$PREFIX" in *[[:space:]]*) die "--key and --prefix must not contain whitespace (they are written into a unit file)" ;; esac
@@ -109,6 +116,14 @@ for rel in "${files[@]}"; do
   printf 'installed %s  %s\n' "$dst" "$rel"
 done
 
+extern="--remote '$REMOTE' --key $KEY --limit $LIMIT"
+if [ -n "$PAGE_CMD" ]; then
+  extern="$extern --page-cmd '$PAGE_CMD'"
+else
+  printf 'warning: no --page-cmd (and no STANDING_REVIEW_PAGE_CMD): a rate-limited round cannot page anyone, it\n' >&2
+  printf '         will fail and say so. Re-run with --page-cmd to install the pager.\n' >&2
+fi
+
 mkdir -p "$UNIT_DIR"
 cat > "$SERVICE" <<UNIT
 [Unit]
@@ -119,9 +134,11 @@ Documentation=file://$PREFIX/scripts/outbound_copy/review_pull.py
 Type=oneshot
 # The reviewer CLI lives in the user's own bin dir; a user unit does not inherit a login PATH.
 Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
-# rc 1 = some bodies are still unreviewed (the next round takes them); rc 2 = the round could not run. Both show
-# as a failed run here on purpose, and node-8's watchdog pages when the oldest held body ages past its limit.
-ExecStart=/usr/bin/python3 $PREFIX/scripts/outbound_copy/review_pull.py --remote '$REMOTE' --key $KEY --limit $LIMIT
+# rc 1 = some bodies are still unreviewed (the next round takes them), or this round paged: Fable is rate-limited
+# and Opus is the standing reviewer; rc 2 = the round could not run, or a page could not be delivered (no marker is
+# written then, so the next round says it again). Both show as a failed run here on purpose, and node-8's watchdog
+# pages when the oldest held body ages past its limit.
+ExecStart=/usr/bin/python3 $PREFIX/scripts/outbound_copy/review_pull.py $extern
 TimeoutStartSec=3300
 UNIT
 cat > "$TIMER" <<UNIT

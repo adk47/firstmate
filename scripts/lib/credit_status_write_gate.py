@@ -56,6 +56,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from functools import lru_cache
 
 # Identifier quoting. Quotes are DROPPED, so `UPDATE "public"."credit_requests"` reads `UPDATE public.credit_requests`
 # and `db["credit_requests"]` reads `db credit_requests`; brackets become a space rather than vanishing, so the name
@@ -177,6 +178,9 @@ _BRACKETS = {"[": "]", "(": ")", "{": "}"}
 # equivalent SQL INSERT was refused: the same hole, one API down.
 _MONGO_VERBS = r"(?:insert_?one|insert_?many|update_?one|update_?many|find_?one_?and_?update|replace_?one|bulk_?write|bulk_?insert)"
 _MONGO_VERB = rf"\b{_MONGO_VERBS}\s*\("
+#: A cheap presence check before the alias walk: a file with no write verb at all cannot hold an aliased write, and
+#: the alias/receiver scans are the expensive part of the whole-tree run.
+_MONGO_VERB_ANY = re.compile(_MONGO_VERB, re.IGNORECASE)
 #: How a write verb is REACHED on a receiver. qa-review #1578 (r15) reproduced two valid forms the literal `.verb(`
 #: join missed: OPTIONAL CHAINING (`db.credit_requests?.updateOne(...)`, `db.collection("credit_requests")?.updateOne`)
 #: and the BRACKET CALL (`db.credit_requests["updateOne"](...)`). Both execute a direct status write when the
@@ -394,6 +398,8 @@ def _credit_constants(binding_text: str) -> set[str]:
     receiver was a false green. Only single-line literals without interpolation count - a built-up name is a different
     problem, and guessing at it would trade a false green for a false red."""
     consts: set[str] = set()
+    if not re.search(r"credit_?requests", binding_text, re.IGNORECASE):
+        return consts
     for m in _CONST_ASSIGN.finditer(binding_text):
         if re.search(r"credit_?requests", m.group(3), re.IGNORECASE):
             consts.add(m.group(1))
@@ -754,6 +760,13 @@ def _alias_at(timeline: dict[str, list[tuple[int, bool]]], name: str, pos: int) 
     return live
 
 
+@lru_cache(maxsize=None)
+def _alias_write_pattern(alias: str) -> re.Pattern[str]:
+    """The write-verb pattern for one alias name, compiled ONCE: the tree names the same few aliases thousands of times."""
+    return re.compile(rf"(?<![A-Za-z0-9_$]){re.escape(alias)}(?:{_MONGO_ACCESS}{_MONGO_VERBS}\s*\(|"
+                      rf"\s+(?:{_MONGO_VERBS})\s*\()", re.IGNORECASE)
+
+
 def _mongo_alias_hits(timeline: dict[str, list[tuple[int, bool]]], body: str) -> list[tuple[int, str]]:
     """Every write verb on an alias that was bound to the credit collection AT THAT POINT.
 
@@ -764,9 +777,7 @@ def _mongo_alias_hits(timeline: dict[str, list[tuple[int, bool]]], body: str) ->
     for alias in sorted(timeline):
         if alias in {"db", "collection", "getCollection", "getcollection", "get_collection"}:
             continue
-        pattern = (rf"(?<![A-Za-z0-9_$]){re.escape(alias)}(?:{_MONGO_ACCESS}{_MONGO_VERBS}\s*\(|"
-                   rf"\s+(?:{_MONGO_VERBS})\s*\()")
-        for m in re.finditer(pattern, body, re.IGNORECASE):
+        for m in _alias_write_pattern(alias).finditer(body):
             if _alias_at(timeline, alias, m.start()):
                 hits.append((m.start(), MONGO_MSG))
     return hits
@@ -793,7 +804,8 @@ def scan(text: str, path: str | None = None) -> list[tuple[int, str]]:
     found += _collection_receiver_hits(flat, consts, in_string)
     found += [(m.start(), MONGO_MSG) for m in _mongo_bracket_call_pattern(consts).finditer(flat)]
     found += [(m.start(), NOTIFY_MSG) for m in NOTIFY_FALSE.finditer(raw_code)]
-    found += _mongo_alias_hits(_mongo_aliases(raw_code, consts), flat)
+    if _MONGO_VERB_ANY.search(flat):  # the bracket call form only reads as a verb on the normalised stream
+        found += _mongo_alias_hits(_mongo_aliases(raw_code, consts), flat)
     for start, msg in found:
         line = flat.count("\n", 0, start) + 1
         if (line, msg) in seen:

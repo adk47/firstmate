@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -92,8 +93,9 @@ class Mirror:
         self.modes.write_text(json.dumps({"version": 1, "default": "enforce", "enforce": [], "observe": [],
                                           "retired": [], **modes}), encoding="utf-8")
 
-    def run(self, *args: str, stdin: str = "") -> tuple[int, dict]:
-        p = subprocess.run([sys.executable, "-I", str(self.gate), *args], input=stdin, capture_output=True, text=True)
+    def run(self, *args: str, stdin: str = "", env: dict | None = None) -> tuple[int, dict]:
+        p = subprocess.run([sys.executable, "-I", str(self.gate), *args], input=stdin, capture_output=True, text=True,
+                           env=env)
         try:
             return p.returncode, json.loads(p.stdout.strip().splitlines()[-1])
         except (ValueError, IndexError):
@@ -634,6 +636,173 @@ class GateTests(unittest.TestCase):
                 self.assertIn("unreadable", ans["reason"])
 
 
+# the real stderr of a rate-limited Fable pool, reproduced on ak47 2026-11-16 03:05Z
+REAL_RATE_LIMIT_STDERR = (
+    '429 {"type":"error","error":{"type":"rate_limit_error","message":"All credentials for model '
+    'claude-fable-5-1 are cooling down (last error: rate_limit_error: This request would exceed your account\'s '
+    'rate limit. Please try again later.) (reset after 1m54s)"}}\n')
+
+OVERLOADED_STDERR = '529 {"type":"error","error":{"type":"overloaded_error"}}\n'
+
+
+def fake_pi(tmp: Path, fable: str, fallback: str = "ok") -> tuple[dict, Path]:
+    """A `pi` on PATH, so the gate's REAL reviewer path runs (no --reviewer-cmd). It logs each --model it is asked
+    for; Fable answers per `fable` (ok | 429 | overloaded | down) and Opus per `fallback` (ok | 429 | 429-after-one,
+    i.e. it answers its first batch and is rate-limited from the second on)."""
+    bindir, log = tmp / "fakebin", tmp / "pi-calls.log"
+    bindir.mkdir(exist_ok=True)
+    p = bindir / "pi"
+    p.write_text(
+        "#!/usr/bin/env python3\nimport json, pathlib, re, sys\n"
+        "model = sys.argv[sys.argv.index('--model') + 1]\nprompt = sys.argv[-1]\n"
+        f"open({str(log)!r}, 'a').write(model + '\\n')\n"
+        f"if model.endswith('fable-5-1') and {fable!r} == '429':\n"
+        f"    sys.stderr.write({REAL_RATE_LIMIT_STDERR!r}); sys.exit(1)\n"
+        f"if not model.endswith('fable-5-1') and {fallback!r} == '429':\n"
+        f"    sys.stderr.write({REAL_RATE_LIMIT_STDERR!r}); sys.exit(1)\n"
+        f"if not model.endswith('fable-5-1') and {fallback!r} == '429-after-one':\n"
+        f"    seen = pathlib.Path({str(tmp / 'opus-batches')!r})\n"
+        "    n = int(seen.read_text()) if seen.exists() else 0\n"
+        "    seen.write_text(str(n + 1))\n"
+        "    if n >= 1:\n"
+        f"        sys.stderr.write({REAL_RATE_LIMIT_STDERR!r}); sys.exit(1)\n"
+        f"if model.endswith('fable-5-1') and {fable!r} == 'overloaded':\n"
+        f"    sys.stderr.write({OVERLOADED_STDERR!r}); sys.exit(1)\n"
+        f"if model.endswith('fable-5-1') and {fable!r} == 'echo':\n"
+        "    print('the customer wrote: 429 rate_limit, usage limit, cooling down')\n"
+        "    sys.stderr.write('500 internal server error\\n'); sys.exit(1)\n"
+        f"if model.endswith('fable-5-1') and {fable!r} == 'down':\n"
+        "    sys.stderr.write('500 internal server error\\n'); sys.exit(1)\n"
+        "items = re.findall(r'BEGIN message (\\d+) \\|.*?body_sha256: ([0-9a-f]{64})', prompt)\n"
+        "print(json.dumps({'verdicts': [{'i': int(i), 'body_sha256': h, 'verdict': 'approve', 'note': model}"
+        " for i, h in items]}))\n")
+    p.chmod(p.stat().st_mode | stat.S_IXUSR)
+    return {**os.environ, "PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}"}, log
+
+
+class ReviewerFallbackTests(unittest.TestCase):
+    """Fable rate-limited -> Opus reviews (Aaron's Fable-exhausted -> Opus rule), and the verdict says so. Only a
+    rate limit falls back; only those two models' approvals are a send."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="ocg-fb-")
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def review(self, m: Mirror, env: dict) -> dict:
+        rc, out = m.run("review", "--pending-dir", str(m.store / "pending"), "--out-dir", str(m.out),
+                        "--key", str(m.key), env=env)
+        self.assertEqual(rc, 0, out)
+        return out
+
+    def test_a_rate_limited_fable_round_is_reviewed_by_opus_and_recorded_as_opus(self):
+        m = Mirror(self.tmp, families={"gdpr-ack": "gdpr"})
+        (m.root / "policies" / "outbound-copy-rubric-gdpr.md").write_text("# GDPR rubric\n")
+        m.check(DENIED, "decline")
+        m.check(VERIFYING, "gdpr-ack")                 # a second family = a second batch in the same round
+        env, log = fake_pi(self.tmp, "429")
+        stats = self.review(m, env)
+        g = m.mod
+        self.assertEqual((stats["approve"], stats["reviewer_unavailable"], stats["primary_rate_limited"]),
+                         (2, 0, True))
+        self.assertEqual(stats["by_model"], {g.FALLBACK_REVIEWER_MODEL: 2})
+        # Fable is asked once; once it says rate limit, the rest of the round goes straight to Opus
+        self.assertEqual(log.read_text().split(), [g.REVIEWER_MODEL, g.FALLBACK_REVIEWER_MODEL,
+                                                   g.FALLBACK_REVIEWER_MODEL])
+        self.assertEqual(m.import_()["stored"], 2)
+        rc, ans = m.check(DENIED, "decline")
+        self.assertEqual((rc, ans["result"], ans["reviewer_model"]), (0, "approved", "token-pool/claude-opus-5-5"))
+        self.assertEqual(ans["reviewer_fallback"], "rate_limit:mac-pool/claude-fable-5-1")
+        for f in (m.store / "verdicts").glob("*.json"):             # every verdict of the round is labelled
+            st = json.loads(f.read_text())
+            self.assertEqual((st["reviewer_model"], st["reviewer_fallback"]),
+                             ("token-pool/claude-opus-5-5", "rate_limit:mac-pool/claude-fable-5-1"))
+
+    def test_an_opus_approve_that_does_not_record_fables_rate_limit_is_no_send(self):
+        m = Mirror(self.tmp)
+        g = m.mod
+        good = json.loads(m.approve(DENIED, "decline", reviewer=g.FALLBACK_REVIEWER_MODEL)["statement"])
+        self.assertEqual(good["reviewer_fallback"], g.FALLBACK_LABEL)
+        for label in (None, "", "rate_limit:token-pool/claude-sonnet-5", "server_error:mac-pool/claude-fable-5-1"):
+            st = {k: v for k, v in good.items() if k not in ("verdict_id", "reviewer_fallback")}
+            if label is not None:
+                st["reviewer_fallback"] = label
+            st["verdict_id"] = "ocv-" + sha(g.canonical(st))[:16]
+            raw = g.canonical(st)
+            store = self.tmp / f"s-{len(list(self.tmp.iterdir()))}"
+            m.import_(json.dumps({"statement": raw.decode(), "signature": g.sign(raw, m.key).decode()}) + "\n",
+                      store=store)
+            rc, ans = m.check(DENIED, "decline", store=store)
+            self.assertEqual((rc, ans["reason"]), (1, "copy_verdict_invalid:fallback_approve_without_rate_limit"),
+                             label)
+
+    def test_a_fable_approve_carries_no_fallback_label(self):
+        m = Mirror(self.tmp)
+        st = json.loads(m.approve(DENIED, "decline")["statement"])
+        self.assertNotIn("reviewer_fallback", st)
+
+    def test_fable_that_answers_is_the_reviewer_and_opus_is_never_asked(self):
+        m = Mirror(self.tmp)
+        m.check(DENIED, "decline")
+        env, log = fake_pi(self.tmp, "ok")
+        stats = self.review(m, env)
+        self.assertEqual((stats["approve"], stats["primary_rate_limited"], stats["by_model"]),
+                         (1, False, {"mac-pool/claude-fable-5-1": 1}))
+        self.assertEqual(log.read_text().split(), ["mac-pool/claude-fable-5-1"])
+        m.import_()
+        self.assertEqual(m.check(DENIED, "decline")[1]["reviewer_model"], "mac-pool/claude-fable-5-1")
+
+    def test_rate_limit_words_on_fables_stdout_are_not_a_rate_limit(self):
+        """Only stderr says why Fable failed; stdout is its answer and quotes customer copy (Fable r8 note 1)."""
+        m = Mirror(self.tmp)
+        m.check(DENIED, "decline")
+        env, log = fake_pi(self.tmp, "echo")
+        stats = self.review(m, env)
+        self.assertEqual((stats["approve"], stats["reviewer_unavailable"], stats["primary_rate_limited"]),
+                         (0, 1, False))
+        self.assertEqual(log.read_text().split(), ["mac-pool/claude-fable-5-1"])
+
+    def test_a_fable_failure_that_is_not_a_rate_limit_does_not_fall_back(self):
+        m = Mirror(self.tmp)
+        m.check(DENIED, "decline")
+        env, log = fake_pi(self.tmp, "down")
+        stats = self.review(m, env)
+        self.assertEqual((stats["approve"], stats["reviewer_unavailable"], stats["primary_rate_limited"]),
+                         (0, 1, False))
+        self.assertEqual(log.read_text().split(), ["mac-pool/claude-fable-5-1"])
+        self.assertEqual(m.check(DENIED, "decline")[0], 3)            # still waiting, still unsent
+
+    def test_an_overloaded_fable_is_not_a_rate_limit_and_does_not_fall_back(self):
+        m = Mirror(self.tmp)
+        m.check(DENIED, "decline")
+        env, log = fake_pi(self.tmp, "overloaded")
+        stats = self.review(m, env)
+        self.assertEqual((stats["approve"], stats["reviewer_unavailable"]), (0, 1))
+        self.assertEqual(log.read_text().split(), ["mac-pool/claude-fable-5-1"])
+        self.assertEqual(m.check(DENIED, "decline")[0], 3)
+
+    def test_report_names_the_model_behind_each_verdict(self):
+        m = Mirror(self.tmp)
+        g = m.mod
+        m.check(DENIED, "decline")
+        env, _ = fake_pi(self.tmp, "429")
+        self.review(m, env)
+        m.import_()
+        row = g.report(m.store)["campaigns"]["decline"]
+        self.assertEqual((row["by_model"], row["fallback_approve"]),
+                         ({g.FALLBACK_REVIEWER_MODEL: 1}, 1))
+
+    def test_an_approve_from_any_other_model_is_still_no_send(self):
+        m = Mirror(self.tmp)
+        for other in ("token-pool/claude-sonnet-5", "custom-reviewer", "code-lint"):
+            store = self.tmp / f"s-{other.replace('/', '_')}"
+            m.import_(json.dumps(m.approve(DENIED, "decline", reviewer=other)) + "\n", store=store)
+            rc, ans = m.check(DENIED, "decline", store=store)
+            self.assertEqual((rc, ans["reason"]), (1, "copy_verdict_invalid:approve_not_from_reviewer_model"), other)
+
+
 class ModeTests(unittest.TestCase):
     """Observe mode: the gate reviews and records, the message still goes. Enforce mode: no approval, no send.
     Three things hold in EITHER mode: a code-lint hit, a signed refusal, a retired frame."""
@@ -756,7 +925,7 @@ class ModeTests(unittest.TestCase):
         rep = json.loads(rep["raw"]) if "raw" in rep else rep
         self.assertEqual(rep["campaigns"]["status-team-review"],
                          {"mode": "observe", "approve": 0, "rewrite": 0, "refuse": 0, "pending": 2, "stale": 0,
-                          "ready_to_enforce": False})
+                          "fallback_approve": 0, "by_model": {}, "ready_to_enforce": False})
         self.assertEqual(rep["retired"], ["verify-live/windowed"])
         self.m.import_(json.dumps(self.m.approve(a, "status-team-review")) + "\n"
                        + json.dumps(self.m.approve(b, "status-team-review", verdict="rewrite")) + "\n")
@@ -794,15 +963,216 @@ class ReviewPullTests(unittest.TestCase):
         shutil.copytree(self.sender.root, self.host)
         shutil.copy(PULL, self.host / "scripts" / "outbound_copy" / "review_pull.py")
         self.pull_py = self.host / "scripts" / "outbound_copy" / "review_pull.py"
+        # the installed host's pager: it appends every page it is given to an inbox, and fails while pager-down exists
+        self.inbox, self.pager = self.tmp / "paged-to-a-person", self.tmp / "pager.py"
+        self.pager.write_text(
+            "#!/usr/bin/env python3\nimport sys, pathlib\n"
+            f"box = pathlib.Path({str(self.inbox)!r})\n"
+            f"sys.exit(1) if pathlib.Path({str(self.tmp / 'pager-down')!r}).exists() else None\n"
+            "box.write_text((box.read_text() if box.exists() else '') + sys.stdin.read())\n")
+        self.pager.chmod(0o755)
 
     def tearDown(self):
         self._tmp.cleanup()
 
     def pull(self, *extra: str, remote_gate: Path | None = None) -> tuple[int, dict]:
+        extra = self.state_args(extra)
         p = subprocess.run([sys.executable, "-I", str(self.pull_py), "--remote-gate", str(remote_gate or self.sender.gate),
                             "--remote-store", str(self.sender.store), "--key", str(self.sender.key), *extra],
                            capture_output=True, text=True)
         return p.returncode, json.loads(p.stdout.strip().splitlines()[-1])
+
+    def pull_with(self, *extra: str, env: dict | None = None, pager: bool = True) -> tuple[int, dict, str]:
+        extra = self.state_args(extra, pager=pager)
+        p = subprocess.run([sys.executable, "-I", str(self.pull_py), "--remote-gate", str(self.sender.gate),
+                            "--remote-store", str(self.sender.store), "--key", str(self.sender.key), *extra],
+                           capture_output=True, text=True, env=env)
+        return p.returncode, json.loads(p.stdout.strip().splitlines()[-1]), p.stderr
+
+    def state_args(self, extra: tuple[str, ...], pager: bool = True) -> tuple[str, ...]:
+        if "--state-dir" not in extra:
+            extra = ("--state-dir", str(self.tmp / "state"), *extra)
+        if pager and "--page-cmd" not in extra:
+            extra = (*extra, "--page-cmd", str(self.pager))
+        return extra
+
+    def pages(self) -> str:
+        return self.inbox.read_text() if self.inbox.exists() else ""
+
+    def test_a_rate_limited_round_pages_once_and_later_ones_stay_quiet(self):
+        state = self.tmp / "state"
+        env, _ = fake_pi(self.tmp, "429")
+        self.sender.check(DENIED, "decline")
+        rc, out, err = self.pull_with("--state-dir", str(state), env=env)
+        self.assertEqual((rc, out["reviewer_alert"]["kind"]), (1, "page"), out)
+        self.assertIn("PAGE:", err)
+        self.assertIn("PAGE:", self.pages())                       # a person was actually told
+        self.assertEqual(out["reviewer_alert"]["delivered"], True)
+        self.assertEqual(out["import"]["stored"], 1)              # the body was still reviewed and sent on
+        self.sender.check(VERIFYING, "status-team-review")
+        rc, out, err = self.pull_with("--state-dir", str(state), env=env)
+        self.assertEqual((rc, "reviewer_alert" in out, err.strip()), (0, False, ""), out)
+        self.assertEqual(out["import"]["stored"], 1)
+
+    def test_the_first_round_fable_answers_again_clears_the_page(self):
+        state = self.tmp / "state"
+        self.sender.check(DENIED, "decline")
+        env, _ = fake_pi(self.tmp, "429")
+        self.assertEqual(self.pull_with("--state-dir", str(state), env=env)[1]["reviewer_alert"]["kind"], "page")
+        self.sender.check(VERIFYING, "status-team-review")
+        env_ok, _ = fake_pi(self.tmp, "ok")
+        rc, out, err = self.pull_with("--state-dir", str(state), env=env_ok)
+        self.assertEqual((rc, out["reviewer_alert"]["kind"]), (0, "cleared"), out)
+        self.assertIn("CLEARED:", err)
+        self.assertIn("CLEARED:", self.pages())
+        self.assertFalse((state / "reviewer-fallback.json").exists())
+
+    def test_a_marker_that_cannot_be_written_still_pages_and_still_sends_on(self):
+        state = self.tmp / "state-is-a-file"
+        state.write_text("not a directory")
+        self.sender.check(DENIED, "decline")
+        env, _ = fake_pi(self.tmp, "429")
+        rc, out, err = self.pull_with("--state-dir", str(state), env=env)
+        self.assertEqual((rc, out["reviewer_alert"]["kind"], out["import"]["stored"]), (1, "page", 1), out)
+        self.assertIn("could not be written", err)
+        self.assertIn("PAGE:", self.pages())
+
+    def test_a_page_nobody_received_is_not_a_page_and_buys_no_silence(self):
+        state = self.tmp / "state"
+        marker = state / "reviewer-fallback.json"
+        (self.tmp / "pager-down").write_text("")
+        self.sender.check(DENIED, "decline")
+        env, _ = fake_pi(self.tmp, "429")
+        rc, out, err = self.pull_with("--state-dir", str(state), env=env)
+        self.assertEqual((rc, out["reviewer_alert"]["delivered"], out["import"]["stored"]), (2, False, 1), out)
+        self.assertIn("the page command exited 1", out["reviewer_alert"]["delivery_error"])
+        self.assertIn("exited 1", err)
+        self.assertFalse(marker.exists())
+        (self.tmp / "pager-down").unlink()
+        self.sender.check(VERIFYING, "status-team-review")
+        rc, out, err = self.pull_with("--state-dir", str(state), env=env)
+        self.assertEqual((rc, out["reviewer_alert"]["delivered"]), (1, True), out)   # told on the next round
+        self.assertIn("is rate-limited", self.pages())
+        self.assertTrue(marker.is_file())
+
+    def test_a_host_with_no_page_command_says_so_instead_of_going_quiet(self):
+        state = self.tmp / "state"
+        self.sender.check(DENIED, "decline")
+        env, _ = fake_pi(self.tmp, "429")
+        rc, out, err = self.pull_with("--state-dir", str(state), env=env, pager=False)
+        self.assertEqual((rc, out["reviewer_alert"]["delivered"]), (2, False), out)
+        self.assertIn("no page command is configured", out["reviewer_alert"]["delivery_error"])
+        self.assertIn("no page command is configured", err)
+        self.assertFalse((state / "reviewer-fallback.json").exists())
+
+    def test_the_page_names_the_bodies_the_fallback_actually_answered(self):
+        """A page that says "12 verdicts ... reviewed 14 of 14" reports work that did not happen: the held customer
+        letters an operator is deciding about are the ones with a verdict."""
+        state = self.tmp / "state"
+        for i in range(14):                       # two batches: the fallback answers the first, then rate-limits
+            self.sender.check(DENIED.replace("Muso.AI", f"Muso.AI</p><p>Ref {i}."), "decline")
+        env, _ = fake_pi(self.tmp, "429", fallback="429-after-one")
+        rc, out, err = self.pull_with("--state-dir", str(state), env=env)
+        self.assertEqual((out["review"]["queued"], out["review"]["by_model"]["token-pool/claude-opus-5-5"]),
+                         (14, 12), out)
+        self.assertEqual(out["review"]["reviewer_unavailable"], 2, out)
+        self.assertEqual((rc, out["reviewer_alert"]["kind"]), (1, "page"), out)
+        self.assertIn("token-pool/claude-opus-5-5 (12 verdicts) reviewed 12 of the 14 held bodies", err)
+
+    def test_the_page_names_the_fallback_and_the_verdicts_it_measured(self):
+        state = self.tmp / "state"
+        self.sender.check(DENIED, "decline")
+        env, _ = fake_pi(self.tmp, "429")
+        rc, out, err = self.pull_with("--state-dir", str(state), env=env)
+        self.assertEqual((rc, out["reviewer_alert"]["kind"]), (1, "page"), out)
+        self.assertIn("token-pool/claude-opus-5-5 (1 verdicts) reviewed 1 of the 1 held bodies", err)
+
+    def plant_pending(self, body: str) -> None:
+        """A body queued by a sender that did not pre-lint it: the reviewer's own lint refuses it, asking no model."""
+        mod = self.sender.mod
+        pending = sorted((self.sender.store / "pending").glob("*.json"))[0]
+        item = json.loads(pending.read_bytes())
+        item["body"], item["body_sha256"] = body, sha(body.encode("utf-8"))
+        name = mod.key_name(item["body_sha256"], item["subject_sha256"], item["campaign"], item.get("copy") or "")
+        (self.sender.store / "pending" / (name + ".json")).write_text(json.dumps(item))
+
+    def test_a_code_lint_refusal_is_not_the_fallback_answering(self):
+        """The lint refuses without asking any model, and it is counted in `lint_refuse`; a round whose only
+        verdicts are lint refusals has been reviewed by nobody, so it cannot silence the fallback page."""
+        pull = load(self.pull_py)
+        state = self.tmp / "state"
+        state.mkdir()
+        kind, line, marker_action = pull.reviewer_alert(
+            {"reviewer_primary": "mac-pool/claude-fable-5-1",
+             "reviewer_fallback_model": "token-pool/claude-opus-5-5",
+             "primary_rate_limited": True, "queued": 1, "lint_refuse": 2, "by_model": {"code-lint": 2}},
+            state, 3)
+        self.assertEqual((kind, marker_action), ("page", ""), line)
+        self.assertIn("the fallback answered nothing", line)
+        self.assertIn("3 bodies still waiting", line)
+        self.assertFalse((state / "reviewer-fallback.json").exists())
+
+    def test_a_round_of_lint_refusals_beside_a_failed_fallback_pages_and_writes_no_marker(self):
+        state = self.tmp / "state"
+        marker = state / "reviewer-fallback.json"
+        self.sender.check(DENIED, "decline")
+        self.plant_pending(DENIED.replace("the verification didn't prove out", "we detected fraud"))
+        self.plant_pending(DENIED.replace("You can resubmit for the credit again later.",
+                                          "You can resubmit for the credit again later."
+                                          "<ul><li>The paperwork looks fraudulent.</li></ul>"))
+        env, _ = fake_pi(self.tmp, "429", fallback="429")
+        rc, out, err = self.pull_with("--state-dir", str(state), env=env)
+        self.assertEqual(out["review"]["lint_refuse"], 2, out)
+        self.assertEqual(out["review"]["reviewer_unavailable"], 1)
+        self.assertEqual((rc, out["reviewer_alert"]["kind"]), (1, "page"), out)
+        self.assertIn("the fallback answered nothing", err)
+        self.assertIn("still waiting", err)
+        self.assertIn("nothing reviewed", err)
+        self.assertIn("the fallback answered nothing", self.pages())
+        self.assertFalse(marker.exists())
+
+    def test_when_the_fallback_answers_nothing_the_page_says_so_and_repeats(self):
+        state = self.tmp / "state"
+        self.sender.check(DENIED, "decline")
+        self.sender.check(VERIFYING, "status-team-review")
+        env, _ = fake_pi(self.tmp, "429", fallback="429")
+        rc, out, err = self.pull_with("--state-dir", str(state), "--limit", "1", env=env)
+        self.assertEqual((rc, out["reviewer_alert"]["kind"], out["import"]["stored"]), (1, "page", 0), out)
+        self.assertIn("the fallback answered nothing", err)
+        self.assertIn("2 bodies still waiting, 1 attempted this round, nothing reviewed", err)
+        self.assertEqual(out["review"]["reviewer_unavailable"], 1)
+        self.assertFalse((state / "reviewer-fallback.json").exists())
+        rc, out, err = self.pull_with("--state-dir", str(state), "--limit", "1", env=env)
+        self.assertEqual((rc, out["reviewer_alert"]["kind"]), (1, "page"), out)     # never deduped by a marker
+
+    def test_a_standing_fallback_pages_again_after_a_day(self):
+        state = self.tmp / "state"
+        self.sender.check(DENIED, "decline")
+        env, _ = fake_pi(self.tmp, "429")
+        self.assertEqual(self.pull_with("--state-dir", str(state), env=env)[1]["reviewer_alert"]["kind"], "page")
+        marker = state / "reviewer-fallback.json"
+        backdated = (datetime.now(timezone.utc) - timedelta(hours=25)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        marker.write_text(json.dumps({"since": backdated, "primary": "mac-pool/claude-fable-5-1"}))
+        self.sender.check(VERIFYING, "status-team-review")
+        rc, out, err = self.pull_with("--state-dir", str(state), env=env)
+        self.assertEqual((rc, out["reviewer_alert"]["kind"]), (1, "page"), out)
+        self.assertIn("is rate-limited", err)
+        self.assertNotEqual(json.loads(marker.read_text())["since"], backdated)
+
+    def test_an_unreadable_marker_never_buys_silence(self):
+        state = self.tmp / "state"
+        state.mkdir()
+        (state / "reviewer-fallback.json").write_text("not json")
+        self.sender.check(DENIED, "decline")
+        env, _ = fake_pi(self.tmp, "429")
+        rc, out, err = self.pull_with("--state-dir", str(state), env=env)
+        self.assertEqual((rc, out["reviewer_alert"]["kind"]), (1, "page"), out)
+
+    def test_a_round_that_was_never_rate_limited_says_nothing(self):
+        self.sender.check(DENIED, "decline")
+        env, _ = fake_pi(self.tmp, "ok")
+        rc, out, err = self.pull_with("--state-dir", str(self.tmp / "state"), env=env)
+        self.assertEqual((rc, "reviewer_alert" in out, err.strip()), (0, False, ""), out)
 
     def test_nothing_waiting_is_a_clean_round(self):
         rc, out = self.pull()
@@ -966,7 +1336,8 @@ class ReviewerHostInstallTests(unittest.TestCase):
         return subprocess.run(argv, capture_output=True, text=True, check=False)
 
     def test_it_installs_the_tree_it_was_run_from_byte_for_byte_and_a_timer_that_runs_the_round(self):
-        p = self.install("--remote", "ssh -J root@jump root@10.0.0.8", "--interval", "15min", "--limit", "24")
+        p = self.install("--remote", "ssh -J root@jump root@10.0.0.8", "--interval", "15min", "--limit", "24",
+                         "--page-cmd", "bin/page-a-human")
         self.assertEqual(p.returncode, 0, p.stderr)
         for rel in ("scripts/outbound_copy/gate.py", "scripts/outbound_copy/review_pull.py",
                     "policies/outbound-copy-rubric.md", "policies/outbound-copy-reviewer.allowed_signers",
@@ -985,11 +1356,30 @@ class ReviewerHostInstallTests(unittest.TestCase):
         service = (self.units / "outbound-copy-review.service").read_text()
         timer = (self.units / "outbound-copy-review.timer").read_text()
         self.assertIn(f"ExecStart=/usr/bin/python3 {self.prefix}/scripts/outbound_copy/review_pull.py "
-                      f"--remote 'ssh -J root@jump root@10.0.0.8' --key {self.m.key} --limit 24\n", service)
+                      f"--remote 'ssh -J root@jump root@10.0.0.8' --key {self.m.key} --limit 24 "
+                      f"--page-cmd 'bin/page-a-human'\n", service)
         self.assertNotIn("--reviewer-cmd", service)          # the stand-in reviewer is a test seam, never installed
         self.assertNotIn("SuccessExitStatus", service)       # an incomplete round must not read as a clean one
         self.assertIn("OnUnitActiveSec=15min", timer)
         self.assertIn("undo:", p.stdout)
+
+    def test_the_page_command_is_the_one_ak47s_other_reviewers_are_installed_with(self):
+        """The fallback page goes to a person through the same command the other scheduled reviewers page with."""
+        p = subprocess.run(["bash", str(self.m.root / "scripts" / "outbound_copy" / INSTALL.name),
+                            "--prefix", str(self.prefix), "--unit-dir", str(self.units), "--key", str(self.m.key),
+                            "--no-systemctl", "--remote", "ssh x"],
+                           capture_output=True, text=True, check=False,
+                           env={**os.environ, "STANDING_REVIEW_PAGE_CMD": "bin/page-a-human --urgent"})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("--page-cmd 'bin/page-a-human --urgent'",
+                      (self.units / "outbound-copy-review.service").read_text())
+        self.assertEqual(self.install("--remote", "ssh x", "--page-cmd", "bin/page 'oops'").returncode, 2,
+                         "a quote would break out of ExecStart")
+        # a host installed without one can never tell anyone: the install says so, it does not go quiet
+        p = self.install("--remote", "ssh x")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("no --page-cmd", p.stderr)
+        self.assertNotIn("--page-cmd", (self.units / "outbound-copy-review.service").read_text())
 
     def test_a_second_install_keeps_the_first_beside_it_and_drops_a_rubric_that_left_the_tree(self):
         extra = self.m.root / "policies" / "outbound-copy-rubric-old.md"

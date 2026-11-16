@@ -90,6 +90,14 @@ STORE_DEFAULT = "/var/lib/hydra/outbound-copy"
 NAMESPACE = "muso-outbound-copy-v1"
 SIGNER_ID = "outbound-copy-reviewer"
 REVIEWER_MODEL = "mac-pool/claude-fable-5-1"
+# Aaron's standing rule (Fable exhausted -> Opus; firstmate 2026-11-16 02:53Z, when a rate-limited Fable pool left
+# every round at approve 0): a batch Fable refuses with a RATE LIMIT is asked of this model instead, and the verdict
+# records which model answered. Any other Fable failure is not a fallback: the body keeps waiting.
+FALLBACK_REVIEWER_MODEL = "token-pool/claude-opus-5-5"
+REVIEWER_MODELS = (REVIEWER_MODEL, FALLBACK_REVIEWER_MODEL)     # the only models whose approve is a send
+# the label a fallback verdict carries: an Opus approve is a send ONLY with it (Fable said rate limit that round)
+FALLBACK_LABEL = f"rate_limit:{REVIEWER_MODEL}"
+RATE_LIMIT_RE = re.compile(r"\b429\b|rate_limit|rate limit|cooling down|usage limit", re.I)
 VERDICTS = ("approve", "rewrite", "refuse")
 STAGES = ("received", "verifying", "ask", "done", "denied", "other")
 SSH_KEYGEN = "/usr/bin/ssh-keygen"
@@ -474,11 +482,18 @@ def _review(store: Path, subject: str, body: str, campaign: str, copy: str, mess
             vid, vsha = str(st.get("verdict_id", "")), sha256_hex(raw)
             if st.get("verdict") == "approve":
                 # an approval is the reviewer MODEL's: the stand-in reviewer seam can sign a refusal, never a send
-                if st.get("reviewer_model") != REVIEWER_MODEL:
+                if st.get("reviewer_model") not in REVIEWER_MODELS:
                     return 1, {**base, "result": "refused", "verdict_id": vid, "verdict_sha256": vsha,
                                "reason": "copy_verdict_invalid:approve_not_from_reviewer_model"}
-                return 0, {**base, "result": "approved", "verdict_id": vid, "verdict_sha256": vsha,
-                           "reviewer_model": st.get("reviewer_model"), "reviewed_at": st.get("reviewed_at")}
+                # Opus is the reviewer only when Fable was rate-limited, and the signed verdict must say so
+                if st.get("reviewer_model") == FALLBACK_REVIEWER_MODEL and st.get("reviewer_fallback") != FALLBACK_LABEL:
+                    return 1, {**base, "result": "refused", "verdict_id": vid, "verdict_sha256": vsha,
+                               "reason": "copy_verdict_invalid:fallback_approve_without_rate_limit"}
+                ok = {**base, "result": "approved", "verdict_id": vid, "verdict_sha256": vsha,
+                      "reviewer_model": st.get("reviewer_model"), "reviewed_at": st.get("reviewed_at")}
+                if st.get("reviewer_fallback"):
+                    ok["reviewer_fallback"] = st["reviewer_fallback"]
+                return 0, ok
             # a signed refusal is absolute: these bytes are not sent in any mode. A rewrite is the copy backlog.
             return 1, {**base, "result": "refused", "verdict_id": vid, "verdict_sha256": vsha,
                        "absolute": st.get("verdict") == "refuse",
@@ -541,11 +556,37 @@ def parse_verdicts(text: str, items: list[dict]) -> dict[int, dict]:
     return {i: v for i, v in out.items() if v}
 
 
-def reviewer_argv(cmd: str, prompt: str) -> list[str]:
+def reviewer_argv(cmd: str, prompt: str, model: str = REVIEWER_MODEL) -> list[str]:
     if cmd:
         return [cmd, prompt]
     return ["pi", "-p", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-prompt-templates",
-            "--model", REVIEWER_MODEL, "--thinking", "high", prompt]
+            "--model", model, "--thinking", "high", prompt]
+
+
+def ask_reviewer(cmd: str, prompt: str, primary_limited: bool) -> tuple[str, str, bool]:
+    """(answer, the model that gave it, whether the primary is rate-limited this round). '' = no answer.
+
+    The primary is asked first; only a failure that says RATE LIMIT moves the batch, and every later batch of the
+    round, to the fallback. The stand-in seam (`cmd`) never falls back and signs as "custom-reviewer"."""
+    order = ["custom-reviewer"] if cmd else (
+        [FALLBACK_REVIEWER_MODEL] if primary_limited else [REVIEWER_MODEL, FALLBACK_REVIEWER_MODEL])
+    for model in order:
+        try:
+            proc = subprocess.run(reviewer_argv(cmd, prompt, model), capture_output=True, timeout=REVIEW_TIMEOUT_S,
+                                  check=False, cwd="/tmp", stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            return "", model, primary_limited
+        out = proc.stdout.decode("utf-8", "replace")
+        if proc.returncode == 0 and out.strip():
+            return out, model, primary_limited
+        # stderr ONLY: stdout is the model's answer, which quotes customer copy, so a body (or a note) saying "rate
+        # limit" must never move the round to the fallback (Fable r8 note 1 on hydra#2082)
+        said = proc.stderr.decode("utf-8", "replace")
+        if model == REVIEWER_MODEL and RATE_LIMIT_RE.search(said):
+            primary_limited = True
+            continue
+        return "", model, primary_limited
+    return "", order[-1], primary_limited
 
 
 def sign(statement: bytes, key: Path) -> bytes:
@@ -566,6 +607,8 @@ def make_statement(item: dict, verdict: str, note: str, replacement: str, respon
           "note": note, "replacement": replacement, "rubric": item["rubric"],
           "rubric_sha256": item["rubric_sha256"],
           "reviewer_model": reviewer, "response_sha256": response_sha, "reviewed_at": now_z()}
+    if reviewer == FALLBACK_REVIEWER_MODEL:         # only ask_reviewer reaches Opus, and only after Fable's rate limit
+        st["reviewer_fallback"] = FALLBACK_LABEL
     st["verdict_id"] = "ocv-" + sha256_hex(canonical(st))[:16]
     return canonical(st)
 
@@ -576,7 +619,10 @@ def review(pending_dir: Path, out_dir: Path, key: Path, cmd: str = "", limit: in
     rubrics: dict[str, str] = {}                     # family -> text, read once from this tree
     items: list[dict] = []
     stats = {"queued": 0, "approve": 0, "rewrite": 0, "refuse": 0, "lint_refuse": 0, "skipped_bad_request": 0,
-             "unanswered": 0, "reviewer_unavailable": 0, "rubric_unavailable": 0, "rubric_unavailable_families": []}
+             "unanswered": 0, "reviewer_unavailable": 0, "rubric_unavailable": 0, "rubric_unavailable_families": [],
+             "reviewer_primary": REVIEWER_MODEL,
+             "reviewer_fallback_model": FALLBACK_REVIEWER_MODEL,
+             "primary_rate_limited": False, "by_model": {}}
     for p in sorted(pending_dir.glob("*.json")):
         try:
             it = json.loads(p.read_bytes())
@@ -639,12 +685,7 @@ def review(pending_dir: Path, out_dir: Path, key: Path, cmd: str = "", limit: in
     for batch in batches:
         nonce = "MSG-" + sha256_hex(os.urandom(16))[:12]
         prompt = build_prompt(rubrics[batch[0]["rubric"]], batch, nonce)
-        try:
-            proc = subprocess.run(reviewer_argv(cmd, prompt), capture_output=True, timeout=REVIEW_TIMEOUT_S,
-                                  check=False, cwd="/tmp", stdin=subprocess.DEVNULL)
-            answer = proc.stdout.decode("utf-8", "replace") if proc.returncode == 0 else ""
-        except (OSError, subprocess.SubprocessError):
-            answer = ""
+        answer, model, stats["primary_rate_limited"] = ask_reviewer(cmd, prompt, stats["primary_rate_limited"])
         if not answer.strip():
             stats["reviewer_unavailable"] += len(batch)
             continue
@@ -656,8 +697,9 @@ def review(pending_dir: Path, out_dir: Path, key: Path, cmd: str = "", limit: in
             if not v:
                 stats["unanswered"] += 1
                 continue
-            emit(it, v["verdict"], v["note"], v["replacement"], rsp_sha, cmd and "custom-reviewer" or REVIEWER_MODEL)
+            emit(it, v["verdict"], v["note"], v["replacement"], rsp_sha, model)
             stats[v["verdict"]] += 1
+            stats["by_model"][model] = stats["by_model"].get(model, 0) + 1
     return stats
 
 
@@ -692,7 +734,7 @@ def report(store: Path, notes_for: str = "") -> dict:
 
     def row(campaign: str) -> dict:
         return rows.setdefault(campaign, {"mode": mode_of(campaign, pol), "approve": 0, "rewrite": 0, "refuse": 0,
-                                          "pending": 0, "stale": 0})
+                                          "pending": 0, "stale": 0, "fallback_approve": 0, "by_model": {}})
     for p in sorted((store / "verdicts").glob("*.json")):
         try:
             raw = p.read_bytes()
@@ -704,6 +746,13 @@ def report(store: Path, notes_for: str = "") -> dict:
         except (OSError, ValueError, KeyError, TypeError, GateError):
             continue
         row(campaign)[verdict if fresh else "stale"] += 1
+        if fresh:
+            # which model answered is part of the record: an Opus approve is a fallback, never the norm
+            model = str(st.get("reviewer_model") or "unknown")
+            r = row(campaign)
+            r["by_model"][model] = r["by_model"].get(model, 0) + 1
+            if verdict == "approve" and st.get("reviewer_fallback"):
+                row(campaign)["fallback_approve"] += 1
         if fresh and campaign == notes_for and verdict != "approve":
             notes.append({"verdict": verdict, "copy": st.get("copy", ""), "verdict_id": st.get("verdict_id", ""),
                           "body_sha256": st.get("body_sha256", ""), "note": st.get("note", ""),
