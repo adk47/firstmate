@@ -2744,6 +2744,11 @@ jobs:
           # the bucket classifier, the partition invariant and the arrows. Stdlib only,
           # no Trino/ledger/Slack: the script is imported and fed fixtures.
           python3 scripts/tests/test_verification_queue_report.py
+          # The one page that answers where verifications stand
+          # (scripts/verification-standing.py): unmeasured is never 0, a stale snapshot is
+          # marked on every cell, only a `sent` row is a tell, nothing is written, one
+          # screen. Stdlib only: a fixture ledger, snapshot and policy.
+          python3 scripts/tests/test_verification_standing.py
           # Credit-trust model ladder + fetched-source evidence (scripts/credit_trust,
           # T01). Stdlib only; codex, Jev, OpenRouter and HTTP are faked, and the
           # bash helper is exercised only via --print-argv / census / quota gate.

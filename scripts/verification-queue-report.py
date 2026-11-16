@@ -63,6 +63,7 @@ import json
 import os
 import re
 import sqlite3
+import statistics
 import subprocess
 import sys
 import time
@@ -552,6 +553,61 @@ def age_h(ts: str, now: datetime) -> float:
         return 0.0
 
 
+def readable_age_h(ts: str, now: datetime) -> float | None:
+    """age_h(), but None when the timestamp is empty or unreadable, so a real 0.0 stays a 0.0."""
+    if not ts:
+        return None
+    v = ts.replace(" UTC", "+00:00").replace(" ", "T", 1)
+    try:
+        return max(0.0, (now - datetime.fromisoformat(v)).total_seconds() / 3600)
+    except ValueError:
+        return None
+
+
+def age_stats(pop: dict, now: datetime, request_median_h: float | None = None) -> dict:
+    """How long the open users of one table have waited: the median and the oldest, in hours.
+
+    `median_h` is the median age of an OPEN REQUEST, one sample per request, read by
+    request_median_h() - the done criterion is per request, and a per-user figure moves
+    differently (one 2-year-old request beside ten fresh ones is one sample, not eleven).
+    `oldest_per_user_median_h` is the per-user figure: one age per USER, the user's oldest
+    open request, the same clock every bucket's `oldest` uses. A user whose oldest request
+    has no readable time is left out and counted in `undated`: readable_age_h() answers None
+    for it, and a zero would pull the median down.
+    """
+    ages = sorted(h for h in (readable_age_h(i.get("oldest") or "", now) for i in pop.values())
+                  if h is not None)
+    out = {"users": len(ages), "undated": len(pop) - len(ages),
+           "oldest_per_user_median_h": statistics.median(ages) if ages else None,
+           "oldest_h": ages[-1] if ages else None}
+    if request_median_h is not None:
+        out["median_h"] = request_median_h
+    return out
+
+
+OPEN_REQUEST_SQL = {
+    "credits": f"""select cast(cr.createdat as varchar)
+from postgresql_core.public.credit_requests cr
+where cr.deletedat is null and cr.status in ({OPEN_STATUS_LIST})""",
+    "claims": """select cast(c.createdat as varchar)
+from postgresql_core.public.claiming c
+where c.deletedat is null and c.status = 'pending'""",
+}
+
+
+def request_median_h(family: str, now: datetime) -> float:
+    """The median age of an OPEN REQUEST of one family, one sample per request.
+
+    A read that answers no request with a readable time raises: an empty answer is a failed
+    read, never a 0-hour median.
+    """
+    rows = trino(OPEN_REQUEST_SQL[family], numeric_first=False)
+    ages = sorted(h for h in (readable_age_h(r[0], now) for r in rows) if h is not None)
+    if not ages:
+        raise RuntimeError(f"no open {family} request has a readable time")
+    return statistics.median(ages)
+
+
 def credit_status_guard() -> list[str]:
     """[key=open-status-index] The positive open-status filter is only equal to "not approved/rejected" while every
     status in the table is one we know. An unknown status (core adds `review_pending`) would be silently left out of
@@ -739,6 +795,56 @@ group by 1""", numeric_first=False)
         out["approved" if status == good else "declined"] = {
             "rows": int(n), "users": int(users), "paid": int(paid)}
     return out
+
+
+def pending_request_ids() -> list[str]:
+    """The id of every credit request waiting on the user's verification. An empty answer is a
+    failed read, never "nothing is pending": the wrapper drops every line it cannot parse."""
+    rows = trino("select lower(cast(cr.id as varchar)) from postgresql_core.public.credit_requests cr "
+                 "where cr.deletedat is null and cr.status = 'user_verification_needed'",
+                 numeric_first=False)
+    if not rows:
+        raise RuntimeError("the pending-request read returned no rows")
+    return [r[0] for r in rows]
+
+
+def ask_campaigns() -> tuple[str, ...]:
+    """The ledger's own list of campaigns that ASK the user for something."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from credit_review import verify_ledger
+    return tuple(verify_ledger.ASK_CAMPAIGNS)
+
+
+def ask_gap(pending: list[str]) -> dict:
+    """OURS: the pending requests no ask has been DELIVERED for. Joined by request id, against the
+    ledger's sent ASK messages (a status note or a take-back notice is not an ask). Subtracting a
+    count of sent ids from a count of pending ones under-reads it by every sent id that is no
+    longer pending (16,861 on 2026-11-14). `never_asked` is the part of it with no
+    `verify_requests` row of any campaign; the rest was tried and not delivered."""
+    asks = ask_campaigns()
+    db = sqlite3.connect(f"file:{LEDGER}?mode=ro", uri=True)
+    try:
+        delivered = {str(r[0]).lower() for r in db.execute(
+            "SELECT DISTINCT r.request_id FROM verify_requests r "
+            "JOIN verify_messages m ON m.id = r.message_row WHERE m.status = 'sent' "
+            f"AND m.campaign IN ({','.join('?' * len(asks))})", asks)}
+        tried = {str(r[0]).lower() for r in db.execute("SELECT DISTINCT request_id FROM verify_requests")}
+    finally:
+        db.close()
+    ids = set(pending)
+    return {"pending": len(ids), "ours": len(ids - delivered), "never_asked": len(ids - tried)}
+
+
+def intake_1h() -> dict:
+    """Credit requests created in the last hour: what the decisions of that hour are measured
+    against (verification-standing.py `decisions_per_intake`)."""
+    rows = trino("select cast(count(*) as varchar) from postgresql_core.public.credit_requests cr "
+                 "where cr.createdat > now() - interval '1' hour")
+    if not rows:
+        raise RuntimeError("the intake read returned no row")
+    return {"requests": int(rows[0][0])}
 
 
 # The lanes whose membership is decided by the ledger + proof feed + watchlist: if any of those
@@ -2319,6 +2425,25 @@ def main(argv: list[str]) -> int:
         except Exception as e:                                 # noqa: BLE001
             errors.append(f"claim flow: {e}")
 
+    # Two numbers the standing page prints and this report does not. A failed read leaves the key
+    # out and its error in: the page then says unmeasured. Neither stops the tables.
+    gap = intake = None
+    medians: dict[str, float] = {}
+    if not light and not OFFLINE:
+        for name in ("credits", "claims"):
+            try:
+                medians[name] = request_median_h(name, now)
+            except Exception as e:                             # noqa: BLE001
+                errors.append(f"{name} median: {type(e).__name__}: {e}")
+        try:
+            gap = ask_gap(pending_request_ids())
+        except Exception as e:                                 # noqa: BLE001
+            errors.append(f"ours: {type(e).__name__}: {e}")
+        try:
+            intake = intake_1h()
+        except Exception as e:                                 # noqa: BLE001
+            errors.append(f"intake: {type(e).__name__}: {e}")
+
     local_failed: set[str] = set()
     if light:
         facts = _EMPTY_FACTS()
@@ -2395,7 +2520,7 @@ def main(argv: list[str]) -> int:
                           f"(a row landed in no bucket)")
         return {"buckets": buckets, "open_users": open_users, "open_rows": open_rows,
                 "open_paid": pop_paid_rows, "open_paid_users": pop_paid_users,
-                "flow": flows}
+                "age": age_stats(pop, now, medians.get(name)), "flow": flows}
 
     merges = {}
     clickup: dict = {}
@@ -2423,6 +2548,7 @@ def main(argv: list[str]) -> int:
          "merges": mrg,
          "proof_on_file": proof_meta, "errors": errors,
          "runtime_s": round(time.time() - started, 1)}
+    m.update({k: v for k, v in (("ours", gap), ("intake_1h", intake)) if v is not None})
 
     # ── the backlog sentinel (captain 21:05Z) — runs on every tick, light or full ──
     c_class = lambda u, i: classify_credit(u, facts, i, wz)                    # noqa: E731

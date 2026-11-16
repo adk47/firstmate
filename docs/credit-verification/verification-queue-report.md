@@ -11,6 +11,19 @@ min, written by `scripts/install-aux-units.sh`) · DM to the captain (`U7RP6HKUZ
 devops bot · kill switch `touch /etc/hydra/verification-queue-report.disabled` (the
 `--dry-run`/`--json` diagnosis paths still work while it is set).
 
+The snapshot the full run saves (`last.json`) is also what
+`scripts/verification-standing.py` reads for open, decided and ages
+([verification-standing.md](verification-standing.md)); each table carries an `age` block
+(`median_h`, `oldest_per_user_median_h`, `oldest_h`, `users`, `undated`) for it, and the file
+carries `ours` (pending credit requests with no delivered ask, joined by request id) and
+`intake_1h` (requests created in the last hour). `median_h` is the median age of an open
+request, one sample per request, read by the full run only; `oldest_per_user_median_h` is the
+per-user figure. A failed read leaves its key out, is listed in `errors`
+and fails the run; the tables are still posted. A `--light` tick (and `VQR_OFFLINE=1`) reads
+none of them. While the kill switch is set that
+snapshot is not refreshed; once it is older than 2 h the page marks every number it takes
+from it, and the stale line names the stop file.
+
 ## What it measures
 
 A third table, **PROFILE MERGES**, covers the merge queue: nobody has touched them yet,

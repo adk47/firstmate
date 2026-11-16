@@ -1564,7 +1564,7 @@ class EntrypointFailures(unittest.TestCase):
     arrows baseline. Everything that would touch Trino, the ledger, Intercom or Slack is
     replaced, so this runs anywhere."""
 
-    def run_main(self, args):
+    def run_main(self, args, overrides=None):
         import contextlib
         import io
         patches = {
@@ -1589,7 +1589,12 @@ class EntrypointFailures(unittest.TestCase):
             "probe_sources": lambda prev, now: {"unmeasured": set()},
             "read_sentinel_state": lambda: None,
             "write_sentinel_state": lambda state: None,
+            "pending_request_ids": lambda: ["r1", "r2", "r3"],
+            "ask_gap": lambda pending: {"pending": len(pending), "ours": 2, "never_asked": 1},
+            "intake_1h": lambda: {"requests": 4},
+            "request_median_h": lambda family, now: 12.0,
         }
+        patches.update(overrides or {})
         saved = {k: getattr(vqr, k) for k in patches}
         for k, fn in patches.items():
             setattr(vqr, k, fn)
@@ -1626,6 +1631,83 @@ class EntrypointFailures(unittest.TestCase):
         rc, text, state = self.run_main([])
         self.assertEqual(rc, 1)
         self.assertFalse(os.path.exists(state))
+
+    def test_the_saved_snapshot_is_what_the_standing_page_reads(self):
+        """scripts/verification-standing.py takes open, decided and ages from the file THIS run
+        saves. Run the real writer, hand its file to the real page: no hand-built snapshot."""
+        flow = {"approved": {"rows": 3, "users": 2, "paid": 0}, "declined": {"rows": 0, "users": 0, "paid": 0}}
+        rc, _, state = self.run_main([], {"flow_24h": lambda *a, **k: json.loads(json.dumps(flow))})
+        self.assertEqual(rc, 0)
+        with open(state) as fh:
+            snap = json.load(fh)
+        self.assertEqual(snap["errors"], [])
+        self.assertEqual((snap["credits"]["age"]["users"], snap["credits"]["age"]["undated"]), (1, 0))
+        spec = importlib.util.spec_from_file_location(
+            "vstanding", os.path.join(os.path.dirname(SCRIPT), "verification-standing.py"))
+        page_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(page_mod)
+        missing = os.path.join(os.path.dirname(state), "absent")
+        page = page_mod.build(ledger=missing, snapshot=state, policy=missing, kill=missing,
+                              now=page_mod.parse_ts(snap["at"]) + timedelta(minutes=5))
+        for fam in page["families"]:
+            self.assertEqual((fam["open"], fam["decided_24h"]["value"]), ({"value": 1, "stale": False}, 2), fam)
+            self.assertEqual(fam["median_h"]["value"], snap[fam["family"]]["age"]["median_h"])
+            self.assertEqual(fam["median_h"]["value"], 12.0)
+            self.assertEqual(fam["oldest_h"]["value"], snap[fam["family"]]["age"]["oldest_h"])
+            self.assertEqual((fam["waiting_us"]["value"], fam["waiting_user"]["value"]), (1, 0))
+        self.assertEqual((snap["ours"], snap["intake_1h"]),
+                         ({"pending": 3, "ours": 2, "never_asked": 1}, {"requests": 4}))
+        self.assertEqual(page["tracking"]["ours"], {"value": 2, "stale": False, "pending": 3, "never_asked": 1})
+
+    def test_a_failed_tracking_read_is_an_error_and_no_number(self):
+        """OURS and the intake are read for the standing page. A read that fails leaves its key
+        OUT of the saved file (a 0 there would be read as nothing waiting), fails the run, and
+        does not stop the tables."""
+        flow = {"approved": {"rows": 3, "users": 2, "paid": 0}, "declined": {"rows": 0, "users": 0, "paid": 0}}
+
+        def boom(*a, **k):
+            raise RuntimeError("the pending-request read returned no rows")
+
+        rc, out, state = self.run_main([], {"flow_24h": lambda *a, **k: json.loads(json.dumps(flow)),
+                                            "pending_request_ids": boom, "intake_1h": boom})
+        self.assertEqual(rc, 1)
+        with open(state) as fh:
+            snap = json.load(fh)
+        self.assertNotIn("ours", snap)
+        self.assertNotIn("intake_1h", snap)
+        self.assertEqual([e.split(":")[0] for e in snap["errors"]], ["ours", "intake"])
+        self.assertEqual(snap["credits"]["open_users"], 1)
+        self.assertEqual(vqr.incomplete_errors(snap["errors"]), [])
+
+    def test_a_failed_median_read_is_an_error_and_no_number(self):
+        """The per-request median is a read of its own. A read that fails leaves `median_h` OUT
+        of the saved file (a 0 there would be read as a fresh backlog), fails the run, and does
+        not stop the tables or the per-user figure."""
+        flow = {"approved": {"rows": 3, "users": 2, "paid": 0}, "declined": {"rows": 0, "users": 0, "paid": 0}}
+
+        def boom(family, now):
+            raise RuntimeError("no open credits request has a readable time")
+
+        rc, _, state = self.run_main([], {"flow_24h": lambda *a, **k: json.loads(json.dumps(flow)),
+                                          "request_median_h": boom})
+        self.assertEqual(rc, 1)
+        with open(state) as fh:
+            snap = json.load(fh)
+        self.assertNotIn("median_h", snap["credits"]["age"])
+        self.assertIn("oldest_per_user_median_h", snap["credits"]["age"])
+        self.assertEqual([e.split(":")[0] for e in snap["errors"]], ["credits median", "claims median"])
+        self.assertEqual(snap["credits"]["open_users"], 1)
+
+    def test_a_light_tick_reads_no_tracking_number(self):
+        calls = []
+
+        def seen(*a, **k):
+            calls.append(1)
+            return {"requests": 1}
+
+        self.run_main(["--light"], {"pending_request_ids": seen, "ask_gap": seen, "intake_1h": seen,
+                                    "request_median_h": seen})
+        self.assertEqual(calls, [])
 
 
 DOCS_IN_OWNER = "verification worker, creds home (firstmate-assigned 2026-11-13)"
@@ -2802,6 +2884,141 @@ class Live(unittest.TestCase):
                                text=True, env=env)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(p.stdout.strip(), "NO_REPLY")
+
+
+class AgeStats(unittest.TestCase):
+    """The median and oldest wait of a table's open users, saved for scripts/verification-standing.py."""
+
+    def pop(self, *oldest):
+        return {i: dict(CREDIT, oldest=ts) for i, ts in enumerate(oldest)}
+
+    def test_the_per_user_median_and_oldest_in_hours(self):
+        got = vqr.age_stats(self.pop("2026-10-25 21:00:00.000000 UTC", "2026-10-24 21:00:00.000000 UTC",
+                                     "2026-10-16 21:00:00.000000 UTC"), NOW)
+        self.assertEqual(got, {"users": 3, "undated": 0, "oldest_per_user_median_h": 48.0,
+                               "oldest_h": 240.0})
+
+    def test_the_median_age_is_the_per_request_one_when_it_was_read(self):
+        got = vqr.age_stats(self.pop("2026-10-25 21:00:00.000000 UTC", "2026-10-24 21:00:00.000000 UTC"),
+                            NOW, 3.0)
+        self.assertEqual((got["median_h"], got["oldest_per_user_median_h"]), (3.0, 36.0))
+
+    def test_a_user_without_a_readable_time_is_counted_apart_not_as_zero_hours(self):
+        got = vqr.age_stats(self.pop("2026-10-24 21:00:00.000000 UTC", "", "soon"), NOW)
+        self.assertEqual(got, {"users": 1, "undated": 2, "oldest_per_user_median_h": 48.0,
+                               "oldest_h": 48.0})
+
+    def test_nothing_open_has_no_age(self):
+        self.assertEqual(vqr.age_stats({}, NOW), {"users": 0, "undated": 0,
+                                                  "oldest_per_user_median_h": None, "oldest_h": None})
+
+    def test_an_undated_user_still_lands_in_the_grids_first_column(self):
+        pop = {0: dict(CREDIT, oldest="", oldest_h=vqr.age_h("", NOW))}
+        grid = vqr.grid_build(pop, lambda user, item: "untouched", {})
+        self.assertEqual(grid["cells"][vqr.DATE_BUCKETS[0][0]]["a"]["users"], 1)
+        self.assertEqual(vqr.age_stats(pop, NOW)["undated"], 1)
+
+
+class RequestMedian(unittest.TestCase):
+    """The median age of an OPEN REQUEST, one sample per request, not one per user."""
+
+    def read(self, rows):
+        with mock.patch.object(vqr, "trino", return_value=rows):
+            return vqr.request_median_h("credits", NOW)
+
+    def test_one_old_request_beside_ten_fresh_ones_does_not_move_the_median(self):
+        old = "2025-10-26 21:00:00.000000 UTC"
+        fresh = "2026-10-26 20:00:00.000000 UTC"
+        self.assertEqual(self.read([[old]] + [[fresh]] * 10), 1.0)
+
+    def test_a_hundred_users_with_a_30_day_and_a_700_day_request_median_at_8_748_hours(self):
+        rows = [["2026-09-26 21:00:00.000000 UTC"], ["2024-11-26 21:00:00.000000 UTC"]] * 100
+        self.assertEqual(self.read(rows), 8748.0)
+
+    def test_an_empty_read_raises_instead_of_answering_zero(self):
+        with self.assertRaises(RuntimeError):
+            self.read([])
+
+    def test_an_unreadable_time_is_left_out_not_counted_as_zero(self):
+        self.assertEqual(self.read([["2026-10-26 20:00:00.000000 UTC"], [""], ["soon"]]), 1.0)
+
+    def test_the_read_keeps_timestamp_rows_and_drops_the_banner(self):
+        out = ('"2026-10-26 20:00:00.000000 UTC"\n'
+               'WARNING: query took a while\n'
+               '"2026-10-25 21:00:00.000000 UTC"\n')
+        p = mock.Mock(returncode=0, stdout=out, stderr="")
+        with mock.patch.object(vqr.subprocess, "run", return_value=p):
+            self.assertEqual(vqr.request_median_h("credits", NOW), 12.5)
+
+
+class AskGap(unittest.TestCase):
+    """OURS for the standing page: pending requests with no DELIVERED ask, joined by request id."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.path = os.path.join(self.tmp, "ledger.sqlite3")
+        db = sqlite3.connect(self.path)
+        db.executescript("""
+        CREATE TABLE verify_messages (id INTEGER PRIMARY KEY, status TEXT, campaign TEXT);
+        CREATE TABLE verify_requests (campaign TEXT, request_id TEXT, message_row INTEGER, status TEXT,
+          PRIMARY KEY (campaign, request_id));
+        INSERT INTO verify_messages VALUES (1, 'sent', 'uvn-status'), (2, 'refused', 'uvn-status'),
+          (3, 'sent', 'uvn-status'), (4, 'attempted', 'uvn-status'), (5, 'sent', 'status-team-review');
+        INSERT INTO verify_requests VALUES ('uvn-status', 'aaaa', 1, 'sent'), ('uvn-status', 'bbbb', 2, 'refused'),
+          ('uvn-status', 'GONE', 3, 'sent'), ('gap-ask', 'gone', 3, 'sent'), ('uvn-status', 'eeee', 4, 'attempted'),
+          ('gap-ask', 'EEEE', 1, 'sent'), ('status-team-review', 'ffff', 5, 'sent');
+        """)
+        db.commit()
+        db.close()
+        old = vqr.LEDGER
+        vqr.LEDGER = self.path
+        self.addCleanup(setattr, vqr, "LEDGER", old)
+
+    def test_it_is_joined_by_request_id_not_subtracted(self):
+        # delivered: aaaa, eeee (its second campaign reached the user) and one that is no longer
+        # pending. 5 pending - 3 delivered ids would say 2; 3 pending requests have no delivered ask.
+        gap = vqr.ask_gap(["aaaa", "bbbb", "cccc", "dddd", "eeee"])
+        self.assertEqual(gap, {"pending": 5, "ours": 3, "never_asked": 2})
+
+    def test_only_a_delivered_ask_takes_a_request_out_of_ours(self):
+        self.assertEqual(vqr.ask_gap(["ffff"]), {"pending": 1, "ours": 1, "never_asked": 0})
+        db = sqlite3.connect(self.path)
+        db.execute("INSERT INTO verify_messages VALUES (6, 'sent', 'proof-need-ask')")
+        db.execute("INSERT INTO verify_requests VALUES ('proof-need-ask', 'ffff', 6, 'sent')")
+        db.commit()
+        db.close()
+        self.assertEqual(vqr.ask_gap(["ffff"]), {"pending": 1, "ours": 0, "never_asked": 0})
+
+    def test_an_ask_that_was_tried_and_not_delivered_is_still_ours(self):
+        self.assertEqual(vqr.ask_gap(["bbbb"]), {"pending": 1, "ours": 1, "never_asked": 0})
+
+    def test_a_missing_ledger_raises_and_is_not_created(self):
+        vqr.LEDGER = os.path.join(self.tmp, "absent.sqlite3")
+        with self.assertRaises(sqlite3.Error):
+            vqr.ask_gap(["aaaa"])
+        self.assertFalse(os.path.exists(vqr.LEDGER))
+
+    def test_an_empty_pending_read_is_a_failed_read(self):
+        old = vqr.trino
+        self.addCleanup(setattr, vqr, "trino", old)
+        vqr.trino = lambda sql, **k: []
+        with self.assertRaises(RuntimeError):
+            vqr.pending_request_ids()
+        with self.assertRaises(RuntimeError):
+            vqr.intake_1h()
+
+    def test_the_two_replica_reads(self):
+        answers = iter([[['aaaa'], ['bbbb']], [['26']]])
+
+        def fake(sql, **k):
+            return next(answers)
+
+        old = vqr.trino
+        self.addCleanup(setattr, vqr, "trino", old)
+        vqr.trino = fake
+        self.assertEqual(vqr.pending_request_ids(), ["aaaa", "bbbb"])
+        self.assertEqual(vqr.intake_1h(), {"requests": 26})
 
 
 if __name__ == "__main__":

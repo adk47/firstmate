@@ -170,6 +170,12 @@
 #     bucket, with the change since the previous report. Read-only apart from the
 #     DM and its arrows state file; kill switch
 #     /etc/hydra/verification-queue-report.disabled.
+#   verification-standing.{service,timer}
+#     Runs scripts/verification-standing.py --save twice an hour: the one page that
+#     answers where verifications stand, saved to
+#     /var/lib/hydra/verification-standing/latest.{txt,json}. Read-only apart from
+#     those two files. The unit FAILS (and pages) when a number that has a writer is
+#     unmeasured or stale. docs/credit-verification/verification-standing.md.
 #
 #   /etc/cron.d/stale-ticket-watchdog
 #     Schedules scripts/stale-ticket-watchdog.sh daily to post a
@@ -467,6 +473,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/verification-queue-report.py" ]] \
   || fail "$HYDRA_ROOT/scripts/verification-queue-report.py missing or not executable"
+[[ -f "$HYDRA_ROOT/scripts/verification-standing.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/verification-standing.py is missing"
 [[ -x "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py" ]] \
@@ -3807,6 +3815,59 @@ VERIFQUEUERPT
 chmod 644 /etc/cron.d/verification-queue-report
 mkdir -p /var/lib/hydra/verification-queue-report /var/lib/hydra/backlog-sentinel
 
+# ─── The verification standing page, saved twice an hour ──────
+# scripts/verification-standing.py answers where verifications stand from the snapshot the cron
+# above writes, the verify ledger (mode=ro) and the sender's own tick records. Run by hand it
+# is a page nobody is made to read: on 2026-11-14 the snapshot's writer was stopped by its kill
+# file for 30 hours and every number on the page went stale with nothing saying so. This unit
+# is the page as a job:
+#   - :10 and :40, ten minutes behind the snapshot's :00 and :30 (its run is under a minute);
+#   - the page and its cells are saved to /var/lib/hydra/verification-standing/latest.{txt,json}
+#     (NOT /opt/hydra, which the deploy rsync overwrites), by rename;
+#   - exit 3 when a number that HAS a writer is unmeasured or stale, so the unit fails and
+#     hydra-unit-failed@ pages #clio_devops with the cells and the reason (stderr; stdout is the
+#     page itself and is already in the file). A number no job writes yet does not fail it.
+# It has no kill file: it writes two local files and sends nothing, so there is nothing to stop,
+# and a stop switch is how the snapshot went dark. It runs as root because a non-root SQLite
+# reader recreates the ledger's -shm file (scripts/credit_review/ledger_open.py).
+install -d -m 700 /var/lib/hydra/verification-standing
+
+cat > /etc/systemd/system/verification-standing.service << VERIFSTANDINGSVC
+[Unit]
+Description=HYDRA save the verification standing page; fail when a written number is unmeasured or stale
+
+[Service]
+Type=oneshot
+TimeoutStartSec=300
+Nice=10
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=null
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/verification-standing.py --save /var/lib/hydra/verification-standing
+VERIFSTANDINGSVC
+
+cat > /etc/systemd/system/verification-standing.timer << VERIFSTANDINGTMR
+[Unit]
+Description=HYDRA verification standing page, ten minutes behind each queue snapshot
+
+[Timer]
+OnCalendar=*:10,40
+Persistent=true
+Unit=verification-standing.service
+
+[Install]
+WantedBy=timers.target
+VERIFSTANDINGTMR
+
+systemctl daemon-reload
+# A timer that did not come up is FATAL, not a WARN: the service's OnFailure cannot page for a
+# service that never runs, and a page that is not saved is the hand-run page again.
+mon=verification-standing.timer
+systemctl enable "$mon" >/dev/null 2>&1 || fail "could not enable $mon: the standing page would not be saved or checked"
+systemctl start "$mon" >/dev/null 2>&1 || fail "could not start $mon: the standing page would not be saved or checked"
+[[ "$(systemctl is-active "$mon" 2>/dev/null)" == active ]] || fail "$mon is not active after start: the standing page would not be saved or checked"
+log "  $mon: active"
+
 # ─── Mercury token watchdog, daily ────────────────────────────
 # Pages #clio_devops (C0ADV2W76G4) when the Finance agent's read-only Mercury
 # Bank API token stops authenticating. Detect-only by design: replacing the
@@ -5167,6 +5228,7 @@ AUX_ONFAILURE_UNITS=(
   caroline-monitor.service
   caroline-safety-daily.service
   claim-list-build.service
+  verification-standing.service
   claim-doc-ladder.service
   established-claimant.service
   precedent-ledger-reconcile.service

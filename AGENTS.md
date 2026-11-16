@@ -1855,6 +1855,22 @@ reviewer. Operator doc: `docs/standing-review.md`; rubric: `policies/standing-re
   the index), every write goes through `Store` under the state directory, and the tick fetches into its own bare
   mirror. Do not add a GitHub client, an inbox write or a status-file write to it; the tests pin their absence.
 
+## Where verifications stand: one read-only page
+
+`scripts/verification-standing.py` prints one screen per request family: open, decided 24h, told 24h,
+median and oldest age, last successful send, days to zero, then the credit requests' five tracking
+numbers (`OURS`, `sent_this_tick`, `applied_1h`, `decisions_per_intake`, `held_evidence_unbounded`).
+`median age` is the median age of an OPEN REQUEST, one sample per request; the per-user figure
+(each user's oldest open request) is printed on its own line, labelled.
+It reads the queue report's saved snapshot, the verify ledger (`mode=ro`), the sender's tick records
+and the outbound policy, and nothing else. The table counts users; a source it cannot read prints
+`unmeasured`, never 0; a snapshot older than 2 h is marked `~` on every cell.
+`held_evidence_unbounded` is `unmeasured` until a writer records the reason (none does yet).
+It is a job, not a command to remember: `verification-standing.timer` saves it to
+`/var/lib/hydra/verification-standing/latest.txt` twice an hour, and the unit fails and pages when
+a number that has a writer is unmeasured or stale.
+`docs/credit-verification/verification-standing.md`.
+
 ## Picking the right extension mechanism
 
 Before writing new code in this repo, walk this decision tree top-down and stop at
