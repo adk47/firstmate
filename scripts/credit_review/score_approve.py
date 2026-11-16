@@ -11,7 +11,12 @@ executor side. Only these rows, every other guard intact:
     conflict, no ``reject_*`` rule, no ``review_*``/``reject_*`` rule at 100; core's guard clear.
     Band: A only while ``admit_band_b`` is false (today's core guard, mirrored); A or B, never C,
     once core's twin admitting validator-approved band B is LIVE and the flag is flipped;
-  * (2) stored popularity 1-59 (0 / unknown / 60+ refused);
+  * (2) stored popularity 1-59 (0 / unknown / 60+ refused). A stored 0 is ambiguous, so with
+    ``popularity_reread`` on it is read again from this run's own catalog track document before the
+    row is scored (captain 2026-11-15T19:51Z; see ``live_popularity``): a value of 1 or more replaces
+    the stored 0 and is scored like any other; a 0 there is a measured 0, stays 0 and is held by this
+    same condition; no value there leaves the row held as unknown. No number is ever guessed. OFF in
+    the checked-in policy: ``score-approve --popularity-reread-shadow`` reports what it would do;
   * (3) one-person roles (mix, master, immersive, remaster) only with
     ``review_role_credited_to_other_at_trusted_source`` present and 0;
   * (4) burst / velocity holds refuse (they are review_* rules: conflict or at 100);
@@ -107,6 +112,11 @@ class ScorePolicy:
     # validator-approved band-B rows is LIVE: while false the executor mirrors today's guard
     # (band A only) and approves nothing core would refuse.
     admit_band_b: bool = False
+    # Captain 2026-11-15T19:51Z: a stored popularity of 0 is read again from this run's catalog track
+    # document before the row is scored (live_popularity). OFF until a recorded decision arms it: the
+    # ruling named the same-run DSP capture, and that capture carries no popularity at all, so the
+    # source used here (the catalog track document the run's anchor evidence reads) is itself a decision.
+    popularity_reread: bool = False
     per_user_per_day: int = 20          # condition 8
     per_profile_per_day: int = 50
     fleet_per_day: int = 2000
@@ -125,6 +135,7 @@ class ScorePolicy:
                 candidate_limit=int(d.get("candidate_limit", 2000)),
                 max_profiles_per_run=int(d.get("max_profiles_per_run", 150)),
                 admit_band_b=d.get("admit_band_b") is True,
+                popularity_reread=d.get("popularity_reread") is True,
                 per_user_per_day=int(d.get("per_user_per_day", 20)),
                 per_profile_per_day=int(d.get("per_profile_per_day", 50)),
                 fleet_per_day=int(d.get("fleet_per_day", 2000)))
@@ -503,6 +514,8 @@ def unreadable_report(db, now: datetime, days: int = 7) -> list[dict[str, Any]] 
 # All measured from the RUN START (QA @1347: candidate selection counts too), against the cron's 900 s.
 CANDIDATES_BUDGET_S = 240  # the whole replica candidate walk (each page statement gets what is left)
 READ_BUDGET_S = 420        # reread: the profile-filtered list reads
+POPULARITY_BUDGET_S = 480  # the stored-0 popularity re-read (off by default): after the list reads, before
+#                            anchors. A row it does not reach is held this run and read on a later one.
 ANCHOR_BUDGET_S = 540      # live anchors
 EDITORIAL_BUDGET_S = 600   # editorial velocity: runs right after anchors, BEFORE fan-out (QA @1347: run after
                            # fan-out, its deadline had always passed and every editorial row was held)
@@ -820,15 +833,18 @@ def live_editorial_velocity(admin: admin_api.Admin, sleep: Callable[[float], Non
 
 
 def live_anchors(admin: admin_api.Admin, sleep: Callable[[float], None] | None = None,
-                 deadline: float | None = None, clock: Callable[[], float] | None = None) -> Anchors:
+                 deadline: float | None = None, clock: Callable[[], float] | None = None,
+                 builder: Any = None) -> Anchors:
     """Read-only: the decider's trusted-catalog role verdicts for each row (raw credits +
-    claimant profile). Any read failure = held."""
+    claimant profile). Any read failure = held. ``builder``: the run's own EvidenceBuilder when the
+    popularity re-read already made one, so a track document is read once per run for both."""
     import time as _t
     sleep = sleep or _t.sleep
+    shared = builder
 
     def fetch(rows: list[dict[str, Any]]) -> dict[str, tuple[str | None, str | None]]:
         from .evidence import CONFIRMED, EvidenceBuilder, EvidenceIncomplete
-        builder = EvidenceBuilder(admin)
+        builder = shared or EvidenceBuilder(admin)
         out: dict[str, tuple[str | None, str | None]] = {}
         now_fn = clock or _t.monotonic
         for n, r in enumerate(rows):
@@ -855,6 +871,104 @@ def live_anchors(admin: admin_api.Admin, sleep: Callable[[float], None] | None =
 
 
 Engaged = Callable[[dict[str, Any]], "str | None"]
+
+
+# ---- The stored-0 popularity re-read (captain 2026-11-15T19:51Z) ----------------------------------------
+# 322 of 633 rows decided by run score-20261115T191000Z-5ee287 were held on a stored popularity of 0. The
+# request row's 0 cannot say whether the track was measured at zero or its popularity was not there to
+# copy when the request was filed. The ruling: read it again from the SAME run's capture before the row is
+# scored; a real measured 0 stays 0; never guess.
+#
+# The source. hydra's DSP capture reading (credit_verify/dspverify/pod_driver.py) carries no popularity
+# field, and the DSP store named 7 of those 322 requests. The one popularity a run holds is the catalog
+# track document its anchor evidence reads (EvidenceBuilder._track_read: one GET per track per run). That
+# document is what this reads: the same run, the same read, never an earlier run's and never a stored copy.
+#
+# The four answers, and nothing else:
+#   captured       the document holds a whole number of 1 or more: the row is scored on it;
+#   measured_zero  the document holds 0: a measured 0. The stored 0 stands, it is not overwritten, and
+#                  the row is scored at 0 (condition 2 admits 1-59, so it is held, and the reason says
+#                  measured, not unknown);
+#   no_value       the document holds no usable number (missing, null, a fraction, a negative, a deleted
+#                  or merged document): the row stays held as unknown;
+#   unread         the document could not be read this run, or the time budget ran out first: held,
+#                  and read again on a later run.
+# A reader's answer is taken only in exactly that shape (`applied_popularity`); any other answer is `unread`.
+POP_CAPTURED, POP_MEASURED_ZERO, POP_NO_VALUE, POP_UNREAD = "captured", "measured_zero", "no_value", "unread"
+POP_STATES = (POP_CAPTURED, POP_MEASURED_ZERO, POP_NO_VALUE, POP_UNREAD)
+STORED_ZERO_HOLD = "stored popularity 0 (unknown / unattributable): human"
+STORED_POPULARITY_KEY = "_storedSpotifyPopularity"   # on a re-read row only: what the request row held (0)
+PopRead = tuple   # (state, value or None, detail)
+PopularityReread = Callable[[list[dict[str, Any]]], "dict[str, PopRead]"]
+
+
+def stored_zero(row: dict[str, Any]) -> bool:
+    """The request row holds a popularity of exactly 0 (not a negative, not a missing value, not False)."""
+    pop = row.get("spotifyPopularity")
+    return isinstance(pop, int) and not isinstance(pop, bool) and pop == 0
+
+
+def live_popularity(builder: Any, sleep: Callable[[float], None] | None = None,
+                    deadline: float | None = None, clock: Callable[[], float] | None = None) -> PopularityReread:
+    """Read-only: each row's track popularity from ``builder``'s one read of the catalog track document."""
+    import time as _t
+    sleep = sleep or _t.sleep
+
+    def fetch(rows: list[dict[str, Any]]) -> dict[str, PopRead]:
+        out: dict[str, PopRead] = {}
+        now_fn = clock or _t.monotonic
+        asked: set[str] = set()
+        for r in rows:
+            rid, tid = str(r.get("id")), str(r.get("trackId") or "")
+            if tid not in asked:
+                if deadline is not None and now_fn() >= deadline:
+                    out[rid] = (POP_UNREAD, None, "not read inside this run's time budget")
+                    continue
+                if asked:
+                    sleep(0.3)
+                asked.add(tid)
+            value, why, failed = builder.track_popularity(tid)
+            if value is None:
+                out[rid] = (POP_UNREAD if failed else POP_NO_VALUE, None, str(why or "no value"))
+            elif value == 0:
+                out[rid] = (POP_MEASURED_ZERO, 0, "the catalog track document holds 0")
+            else:
+                out[rid] = (POP_CAPTURED, value, f"the catalog track document holds {value}")
+        return out
+    return fetch
+
+
+def applied_popularity(read: Any) -> PopRead:
+    """A reader's answer for one row, admitted only in the exact shape of one of the four answers.
+    Anything else (no answer, an unknown state, `captured` without a whole number of 1 or more, a
+    `measured_zero` that is not 0) is `unread`: an answer nobody can vouch for scores no row."""
+    if isinstance(read, (tuple, list)) and len(read) == 3 and read[0] in POP_STATES:
+        state, value, detail = read
+        whole = isinstance(value, int) and not isinstance(value, bool)
+        if ((state == POP_CAPTURED and whole and value >= 1) or (state == POP_MEASURED_ZERO and whole and value == 0)
+                or (state in (POP_NO_VALUE, POP_UNREAD) and value is None)):
+            return state, value, str(detail or "")
+    return POP_UNREAD, None, "the re-read returned no usable answer"
+
+
+def popularity_hold(read: PopRead) -> str:
+    """The hold reason of a stored-0 row the re-read did not give a value of 1 or more."""
+    state, _value, detail = read
+    if state == POP_MEASURED_ZERO:
+        return ("popularity 0 measured by this run's catalog track read (the stored 0 stands, it is not "
+                "overwritten): the score approval admits 1-59 only: human")
+    if state == POP_NO_VALUE:
+        return (f"stored popularity 0 and this run's catalog track read holds no value ({detail}): unknown, "
+                f"no number assumed: human")
+    return f"stored popularity 0 and its catalog track re-read did not answer ({detail}): held, retried"
+
+
+def popularity_tag(row: dict[str, Any]) -> str:
+    """'' for a row scored on its stored popularity; the provenance for one scored on the re-read."""
+    if STORED_POPULARITY_KEY not in row:
+        return ""
+    return (f" [popularity {row.get('spotifyPopularity')} read from this run's catalog track document; "
+            f"the request row stored {row[STORED_POPULARITY_KEY]}]")
 
 
 def admitted_refusal(row: dict[str, Any], sp: ScorePolicy, engaged: Engaged | None = None) -> list[str]:
@@ -891,60 +1005,66 @@ def admitted_refusal(row: dict[str, Any], sp: ScorePolicy, engaged: Engaged | No
     return ["proof_required", *out] if out else []
 
 
-def why_not(row: dict[str, Any], sp: ScorePolicy, policy: decide.Policy,
-            engaged: Engaged | None = None) -> str | None:
-    """The reason this row is not score-approved now (None = approvable). Fable's band-B
-    ruling conditions 1-5 (the caps are applied by run())."""
+def why_not_detail(row: dict[str, Any], sp: ScorePolicy, policy: decide.Policy,
+                   engaged: Engaged | None = None) -> tuple[str | None, bool]:
+    """(the reason this row is not score-approved now, whether that reason is the proof path).
+    None = approvable. Fable's band-B ruling conditions 1-5 (the caps are applied by run())."""
     if row.get("status") not in HELD_STATUSES:
-        return f"status is {row.get('status')!r}, not unverified / user_verification_needed"
+        return f"status is {row.get('status')!r}, not unverified / user_verification_needed", False
     vd = row.get("verificationData") if isinstance(row.get("verificationData"), dict) else {}
     risk = vd.get("total_risk_percent")
     if vd.get("is_approved") is not True:
-        return "the validator did not approve it"
+        return "the validator did not approve it", False
     if not isinstance(risk, (int, float)) or isinstance(risk, bool) or not (0 <= risk < sp.max_total_risk):
-        return f"total risk {risk!r} is not a number below {sp.max_total_risk:g}"
+        return f"total risk {risk!r} is not a number below {sp.max_total_risk:g}", False
     if validator_conflict(vd):
-        return "validator conflict (the server holds agent approvals of these)"
+        return "validator conflict (the server holds agent approvals of these)", False
     rejected = validator_rejected_rules(vd)
     if rejected:
-        return f"validator reject rule fired ({', '.join(rejected)})"
+        return f"validator reject rule fired ({', '.join(rejected)})", False
     rules = vd.get("rule_risk_percent") if isinstance(vd.get("rule_risk_percent"), dict) else {}
     held = sorted(k for k, v in rules.items() if str(k).startswith(("review_", "reject_"))
                   and isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 100)
     if held:
-        return f"a hold rule at 100 ({', '.join(held)})"
+        return f"a hold rule at 100 ({', '.join(held)})", False
     refusal = admitted_refusal(row, sp, engaged)
     if refusal:
-        return f"server approval guard would refuse ({','.join(refusal)})"
+        return f"server approval guard would refuse ({','.join(refusal)})", True
     pop = row.get("spotifyPopularity")
     if not isinstance(pop, int) or isinstance(pop, bool):
-        return "stored popularity unknown"
+        return "stored popularity unknown", False
     if pop >= sp.max_popularity:
-        return f"big track (popularity {pop} >= {sp.max_popularity})"
+        return f"big track (popularity {pop} >= {sp.max_popularity})", False
     if pop <= 0:
         # QA @389d0d62: 0, -1 or any negative value = unknown / unattributable: a human, never the writer.
-        return f"stored popularity {pop} (unknown / unattributable): human"
+        return (STORED_ZERO_HOLD if pop == 0 else f"stored popularity {pop} (unknown / unattributable): human"), False
     roles = row.get("credits") or []
     if org_role(roles):
-        return "organization / label / publisher / studio role"
+        return "organization / label / publisher / studio role", False
     if one_person_role(roles):
         v = rules.get(ONE_PERSON_RULE)
         if not isinstance(v, (int, float)) or isinstance(v, bool) or v != 0:
             return (f"one-person role without {ONE_PERSON_RULE} = 0 (the trusted-source check did not run or "
-                    "found someone else): proof path")
+                    "found someone else): proof path"), True
     uid = row.get("userId")
     if isinstance(uid, int) and uid in policy.deny_user_ids:
-        return "user on the decider's deny / fraud / hold list"
+        return "user on the decider's deny / fraud / hold list", False
     if str(row.get("profileId") or "").lower() in policy.deny_profile_ids:
-        return "profile on the decider's deny / fraud / hold list"
+        return "profile on the decider's deny / fraud / hold list", False
     # Fable review-core-10733 condition 1: core pins only its own documents; the executor keeps
     # every engaged claimant (proof on file from any source, a support email in 90 days, an
     # Intercom conversation since the ask) on the proof path. Unknown = engaged.
     if engaged is not None:
         e = engaged(row)
         if e:
-            return f"{ENGAGED_PREFIX} ({e}): stage 2, never a provisional approval"
-    return None
+            return f"{ENGAGED_PREFIX} ({e}): stage 2, never a provisional approval", True
+    return None, False
+
+
+def why_not(row: dict[str, Any], sp: ScorePolicy, policy: decide.Policy,
+            engaged: Engaged | None = None) -> str | None:
+    """The reason this row is not score-approved now (None = approvable)."""
+    return why_not_detail(row, sp, policy, engaged)[0]
 
 
 def intercom_conversations_since(users: dict[int, str]) -> dict[int, "bool | None"]:
@@ -1087,6 +1207,13 @@ class ScoreResult:
     no_anchor: int = 0
     editorial_held: int = 0
     fanout_held: int = 0
+    # The stored-0 popularity re-read (only when ScorePolicy.popularity_reread is on): rows per answer, and
+    # each row's (state, value, detail) by request id.
+    pop_reread: dict[str, int] = field(default_factory=dict)
+    pop_rows: dict[str, tuple] = field(default_factory=dict)
+    pop_candidates: set[str] = field(default_factory=set)
+    # request id -> the class recorded where the decision was made (approve / ask / hold / defer).
+    outcomes: dict[str, str] = field(default_factory=dict)
     anchor_kinds: dict = field(default_factory=dict)
     read_exhausted: bool = False
     # Profiles core answered HTTP 400 for: skipped, nothing decided on their requests, the run went on.
@@ -1135,6 +1262,11 @@ class ScoreResult:
                 + (f"; {self.editorial_held} editorial-role rows held (trusted anchor under pop "
                    f"{decide.EDITORIAL_MID_POPULARITY} only)" if self.editorial_held else "")
                 + f"; {self.fanout_held} held by {FANOUT_PREFIX} (velocity-class)"
+                + (f"; popularity re-read of {sum(self.pop_reread.values())} stored-0 row(s): "
+                   f"{self.pop_reread.get(POP_CAPTURED, 0)} hold 1 or more, "
+                   f"{self.pop_reread.get(POP_MEASURED_ZERO, 0)} a measured 0, "
+                   f"{self.pop_reread.get(POP_NO_VALUE, 0)} no value, "
+                   f"{self.pop_reread.get(POP_UNREAD, 0)} not read" if self.pop_reread else "")
                 + (f"; {self.account_held} held by the account gate" if self.account_held else "")
                 + (f"; {self.watch_held} not approved: account not green at the gate (fraud watch)"
                    if self.watch_held else "")
@@ -1165,7 +1297,8 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
         conversations: Callable[[dict[int, str]], dict[int, "bool | None"]] | None = None,
         anchors: Anchors | None = None, fanout: Fanout | None = None,
         editorial_velocity: EditorialVelocity | None = None,
-        account_gate: Callable[[Any], "account_gate_mod.GateResult"] | None = None) -> ScoreResult:
+        account_gate: Callable[[Any], "account_gate_mod.GateResult"] | None = None,
+        popularity: PopularityReread | None = None) -> ScoreResult:
     if mode not in ("shadow", "apply"):
         raise ValueError("mode must be shadow or apply")
     decide.ensure_schema(db)
@@ -1234,6 +1367,26 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
         res.note = "; ".join([res.note] + notes if res.note else notes)
     res.read_exhausted = READ_EXHAUSTED in notes
     res.reread = len(rows)
+    # Captain 2026-11-15T19:51Z: a stored 0 is read again from this run's catalog track document BEFORE the
+    # row is scored. Only rows whose one remaining refusal is the stored 0 are read (every rule ahead of the
+    # popularity check already passed), so the re-read cannot reach a row another rule holds.
+    builder = None
+    if sp.popularity_reread:
+        res.pop_candidates = {str(r.get("id")) for r in rows.values() if stored_zero(r)}
+        zero = [r for r in rows.values() if stored_zero(r) and why_not(r, sp, policy) == STORED_ZERO_HOLD]
+        if zero:
+            if popularity is None:
+                from .evidence import EvidenceBuilder
+                builder = EvidenceBuilder(admin)
+            answers = (popularity or live_popularity(builder, sleep, deadline=t0 + POPULARITY_BUDGET_S))(zero)
+            for r in zero:
+                rid = str(r.get("id"))
+                read = applied_popularity(answers.get(rid) if isinstance(answers, dict) else None)
+                res.pop_rows[rid] = read
+                res.pop_reread[read[0]] = res.pop_reread.get(read[0], 0) + 1
+                if read[0] == POP_CAPTURED:
+                    # The row is scored on the value the run read; what the request row held rides along.
+                    rows[rid] = {**r, "spotifyPopularity": read[1], STORED_POPULARITY_KEY: 0}
     # Pass 1 without the engagement check finds the rows worth an Intercom look-up; pass 2 (the
     # loop) applies it to every row.
     survivors = [r for r in rows.values() if why_not(r, sp, policy) is None]
@@ -1242,7 +1395,8 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
     admitted = [r for r in survivors if why_not(r, sp, policy, engaged) is None]
     # Phase order = deadline order (anchors 540 s, editorial velocity 600 s, fan-out 720 s), so every phase
     # starts before its own deadline unless the one before it overran (then its rows read None: held, transient).
-    anchor_of = (anchors or live_anchors(admin, sleep, deadline=t0 + ANCHOR_BUDGET_S))(admitted) if admitted else {}
+    anchor_of = ((anchors or live_anchors(admin, sleep, deadline=t0 + ANCHOR_BUDGET_S, builder=builder))(admitted)
+                 if admitted else {})
     editorial_rows = [r for r in admitted
                       if any(is_editorial(str(x), policy.editorial_role_terms) for x in (r.get("credits") or []))]
     vel_of = ((editorial_velocity or live_editorial_velocity(admin, sleep, deadline=t0 + EDITORIAL_BUDGET_S))(editorial_rows)
@@ -1261,7 +1415,10 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
         d.popularity = r.get("spotifyPopularity") if isinstance(r.get("spotifyPopularity"), int) else None
         d.big_track = not (isinstance(d.popularity, int) and d.popularity < sp.max_popularity)
         d.paid_priority = (None if paying is None else (isinstance(d.user_id, int) and d.user_id in paying))
-        why = why_not(r, sp, policy, engaged)
+        why, ask = why_not_detail(r, sp, policy, engaged)
+        if why == STORED_ZERO_HOLD and str(r.get("id")) in res.pop_rows:
+            # Re-read this run and still no value of 1 or more: the hold says which of the three it was.
+            why = popularity_hold(res.pop_rows[str(r.get("id"))])
         if why and why.startswith(ENGAGED_PREFIX):
             res.engaged_excluded += 1
         kind = None
@@ -1290,9 +1447,11 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
                 if pop is None or pop >= decide.EDITORIAL_MID_POPULARITY:
                     why = (f"editorial role ({', '.join(editorial)}) on a track at pop >= "
                            f"{decide.EDITORIAL_MID_POPULARITY} (or unknown): documentation required")
+                    ask = True
                 elif kind != "trusted":
                     why = (f"editorial role ({', '.join(editorial)}): only a trusted source naming this profile in "
                            "the role approves it, never the validator's verdict alone: proof path")
+                    ask = True
                 else:
                     # The decider's editorial-velocity hold (pre_model): editorial weighs double against
                     # the 24 h / 7 d velocity thresholds. Velocity unreadable = held.
@@ -1328,6 +1487,7 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
             g = gate(d.user_id)
             if not g.allowed:
                 why = f"{g.why()}: no approval, proof ask"
+                ask = True
                 res.account_held += 1
             else:
                 # Captain 2026-11-14: an allow is not enough. Only a green account is approved here; an
@@ -1338,6 +1498,7 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
                     why = f"{watch}: no score approval"
                     res.watch_held += 1
         if why is None:
+            d.outcome_class = "approve"
             d.evidence_kind = TRUSTED_EVIDENCE_KIND if kind == "trusted" else EVIDENCE_KIND
             res.anchor_kinds[kind] = res.anchor_kinds.get(kind, 0) + 1
             decide._set(d, "approve", f"score approval anchor_kind={kind} "
@@ -1345,7 +1506,8 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
                                       f"captain 2026-10-20 'approve low risk credits'): the validator "
                                       f"approved it at total risk {r['verificationData']['total_risk_percent']:g} < "
                                       f"{sp.max_total_risk:g}; no conflict, no reject rule, server guard clear, "
-                                      f"popularity {d.popularity}, no org role, not on a hold list")
+                                      f"popularity {d.popularity}, no org role, not on a hold list"
+                                      f"{popularity_tag(r)}")
             if audit_sampled(d.request_id, r.get("credits") or [], now.strftime("%Y-%m-%d")):
                 d.reason += " [audit sample]"
                 res.audit_sampled += 1
@@ -1357,8 +1519,11 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
             fleet += 1
             res.paid_first += 1 if d.paid_priority else 0
         else:
-            decide._set(d, "defer" if "next run" in why or "today" in why else "hold", f"score approval not now: {why}")
+            d.outcome_class = "ask" if ask else ("defer" if "next run" in why or "today" in why else "hold")
+            decide._set(d, "defer" if "next run" in why or "today" in why else "hold",
+                        f"score approval not now: {why}{popularity_tag(r)}")
             res.held[_reason_class(why)] = res.held.get(_reason_class(why), 0) + 1
+        res.outcomes[d.request_id] = d.outcome_class or "hold"
         decide.record_decision(db, res.run_id, mode, d, now)
     ids = [d.request_id for d in approve]
     status_of = {rid: (rows[rid].get("status") if rows[rid].get("status") in HELD_STATUSES else decide.UVN)
@@ -1477,6 +1642,158 @@ def settle_lost_race(db, res, lost: list[str], who, policy, sp, writer, readback
             final(rid, f"{prefix}:state_unread:{type(exc).__name__}")
         for rid in resending:   # the second send may have committed: decide's word for a write nobody confirmed
             final(rid, f"error:unverified:re-send raised {type(exc).__name__}")
+
+
+# ---- The re-read's shadow report: what it WOULD do, with nothing applied -----------------------------------
+# `credit-review.py score-approve --popularity-reread-shadow`. It takes the rows one earlier run held on a
+# stored popularity of 0, and decides them again with the re-read on, through run() itself in shadow mode,
+# so every rule, cap and the account gate is the real one and none is restated here. Nothing applies:
+#   * no core write (run() in shadow mode returns before it builds a writer);
+#   * no row in the live ledger. A shadow decision there would be read by the live job (recently_held and
+#     last_decided read every `score-` run, whatever its mode), so the runs are made on a scratch copy of
+#     the ledger, which is deleted afterwards. The live ledger is opened read-only, once, to copy it.
+# The rows are decided in slices of at most the per-run pace, so each slice has a run's full time budget
+# and the pace does not bind inside one; the daily caps are the real ones and are reported, not lifted.
+def stored_zero_holds(db, run_id: str | None = None) -> tuple[str | None, list[tuple], bool]:
+    """(the run, its rows held on a stored popularity of 0 as (request id, profile id, user id), whether the
+    ledger holds any decision for that run). With no ``run_id``: the newest score run that held any."""
+    like = f"%{STORED_ZERO_HOLD}%"
+    if run_id is None:
+        got = db.execute("SELECT run_id FROM decisions WHERE run_id LIKE 'score-%' AND reason LIKE ? "
+                         "ORDER BY id DESC LIMIT 1", (like,)).fetchone()
+        if got is None:
+            return None, [], False
+        run_id = got[0]
+    elif db.execute("SELECT 1 FROM decisions WHERE run_id = ? LIMIT 1", (run_id,)).fetchone() is None:
+        return run_id, [], False
+    held = db.execute("SELECT request_id, profile_id, user_id FROM decisions WHERE run_id = ? AND reason LIKE ? "
+                      "ORDER BY id", (run_id, like)).fetchall()
+    return run_id, [(str(rid), str(pid or ""), uid) for rid, pid, uid in held], True
+
+
+def popularity_reread_shadow(admin: admin_api.Admin, ledger_path: str, *, policy: decide.Policy, sp: ScorePolicy,
+                             source_run: str | None = None, scratch_dir: str | None = None,
+                             **run_kwargs: Any) -> dict[str, Any]:
+    """Decide one run's stored-0 holds again with the re-read on, in shadow, on a scratch ledger copy."""
+    import dataclasses
+    import shutil
+    import sqlite3
+    import tempfile
+    live = sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True)
+    made = tempfile.mkdtemp(prefix="score-approve-popularity-shadow-", dir=scratch_dir)
+    try:
+        scratch = sqlite3.connect(os.path.join(made, "ledger.sqlite3"))
+        try:
+            live.backup(scratch)
+        finally:
+            live.close()
+        run_id, held, found = stored_zero_holds(scratch, source_run)
+        report: dict[str, Any] = {"source_run": run_id, "source_run_found": found,
+                                  "held_on_stored_zero": len(held), "applied": 0,
+                                  "shadow_runs": [], "not_decided": 0, "other_rule_now": {},
+                                  "not_stored_zero": {},
+                                  "reread": {st: 0 for st in POP_STATES}, "captured": {}, "captured_reasons": {},
+                                  "captured_bands": {"1-29": 0, "30-59": 0, "60+": 0}, "captured_users": 0,
+                                  "approve_users": 0, "approve_beyond_user_day_cap": 0}
+        if not held:
+            return report
+        # Slices of whole profiles, each at most the per-run pace in rows (a profile holding more is its own).
+        by_profile: dict[str, list[tuple]] = {}
+        for h in held:
+            by_profile.setdefault(h[1], []).append(h)
+        size = max(1, min(sp.max_per_run, sp.max_profiles_per_run // len(HELD_STATUSES)))
+        slices: list[list[tuple]] = [[]]
+        for group in by_profile.values():
+            if slices[-1] and len(slices[-1]) + len(group) > size:
+                slices.append([])
+            slices[-1].extend(group)
+        armed = dataclasses.replace(sp, popularity_reread=True)
+        approve_by_user: dict[Any, int] = {}
+        captured_users: set[Any] = set()
+        for part in slices:
+            # The held status is not in the ledger, so each row is asked for in both held statuses; a row
+            # core no longer holds comes back in neither and is counted as not decided.
+            cands = [(rid, pid, 0.0, st, uid) for rid, pid, uid in part for st in HELD_STATUSES]
+            res = run(admin, scratch, mode="shadow", policy=policy, sp=armed,
+                      candidates=lambda _risk, _limit, c=cands: c, **run_kwargs)
+            report["shadow_runs"].append(res.run_id)
+            decided = {str(rid): (dec, why or "", uid) for rid, dec, why, uid in scratch.execute(
+                "SELECT request_id, decision, reason, user_id FROM decisions WHERE run_id = ?", (res.run_id,))}
+            for rid, _pid, _uid in part:
+                if rid not in decided:
+                    report["not_decided"] += 1
+                    continue
+                dec, why, uid = decided[rid]
+                read = res.pop_rows.get(rid)
+                if read is None:
+                    cls = _reason_class(why.replace("score approval not now: ", "", 1))
+                    if rid in res.pop_candidates:
+                        # Read again, and a rule ahead of the popularity check holds it now.
+                        report["other_rule_now"][cls] = report["other_rule_now"].get(cls, 0) + 1
+                    else:
+                        # Core no longer stores a 0 here (or it approves now): not this re-read's row.
+                        report["not_stored_zero"][cls] = report["not_stored_zero"].get(cls, 0) + 1
+                    continue
+                report["reread"][read[0]] += 1
+                outcome = res.outcomes.get(rid, "hold")
+                if read[0] != POP_CAPTURED:
+                    continue
+                captured_users.add(uid)
+                report["captured"][outcome] = report["captured"].get(outcome, 0) + 1
+                band = "1-29" if read[1] < 30 else "30-59" if read[1] < 60 else "60+"
+                report["captured_bands"][band] += 1
+                if outcome == "approve":
+                    approve_by_user[uid] = approve_by_user.get(uid, 0) + 1
+                else:
+                    cls = _reason_class(why.replace("score approval not now: ", "", 1))
+                    key = f"{outcome}: {cls}"
+                    report["captured_reasons"][key] = report["captured_reasons"].get(key, 0) + 1
+        report["captured_users"] = len(captured_users)
+        report["approve_users"] = len(approve_by_user)
+        report["approve_beyond_user_day_cap"] = sum(max(0, n - sp.per_user_per_day) for n in approve_by_user.values())
+        scratch.close()
+        return report
+    finally:
+        shutil.rmtree(made, ignore_errors=True)
+
+
+def shadow_report_lines(report: dict[str, Any], sp: ScorePolicy) -> list[str]:
+    """The shadow report as printed. Every count is of rows; a row that was not decided is never a zero."""
+    if report["source_run"] is None:
+        return ["score-approve popularity re-read SHADOW: no score run in this ledger held a row on a stored "
+                "popularity of 0. Nothing was read and nothing applied. This is not a count of zero."]
+    if not report.get("source_run_found", True):
+        return [f"score-approve popularity re-read SHADOW: source run {report['source_run']} was not found in "
+                "this ledger. Nothing was read and nothing applied. This is not a count of zero."]
+    rr, cap = report["reread"], report["captured"]
+    captured = rr[POP_CAPTURED]
+    lines = [
+        "score-approve popularity re-read SHADOW: nothing applied (no core write, no row in the live ledger).",
+        f"source run {report['source_run']}: {report['held_on_stored_zero']} row(s) held on a stored popularity of 0.",
+        f"decided again now with the re-read on: {sum(rr.values())}; held by another rule now, so not re-read: "
+        f"{sum(report['other_rule_now'].values())}; no longer a stored 0 (core updated it, or it approves now): "
+        f"{sum(report['not_stored_zero'].values())}; not decided (core no longer holds the request, or its "
+        f"profile was not read): {report['not_decided']}.",
+        f"the re-read, from each run's own catalog track document: {captured} hold a real popularity of 1 or more; "
+        f"{rr[POP_MEASURED_ZERO]} a measured 0 (stays 0, scored at 0: held, the score approval admits 1-59); "
+        f"{rr[POP_NO_VALUE]} no value (held as unknown, no number assumed); {rr[POP_UNREAD]} not read (held, retried).",
+        f"of the {captured} with a real popularity ({report['captured_users']} user(s)): "
+        f"{cap.get('approve', 0)} would approve, {cap.get('hold', 0)} hold, {cap.get('ask', 0)} ask (held for the "
+        f"proof path), {cap.get('defer', 0)} deferred by a cap or the pace.",
+        f"their popularity: {report['captured_bands']['1-29']} at 1-29, {report['captured_bands']['30-59']} at 30-59, "
+        f"{report['captured_bands']['60+']} at 60 or more (big track: held).",
+    ]
+    if cap.get("approve"):
+        lines.append(f"the {cap['approve']} approvals are of {report['approve_users']} user(s); "
+                     f"{report['approve_beyond_user_day_cap']} of them are past one day's per-user cap of "
+                     f"{sp.per_user_per_day} and would wait for a later day. The caps are the live ones, unchanged.")
+    for key, n in sorted(report["captured_reasons"].items(), key=lambda kv: (-kv[1], kv[0])):
+        lines.append(f"  {n}  {key}")
+    for key, n in sorted(report["other_rule_now"].items(), key=lambda kv: (-kv[1], kv[0])):
+        lines.append(f"  {n}  held by another rule now: {key}")
+    for key, n in sorted(report["not_stored_zero"].items(), key=lambda kv: (-kv[1], kv[0])):
+        lines.append(f"  {n}  no longer a stored 0: {key}")
+    return lines
 
 
 def _write_batches(db, res, now, policy, sp, ids, groups, who, writer, readback, paused, day_start, t0, _time,

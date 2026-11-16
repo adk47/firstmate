@@ -434,6 +434,37 @@ class EvidenceBuilder:
                 self._tracks[track_id] = (self._catalog_of(doc), None)
         return self._tracks[track_id]
 
+    def track_popularity(self, track_id: str) -> tuple[int | None, str | None, bool]:
+        """(the track's OWN popularity, why there is none, whether the read itself failed), from this
+        run's one read of the catalog track document (`_track_read`: the same document the anchor
+        evidence is built from, never a second read and never an earlier run's).
+
+        A value is an integer of 0 or more, exactly as the document holds it. Everything else is "no
+        value" with its reason and is never turned into a number: a missing field, null, a boolean, a
+        fraction, a negative, a deleted or merged document. A read that failed (a 404 included) is
+        marked as failed: it can answer on a later run. The rest is what the catalog says."""
+        if not track_id:
+            return None, "the request names no catalog track", False
+        doc, err, not_found = self._track_read(track_id)
+        if doc is None:
+            # A 404 is a failed read too: core answers 404 for a catalog read that failed as well as
+            # for a track that is gone (`_reread`), so it says nothing about the track's popularity.
+            if not_found:
+                return None, "the catalog track read answered 404 twice", True
+            return None, f"the catalog track document could not be read ({str(err)[:80]})", True
+        if doc.get("deleted") or doc.get("merged"):
+            return None, "the catalog track document is deleted or merged", False
+        if "popularity" not in doc or doc.get("popularity") is None:
+            return None, "the catalog track document carries no popularity", False
+        value = doc.get("popularity")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None, f"the catalog track document's popularity is not a whole number of 0 or more ({value!r})", False
+        if isinstance(value, float) and not value.is_integer():
+            return None, f"the catalog track document's popularity is not a whole number of 0 or more ({value!r})", False
+        if value < 0:
+            return None, f"the catalog track document's popularity is not a whole number of 0 or more ({value!r})", False
+        return int(value), None, False
+
     def _catalog_of(self, doc: dict[str, Any]) -> TrackCatalog:
         """Same rule as the IDP's _is_big_track (industry-data-processing
         credit_validation_rules.py): unknown TRACK popularity is big; only the

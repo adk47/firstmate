@@ -541,6 +541,7 @@ class Decision:
     approved_roles: list[str] = field(default_factory=list)
     pending_roles: list[str] = field(default_factory=list)
     pending_proof_need: dict[str, str] = field(default_factory=dict)   # role -> what would prove it
+    outcome_class: str | None = None    # approve / ask / hold / defer, recorded where the decision is made
 
 
 def record_decision(db: sqlite3.Connection, run_id: str, mode: str, d: Decision, at: datetime | None = None) -> None:

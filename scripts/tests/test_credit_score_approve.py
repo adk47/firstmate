@@ -673,6 +673,21 @@ class ScoreApprove(unittest.TestCase):
         self.assertEqual(res.editorial_held, 2)
         self.assertIn("2 editorial-role rows held", res.line())
 
+    def test_editorial_proof_path_wordings_are_recorded_as_ask(self):
+        terms = tuple(json.loads(Path(__file__).resolve().parents[2].joinpath(
+            "policies/credit-trust-decide.json").read_text())["editorial_role_terms"])
+        pol = dataclasses.replace(policy(), editorial_role_terms=terms)
+        rows = [row("ed_doc", uid=611, pid="qa", roles=("Editorial",), pop=30),
+                row("ed_proof", uid=612, pid="qb", roles=("Editorial",), pop=16)]
+        res, w = self.go(rows, sp=self.phase1(), pol=pol,
+                         anchors=lambda rs: {str(r["id"]): ("none", None) for r in rs})
+        d = self.decisions()
+        self.assertIn("documentation required", d["ed_doc"]["reason"])
+        self.assertIn("never the validator's verdict alone", d["ed_proof"]["reason"])
+        self.assertEqual(res.outcomes["ed_doc"], "ask")
+        self.assertEqual(res.outcomes["ed_proof"], "ask")
+        self.assertEqual(w.calls, [])
+
     def test_a_trusted_editorial_claim_still_gets_the_deciders_velocity_hold(self):
         """QA @d0f07f55: editorial weighs double against 50/24 h and 150/7 d (decide.editorial_velocity)."""
         terms = tuple(json.loads(Path(__file__).resolve().parents[2].joinpath(
@@ -1515,6 +1530,359 @@ class BoundedCandidateRead(unittest.TestCase):
                 self.walk(replica, page_rows=4, timeout_s=100)
         self.assertEqual(len(replica.calls), 4)
         self.assertEqual([c["timeout"] for c in replica.calls], [100.0, 70.0, 40.0, 10.0])
+class TrackAdmin(FakeAdmin):
+    """FakeAdmin plus the catalog track document. ``tracks`` = {track id: the document, or the error the
+    read raises}; a track that is not in it answers 404, as core does."""
+
+    def __init__(self, rows, tracks):
+        super().__init__(rows)
+        self.tracks = tracks
+        self.track_reads = []
+
+    def get(self, path, params=None):
+        if not path.startswith("/admin/track/"):
+            return super().get(path, params)
+        tid = path.rsplit("/", 1)[1]
+        self.track_reads.append(tid)
+        doc = self.tracks.get(tid, sa.admin_api.NotFound(f"HTTP 404 {tid}"))
+        if isinstance(doc, Exception):
+            raise doc
+        return doc
+
+
+def zero(rid, **kw):
+    """A row whose request row stores a popularity of 0, on its own profile."""
+    return row(rid, pop=0, pid="p-" + rid, **kw)
+
+
+class PopularityReread(unittest.TestCase):
+    """Captain 2026-11-15T19:51Z: a stored popularity of 0 is read again from the run's own catalog track
+    document before the row is scored. A value of 1 or more is scored like any other; a 0 there is a
+    measured 0 and stays 0; no value leaves the row held as unknown. No number is ever assumed."""
+
+    setUp = ScoreApprove.setUp
+    proof = ScoreApprove.proof
+    decisions = ScoreApprove.decisions
+
+    def run_kwargs(self, convo=None):
+        return dict(readback=lambda status, ids: set(), now=NOW, sleep=lambda _s: None,
+                    conversations=lambda users: {u: (convo or {}).get(u, False) for u in users},
+                    anchors=lambda rs: {str(r["id"]): ("none", None) for r in rs}, fanout=lambda rs: {},
+                    editorial_velocity=lambda rs: {})
+
+    def go(self, rows, tracks, *, mode="apply", on=True, popularity=None, pol=None, convo=None):
+        admin, w = TrackAdmin(rows, tracks), Writer()
+        cands = lambda risk, limit: [(r["id"], r["profileId"], float(r["verificationData"]["total_risk_percent"]),
+                                      r["status"], r["userId"]) for r in rows]
+        res = sa.run(admin, self.db, mode=mode, policy=pol or policy(),
+                     sp=sa.ScorePolicy(enabled=True, popularity_reread=on), candidates=cands, writer=w,
+                     popularity=popularity, **self.run_kwargs(convo))
+        return res, w, admin
+
+    def written(self, w):
+        return sorted(i for c in w.calls for i in c[1])
+
+    def test_an_uncaptured_zero_is_read_again_from_the_runs_track_document_and_scored_on_it(self):
+        res, w, admin = self.go([zero("z")], {"t-z": {"id": "t-z", "popularity": 23}})
+        d = self.decisions()["z"]
+        self.assertEqual(admin.track_reads, ["t-z"])
+        self.assertEqual(res.pop_reread, {sa.POP_CAPTURED: 1})
+        self.assertEqual(d["popularity"], 23)
+        self.assertEqual(d["decision"], "approve")
+        self.assertIn("the request row stored 0", d["reason"])
+        self.assertEqual(self.written(w), ["z"])
+
+    def test_a_measured_zero_is_not_overwritten_and_is_held_as_a_zero_not_as_unknown(self):
+        res, w, admin = self.go([zero("z")], {"t-z": {"id": "t-z", "popularity": 0}})
+        d = self.decisions()["z"]
+        self.assertEqual(admin.track_reads, ["t-z"])
+        self.assertEqual(res.pop_reread, {sa.POP_MEASURED_ZERO: 1})
+        self.assertEqual(d["popularity"], 0)
+        self.assertEqual(d["decision"], "hold")
+        self.assertIn("popularity 0 measured", d["reason"])
+        self.assertNotIn("unknown", d["reason"])
+        self.assertEqual(w.calls, [])
+
+    def test_a_track_document_with_no_value_leaves_the_row_held_and_no_number_is_assumed(self):
+        docs = {"absent": {"id": "x"}, "null": {"popularity": None}, "bool": {"popularity": True},
+                "text": {"popularity": "23"}, "fraction": {"popularity": 23.5}, "negative": {"popularity": -1},
+                "deleted": {"popularity": 23, "deleted": True}, "merged": {"popularity": 23, "merged": True}}
+        res, w, _admin = self.go([zero(k) for k in docs], {"t-" + k: doc for k, doc in docs.items()})
+        d = self.decisions()
+        self.assertEqual(res.pop_reread, {sa.POP_NO_VALUE: len(docs)})
+        self.assertEqual(w.calls, [])
+        for k in docs:
+            self.assertEqual(d[k]["decision"], "hold", k)
+            self.assertEqual(d[k]["popularity"], 0, k)
+            self.assertIn("no number assumed", d[k]["reason"], k)
+
+    def test_an_integral_float_is_the_whole_number_it_names(self):
+        res, w, _admin = self.go([zero("z")], {"t-z": {"id": "t-z", "popularity": 23.0}})
+        d = self.decisions()["z"]
+        self.assertEqual(res.pop_reread, {sa.POP_CAPTURED: 1})
+        self.assertEqual(d["popularity"], 23)
+        self.assertEqual(d["decision"], "approve")
+        self.assertEqual(self.written(w), ["z"])
+
+    def test_a_non_integral_float_is_no_value_and_the_row_is_held(self):
+        res, w, _admin = self.go([zero("z")], {"t-z": {"id": "t-z", "popularity": 23.5}})
+        d = self.decisions()["z"]
+        self.assertEqual(res.pop_reread, {sa.POP_NO_VALUE: 1})
+        self.assertEqual(d["popularity"], 0)
+        self.assertEqual(d["decision"], "hold")
+        self.assertIn("no number assumed", d["reason"])
+        self.assertEqual(w.calls, [])
+
+    def test_the_proof_path_wordings_are_recorded_as_ask_not_hold(self):
+        rows = [zero("guard", band="B"), zero("engaged", uid=501)]
+        res, w, _admin = self.go(rows, {"t-guard": {"popularity": 23}, "t-engaged": {"popularity": 23}},
+                                 convo={501: True})
+        d = self.decisions()
+        self.assertIn("server approval guard would refuse (proof_required", d["guard"]["reason"])
+        self.assertIn("stage 2, never a provisional approval", d["engaged"]["reason"])
+        self.assertEqual(res.outcomes["guard"], "ask")
+        self.assertEqual(res.outcomes["engaged"], "ask")
+        self.assertEqual(w.calls, [])
+
+    def test_a_request_that_names_no_track_is_held_and_nothing_is_read(self):
+        res, w, admin = self.go([{**zero("z"), "trackId": None}], {})
+        self.assertEqual(admin.track_reads, [])
+        self.assertEqual(res.pop_reread, {sa.POP_NO_VALUE: 1})
+        self.assertEqual(self.decisions()["z"]["decision"], "hold")
+        self.assertEqual(w.calls, [])
+
+    def test_a_track_read_that_fails_leaves_the_row_held_and_is_tried_again_on_a_later_run(self):
+        res, w, admin = self.go([zero("gone"), zero("down")],
+                                {"t-down": sa.admin_api.AdminError("admin GET failed: HTTP 500")})
+        d = self.decisions()
+        self.assertEqual(admin.track_reads.count("t-gone"), 2, "one re-read on a 404, as every catalog read")
+        self.assertEqual(res.pop_reread, {sa.POP_UNREAD: 2})
+        self.assertEqual(w.calls, [])
+        for k in ("gone", "down"):
+            self.assertNotEqual(d[k]["decision"], "approve", k)
+            self.assertEqual(d[k]["popularity"], 0, k)
+            self.assertIn("did not answer", d[k]["reason"], k)
+            self.assertTrue(any(m in d[k]["reason"] for m in sa.TRANSIENT_HOLD), k)
+
+    def test_an_answer_nobody_can_vouch_for_scores_no_row(self):
+        bad = {"zero-as-captured": (sa.POP_CAPTURED, 0, ""), "none": (sa.POP_CAPTURED, None, ""),
+               "text": (sa.POP_CAPTURED, "23", ""), "bool": (sa.POP_CAPTURED, True, ""),
+               "five-as-zero": (sa.POP_MEASURED_ZERO, 5, ""), "state": ("guess", 23, ""), "bare": 23,
+               "valued-no-value": (sa.POP_NO_VALUE, 23, "")}
+        rows = [zero(k) for k in bad] + [zero("unanswered")]
+        res, w, _admin = self.go(rows, {}, popularity=lambda rs: dict(bad))
+        d = self.decisions()
+        self.assertEqual(res.pop_reread, {sa.POP_UNREAD: len(rows)})
+        self.assertEqual(w.calls, [])
+        for r in rows:
+            self.assertNotEqual(d[r["id"]]["decision"], "approve", r["id"])
+            self.assertEqual(d[r["id"]]["popularity"], 0, r["id"])
+
+    def test_a_reader_that_answers_with_no_mapping_scores_no_row(self):
+        res, w, _admin = self.go([zero("z")], {}, popularity=lambda rs: None)
+        self.assertEqual(res.pop_reread, {sa.POP_UNREAD: 1})
+        self.assertEqual(self.decisions()["z"]["decision"], "hold")
+        self.assertEqual(w.calls, [])
+
+    def test_the_reread_is_off_unless_the_policy_turns_it_on(self):
+        res, w, admin = self.go([zero("z")], {"t-z": {"popularity": 23}}, on=False)
+        d = self.decisions()["z"]
+        self.assertEqual(admin.track_reads, [])
+        self.assertEqual(res.pop_reread, {})
+        self.assertEqual(d["decision"], "hold")
+        self.assertIn(sa.STORED_ZERO_HOLD, d["reason"])
+        self.assertEqual(w.calls, [])
+
+    def test_only_a_literal_true_in_the_policy_turns_it_on_and_the_checked_in_policy_has_it_off(self):
+        p = Path(self.tmp) / "policy.json"
+        p.write_text(json.dumps({"score_approve": {"enabled": True}}))
+        self.assertFalse(sa.ScorePolicy.load(p).popularity_reread)
+        p.write_text(json.dumps({"score_approve": {"enabled": True, "popularity_reread": "true"}}))
+        self.assertFalse(sa.ScorePolicy.load(p).popularity_reread)
+        p.write_text(json.dumps({"score_approve": {"enabled": True, "popularity_reread": True}}))
+        self.assertTrue(sa.ScorePolicy.load(p).popularity_reread)
+        self.assertFalse(sa.ScorePolicy.load(ROOT / "policies" / "credit-trust-decide.json").popularity_reread)
+
+    def test_a_value_read_again_is_scored_by_the_same_rules_as_a_stored_one(self):
+        rows = [zero("small"), zero("big"), zero("label", roles=("Record Label",)), zero("denied", uid=13)]
+        tracks = {"t-small": {"popularity": 59}, "t-big": {"popularity": 60}, "t-label": {"popularity": 23},
+                  "t-denied": {"popularity": 23}}
+        res, w, _admin = self.go(rows, tracks, pol=policy(deny_users=(13,)))
+        d = self.decisions()
+        self.assertEqual(res.pop_reread, {sa.POP_CAPTURED: 4})
+        self.assertEqual(self.written(w), ["small"])
+        self.assertEqual(d["big"]["popularity"], 60)
+        self.assertEqual(d["big"]["big_track"], 1)
+        self.assertIn("big track (popularity 60 >= 60)", d["big"]["reason"])
+        self.assertIn("organization", d["label"]["reason"])
+        self.assertIn("deny", d["denied"]["reason"])
+
+    def test_a_row_held_by_a_rule_ahead_of_the_popularity_check_is_never_read(self):
+        rows = [zero("declined", approved=False), zero("risk30", risk=30),
+                zero("conflict", rules={"review_hourly_velocity_profile": 100}),
+                zero("reject", rules={"reject_artist_credit": 100}), zero("proofreq", meta={"proofRequest": {}})]
+        res, w, admin = self.go(rows, {"t-" + r["id"]: {"popularity": 23} for r in rows})
+        d = self.decisions()
+        self.assertEqual(admin.track_reads, [])
+        self.assertEqual(res.pop_reread, {})
+        self.assertEqual(w.calls, [])
+        for r in rows:
+            self.assertEqual(d[r["id"]]["decision"], "hold", r["id"])
+            self.assertEqual(d[r["id"]]["popularity"], 0, r["id"])
+
+    def test_two_requests_on_one_track_are_scored_on_the_runs_one_read_of_it(self):
+        rows = [{**zero("a"), "trackId": "shared"}, {**zero("b"), "trackId": "shared"}]
+        res, w, admin = self.go(rows, {"shared": {"popularity": 7}})
+        self.assertEqual(admin.track_reads, ["shared"])
+        self.assertEqual(res.pop_reread, {sa.POP_CAPTURED: 2})
+        self.assertEqual(self.written(w), ["a", "b"])
+
+    def test_a_row_past_the_time_budget_is_held_unread_and_no_track_is_asked(self):
+        class Builder:
+            def track_popularity(self, tid):
+                raise AssertionError("asked past the deadline")
+        got = sa.live_popularity(Builder(), sleep=lambda _s: None, deadline=10.0, clock=lambda: 10.0)([zero("z")])
+        self.assertEqual(got["z"][:2], (sa.POP_UNREAD, None))
+
+    def test_shadow_mode_applies_nothing(self):
+        res, w, _admin = self.go([zero("z")], {"t-z": {"popularity": 23}}, mode="shadow")
+        outcomes = self.db.execute("SELECT outcome FROM decision_outcomes WHERE request_id = 'z'").fetchall()
+        self.assertEqual(w.calls, [])
+        self.assertEqual(res.approved, 0)
+        self.assertEqual(res.would_approve, 1)
+        self.assertEqual(outcomes, [("shadow",)])
+
+    # -- the shadow report ------------------------------------------------------------------------------
+    def held_run(self, rows, tracks):
+        """A source run with the re-read off (today's code), committed to the ledger file."""
+        self.go(rows, tracks, on=False)
+        self.db.commit()
+        return os.path.join(self.tmp, "ledger.sqlite3")
+
+    def shadow(self, path, rows, tracks, **kw):
+        w = Writer()
+        report = sa.popularity_reread_shadow(TrackAdmin(rows, tracks), path, policy=policy(),
+                                             sp=sa.ScorePolicy(enabled=True), scratch_dir=self.tmp, writer=w,
+                                             source_run=kw.get("source_run"),
+                                             **self.run_kwargs(kw.get("convo")))
+        return report, w
+
+    def test_the_shadow_report_decides_the_runs_stored_zero_holds_again_and_applies_nothing(self):
+        rows = [zero("approve"), zero("ask", uid=501), zero("big"), zero("measured"), zero("novalue"), zero("gone"),
+                row("scored", pop=20, pid="p-scored")]
+        tracks = {"t-approve": {"popularity": 23}, "t-ask": {"popularity": 12}, "t-big": {"popularity": 64},
+                  "t-measured": {"popularity": 0}, "t-novalue": {"id": "t-novalue"}}
+        path = self.held_run(rows, tracks)
+        before = Path(path).read_bytes()
+        # User 501 has written to support since the source run: the proof path, never a provisional approval.
+        report, w = self.shadow(path, rows, tracks, convo={501: True})
+        self.assertEqual(report["held_on_stored_zero"], 6)
+        self.assertEqual(report["reread"], {sa.POP_CAPTURED: 3, sa.POP_MEASURED_ZERO: 1, sa.POP_NO_VALUE: 1,
+                                            sa.POP_UNREAD: 1})
+        self.assertEqual(report["captured"], {"approve": 1, "ask": 1, "hold": 1})
+        self.assertEqual(report["captured_bands"], {"1-29": 2, "30-59": 0, "60+": 1})
+        self.assertEqual(report["not_decided"], 0)
+        self.assertEqual(report["applied"], 0)
+        self.assertEqual(w.calls, [])
+        self.assertEqual(Path(path).read_bytes(), before, "no row in the live ledger")
+        self.assertEqual([n for n in os.listdir(self.tmp) if n.startswith("score-approve-popularity-shadow-")], [])
+        printed = "\n".join(sa.shadow_report_lines(report, sa.ScorePolicy(enabled=True)))
+        self.assertIn("nothing applied", printed)
+        self.assertIn("3 hold a real popularity of 1 or more", printed)
+        self.assertIn("1 would approve, 1 hold, 1 ask", printed)
+
+    def test_a_row_still_storing_zero_but_held_by_another_rule_is_not_called_updated(self):
+        rows = [zero("still"), zero("updated")]
+        path = self.held_run(rows, {})
+        now = [{**rows[0], "verificationData": {**rows[0]["verificationData"],
+                                                "rule_risk_percent": {"review_x": 100}}},
+               {**rows[1], "spotifyPopularity": 20}]
+        report, w = self.shadow(path, now, {"t-still": {"popularity": 23}, "t-updated": {"popularity": 23}})
+        self.assertEqual(sum(report["other_rule_now"].values()), 1)
+        self.assertEqual(sum(report["not_stored_zero"].values()), 1)
+        self.assertEqual(sum(report["reread"].values()), 0)
+        self.assertEqual(w.calls, [])
+
+    def test_shadow_slices_leave_room_for_both_statuses_of_every_profile(self):
+        rows = [zero(f"z{i}", uid=600 + i) for i in range(4)]
+        tracks = {f"t-z{i}": {"popularity": 23} for i in range(4)}
+        path = self.held_run(rows, tracks)
+        w = Writer()
+        report = sa.popularity_reread_shadow(TrackAdmin(rows, tracks), path, policy=policy(),
+                                             sp=sa.ScorePolicy(enabled=True, max_per_run=4, max_profiles_per_run=4),
+                                             scratch_dir=self.tmp, writer=w, **self.run_kwargs())
+        self.assertEqual(report["not_decided"], 0)
+        self.assertEqual(report["reread"][sa.POP_CAPTURED], 4)
+        self.assertEqual(w.calls, [])
+
+    def test_the_shadow_report_runs_with_the_reread_on_while_the_policy_has_it_off(self):
+        rows = [zero("z")]
+        tracks = {"t-z": {"popularity": 23}}
+        path = self.held_run(rows, tracks)
+        sp = sa.ScorePolicy(enabled=True)
+        report = sa.popularity_reread_shadow(TrackAdmin(rows, tracks), path, policy=policy(), sp=sp,
+                                             scratch_dir=self.tmp, **self.run_kwargs())
+        self.assertEqual(report["captured"], {"approve": 1})
+        self.assertFalse(sp.popularity_reread, "the caller's policy is not armed by the report")
+
+    def test_a_held_request_core_no_longer_holds_is_reported_as_not_decided_never_as_a_zero(self):
+        rows = [zero("z")]
+        path = self.held_run(rows, {})
+        report, w = self.shadow(path, [{**rows[0], "status": decide.APPROVED}], {"t-z": {"popularity": 23}})
+        self.assertEqual(report["not_decided"], 1)
+        self.assertEqual(sum(report["reread"].values()), 0)
+        self.assertEqual(w.calls, [])
+
+    def test_a_ledger_with_no_stored_zero_hold_reports_that_and_not_a_count_of_zero(self):
+        rows = [row("scored", pop=20)]
+        path = self.held_run(rows, {})
+        report, _w = self.shadow(path, rows, {})
+        printed = "\n".join(sa.shadow_report_lines(report, sa.ScorePolicy(enabled=True)))
+        self.assertIsNone(report["source_run"])
+        self.assertIn("This is not a count of zero", printed)
+
+    def test_the_shadow_report_reads_the_run_it_is_given(self):
+        first = self.held_run([zero("old")], {})
+        run_id = self.db.execute("SELECT run_id FROM decisions WHERE request_id = 'old'").fetchone()[0]
+        rows = [zero("old"), zero("new")]
+        self.go([rows[1]], {}, on=False)
+        self.db.commit()
+        tracks = {"t-old": {"popularity": 5}, "t-new": {"popularity": 5}}
+        w = Writer()
+        report = sa.popularity_reread_shadow(TrackAdmin(rows, tracks), first, policy=policy(),
+                                             sp=sa.ScorePolicy(enabled=True), source_run=run_id,
+                                             scratch_dir=self.tmp, writer=w, **self.run_kwargs())
+        self.assertEqual(report["source_run"], run_id)
+        self.assertEqual(report["held_on_stored_zero"], 1)
+        self.assertEqual(report["reread"][sa.POP_CAPTURED], 1)
+        self.assertEqual(report["captured"], {"approve": 1})
+        self.assertEqual(w.calls, [])
+    def test_a_source_run_this_ledger_does_not_hold_is_not_measured_and_never_a_zero(self):
+        rows = [zero("z")]
+        path = self.held_run(rows, {"t-z": {"popularity": 23}})
+        w = Writer()
+        report = sa.popularity_reread_shadow(TrackAdmin(rows, {"t-z": {"popularity": 23}}), path,
+                                             policy=policy(), sp=sa.ScorePolicy(enabled=True),
+                                             source_run="score-typo", scratch_dir=self.tmp, writer=w,
+                                             **self.run_kwargs())
+        printed = "\n".join(sa.shadow_report_lines(report, sa.ScorePolicy(enabled=True)))
+        self.assertFalse(report["source_run_found"])
+        self.assertIn("source run score-typo was not found", printed)
+        self.assertIn("This is not a count of zero", printed)
+        self.assertNotIn("row(s) held on a stored popularity of 0", printed)
+        self.assertEqual(w.calls, [])
+
+    def test_a_source_run_that_held_no_stored_zero_row_still_reports_that_it_held_none(self):
+        rows = [row("scored", pop=20)]
+        path = self.held_run(rows, {})
+        run_id = self.db.execute("SELECT run_id FROM decisions WHERE request_id = 'scored'").fetchone()[0]
+        report, w = self.shadow(path, rows, {}, source_run=run_id)
+        printed = "\n".join(sa.shadow_report_lines(report, sa.ScorePolicy(enabled=True)))
+        self.assertTrue(report["source_run_found"])
+        self.assertEqual(report["held_on_stored_zero"], 0)
+        self.assertIn(f"source run {run_id}: 0 row(s) held on a stored popularity of 0", printed)
+        self.assertNotIn("was not found", printed)
+        self.assertEqual(w.calls, [])
 
 
 class LiveAdmin(FakeAdmin):

@@ -1,6 +1,8 @@
 #!/usr/bin/env bats
 # Tests for check-credit-status-writes.sh: hydra code never writes a credit status directly and never moves one
 # silently (Fable GO 2026-10-31). Hermetic: each test builds a synthetic tree (no git) and runs the guard on it.
+# The real tree is guarded by the `validate-code` CI step that runs the script itself; scanning it here as well
+# duplicated that work and timed out under the 2-CPU bats shard.
 bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
@@ -15,10 +17,16 @@ setup() {
 
 teardown() { rm -rf "$T"; }
 
-@test "the real tree is clean" {
-  run bash "$SCRIPT"
+@test "validate-code still scans the real tree (the covering check for the removed case)" {
+  # This suite no longer scans the real tree; the `validate-code` job of .github/workflows/pr-validate.yml is the
+  # one remaining real-tree scan (`scripts/check-credit-status-writes.sh` at the repo root). Pin the step here so
+  # a later edit that drops it fails CI instead of silently leaving hydra's credit-status writes unguarded.
+  run awk '
+    /^  [A-Za-z0-9_-]+:/ { job = $1; sub(":$", "", job) }
+    job == "validate-code" && /bash scripts\/check-credit-status-writes\.sh/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$HYDRA_REPO/.github/workflows/pr-validate.yml"
   [ "$status" -eq 0 ]
-  [[ "$output" == OK:* ]]
 }
 
 @test "a clean synthetic tree passes" {

@@ -661,6 +661,21 @@ def cmd_score_approve(args: argparse.Namespace) -> int:
                   f"{r['requests']} request(s) [{', '.join(r['request_ids'][:10])}"
                   f"{' ...' if len(r['request_ids']) > 10 else ''}] - {r['reason']}")
         return 0
+    if getattr(args, "popularity_reread_shadow", False):
+        # Captain 2026-11-15T19:51Z: what the stored-0 popularity re-read WOULD do for one run's holds.
+        # Shadow only: no core write, and no row in the live ledger (it is copied, read-only, to a scratch
+        # file the runs are made on). It reads core, so it honours neither kill switch and needs none.
+        from credit_review import ledger as _ledger
+        os.environ["MUSO_ADMIN_IDENTITY"] = decide.ADMIN_IDENTITY
+        try:
+            report = score_approve.popularity_reread_shadow(
+                admin_api.AdminClient(), args.ledger or _ledger.DEFAULT_PATH, policy=decide.Policy.load(),
+                sp=score_approve.ScorePolicy.load(), source_run=args.source_run, scratch_dir=args.scratch_dir)
+        except (sqlite3.Error, OSError) as exc:
+            print(f"score-approve popularity re-read SHADOW: NOT RUN (ledger: {exc}). This is not a count of zero.")
+            return 1
+        print("\n".join(score_approve.shadow_report_lines(report, score_approve.ScorePolicy.load())))
+        return 0
     if score_approve.KILL_SWITCH.exists() or decide.KILL_SWITCH.exists():
         log("score-approve: kill switch present; nothing decided")
         print("NO_REPLY")
@@ -1320,6 +1335,15 @@ def parser() -> argparse.ArgumentParser:
     sa.add_argument("--skipped-profiles", action="store_true",
                     help="list the profiles the runs of the last 7 days skipped because core answered HTTP 400 "
                          "(read-only; runs nothing)")
+    sa.add_argument("--popularity-reread-shadow", action="store_true",
+                    help="report what re-reading a stored popularity of 0 from the run's catalog track document "
+                         "would do for the rows one run held on it: how many get a real popularity, and of those "
+                         "how many would approve / hold / ask. Applies nothing: no core write, no live ledger row")
+    sa.add_argument("--source-run", default=None, metavar="RUN_ID",
+                    help="with --popularity-reread-shadow: the score run whose stored-0 holds are read again "
+                         "(default: the newest run that held any)")
+    sa.add_argument("--scratch-dir", default=None,
+                    help="with --popularity-reread-shadow: where the scratch copy of the ledger is made and deleted")
     sa.set_defaults(fn=cmd_score_approve)
 
     ex = sub.add_parser("explain", help="every decision + server outcome for one credit request")
