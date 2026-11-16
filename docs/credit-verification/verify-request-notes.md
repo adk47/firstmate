@@ -18,7 +18,7 @@ credit-trust-verify-notify-15m  (credit-review.py verify-notify --mode apply --m
    ├─ day-14 / day-25 reminders of windowed notes FIRST (they count against the day's 200)
    ├─ re-read every candidate (GET /admin/credit-requests); keep only rows the server says are approved NOW
    ├─ hold for a human (never notified; credits kept for later runs): proof on file from ANY source,
-   │    the support@ 90-day contacts, org affiliation unknown or affiliated, an ask in the last 90 days
+   │    org affiliation unknown or affiliated, an ask in the last 90 days
    ├─ paying users first
    ├─ group by the request's account (user.email); one gate call per account
    │    scripts/intercom-verify-request.sh send   -> POST /messages (email; Caroline; windowed copy)
@@ -700,9 +700,20 @@ daily line.
 | Gate | Source | Missing source |
 |---|---|---|
 | Proof on file from any source (Intercom, support@ Gmail, core): no note at all | `/var/lib/credit-trust/proof-on-file.json`, through `credit_review.proof_parts` | no sends |
-| Emailed support@ in the last 90 days | the same file's `gmail_contacts_90d` (`proof_parts.support_contacts`, the decider's reader) | no sends |
 | Org affiliation (RULE-org-affiliation, schema `org-affiliation/v1` from cmux-credit-system-lane): a note needs verdict `none` with coverage `full`; no verdict, `held`, `labels_only`, `claimed_unverified` (automatic only for trusted-contradicted removals) or `contributor` / `verified_org` / `authenticated_domain` = human | `/var/lib/credit-trust/org-affiliation.json` (`credit_review.affiliation`, shared with the take-back gate); older than 2h or dated in the future = unknown for everyone | no sends |
 | One ask per user per 90 days across the ask campaigns (verify-live, retro-past, uvn-status) | verify ledger (`verify_ledger.asked_within`, checked in the run and again at the claim) | n/a |
+
+**Emailed support@ in the last 90 days is no longer a gate here (2026-11-15).** It held those
+users' notes for a human nobody worked, so the same list that held these users on the decider (PR
+#1992, 2026-11-14; 69 accounts / 954 requests in the estimate there, **649 requests / 47 accounts**
+measured on the ledger's newest decision rows, `data/verify-notify-support-hold-r1/report.md`) is
+gone from this run: a support@ contact is asked like anyone else, and nothing is withheld because
+they wrote to support@. It still holds elsewhere on the send side - `credit_review/claim_proof_ask.py`
+owns its own hold on it (and `uvn_status` / `score_approve` their scoped ones) - and the list
+(`gmail_contacts_90d`, read through `proof_parts.support_contacts`) is still READ and still has to
+be readable: a file without a fresh `cs-gmail` snapshot still halts the run.
+`scripts/intercom-backlog/tail_lists.py` only counts the listed accounts for its report line. Taken
+before/after: `data/verify-notify-support-hold-r1/report.md`.
 
 Cadence: once a day at 09:00 Europe/Rome, paying users first, at most 200 messages a day for
 the first week (then 500), reminders included and sent first. Removal, expiry and the

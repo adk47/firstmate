@@ -102,8 +102,6 @@ class Report:
     held_user_window: int = 0
     window_after_gate: int = 0
     pending_doc_users: int = 0
-    support_contact_users: int = 0
-    support_contact_credits: int = 0
     documented_users: int = 0          # proof on file (any source) for another credit / whole user
     documented_credits: int = 0
     affiliation_held: list[str] = field(default_factory=list)   # "user <id>: <reason>" for a human
@@ -238,7 +236,7 @@ class Report:
                 or self.post_failed_users
                 or self.proof_tagged or self.proof_failed or self.extension_requests
                 or self.claim_proof_tagged or self.claim_replies
-                or self.affiliation_held or self.documented_users or self.support_contact_users
+                or self.affiliation_held or self.documented_users
                 or self.paying_hold or self.no_professional_id or self.read_failure_pages
                 or self.evidence_unbounded) and mode == "apply":
             return "NO_REPLY"
@@ -317,9 +315,6 @@ class Report:
         if self.recently_asked_users:
             parts.append(f"{self.recently_asked_users} account(s) ({self.recently_asked_credits} credit(s)) waiting: "
                          "asked in the last 90 days")
-        if self.support_contact_users:
-            parts.append(f"{self.support_contact_users} account(s) ({self.support_contact_credits} credit(s)) held for a "
-                         "human: emailed support@ in the last 90 days (no note)")
         if self.human_approved:
             parts.append(f"{self.human_approved} approved by a person (not asked again)")
         if self.trusted_anchor:
@@ -532,8 +527,13 @@ class ProofFileError(RuntimeError):
 
 class ProofOnFile(dict[str, list[tuple[Optional[str], str]]]):
     """Documents on file per user id, plus who emailed support@ in the last 90 days
-    (``support_contacts``, user ids as strings): those users get no note while listed -
-    held for a human (firstmate 050, the decider's rule)."""
+    (``support_contacts``, user ids as strings).
+
+    This step holds no note on that list any more (2026-11-15, the decider's 2026-11-14
+    decision applied to the senders): a support@ contact is decided like anyone else, so the
+    note is an ask like any other - never silence. The list is still READ and still has to be
+    readable (``load_proof_on_file`` refuses a file without a fresh snapshot), because
+    ``claim_proof_ask`` owns its own hold on it and reads it through this object."""
 
     def __init__(self, *args: Any, support_contacts: frozenset[str] = frozenset(), **kw: Any):
         super().__init__(*args, **kw)
@@ -545,6 +545,10 @@ class ProofOnFile(dict[str, list[tuple[Optional[str], str]]]):
 
 
 def is_support_contact(documented: dict[str, Any], uid: str) -> bool:
+    """Did this user email support@ in the last 90 days (a rule each LANE owns, not this file)?
+
+    Nothing in this module holds a note on it any more (2026-11-15): ``claim_proof_ask`` does,
+    through its own gates. Kept as the one reading of ``support_contacts``."""
     return bool(uid) and uid in getattr(documented, "support_contacts", frozenset())
 
 
@@ -614,18 +618,16 @@ def _user_id(req: dict[str, Any]) -> str:
 
 def drop_documented(rows: dict[str, dict[str, Any]], documented: ProofOnFile, report: Report) -> list[str]:
     """Past credits: remove requests whose account user is on the proof-on-file list with
-    any entry; return their ids."""
+    any entry; return their ids.
+
+    A user who emailed support@ in the last 90 days is NOT dropped here any more
+    (2026-11-15): the same list held their note for a human nobody worked, so the row now
+    keeps its ladder verdict and is asked like anyone else's. Only a document on file excludes
+    a past credit."""
     gone = [rid for rid, req in rows.items() if _user_id(req) in documented]
     for rid in gone:
         del rows[rid]
     report.proof_on_file += len(gone)
-    # Emailed support@ in the last 90 days: no note, held for a human. Not closed (the
-    # credit is offered again once the user is off the list or a human has ruled).
-    held = {rid: _user_id(req) for rid, req in rows.items() if is_support_contact(documented, _user_id(req))}
-    for rid in held:
-        del rows[rid]
-    report.support_contact_users += len(set(held.values()))
-    report.support_contact_credits += len(held)
     return gone
 
 
@@ -636,12 +638,13 @@ def screen_live(rows: dict[str, dict[str, Any]], documented: ProofOnFile,
       - a credit with its own proof-on-file entry (any kind), approved by a person, or a
         band-A automation approval (metadata.approval.anchor_kind = trusted, Fable 10-22
         23:10Z) is not asked about; its id is returned so the caller can close it;
-      - if credits are left to ask about and the user emailed support@ in the last 90 days
-        (firstmate 050) or has ANY proof-on-file entry (another credit, a whole-user
-        document of any kind, any source: Fable 2026-10-17 precondition 1), the user gets
-        no note: those credits are returned as (request_id, profile_id, track_id) for the
-        ledger's deferred rows, so they are offered again on every run and a human sees
-        them (a pending_doc keeps its old meaning: one batched ask once it is reviewed)."""
+      - if credits are left to ask about and the user has ANY proof-on-file entry (another
+        credit, a whole-user document of any kind, any source: Fable 2026-10-17 precondition
+        1), the user gets no note: those credits are returned as (request_id, profile_id,
+        track_id) for the ledger's deferred rows, so they are offered again on every run and
+        a human sees them (a pending_doc keeps its old meaning: one batched ask once it is
+        reviewed). A user who only emailed support@ in the last 90 days is asked like anyone
+        else (2026-11-15; the firstmate-050 hold on it is gone)."""
     own = _documented_ids(documented)
     by_user: dict[str, list[str]] = {}
     for rid, req in rows.items():
@@ -653,12 +656,7 @@ def screen_live(rows: dict[str, dict[str, Any]], documented: ProofOnFile,
         by_person = [rid for rid in rids if rid not in own and human_approved(rows[rid])]
         band_a = [rid for rid in rids if rid not in own and rid not in by_person and trusted_anchor(rows[rid])]
         ask = [rid for rid in rids if rid not in own and rid not in by_person and rid not in band_a]
-        if ask and is_support_contact(documented, uid):
-            # firstmate 050: emailed support@ in the last 90 days - no note, held for a
-            # human; the credits to ask about are not closed, so they are offered again.
-            report.support_contact_users += 1
-            report.support_contact_credits += len(ask)
-        elif ask and documented.get(uid):
+        if ask and documented.get(uid):
             # Fable 2026-10-17 (verify-notify enable, precondition 1): a user with proof on
             # file from ANY source (Intercom, support@, core) is never notified. A document
             # under review keeps the old meaning (asked once, after the review); any other
@@ -720,9 +718,9 @@ def removal_due(db: sqlite3.Connection, admin: admin_api.Admin, documented: Proo
     by_person = {rid for rid, req in live.items() if human_approved(req)}
     # Proof is matched by USER as well as by credit (firstmate 042): a user with a
     # whole-user document waiting for review (e.g. emailed to support@, no request id)
-    # never reaches a per-credit removal day - their credits are held for a human.
-    waiting = {rid for rid, req in live.items()
-               if _user_pending_doc(documented, _user_id(req)) or is_support_contact(documented, _user_id(req))}
+    # never reaches a per-credit removal day - their credits are held for a human. Merely
+    # having emailed support@ is no longer a hold (2026-11-15): the row keeps its verdict.
+    waiting = {rid for rid, req in live.items() if _user_pending_doc(documented, _user_id(req))}
     for r in due:
         if r["request_id"] in waiting:
             r["reason"] = verify_ledger.HELD_AWAITING_REVIEW
@@ -2543,9 +2541,11 @@ def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "
         never_asked_days: int | None = NEVER_ASKED_DAYS) -> Report:
     """The whole step, once a day (09:00 Europe/Rome). `max_users` is the day's cap on
     messages, reminders included (they go first: the note promised them). Gates, in order:
-    proof on file from any source, the support@ 90-day contacts, org affiliation, the shared
-    90-day re-ask lock; then paying users first. Any gate source that cannot be read halts
-    the run: nothing is sent."""
+    proof on file from any source, org affiliation, the shared 90-day re-ask lock; then paying
+    users first. Emailing support@ in the last 90 days is NOT a gate here (2026-11-15: it held
+    those users' notes for a human nobody worked); the list is read and must be readable, and
+    other lanes still own their own hold on it. Any gate source that cannot be read halts the
+    run: nothing is sent."""
     report = Report()
     try:
         documented = load_proof_on_file(proof_path)

@@ -102,10 +102,11 @@ server stays the authority: an approval it refuses comes back
 ``skipped:needs_human_review`` and is recorded, never retried blindly.
 
 A support@ contact is no longer a hold here (2026-11-14, firstmate 041): a row whose user
-emailed support@ in the last 90 days keeps the ladder's own verdict. The contact hold ends in
-the decider only; ``verify_notify``, ``claim_proof_ask``, ``uvn_status`` (stale Gmail part) and
-``score_approve`` each hold their own support@ contact, are unchanged, and are tracked separately
-(support-hold-sender-lift-r1). Nothing in this module posts on a support thread.
+emailed support@ in the last 90 days keeps the ladder's own verdict. ``verify_notify`` dropped
+its hold the same way (2026-11-15). Elsewhere the contact hold stands: ``claim_proof_ask``,
+``uvn_status`` (stale Gmail part) and ``score_approve`` each hold their own support@ contact,
+are unchanged, and are tracked separately (support-hold-sender-lift-r1). Nothing in this module
+posts on a support thread.
 """
 
 from __future__ import annotations

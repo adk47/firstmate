@@ -25,10 +25,11 @@ While ``cs-gmail`` is unusable EVERYONE is UNKNOWN: a snapshot of
 who emailed support@ cannot cover mail sent after it, so no contact list narrows the hold.
 UNKNOWN never asks and never removes. The live export also carries ``gmail_contacts_90d``
 ({generated_at, source, user_ids[]}): completeness never depends on it (it narrows nothing),
-but the readers that SEND (the verify notes and the other support@-contact senders) hold every
-listed user for a human, read through ``support_contacts`` below, the one parser for it. The
-credit decider does not hold on it any more (2026-11-14): it requires the list to be readable
-only, and the row keeps the ladder's verdict.
+read through ``support_contacts`` below, the one parser for it. The credit decider does not
+hold on it any more (2026-11-14) and neither do the verify notes (2026-11-15): each requires
+the list to be readable only, and the row keeps the ladder's verdict. The senders that still
+hold every listed user for a human are ``claim_proof_ask`` (the live one),
+``uvn_status`` (its stale Gmail part) and ``score_approve``.
 
 A half-written export is UNKNOWN too: every entry must be an object with a user_id, a
 request_id that is null or a string and a known kind, and ``users`` must be the number of

@@ -3438,14 +3438,51 @@ class EnableGateTests(unittest.TestCase):
         finally:
             db.close()
 
-    def test_a_support_at_only_contact_gets_no_note_and_is_held(self):
-        """Precondition 1: the 90-day support@ list is read; a user who only emailed
-        support@ (no proof-on-file entry at all) is never notified."""
+    def test_a_support_at_only_contact_is_asked_like_anyone_else(self):
+        """2026-11-15: the 90-day support@ list holds no note any more (the decider dropped the
+        same hold on 2026-11-14). A user who only emailed support@ - no proof on file - gets the
+        same ASK as everyone else: ask-or-no, never silence."""
         rep, fake = self.go([user_req("a1", 41), user_req("a2", 42)], contacts=[41])
-        self.assertEqual([p["user"]["id"] for p in fake.payloads], ["42"])
-        self.assertEqual((rep.support_contact_users, rep.support_contact_credits), (1, 1))
-        self.assertEqual(self.deferred(), {"a1"}, "held, not closed")
-        self.assertIn("emailed support@ in the last 90 days", rep.render("apply"))
+        self.assertEqual([p["user"]["id"] for p in fake.payloads], ["41", "42"])
+        self.assertEqual(self.deferred(), set(), "nothing is held for having emailed support@")
+        self.assertNotIn("emailed support@ in the last 90 days", rep.render("apply"))
+
+    def test_a_user_off_the_support_list_is_unaffected(self):
+        """The list narrows nothing for the other gates: a user with a document on file for
+        another credit is held exactly as before, on the list or off it."""
+        rep, fake = self.go([user_req("b1", 41), user_req("b2", 42)], contacts=[41],
+                            entries=[{"user_id": 42, "request_id": None, "kind": "pending_doc",
+                                      "source": "intercom", "ref": "conv-1"}])
+        self.assertEqual([p["user"]["id"] for p in fake.payloads], ["41"])
+        self.assertEqual((rep.pending_doc_users, rep.documented_users), (1, 0))
+        self.assertEqual(self.deferred(), {"b2"})
+
+    def test_a_support_at_contact_is_not_dropped_from_past_credits(self):
+        """Past credits: only a document on file excludes a row, never the support@ list."""
+        rep = verify_notify.Report()
+        rows = {"a1": {"id": "a1", "user": {"id": 41}}, "a2": {"id": "a2", "user": {"id": 42}}}
+        gone = verify_notify.drop_documented(rows, verify_notify.ProofOnFile(support_contacts=frozenset({"41"})),
+                                             rep)
+        self.assertEqual((gone, sorted(rows), rep.proof_on_file), ([], ["a1", "a2"], 0))
+
+    def test_a_support_at_contact_reaches_the_removal_export_instead_of_a_hold(self):
+        """The NO half of ask-or-no: a past credit whose only mark was "emailed support@" is
+        judged like anyone else - past its reply-by date it is removal-due - while a user whose
+        document is waiting for review stays held for a human."""
+        db = verify_ledger.connect(self.path)
+        self.addCleanup(db.close)
+        for rid, uid in (("a1", 41), ("a2", 42)):
+            c = verify_ledger.claim(db, user_key=f"u{uid}@example.com", day="2026-10-01", request_ids=[rid],
+                                    message_type="email", approved_by=CAPTAIN_UID, approval_ref="ref", windowed=True,
+                                    refs=[{"request_id": rid, "profile_id": PID, "track_id": f"t-{rid}"}])
+            verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=rid)
+        documented = verify_notify.ProofOnFile(support_contacts=frozenset({"41"}))
+        documented["42"] = [(None, "pending_doc")]
+        due, held = verify_notify.removal_due(db, FakeAdmin([user_req("a1", 41), user_req("a2", 42)]), documented,
+                                             day="2026-11-16")
+        self.assertEqual([r["request_id"] for r in due], ["a1"])
+        self.assertEqual([(h["request_id"], h["reason"]) for h in held],
+                         [("a2", verify_ledger.HELD_AWAITING_REVIEW)])
 
     def test_intercom_proof_of_any_kind_means_no_note(self):
         for kind in ("pending_doc", "approved_doc", "human_approved_after_doc"):
