@@ -106,7 +106,7 @@ def key_filings(proof_db: sqlite3.Connection, store: DocVerifyStore, deps: Deps,
     # readable=None: a filing whose bytes are owed still gets keyed. `settled` still filters: a filing already
     # keyed under this version with the same candidates owes nothing.
     docs = _intake_docs(proof_db, store, deps, limit, keep=keep, paying=paying, require_bytes=False,
-                        settled=store.intake_keyed)
+                        settled=store.intake_keyed, reply_recheck=False)
     readable = lambda d: not intake_read.needs_backfill(d, deps.blobs, store.blob_registered)  # noqa: E731
     failed: list[tuple[str, BaseException]] = []
     for doc in docs:
@@ -146,7 +146,8 @@ def _intake_docs(proof_db: sqlite3.Connection, store: DocVerifyStore, deps: Deps
                  keep: Callable[[str], bool] | None = None,
                  paying: set[int] | frozenset[int] | None = None,
                  settled: Callable[[str, list[str]], bool] | None = None,
-                 require_bytes: bool = True) -> list:
+                 require_bytes: bool = True,
+                 reply_recheck: bool = True) -> list:
     """Filed credit documents that still owe a read, best first (paid, then oldest). A document whose
     bytes are still owed to blob-backfill is skipped here: it cannot be read yet, and spending a slot on
     it is how a readable document behind it starves."""
@@ -156,7 +157,8 @@ def _intake_docs(proof_db: sqlite3.Connection, store: DocVerifyStore, deps: Deps
     readable = (lambda d: not intake_read.needs_backfill(d, deps.blobs, store.blob_registered)) \
         if require_bytes else None
     return intake_read.intake_docs(proof_db, settled or store.intake_settled, limit, keep=keep, paying=paying,
-                                   readable=readable)
+                                   readable=readable,
+                                   seen=store.intake_reply_seen if reply_recheck else None)
 
 
 CLAIM_ACCOUNTS_KEY = "open_claim_accounts"
@@ -514,6 +516,7 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
             store.step(run_id, proof_id, "forensics", forensics.worst(findings) or "ok",
                        {"h3": h3.verdict, "h3_reasons": h3.reasons[:3], "findings": [f.as_dict() for f in findings]},
                        key)
+            support = supports(ex, r.names, role, r.title, r.isrc) if r else None
             checks = [dom, sig, dint]
             if r is None:
                 checks.append(xc.Check("xc_dsp", xc.ERROR, {"error": "request not found in core"}))
@@ -548,12 +551,20 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                 else:
                     checks.append(xc.isrc_check(rel, role, r.names))
                     checks.append(xc.label_check(issuer, itype, rel))
-                # F9: a code we issued with the per-need ask, shown in this document inside its window
+                # F9: a code we issued with the per-need ask, inside its window, shown in this document OR
+                # typed by the customer in the message alongside it (challenge.py). A typed code is bound only
+                # to a dashboard screenshot that supports this request on its own merits: it is a possession
+                # signal, never document evidence, and it never makes the document a document of record.
                 chs = store.challenges(rid) if intake is not None else []
                 ch = challenge.check(text, chs, user_id=r.user_id,
                                      received_at=intake.received_at if intake is not None else None,
-                                     consumer=f"intake:{intake.intake_id}" if intake is not None else None)
-                if ch is not None and ch.status == xc.POSITIVE and \
+                                     consumer=f"intake:{intake.intake_id}" if intake is not None else None,
+                                     reply=intake.reply_text if intake is not None else None,
+                                     reply_ok=(getattr(ex, "doc_type", None) in gate.F9_DOC_TYPES
+                                               and support is not None))
+                # A typed code is possession only, never document evidence (gate/tray refuse it as F9), so it must
+                # NOT use the one-use code up: the corrected screenshot showing the same code can still verify.
+                if ch is not None and ch.status == xc.POSITIVE and ch.detail.get("where") == challenge.DOCUMENT and \
                         not store.consume_challenge(ch.detail["challenge_id"], f"intake:{intake.intake_id}"):
                     # another filing claimed this one-use code first (a concurrent reader): never F9 here
                     ch = xc.Check("xc_challenge", xc.WEAK, {"why": ["the code was already used by another document"],
@@ -563,7 +574,6 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
             for c in checks[3:]:
                 store.step(run_id, proof_id, c.step, c.status, c.detail, key)
             uid = r.user_id if r else None
-            support = supports(ex, r.names, role, r.title, r.isrc) if r else None
             elsewhere = claimant_elsewhere(ex, r.names, r.title) if r else []
             # A deny reaches a request only when the document itself names its track/ISRC or its extracted credit
             # supports it. The <= 5-candidate tie attributes a filing (asks, junk purge); it is never positive
@@ -710,12 +720,18 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
                                    {"candidates": len(doc.candidate_ids), "keys": len(keys),
                                     "first_keys": keys[:20]}, f"intake:{doc.intake_id}")
                     finished = store.intake_finished_keys(doc.intake_id)
+                    if intake_read.reply_recheck(doc, store.intake_reply_seen(doc.intake_id)):
+                        # the customer typed something for this filing after we last read it: check it again
+                        # (the message may carry the code the screenshot did not show)
+                        finished = set()
                     if reread_carried:
                         finished -= store.intake_carried_keys(doc.intake_id)    # carried = not read under this rule
                     todo = [k for k in keys if k not in finished]      # capped after the fan-out cut
                     if not todo:
+                        store.record_intake_reply_seen(doc.intake_id, doc.reply_text)
                         continue
                     rows += verify_document(store, proof_db, doc.sha, todo, deps, run_id, stats, held, intake=doc)
+                    store.record_intake_reply_seen(doc.intake_id, doc.reply_text)
                 except ProviderDown as exc:
                     stats.provider_down = str(exc)
                     stats.errors.append(f"provider down ({exc}): run stopped, nothing recorded")

@@ -375,6 +375,71 @@ class IntakeTest(unittest.TestCase):
         self.assertEqual((stats["candidates_refreshed"], json.loads(self._rows()[0]["candidate_request_ids_json"])),
                          (0, [rid]))
 
+    # --- what the customer typed alongside the document (proof-return-path-e2e-1115) ---
+    def _typed(self, cid: str = "111") -> list[dict]:
+        row = self.store.db.execute("SELECT reply_text_json FROM proof_intake WHERE conversation_id=?",
+                                    (cid,)).fetchone()
+        return json.loads(row[0]) if row and row[0] else []
+
+    def _say(self, cid: str, body: str, at: int, author: str = "user") -> None:
+        self.docs[cid]["conversation_parts"]["conversation_parts"].append(
+            {"created_at": at, "author": {"type": author, "id": "9"}, "body": body})
+
+    def test_what_the_customer_typed_is_filed_with_the_document_and_staff_words_never(self) -> None:
+        self._say("111", "<p>Type this code in the find box: ACDEFGHJ</p>", 1, author="admin")
+        self._say("111", "<p>our bot says ACDEFGHJ</p>", 3, author="bot")
+        self._say("111", "<p>my code is ACDEFGHJ</p>", 4)
+        stats = self._run(apply=True, convs=["111"])
+        self.assertEqual(self._typed(), [{"at": "1970-01-01T00:00:02Z", "text": "here"},
+                                         {"at": "1970-01-01T00:00:04Z", "text": "my code is ACDEFGHJ"}])
+        self.assertEqual(stats["reply_text_filed"], 1)
+        self.assertEqual(len(self._rows()), 1)
+
+    def test_a_message_typed_after_the_filing_lands_on_the_same_row(self) -> None:
+        self._run(apply=True, convs=["111"])
+        before = self._typed()
+        self._say("111", "<p>the code is ACDEFGHJ</p>", 50)
+        dry = self._run(apply=False, convs=["111"])
+        self.assertEqual(dry["reply_text_refreshed"], 1)
+        self.assertEqual(self._typed(), before)                    # a dry run writes nothing
+        stats = self._run(apply=True, convs=["111"])
+        self.assertEqual(stats["reply_text_refreshed"], 1)
+        self.assertEqual(stats["files_filed"], 0)
+        self.assertEqual(len(self._rows()), 1)                     # UNIQUE (user_id, file_sha256): still one row
+        self.assertEqual(self._typed()[-1], {"at": "1970-01-01T00:00:50Z", "text": "the code is ACDEFGHJ"})
+        # the reader reopens a settled filing whose text arrived after its last read: the change is stamped
+        self.assertIsNotNone(self.store.db.execute("SELECT reply_text_at FROM proof_intake").fetchone()[0])
+        again = self._run(apply=True, convs=["111"])
+        self.assertEqual(again["reply_text_refreshed"], 0)         # an unchanged conversation rewrites nothing
+
+    def test_a_later_read_with_fewer_messages_never_erases_what_was_recorded(self) -> None:
+        self._say("111", "<p>the code is ACDEFGHJ</p>", 50)
+        self._run(apply=True, convs=["111"])
+        kept = self._typed()
+        self.docs["111"]["conversation_parts"]["conversation_parts"].pop()
+        stats = self._run(apply=True, convs=["111"])
+        self.assertEqual(stats["reply_text_refreshed"], 0)
+        self.assertEqual(self._typed(), kept)
+
+    def test_a_message_more_than_the_code_window_from_the_document_is_not_kept(self) -> None:
+        self._say("111", "<p>far too late ACDEFGHJ</p>", 2 + 7 * 86400 + 1)
+        self._say("111", "<p>last second ACDEFGHJ</p>", 2 + 7 * 86400)
+        self._run(apply=True, convs=["111"])
+        self.assertEqual([m["text"] for m in self._typed()], ["here", "last second ACDEFGHJ"])
+
+    def test_our_ask_quoted_back_is_not_the_customers_words(self) -> None:
+        self._say("111", "<p>done</p><blockquote>type this code in the find box: ACDEFGHJ, and take one "
+                         "screenshot</blockquote>", 5)
+        self._say("111", "<div>sent</div><div class=\"gmail_quote\"><div>the code ACDEFGHJ</div></div>", 6)
+        self._run(apply=True, convs=["111"])
+        self.assertEqual([m["text"] for m in self._typed()], ["here", "done", "sent"])
+
+    def test_a_message_with_no_time_of_its_own_is_not_kept(self) -> None:
+        self.docs["111"]["conversation_parts"]["conversation_parts"].append(
+            {"author": {"type": "user", "id": "9"}, "body": "<p>undated ACDEFGHJ</p>"})
+        self._run(apply=True, convs=["111"])
+        self.assertEqual([m["text"] for m in self._typed()], ["here"])
+
     def test_downloads_only_from_intercom_attachment_hosts(self) -> None:
         ok = intake.attachment_url_ok
         self.assertTrue(ok("https://musoai.intercom-attachments-5.com/i/o/123/abc/file.png"))
@@ -605,6 +670,31 @@ class GmailIntakeTest(unittest.TestCase):
         self.assertEqual((again["files_filed"], again["files_duplicate"], again["candidates_refreshed"]), (0, 1, 1))
         self.assertEqual(len(json.loads(self._rows()[0]["candidate_request_ids_json"])), 2)
 
+    def test_the_email_body_is_filed_as_what_the_customer_typed_at_the_messages_own_time(self) -> None:
+        stats = self._run(["m1"])
+        (r,) = self._rows()
+        self.assertEqual(json.loads(r["reply_text_json"]), [{"at": "2026-10-14T10:31:00Z", "text": "here is my proof"}])
+        self.assertEqual(stats["reply_text_filed"], 1)
+        again = self._run(["m1"])
+        self.assertEqual(again["reply_text_refreshed"], 0)
+        self.assertEqual(len(self._rows()), 1)
+
+    def test_an_email_reply_that_quotes_our_ask_keeps_only_the_customers_own_words(self) -> None:
+        from email.message import EmailMessage
+        m = EmailMessage()
+        m["From"] = "Ann <ann@example.com>"
+        m["To"] = "support@muso.ai"
+        m["Date"] = "Tue, 14 Oct 2026 12:31:00 +0200"
+        m["Authentication-Results"] = "mx.google.com; dkim=pass header.i=@example.com header.d=example.com"
+        m.set_content("attached, my code is ACDEFGHJ\n\nOn Mon, 13 Oct 2026 at 09:00, Muso <support@muso.ai> wrote:\n"
+                      "> type this code in the find box: QRTUVWXY, and take one screenshot\n")
+        m.add_attachment(b"%PDF-1.4 emailed split sheet", maintype="application", subtype="pdf", filename="s.pdf")
+        self.msgs["m5"] = m.as_bytes()
+        self._run(["m5"])
+        (r,) = self._rows()
+        self.assertEqual(json.loads(r["reply_text_json"]),
+                         [{"at": "2026-10-14T10:31:00Z", "text": "attached, my code is ACDEFGHJ"}])
+
     def test_a_dry_run_counts_an_attachment_sent_twice_once(self) -> None:
         # Prod 2026-10-28: the dry run said 1,521, --apply filed 1,174 - re-sent attachments were counted twice.
         self.msgs["m6"] = gmail_raw()                                   # the same attachment as m1, sent again
@@ -715,6 +805,93 @@ class GmailIntakeTest(unittest.TestCase):
         for bad in ("", "../x", "a b", "m1;rm"):
             with self.assertRaises(ValueError):
                 self.g.gog_raw(bad)
+
+
+class ReplyTextTest(unittest.TestCase):
+    """proof/reply_text.py: the customer's own words, each with its own time, and nothing else."""
+
+    def setUp(self) -> None:
+        from credit_verify.proof import reply_text
+        self.rt = reply_text
+
+    def test_plain_keeps_the_customers_words_and_drops_tags(self) -> None:
+        self.assertEqual(self.rt.plain("<p>my code is <b>ACDE FGHJ</b></p><p>thanks &amp; bye</p>"),
+                         "my code is ACDE FGHJ\nthanks & bye")
+        self.assertEqual(self.rt.plain("plain words"), "plain words")
+        self.assertEqual(self.rt.plain(""), "")
+        self.assertEqual(self.rt.plain(None), "")
+        self.assertEqual(self.rt.plain("<p> </p>"), "")
+
+    def test_plain_drops_quoted_history_in_every_shape_a_mail_client_writes(self) -> None:
+        for body in ("mine<blockquote>ASK ACDEFGHJ</blockquote>",
+                     "<div>mine</div><div class=\"gmail_quote\"><div><div>ASK ACDEFGHJ</div></div></div>",
+                     "<div>mine</div><div id=\"divRplyFwdMsg\">ASK ACDEFGHJ</div>",
+                     "mine\n\nOn Mon, 3 Nov 2026 at 10:00, Muso <s@muso.ai> wrote:\n> ASK ACDEFGHJ",
+                     "mine\n\nOn Mon, 3 Nov 2026 at 10:00, Muso\n<s@muso.ai> wrote:\nASK ACDEFGHJ",
+                     "mine\n-----Original Message-----\nASK ACDEFGHJ",
+                     "mine\nFrom: Muso <s@muso.ai>\nSent: Monday\nASK ACDEFGHJ",
+                     "mine\n> ASK ACDEFGHJ",
+                     "mine<style>.x{content:'ACDEFGHJ'}</style><script>var a='ACDEFGHJ'</script>"):
+            self.assertEqual(self.rt.plain(body), "mine", body)
+
+    def test_plain_keeps_a_customers_own_sentence_that_ends_in_wrote(self) -> None:
+        for body in ("On the dashboard it wrote:\nACDEFGHJ",
+                     "On the dashboard it wrote:<br>ACDEFGHJ",
+                     "On the dashboard it wrote: ACDEFGHJ",
+                     "On the dashboard at 10:00 it wrote:\nACDEFGHJ",
+                     "On the dashboard, It wrote:\nACDEFGHJ"):
+            self.assertIn("ACDEFGHJ", self.rt.plain(body), body)
+        self.assertEqual(self.rt.plain("On the dashboard it wrote:\nACDEFGHJ"),
+                         "On the dashboard it wrote:\nACDEFGHJ")
+        self.assertEqual(self.rt.plain("On the dashboard at 10:00 it wrote:\nACDEFGHJ"),
+                         "On the dashboard at 10:00 it wrote:\nACDEFGHJ")
+        self.assertEqual(self.rt.plain("On the dashboard, It wrote:\nACDEFGHJ"),
+                         "On the dashboard, It wrote:\nACDEFGHJ")
+
+    def test_plain_is_capped(self) -> None:
+        self.assertEqual(len(self.rt.plain("x" * (self.rt.MAX_CHARS + 500))), self.rt.MAX_CHARS)
+
+    def test_customer_parts_are_the_customers_only_each_with_its_own_time_oldest_first(self) -> None:
+        doc = {"created_at": 100,
+               "source": {"author": {"type": "user"}, "body": "<p>opening</p>"},
+               "conversation_parts": {"conversation_parts": [
+                   {"created_at": 300, "author": {"type": "lead"}, "body": "third"},
+                   {"created_at": 200, "author": {"type": "admin"}, "body": "staff ACDEFGHJ"},
+                   {"created_at": 250, "author": {"type": "bot"}, "body": "bot ACDEFGHJ"},
+                   {"created_at": 220, "author": {"type": "contact"}, "body": "second"},
+                   {"author": {"type": "user"}, "body": "no time"},
+                   {"created_at": 400, "author": {"type": "user"}, "body": "<p></p>"},
+                   "not a part"]}}
+        self.assertEqual(self.rt.customer_parts(doc),
+                         [{"at": "1970-01-01T00:01:40Z", "text": "opening"},
+                          {"at": "1970-01-01T00:03:40Z", "text": "second"},
+                          {"at": "1970-01-01T00:05:00Z", "text": "third"}])
+        self.assertEqual(self.rt.customer_parts(None), [])
+        self.assertEqual(self.rt.customer_parts({}), [])
+
+    def test_near_keeps_only_messages_inside_the_window_and_the_closest_when_there_are_too_many(self) -> None:
+        parts = [{"at": "2026-11-01T00:00:00Z", "text": "week before"},
+                 {"at": "2026-10-31T23:59:59Z", "text": "too early"},
+                 {"at": "2026-11-15T00:00:00Z", "text": "week after"},
+                 {"at": "2026-11-15T00:00:01Z", "text": "too late"},
+                 {"at": "garbage", "text": "no time"}]
+        self.assertEqual([p["text"] for p in self.rt.near(parts, "2026-11-08T00:00:00Z")], ["week before", "week after"])
+        self.assertEqual(self.rt.near(parts, ""), [])
+        self.assertEqual(self.rt.near(parts, None), [])
+        many = [{"at": f"2026-11-08T00:{i:02d}:00Z", "text": f"m{i}"} for i in range(self.rt.MAX_PARTS + 10)]
+        kept = self.rt.near(many, "2026-11-08T00:00:00Z")
+        self.assertEqual(len(kept), self.rt.MAX_PARTS)
+        self.assertEqual(kept[0]["text"], "m0")
+        self.assertEqual(kept[-1]["text"], f"m{self.rt.MAX_PARTS - 1}")
+
+    def test_the_stored_form_round_trips_and_a_bad_value_reads_as_no_text(self) -> None:
+        parts = [{"at": "2026-11-08T00:00:00Z", "text": "héllo ACDEFGHJ"}]
+        self.assertEqual(self.rt.loads(self.rt.dumps(parts)), parts)
+        self.assertIsNone(self.rt.dumps([]))
+        self.assertIsNone(self.rt.dumps(None))
+        self.assertIsNone(self.rt.dumps([{"at": "", "text": "x"}, {"at": "2026-11-08T00:00:00Z", "text": " "}]))
+        for bad in (None, "", "not json", "{}", "[1, 2]", '[{"at": "", "text": "x"}]'):
+            self.assertEqual(self.rt.loads(bad), [], bad)
 
 
 class RecentIntakeTest(unittest.TestCase):

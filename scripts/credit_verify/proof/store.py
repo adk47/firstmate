@@ -24,6 +24,7 @@ from typing import Any
 from . import FORENSICS_VERSION
 from .fingerprint import (MINHASH_FAMILY, MINHASH_MIN_SHINGLES, MINHASH_REUSE, PHASH_MAX_DISTANCE, Fingerprint, hamming, jaccard)
 from . import content
+from . import reply_text as reply_text_mod
 from .signals import HARD, INFO, POSITIVE, SOFT, Evidence, Signal
 from .verdict import UNDETERMINED
 
@@ -85,6 +86,9 @@ CREATE TABLE IF NOT EXISTS proof_intake (
   matched_by TEXT,                     -- professional_id | proof_on_file (how the account was verified)
   contact_h TEXT,                      -- hash of the Intercom contact id; no contact id, email or name is stored
   detail_json TEXT,                    -- candidate request status/basis, per-file provenance
+  reply_text_json TEXT,                -- [{at, text}]: what the customer TYPED near the document (reply_text.py)
+  reply_text_at TEXT,                  -- when reply_text_json last changed: the reader rechecks a settled filing
+                                       -- whose text arrived after its last read (NULL = never changed)
   UNIQUE (user_id, file_sha256)        -- idempotent on (user, document): a re-file is not a second row
 );
 CREATE INDEX IF NOT EXISTS proof_intake_user ON proof_intake(user_id, conversation_id);
@@ -136,6 +140,9 @@ MIGRATIONS = (
     ("verdicts", "contact_h", "TEXT NOT NULL DEFAULT ''"),
     ("verdicts", "track_key", "TEXT NOT NULL DEFAULT ''"),
     ("verdicts", "request_id", "TEXT NOT NULL DEFAULT ''"),
+    # what the customer typed alongside the document, for the F9 code (proof-code-roundtrip-r1); NULL = none
+    ("proof_intake", "reply_text_json", "TEXT"),
+    ("proof_intake", "reply_text_at", "TEXT"),
 )
 INDEXES = """
 CREATE INDEX IF NOT EXISTS forensics_proof ON forensics(proof_id, analyzer_version);
@@ -298,9 +305,10 @@ class ProofStore:
                       candidate_request_ids: list[str] | None = None, source: str = "intercom",
                       file_path: str | None = None, received_at: str = "", filed_by: str = "credit-proof.py file",
                       matched_by: str = "", contact_h: str = "", mime: str | None = None, nbytes: int = 0,
-                      detail: Any = None) -> str | None:
+                      detail: Any = None, reply_text: list[dict[str, str]] | None = None) -> str | None:
         """Record a document the customer sent: the account, the subject, the candidate credit
-        requests, the conversation it arrived in and its sha256 - and NOTHING else. No
+        requests, the conversation it arrived in, its sha256 and what the customer typed
+        alongside it (`reply_text`, their own words only: reply_text.py) - and NOTHING else. No
         forensics row, no fingerprint, no verdict: judgement is H3's and doc-verify's. The
         contract is the proof-loop lead's `proof_intake` row (one per file, idempotent on
         (user_id, sha256), writers never judge). Returns the intake id, or None when the row
@@ -308,17 +316,68 @@ class ProofStore:
         if self.readonly:
             raise RuntimeError("read-only proof store: file_document needs --apply")
         intake_id = f"{int(user_id)}:{file_sha256[:32]}"
+        typed = reply_text_mod.dumps(reply_text)
         with self.lock:
             cur = self.db.execute(
                 "INSERT OR IGNORE INTO proof_intake (intake_id, user_id, subject, candidate_request_ids_json,"
                 " conversation_id, source, file_sha256, file_path, mime, bytes, received_at, filed_by,"
-                " matched_by, contact_h, detail_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " matched_by, contact_h, detail_json, reply_text_json, reply_text_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (intake_id, int(user_id), subject,
                  json.dumps([str(r) for r in (candidate_request_ids or [])]), str(conversation_id), source,
                  file_sha256, file_path, mime, int(nbytes or 0), received_at or utcnow(), filed_by,
-                 matched_by, contact_h or "", json.dumps(detail, default=str)))
+                 matched_by, contact_h or "", json.dumps(detail, default=str), typed,
+                 utcnow() if typed else None))
             self.db.commit()
             return intake_id if cur.rowcount > 0 else None
+
+    def _reply_text_merged(self, user_id: int, file_sha256: str,
+                           reply_text: list[dict[str, str]] | None) -> tuple[str | None, str | None] | None:
+        """(stored, merged) for the (user, document) filing, or None when it is not on file. `merged` is the
+        stored messages plus `reply_text`, kept to what can matter for this document (reply_text.near, against
+        the row's own received_at). Text is only ever ADDED: a later read that carries less (a part that went
+        missing, a failed fetch, a second email re-sending the same file) never erases what an earlier read
+        recorded."""
+        with self.lock:
+            return self._reply_text_merged_locked(user_id, file_sha256, reply_text)
+
+    def _reply_text_merged_locked(self, user_id: int, file_sha256: str,
+                                  reply_text: list[dict[str, str]] | None) -> tuple[str | None, str | None] | None:
+        try:
+            row = self.db.execute("SELECT reply_text_json, received_at FROM proof_intake "
+                                  "WHERE user_id=? AND file_sha256=?", (int(user_id), file_sha256)).fetchone()
+        except sqlite3.OperationalError:
+            if self.readonly:
+                return None              # a read-only dry run over a store from before the column
+            raise
+        if row is None:
+            return None
+        seen: dict[tuple[str, str], dict[str, str]] = {}
+        for part in reply_text_mod.loads(row[0]) + reply_text_mod.loads(reply_text_mod.dumps(reply_text)):
+            seen.setdefault((part["at"], part["text"]), part)
+        return row[0], reply_text_mod.dumps(reply_text_mod.near(list(seen.values()), row[1]))
+
+    def reply_text_differs(self, user_id: int, file_sha256: str, reply_text: list[dict[str, str]] | None) -> bool:
+        """True when the (user, document) filing exists and `reply_text` would add to its stored reply text
+        (what a dry run counts; `set_reply_text` writes it)."""
+        got = self._reply_text_merged(user_id, file_sha256, reply_text)
+        return got is not None and got[1] is not None and got[0] != got[1]
+
+    def set_reply_text(self, user_id: int, file_sha256: str, reply_text: list[dict[str, str]] | None) -> bool:
+        """Record what the customer typed on an EXISTING filing (a message that arrived after the document was
+        filed). The same row: (user_id, file_sha256) stays the one key, nothing is inserted. True when it
+        changed."""
+        if self.readonly:
+            raise RuntimeError("read-only proof store: set_reply_text needs --apply")
+        with self.lock:
+            got = self._reply_text_merged_locked(user_id, file_sha256, reply_text)
+            if got is None or got[1] is None or got[0] == got[1]:
+                return False
+            self.db.execute("UPDATE proof_intake SET reply_text_json=?, reply_text_at=? "
+                            "WHERE user_id=? AND file_sha256=?",
+                            (got[1], utcnow(), int(user_id), file_sha256))
+            self.db.commit()
+        return True
 
     def link_filed(self, user_id: int, url: str) -> bool:
         with self.lock:

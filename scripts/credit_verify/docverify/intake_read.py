@@ -28,6 +28,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from credit_verify.proof import reply_text as reply_text_mod
 from credit_verify.proof.store import ProofStore
 
 from .forensics import H3, signal_dict
@@ -44,20 +45,63 @@ class IntakeDoc:
     candidate_ids: list[str] = field(default_factory=list)
     received_at: str = ""
     matched_by: str = ""
+    # what the customer typed alongside the document, [{at, text}] (proof/reply_text.py). The F9 code check
+    # searches it; it is never given to the extractor and never written to a step.
+    reply_text: list[dict[str, str]] = field(default_factory=list)
+    # when that text last changed (proof_intake.reply_text_at): a settled filing whose text arrived after its
+    # last read owes a recheck, so a code typed after the screenshot was read is still seen.
+    reply_text_at: str = ""
+
+
+def reply_column(proof_db: sqlite3.Connection) -> str:
+    """The SELECT expression for a filing's reply text: the column where the store has it, NULL on a store from
+    before it (the reader opens the proof store read-only and never migrates it). Asked of the schema, never
+    found out by a failed SELECT: `intake_docs` reads an OperationalError as "no filings"."""
+    try:
+        cols = {r[1] for r in proof_db.execute("PRAGMA table_info(proof_intake)")}
+    except sqlite3.Error:
+        return "NULL"
+    return "reply_text_json" if "reply_text_json" in cols else "NULL"
+
+
+def reply_column_at(proof_db: sqlite3.Connection) -> str:
+    """The SELECT expression for when a filing's reply text last changed: NULL on a store from before the
+    column, like `reply_column`."""
+    try:
+        cols = {r[1] for r in proof_db.execute("PRAGMA table_info(proof_intake)")}
+    except sqlite3.Error:
+        return "NULL"
+    return "reply_text_at" if "reply_text_at" in cols else "NULL"
+
+
+def reply_key(reply_text: list[dict[str, str]]) -> str | None:
+    """The exact customer text, in its canonical stored form: what a read records as seen (`dv_intake_reply_seen`).
+    An exact key, not a timestamp: a reply and the read that follows it can share one UTC second."""
+    return reply_text_mod.dumps(reply_text)
+
+
+def reply_recheck(doc: IntakeDoc, seen: str | None) -> bool:
+    """True when this filing has customer text the reader has not read yet. `seen` is the text recorded at the
+    last read (None = never read). The document's own text has not changed, but the code may be in the message:
+    the filing is read again, and the extraction is a cache hit."""
+    key = reply_key(doc.reply_text)
+    return bool(key) and key != seen
 
 
 def intake_docs(proof_db: sqlite3.Connection, settled: Callable[[str, list[str]], bool],
                 limit: int, *, keep: Callable[[str], bool] | None = None,
                 paying: set[int] | frozenset[int] | None = None,
-                readable: Callable[[IntakeDoc], bool] | None = None) -> list[IntakeDoc]:
+                readable: Callable[[IntakeDoc], bool] | None = None,
+                seen: Callable[[str], str | None] | None = None) -> list[IntakeDoc]:
     """Filed credit documents with candidate requests that are not settled yet (some claim
-    unfinished, or the candidates changed): PAID accounts first when `paying` is given (proof-loop
-    lead 2026-10-28), then oldest first. `keep(sha256)` restricts a parallel worker to its own
+    unfinished, or the candidates changed, or their reply text changed after `read_at` last read them):
+    PAID accounts first when `paying` is given (proof-loop lead 2026-10-28), then oldest first. `keep(sha256)` restricts a parallel worker to its own
     shard. An older H3 store without the table yields nothing."""
     try:
         rows = proof_db.execute(
             "SELECT intake_id, user_id, file_sha256, conversation_id, file_path, contact_h, "
-            "candidate_request_ids_json, received_at, matched_by FROM proof_intake "
+            f"candidate_request_ids_json, received_at, matched_by, {reply_column(proof_db)}, "
+            f"{reply_column_at(proof_db)} FROM proof_intake "
             "WHERE subject = 'credit' AND candidate_request_ids_json != '[]' ORDER BY received_at, intake_id").fetchall()
     except sqlite3.OperationalError:
         return []
@@ -73,11 +117,15 @@ def intake_docs(proof_db: sqlite3.Connection, settled: Callable[[str, list[str]]
             ids = [str(x) for x in json.loads(r[6] or "[]") if x]
         except ValueError:
             ids = []
-        if ids and not settled(r[0], ids):
-            doc = IntakeDoc(r[0], int(r[1]), r[2], str(r[3]), r[4], r[5] or "", ids, r[7] or "", r[8] or "")
-            if readable is not None and not readable(doc):
-                continue                  # bytes owed by blob-backfill: never selected, never a retry, no network
-            out.append(doc)
+        if not ids:
+            continue
+        doc = IntakeDoc(r[0], int(r[1]), r[2], str(r[3]), r[4], r[5] or "", ids, r[7] or "", r[8] or "",
+                        reply_text_mod.loads(r[9]), r[10] or "")
+        if settled(r[0], ids) and not (seen is not None and reply_recheck(doc, seen(r[0]))):
+            continue
+        if readable is not None and not readable(doc):
+            continue                  # bytes owed by blob-backfill: never selected, never a retry, no network
+        out.append(doc)
     return out
 
 

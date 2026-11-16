@@ -43,6 +43,49 @@ A backlog is drained by running the same command back to back
 Kill files: `/etc/hydra/credit-doc-intake.disabled`, `/etc/hydra/credit-verify.disabled`;
 `/etc/hydra/gmail-readers.disabled` turns support@ off and keeps Intercom on.
 
+## The dashboard code: read in the document and in what the customer typed
+
+The distributor-dashboard ask carries a one-time code and tells the customer to type it in the dashboard's find
+box and send one screenshot that shows both. Of the 28 codes issued from 2026-11-01 to 2026-11-15, 0 were
+consumed: 25 customers never replied, 3 attached a file, none showed the code. The reader looked for the code
+only in the document's extracted text, so a customer who typed it in the message was invisible.
+
+- **The feeder records what the customer typed** in `proof_intake.reply_text_json` (`proof/reply_text.py`): the
+  customer's own messages only (never ours: our ask contains the code), quoted history removed, each with its own
+  time, and only those within 7 days of the document. It lands on the filing's one row; a message typed after
+  the filing is added to the same row on the next read, and a later read that carries less never erases what was
+  recorded (`ProofStore.set_reply_text`). Only the `MAX_PARTS` (20) messages closest to the document are kept, so
+  a conversation that grows past 20 in-window messages drops the ones furthest from it. `UNIQUE (user_id,
+  file_sha256)` is unchanged.
+- **The reader looks in two places** (`docverify/challenge.check`): the document's text, then the typed
+  messages. The step detail records which (`where`: `document` or `reply_text`, plus `typed_at`), never the
+  code. Only a code SHOWN IN THE DOCUMENT consumes the challenge (`dv_challenges.consumed_at` / `consumed_by =
+  intake:<id>`): a typed one is possession only, so it never uses the code up and a corrected screenshot
+  showing the same code can still verify the credit. A typed code the document could not be bound to is
+  recorded as `seen_unbound`.
+- **The window is not wider.** The document must be inside the code's 7 days as before, and a typed code counts
+  only when its own message is inside them too.
+- **A typed code is bound only to a dashboard screenshot that supports the request.** It is consumed only when
+  that same document is a dashboard screenshot (`gate.F9_DOC_TYPES`) AND supports the request on its own
+  merits; a code typed next to a contract, or next to a screenshot of a different request, is never used up by
+  it. A typed code is a possession and freshness signal, never document evidence: it does not make a
+  dashboard a document of record (`gate.f9_anchor` refuses a challenge whose `where` is `reply_text`, and
+  `tray._f9_anchor` agrees).
+- **Our own ask quoted back is not the customer showing the code** (`challenge.shown`): an occurrence that sits
+  inside the ask's own sentence is skipped, in the document and in the message. A test holds the two markers to
+  the sender's line.
+- The typed text is searched for the code and nothing else: it is never given to the extractor model and never
+  written to a step.
+
+What a typed code proves is less than a code in the screenshot: it shows the account that received the ask
+answered it, not that the page in the screenshot was open when the code was typed. The approval rule is
+unchanged: the code alone confirms nothing, and a code typed in the message never anchors F9. The document must
+still show the code itself, support the credit, and be a dashboard screenshot for F9 to count
+(`gate.f9_anchor` + `extracted_support`). A message that arrives after the filing was read is not lost: the
+feeder stamps `proof_intake.reply_text_at`, and the reader reopens that settled filing (its extraction is a cache
+hit) so a code typed later is still seen (`intake_read.reply_recheck`). What it has read is the exact reply text
+(`dv_intake_reply_seen`), not a clock: a reply and the read after it can fall in one UTC second.
+
 ## The marker (`proof_marker.py`)
 
 `verify_messages.proof_tagged_at` answers "did they answer this note with a document?". The marker sets it from

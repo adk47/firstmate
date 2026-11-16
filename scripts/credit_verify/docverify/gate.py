@@ -43,6 +43,7 @@ from typing import Any
 import re
 
 from . import FRAUD_SIGNAL_FAMILY
+from . import challenge
 from . import crosscheck as xc
 from .extract import Extraction
 from .forensics import HARD, INFO, SOFT, Finding
@@ -72,7 +73,8 @@ F9_DOC_TYPES = ("dashboard_screenshot",)
 
 
 def f9_anchor(checks: list[xc.Check], ex: Extraction, kind: str | None) -> bool:
-    return (any(c.step == "xc_challenge" and c.status == xc.POSITIVE for c in checks)
+    return (any(c.step == "xc_challenge" and c.status == xc.POSITIVE
+                and c.detail.get("where") != challenge.REPLY_TEXT for c in checks)
             and getattr(ex, "doc_type", None) in F9_DOC_TYPES)
 RECORD_H3_KINDS = ("split_sheet", "contract", "invoice", "letter_of_direction", "pro_portal")
 

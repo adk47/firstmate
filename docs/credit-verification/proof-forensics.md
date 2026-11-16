@@ -81,7 +81,7 @@ A check that cannot run (a missing library, a file that doesn't decode, an unrea
 | F3c / F5e | dashboard numbers above our lifetime streams: an artist-level view (Spotify for Artists Home/Audience, Apple Music for Artists Overview) against the artist's total, a song/track page against the track's | mismatch |
 | F3c / F5e | dashboard view scope unknown, or our total missing | info (`dsp_number_scope_unknown`); not compared |
 | F8 | reverse image search (T2/T3) | **deferred**: needs network. Ticket: credit-trust V2 (T06). |
-| F9 | challenge-response identity code | **deferred**: needs a messaging channel. Ticket: credit-trust V2 (T06). |
+| F9 | challenge-response identity code | live: the one-time code is issued with the distributor-dashboard ask and read by `docverify/challenge.py`; the rule (document text vs. what the customer typed, and why a typed code never anchors F9) is owned by `proof-path.md` §"The dashboard code" |
 
 **Verdict** (`verdict.py`, deterministic), one per claimed role (request): a role the document can't show gets PLAUSIBLE, a listed role its own verdict, an unlisted one SUSPECT; none demotes another. `request_ids[i]` belongs to `claimed_roles[i]`; lists that don't pair up give the error `claim_context_mismatch` (UNDETERMINED) and no verdict row, while the file's forensics are still stored.
 

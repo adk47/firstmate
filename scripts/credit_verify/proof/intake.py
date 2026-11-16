@@ -45,6 +45,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
+from . import reply_text
 from .intercom import CACHE_ROOT, ORIGINAL, contact_hash
 from .sandbox import MAX_BYTES
 from .store import ProofStore
@@ -549,6 +550,8 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
                              "unmatched_conversations": [], "ambiguous_conversations": [], "no_document_conversations": [],
                              "deferred_conversations": [], "fetches_used": 0, "candidates_refreshed": 0,
                              "cache_not_customer": 0,
+                             # what the customer typed near a document (reply_text.py): counts only
+                             "reply_text_filed": 0, "reply_text_refreshed": 0,
                              "files_filed": 0, "files_duplicate": 0, "files_error": 0,
                              "users": 0, "with_candidate_requests": 0, "candidate_requests": 0,
                              "errors": [], "unresolved": [], "files_rejected_type": 0,
@@ -632,6 +635,7 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
                 continue
             ch = contact_hash((((doc.get("contacts") or {}).get("contacts")) or [{}])[0].get("id"))
             cands = candidate_requests(uid, open_rows=open_rows, held=held)
+            said = reply_text.customer_parts(doc)       # the customer's own messages, each with its own time
             stats["users"] += 1
             if cands:
                 stats["with_candidate_requests"] += 1
@@ -641,6 +645,7 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
                 if (uid, f["sha"]) in filed:
                     stats["files_duplicate"] += 1
                     continue
+                typed = reply_text.near(said, f.get("received_at"))
                 if store.already_filed(uid, f["sha"]):
                     # A request that opened after the filing becomes a candidate on it (QA #1417):
                     # the union is written (never a removal), so the reader picks the new claim up.
@@ -648,6 +653,10 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
                         stats["candidates_refreshed"] += 1
                     elif not apply and store.missing_candidates(uid, f["sha"], [c["request_id"] for c in cands]):
                         stats["candidates_refreshed"] += 1
+                    # A message typed after the document was filed lands on the SAME row (never a second one).
+                    if (store.set_reply_text(uid, f["sha"], typed) if apply
+                            else store.reply_text_differs(uid, f["sha"], typed)):
+                        stats["reply_text_refreshed"] += 1
                     stats["files_duplicate"] += 1
                     filed.add((uid, f["sha"]))
                     continue
@@ -660,11 +669,13 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
                                                 matched_by=how, contact_h=ch, mime=f["mime"],
                                                 nbytes=int(f.get("bytes") or 0),
                                                 detail={"provenance": f["source_ref"], "from": f["from"],
-                                                        "candidates": cands})
+                                                        "candidates": cands},
+                                                reply_text=typed)
                     if wrote is None:
                         stats["files_duplicate"] += 1
                         continue
                 stats["files_filed"] += 1
+                stats["reply_text_filed"] += 1 if typed else 0
                 filed_here += 1
                 filed.add((uid, f["sha"]))
             stats["filed_conversations" if filed_here else "duplicate_conversations"].append(cid)

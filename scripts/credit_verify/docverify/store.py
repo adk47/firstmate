@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS dv_intake_unmatched (intake_id TEXT NOT NULL, version
   keys_json TEXT NOT NULL, PRIMARY KEY (intake_id, version));
 CREATE TABLE IF NOT EXISTS dv_intake_keys (intake_id TEXT NOT NULL, version TEXT NOT NULL, at TEXT NOT NULL,
   candidates_json TEXT NOT NULL, keys_json TEXT NOT NULL, PRIMARY KEY (intake_id, version));
+CREATE TABLE IF NOT EXISTS dv_intake_reply_seen (intake_id TEXT PRIMARY KEY, text_json TEXT NOT NULL, at TEXT NOT NULL);
 """
 
 
@@ -688,6 +689,25 @@ class DocVerifyStore:
             else:
                 n_closed += 1
         return {"rows": n_open, "filings": len(filings), "closed_rows": n_closed, "fanout_read_rows": n_fanout}
+
+    def intake_reply_seen(self, intake_id: str) -> str | None:
+        """The customer reply text this filing was last read against, or None when the reader has not seen any.
+        A filing whose stored text differs owes a recheck (intake_read.reply_recheck)."""
+        row = self.db.execute("SELECT text_json FROM dv_intake_reply_seen WHERE intake_id=?",
+                              (intake_id,)).fetchone()
+        return (row[0] if row else None) or None
+
+    def record_intake_reply_seen(self, intake_id: str, reply_text: list[dict[str, str]]) -> None:
+        """Record the exact reply text the reader has now seen for this filing. A text -- not a clock: a reply
+        and the read that follows it can fall in one UTC second."""
+        from credit_verify.proof import reply_text as reply_text_mod
+        key = reply_text_mod.dumps(reply_text)
+        if not key:
+            return
+        with self.lock, self.db:
+            self.db.execute("INSERT INTO dv_intake_reply_seen (intake_id, text_json, at) VALUES (?,?,?) "
+                            "ON CONFLICT(intake_id) DO UPDATE SET text_json=excluded.text_json, at=excluded.at",
+                            (intake_id, key, utcnow()))
 
     def intake_settled(self, intake_id: str, candidates: list[str]) -> bool:
         """No Trino needed: the last run saw exactly these candidate requests and every

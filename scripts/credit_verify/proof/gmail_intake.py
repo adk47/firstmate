@@ -37,6 +37,7 @@ from typing import Any, Callable
 
 from .email_in import ACCEPTED_TYPES, MAX_ATTACHMENT_BYTES, attachments, authenticated_sender, match_account, \
     user_hash
+from . import reply_text
 from .store import ProofStore
 
 ACCOUNT = "support@muso.ai"
@@ -178,6 +179,19 @@ def message_attachment(raw: bytes, sha: str) -> tuple[str, str, bytes] | None:
     return None
 
 
+def typed(msg: EmailMessage) -> list[dict[str, str]]:
+    """What the sender wrote in the message that carried the attachment, as `proof_intake.reply_text_json`
+    rows: their own words (quoted history removed by reply_text.plain) at the message's own time. [] when the
+    body or the time cannot be read: no text, never a guess."""
+    try:
+        at = received_at(msg)
+        body = msg.get_body(preferencelist=("plain", "html"))
+        text = reply_text.plain(str(body.get_content())[:200_000]) if body is not None else ""
+    except Exception:  # noqa: BLE001 - a body we cannot read is no reply text; the filing is unaffected
+        return []
+    return [{"at": at, "text": text}] if at and text else []
+
+
 def _watch_injection(mid: str, msg: EmailMessage) -> None:
     """Prompt-injection watch on every support@ message read here, authenticated or not (caroline-guard-g1).
     DETECTION ONLY: a ledger row (lib/injection_watch.py), never a change to what is filed; no failure here can
@@ -203,7 +217,8 @@ def run(store: ProofStore, *, message_ids: list[str], fetch: RawFetch, lookup: L
                              "no_document_messages": [], "refused": {}, "fetch_errors": [],
                              "files_filed": 0, "files_duplicate": 0, "files_too_large": 0,
                              "candidates_refreshed": 0, "users": 0, "with_candidate_requests": 0,
-                             "blobs_stored": 0, "blob_errors": 0}
+                             "blobs_stored": 0, "blob_errors": 0,
+                             "reply_text_filed": 0, "reply_text_refreshed": 0}
 
     def keep_bytes(sha: str, data: bytes) -> None:
         # The bytes we already hold, stored once by sha256; a failure never blocks the filing (the bytes are
@@ -258,6 +273,7 @@ def run(store: ProofStore, *, message_ids: list[str], fetch: RawFetch, lookup: L
         if not files:
             stats["no_document_messages"].append(mid)
             continue
+        said = typed(msg)
         filed_here = 0
         for name, ctype, data in files:
             sha = hashlib.sha256(data).hexdigest()
@@ -269,6 +285,8 @@ def run(store: ProofStore, *, message_ids: list[str], fetch: RawFetch, lookup: L
                 keep_bytes(sha, data)
                 if (store.add_candidates(uid, sha, cands) if apply else store.missing_candidates(uid, sha, cands)):
                     stats["candidates_refreshed"] += 1
+                if (store.set_reply_text(uid, sha, said) if apply else store.reply_text_differs(uid, sha, said)):
+                    stats["reply_text_refreshed"] += 1
                 stats["files_duplicate"] += 1
                 continue
             if apply:
@@ -277,9 +295,11 @@ def run(store: ProofStore, *, message_ids: list[str], fetch: RawFetch, lookup: L
                                     received_at=received_at(msg), filed_by=filed_by,
                                     matched_by="authenticated_email", contact_h=user_hash(uid), mime=ctype,
                                     nbytes=len(data), detail={"provenance": PREFIX + mid, "name": name[-80:],
-                                                              "sender_auth": how})
+                                                              "sender_auth": how},
+                                    reply_text=said)
                 keep_bytes(sha, data)
             stats["files_filed"] += 1
+            stats["reply_text_filed"] += 1 if said else 0
             filed_here += 1
         stats["filed_messages" if filed_here else "duplicate_messages"].append(mid)
         log(f"{mid}: user …{str(uid)[-4:]}, {len(files)} file(s), {len(cands)} candidate request(s), {filed_here} filed")

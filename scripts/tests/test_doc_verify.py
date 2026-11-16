@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time as _time
@@ -34,6 +35,41 @@ from credit_verify.docverify.store import DocVerifyStore  # noqa: E402
 from credit_verify.proof import FORENSICS_VERSION  # noqa: E402
 from credit_verify.proof.store import ProofStore  # noqa: E402
 from lib import model_chain  # noqa: E402
+
+def rendered_dashboard_ask(code: str) -> str:
+    """The proof-need-ask body a customer receives, rendered by the real sender in a hermetic dry run."""
+    root = Path(__file__).resolve().parents[1]
+    d = Path(tempfile.mkdtemp())
+    try:
+        gate = d / "gate.sh"
+        gate.write_text((root / "intercom-verify-request.sh").read_text()
+                        .replace("readonly TESTABLE=0", "readonly TESTABLE=1"))
+        credits = d / "need.json"
+        credits.write_text(json.dumps({
+            "user": {"email": "jane@example.com", "id": "42", "first_name": "Jane",
+                     "professional_id": "9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64",
+                     "auth_id": "auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"},
+            "credits": [{"request_id": "r1", "role": "Mixing", "track_title": "Song A",
+                         "artist_name": "Big Star", "profile_id": "p1", "track_id": "t1"}],
+            "need": {"code": "distributor_dashboard_with_code", "doc_sha": "a" * 64,
+                     "doc_received_at": "2026-10-18T09:30:00Z", "doc_kind": "image", "doc_count": 1,
+                     "doc_shas": ["a" * 64], "verify_code": code}}))
+        env = {**os.environ, "MUSOAI_INTERCOM_TOKEN": "test-token", "INTERCOM_VERIFY_TEST_DAY": "2026-10-15",
+               "INTERCOM_VERIFY_TEST_LOG_DIR": str(d / "api-logs"),
+               "INTERCOM_VERIFY_TEST_LEDGER": str(d / "ledger.sqlite3"),
+               "INTERCOM_VERIFY_TEST_PROOF_DB": str(d / "proof.sqlite"),
+               "INTERCOM_VERIFY_TEST_LEDGER_HELPER": str(root / "scripts/credit_review/verify_ledger.py"),
+               "INTERCOM_VERIFY_TEST_JQ_LIB": str(root / "scripts/lib"),
+               "INTERCOM_VERIFY_TEST_API_RETRY_SLEEPS": "0 0"}
+        r = subprocess.run(["bash", str(gate), "send", "--campaign", "proof-need-ask", "--credits-file",
+                            str(credits), "--approved-by", "U7RP6HKUZ", "--dry-run"],
+                           env=env, capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            raise AssertionError(r.stdout + r.stderr)
+        return json.loads(r.stdout[r.stdout.index("{"):])["body"]
+    finally:
+        shutil.rmtree(d, True)
+
 
 RID = "11111111-2222-3333-4444-555555555555"
 KEY = f"{RID}#Mixing"
@@ -2046,6 +2082,343 @@ class IntakeD2Tests(unittest.TestCase):
         self.assertIn("expired", det)
         self.assertEqual([(r["outcome"], r["account_hold"]) for r in rows], [(gate.UNVERIFIABLE, False)])
 
+    # ---- the code in either of the two places the reader looks (proof-code-roundtrip-r1) ----
+    def _dashboard(self, text="DistroKid dashboard  Ann Alpha mixed Night Drive", doc_type="dashboard_screenshot"):
+        """The filed document reads as `text`; no DSP anchor, so only F9 can confirm the credit."""
+        def sandbox(path, declared, ctx, want_text=False):
+            return {"doc_text": text, "mime": "image/png", "kind": "distributor_portal", "facts": {}}
+        self.deps.sandbox = sandbox
+        self.answer = {**GOOD_ANSWER, "doc_type": doc_type}
+        self.deps.raw_credits = lambda tid: []
+        self.h3 = {KEY: H3(verdict="GENUINE")}
+
+    def _typed(self, text, at="2026-10-27T20:00:05Z", sha=None):
+        ps = ProofStore(self.proof_path)
+        ps.set_reply_text(42, sha or self.sha, [{"at": at, "text": text}])
+        ps.close()
+
+    def _issue(self, day=27, hour=12):
+        from datetime import datetime, timezone
+        return self.store.issue_challenge(RID, 42, now=datetime(2026, 10, day, hour, tzinfo=timezone.utc))
+
+    def _challenge_step(self):
+        st, det = self.store.db.execute("SELECT status, detail_json FROM dv_steps WHERE step='xc_challenge' "
+                                        "ORDER BY id DESC LIMIT 1").fetchone()
+        return st, json.loads(det), det
+
+    def test_a_code_typed_in_the_reply_text_is_possession_only_never_the_f9_anchor(self):
+        # The screenshot supports the request, so the typed code is bound, but a typed code is not document
+        # evidence: it cannot anchor F9, so the dashboard is not a document of record and the credit is not
+        # verified on this filing. It does not use the one-use code up either (see the correction tests).
+        ch = self._issue()
+        self._dashboard()                                               # the screenshot does not show the code
+        self._typed(f"here is my dashboard, the code is {ch['code'][:4]} {ch['code'][4:]}")
+        stats, rows = self._run()
+        st, detail, raw_detail = self._challenge_step()
+        self.assertEqual(st, xc.POSITIVE)
+        self.assertEqual(detail["where"], "reply_text")
+        self.assertEqual(detail["typed_at"], "2026-10-27T20:00:05Z")
+        self.assertNotIn(ch["code"], raw_detail)                        # the code itself is never logged
+        self.assertIsNone(self.store.challenges(RID)[0]["consumed_at"])  # the document code is still usable
+        self.assertEqual([r["outcome"] for r in rows], [gate.UNVERIFIABLE])
+        g = json.loads(self.store.db.execute("SELECT detail_json FROM dv_steps WHERE step='gate'").fetchone()[0])
+        self.assertFalse(g["f9"])
+        self.assertNotIn("xc_challenge", g.get("confirmed") or [])
+
+    def test_a_typed_code_without_a_supporting_attachment_does_not_consume_the_challenge(self):
+        # A code typed next to a dashboard of another track proves the account answered, but this document is
+        # not the one it belongs to: seen, recorded as unbound, never consumed, and it flips no verdict.
+        ch = self._issue()
+        self._dashboard()
+        self.answer = {**GOOD_ANSWER, "doc_type": "dashboard_screenshot",
+                       "tracks": [{"title": "Other Song", "isrc": "US-AB1-24-00009", "confidence": 0.9}],
+                       "credits": [{"person": "Bob Beta", "role": "Mixing Engineer", "track": "Other Song",
+                                    "share_percent": None, "confidence": 0.9}]}
+        self._typed(f"code {ch['code']}")
+        stats, rows = self._run()
+        st, detail, _raw = self._challenge_step()
+        self.assertEqual(st, xc.WEAK)
+        self.assertTrue(detail["seen_unbound"])
+        self.assertIn("the code was typed in the message, and this document does not support the request",
+                      detail["why"])
+        self.assertIsNone(self.store.challenges(RID)[0]["consumed_at"])
+        self.assertEqual([r["outcome"] for r in rows], [gate.UNVERIFIABLE])
+        g = json.loads(self.store.db.execute("SELECT detail_json FROM dv_steps WHERE step='gate'").fetchone()[0])
+        self.assertFalse(g["f9"])
+
+    def test_a_typed_code_is_bound_only_to_the_attachment_that_supports_the_request(self):
+        # Two attachments in one message: the first is a dashboard of another request, the second is this
+        # request's dashboard. Neither uses the code up: a typed code is never document evidence.
+        ch = self._issue()
+        sha_bad = hashlib.sha256(b"other dashboard").hexdigest()
+        ps = ProofStore(self.proof_path)
+        ps.file_document(file_sha256=sha_bad, user_id=42, conversation_id="777", candidate_request_ids=[RID],
+                         received_at="2026-10-27T19:59:59Z", matched_by="professional_id")
+        ps.close()
+
+        def dl(url, dest):
+            data = b"other dashboard" if url.endswith("other.png") else self.data
+            Path(dest).write_bytes(data)
+            return 1
+        self.deps.dl = dl
+
+        def sandbox(path, declared, ctx, want_text=False):
+            other_doc = "other.png" in os.path.basename(str(path))
+            if other_doc:
+                self.answer = {**GOOD_ANSWER, "doc_type": "dashboard_screenshot",
+                               "tracks": [{"title": "Other Song", "isrc": "US-AB1-24-00009", "confidence": 0.9}],
+                               "credits": [{"person": "Bob Beta", "role": "Mixing Engineer", "track": "Other Song",
+                                            "share_percent": None, "confidence": 0.9}]}
+            else:
+                self.answer = {**GOOD_ANSWER, "doc_type": "dashboard_screenshot"}
+            return {"doc_text": "DistroKid dashboard " + ("Other Song" if other_doc else "Night Drive"),
+                    "mime": "image/png", "kind": "distributor_portal", "facts": {}}
+        self.deps.sandbox = sandbox
+        self.deps.raw_credits = lambda tid: []
+        self.h3 = {KEY: H3(verdict="GENUINE")}
+        self._typed(f"code {ch['code']}")
+        self._typed(f"code {ch['code']}", sha=sha_bad)
+        self._run()
+        got = {pid: (st, json.loads(det)) for pid, st, det in self.store.db.execute(
+            "SELECT proof_id, status, detail_json FROM dv_steps WHERE step='xc_challenge'")}
+        self.assertEqual(got[sha_bad][0], xc.WEAK)
+        self.assertTrue(got[sha_bad][1]["seen_unbound"])
+        self.assertEqual(got[self.sha][0], xc.POSITIVE)
+        self.assertIsNone(self.store.challenges(RID)[0]["consumed_at"])
+
+    def test_a_code_in_the_document_text_still_consumes_the_challenge(self):
+        ch = self._issue()
+        self._dashboard(f"DistroKid dashboard  Ann Alpha mixed Night Drive  find: {ch['code']}")
+        stats, rows = self._run()
+        st, detail, _raw = self._challenge_step()
+        self.assertEqual(st, xc.POSITIVE)
+        self.assertEqual(detail["where"], "document")
+        self.assertNotIn("typed_at", detail)
+        used = self.store.challenges(RID)[0]
+        self.assertIsNotNone(used["consumed_at"])
+        self.assertEqual(used["consumed_by"], f"intake:{self.intake_id}")
+        self.assertEqual([r["outcome"] for r in rows], [gate.VERIFIED])
+
+    def test_the_document_is_named_when_the_code_is_in_both_places(self):
+        ch = self._issue()
+        self._dashboard(f"DistroKid dashboard  Ann Alpha mixed Night Drive  find: {ch['code']}")
+        self._typed(f"code {ch['code']}")
+        self._run()
+        self.assertEqual(self._challenge_step()[1]["where"], "document")
+
+    def test_a_wrong_code_in_the_reply_text_consumes_nothing(self):
+        ch = self._issue()
+        wrong = ch["code"][:-1] + ("A" if ch["code"][-1] != "A" else "C")
+        self._dashboard()
+        self._typed(f"the code is {wrong}")
+        stats, rows = self._run()
+        st, detail, _raw = self._challenge_step()
+        self.assertEqual(st, xc.WEAK)
+        self.assertEqual(detail["why"], ["the document does not show the code"])
+        self.assertIsNone(self.store.challenges(RID)[0]["consumed_at"])
+        self.assertEqual([(r["outcome"], r["account_hold"]) for r in rows], [(gate.UNVERIFIABLE, False)])
+        g = json.loads(self.store.db.execute("SELECT detail_json FROM dv_steps WHERE step='gate'").fetchone()[0])
+        self.assertFalse(g["f9"])
+
+    def test_a_code_typed_after_it_expired_consumes_nothing(self):
+        # The document is inside the window (10-27 20:00, code 10-27 12:00 .. 11-03 12:00); the message that
+        # carries the code is not. The message's own time decides: the document's never stands in for it.
+        ch = self._issue()
+        self._dashboard()
+        self._typed(f"code {ch['code']}", at="2026-11-03T12:00:01Z")
+        stats, rows = self._run()
+        st, detail, _raw = self._challenge_step()
+        self.assertEqual(st, xc.WEAK)
+        self.assertIn("the code was typed in a message outside the code's window", detail["why"])
+        self.assertIsNone(self.store.challenges(RID)[0]["consumed_at"])
+        self.assertEqual([r["outcome"] for r in rows], [gate.UNVERIFIABLE])
+
+    def test_a_typed_code_never_reaches_back_to_a_document_sent_before_the_code(self):
+        # The window is not widened: a document filed BEFORE the code was issued stays outside it, whatever the
+        # customer types later (an old screenshot plus today's code is not a live dashboard).
+        ch = self._issue(day=28)
+        self._dashboard()
+        self._typed(f"code {ch['code']}", at="2026-10-28T13:00:00Z")
+        stats, rows = self._run()
+        st, detail, _raw = self._challenge_step()
+        self.assertEqual(st, xc.WEAK)
+        self.assertEqual(detail["why"], ["the document was sent before the code was issued"])
+        self.assertIsNone(self.store.challenges(RID)[0]["consumed_at"])
+
+    def test_an_expired_code_in_the_reply_text_consumes_nothing(self):
+        ch = self._issue(day=10)                                        # expired 10-17, the document is 10-27
+        self._dashboard()
+        self._typed(f"code {ch['code']}")
+        stats, rows = self._run()
+        st, detail, _raw = self._challenge_step()
+        self.assertEqual(st, xc.WEAK)
+        self.assertEqual(len(detail["why"]), 1)
+        self.assertIn("expired", detail["why"][0])
+        self.assertIsNone(self.store.challenges(RID)[0]["consumed_at"])
+        self.assertEqual([(r["outcome"], r["account_hold"]) for r in rows], [(gate.UNVERIFIABLE, False)])
+
+    def test_a_typed_code_is_not_used_up_by_a_document_that_is_not_a_dashboard(self):
+        # A typed code names no document. Next to a contract it confirms nothing and is NOT consumed, so the
+        # dashboard screenshot the customer sends next can still use it.
+        ch = self._issue()
+        self._dashboard(text="Blue Fern Records ... Ann Alpha mixed Night Drive", doc_type="contract")
+        self._typed(f"code {ch['code']}")
+        self._run()
+        st, detail, _raw = self._challenge_step()
+        self.assertEqual(st, xc.WEAK)
+        self.assertIn("the code was typed in the message, and this document does not support the request",
+                      detail["why"])
+        self.assertIsNone(self.store.challenges(RID)[0]["consumed_at"])
+
+    def test_our_own_ask_quoted_back_is_not_the_customer_showing_the_code(self):
+        ch = self._issue()
+        self._dashboard()
+        self._typed("see attached. > open your distributor dashboard, press Ctrl+F (or Cmd+F on a Mac), type this "
+                    f"code in the find box: {ch['code']}, and take one screenshot that shows both")
+        self._run()
+        st, detail, _raw = self._challenge_step()
+        self.assertEqual(st, xc.WEAK)
+        self.assertEqual(detail["why"], ["the document does not show the code"])
+        self.assertIsNone(self.store.challenges(RID)[0]["consumed_at"])
+
+    def test_a_typed_code_beside_two_documents_leaves_the_document_code_unused(self):
+        # The same message sits beside two documents: neither typed read uses the one-use code up, so the
+        # screenshot that shows it can still verify the credit.
+        ch = self._issue()
+        other = b"%PDF-1.4 a second file in the same message"
+        sha2 = hashlib.sha256(other).hexdigest()
+        ps = ProofStore(self.proof_path)
+        second = ps.file_document(file_sha256=sha2, user_id=42, conversation_id="777", candidate_request_ids=[RID],
+                                  received_at="2026-10-27T20:00:01Z", matched_by="professional_id")
+        ps.close()
+        blobs = {self.sha: self.data, sha2: other}
+
+        def dl(url, dest):
+            Path(dest).write_bytes(blobs[self.sha] if url.endswith("doc.pdf") else other)
+            return 1
+        self.deps.dl = dl
+        self._dashboard()
+        self.h3 = {KEY: H3(verdict="GENUINE")}
+        self._typed(f"code {ch['code']}")
+        self._typed(f"code {ch['code']}", sha=sha2)
+        self._run()
+        got = {pid: (st, json.loads(det)) for pid, st, det in self.store.db.execute(
+            "SELECT proof_id, status, detail_json FROM dv_steps WHERE step='xc_challenge'")}
+        self.assertEqual(got[self.sha][0], xc.POSITIVE)
+        self.assertEqual(got[sha2][0], xc.POSITIVE)
+        self.assertIsNone(self.store.challenges(RID)[0]["consumed_at"])
+        self.assertNotEqual(second, self.intake_id)
+
+    def test_a_typed_code_does_not_stop_a_corrected_screenshot_from_verifying(self):
+        # The first screenshot omits the code; the customer types it in the message, then sends the corrected
+        # screenshot showing it. The typed read is possession only and must not use the one-use code up: the
+        # document read is what verifies the credit (QA review of the PR).
+        from datetime import datetime, timezone
+        ch = self._issue()
+        self._dashboard()                                               # the first screenshot: no code
+        self._typed(f"code {ch['code']}")
+        self._run()
+        self.assertEqual(self._challenge_step()[1]["where"], "reply_text")
+        self.assertIsNone(self.store.challenges(RID)[0]["consumed_at"])
+        later = datetime(2026, 10, 27, 21, tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        data = b"%PDF-1.4 a corrected dashboard screenshot"
+        sha2 = hashlib.sha256(data).hexdigest()
+        os.makedirs(self.cache, exist_ok=True)
+        path = os.path.join(self.cache, "corrected.png")
+        Path(path).write_bytes(data)
+        ps = ProofStore(self.proof_path)
+        corrected = ps.file_document(file_sha256=sha2, user_id=42, conversation_id="777",
+                                     candidate_request_ids=[RID], received_at=later,
+                                     matched_by="professional_id", file_path=path)
+        ps.close()
+        self._dashboard(f"DistroKid dashboard  Ann Alpha mixed Night Drive  find: {ch['code']}")
+        stats, rows = self._run()
+        st, detail, _raw = self._challenge_step()
+        self.assertEqual(st, xc.POSITIVE)
+        self.assertEqual(detail["where"], "document")
+        self.assertEqual(self.store.challenges(RID)[0]["consumed_by"], f"intake:{corrected}")
+        self.assertEqual([r["outcome"] for r in rows], [gate.VERIFIED])
+
+    def test_a_code_typed_after_the_screenshot_was_read_is_read_again(self):
+        # The screenshot settles (unverifiable) with no code; the customer then types the code in the thread.
+        # The feeder stamps the changed reply text, and the reader reopens that filing instead of skipping it
+        # as settled (QA review of the PR).
+        ch = self._issue()
+        self._dashboard()
+        self._run()
+        self.assertEqual(self._challenge_step()[0], xc.WEAK)
+        # the read above is the one the customer's later message is measured against
+        db = sqlite3.connect(os.path.join(self.td.name, "dv.sqlite"))
+        db.execute("UPDATE dv_outcomes SET at=? WHERE intake_id=?", ("2026-10-27T20:00:00Z", self.intake_id))
+        db.commit()
+        db.close()
+        self._typed(f"the code is {ch['code']}")                        # the feeder's own write, stamped now
+        stamped = sqlite3.connect(self.proof_path).execute(
+            "SELECT reply_text_at FROM proof_intake WHERE intake_id=?", (self.intake_id,)).fetchone()[0]
+        self.assertGreater(stamped, "2026-10-27T20:00:00Z")
+        stats, rows = self._run()
+        self.assertEqual(stats.intake, 1)                               # the settled filing is read again
+        st, detail, _raw = self._challenge_step()
+        self.assertEqual(st, xc.POSITIVE)
+        self.assertEqual(detail["where"], "reply_text")
+        self.assertEqual(detail["typed_at"], "2026-10-27T20:00:05Z")
+        self.assertIsNone(self.store.challenges(RID)[0]["consumed_at"])
+        stats, rows = self._run()
+        self.assertEqual(stats.intake, 0)                               # read once for that text, not every tick
+
+    def test_a_code_typed_in_the_same_second_as_the_read_is_not_missed(self):
+        # Both writes land inside one UTC second: the read's stamp is second-precision and the reply's is not,
+        # so the later reply must still read as later instead of being skipped as already read.
+        ch = self._issue()
+        self._dashboard()
+        self._run()
+        self.assertEqual(self._challenge_step()[0], xc.WEAK)
+        db = sqlite3.connect(os.path.join(self.td.name, "dv.sqlite"))
+        db.execute("UPDATE dv_outcomes SET at=? WHERE intake_id=?", ("2026-10-27T20:00:00Z", self.intake_id))
+        db.commit()
+        db.close()
+        self._typed(f"the code is {ch['code']}")
+        # the reply was written in the very second the read was recorded: a timestamp compare cannot order them
+        db = sqlite3.connect(self.proof_path)
+        db.execute("UPDATE proof_intake SET reply_text_at=? WHERE intake_id=?",
+                   ("2026-10-27T20:00:00Z", self.intake_id))
+        db.commit()
+        db.close()
+        stats, rows = self._run()
+        self.assertEqual(stats.intake, 1)
+        st, detail, _raw = self._challenge_step()
+        self.assertEqual(st, xc.POSITIVE)
+        self.assertEqual(detail["where"], "reply_text")
+
+    def test_a_proof_store_from_before_the_reply_text_column_is_still_read(self):
+        # The reader opens the proof store read-only and never migrates it. A store the intake writer has not
+        # touched since the deploy has no column: its filings are read on the document alone, never dropped.
+        db = sqlite3.connect(self.proof_path)
+        db.execute("ALTER TABLE proof_intake DROP COLUMN reply_text_json")
+        db.commit()
+        db.close()
+        ch = self._issue()
+        self._dashboard(f"DistroKid dashboard  Ann Alpha mixed Night Drive  find: {ch['code']}")
+        stats, rows = self._run()
+        self.assertEqual(stats.intake, 1)
+        self.assertEqual(self._challenge_step()[1]["where"], "document")
+
+    def test_the_reply_text_is_never_given_to_the_extractor_or_written_to_a_step(self):
+        ch = self._issue()
+        seen = []
+        self._dashboard()
+        self.deps.extractor = Extractor(self.store, key="k",
+                                        post=lambda *a: (seen.append(json.dumps(a, default=str)),
+                                                         or_response(self.answer))[1])
+        self._typed(f"MARKERWORDS code {ch['code']}")
+        self._run()
+        self.assertEqual(len(seen), 1)
+        self.assertNotIn("MARKERWORDS", seen[0])
+        self.assertNotIn(ch["code"], seen[0])
+        steps = "".join(r[0] or "" for r in self.store.db.execute("SELECT detail_json FROM dv_steps"))
+        self.assertNotIn("MARKERWORDS", steps)
+        self.assertNotIn(ch["code"], steps)
+
     def test_a_filed_document_is_read_by_sha_and_judged_against_its_open_request(self):
         stats, rows = self._run()
         self.assertEqual((stats.intake, stats.outcomes), (1, {"verified": 1}))
@@ -3115,13 +3488,22 @@ class TrayTests(unittest.TestCase):
         self._out("p9", "r-code-only", "verified", fresh=False)
         self.store.step("r1", "p9", "xc_challenge", "positive", {"anchor_class": "F9"}, "r-code-only#Mixing")
         self.store.step("r1", "p9", "gate", "verified", {"extracted_support": None}, "r-code-only#Mixing")
+        self._out("p11", "r-f9-typed", "verified", fresh=False)         # a typed code is not the F9 anchor
+        self.store.step("r1", "p11", "xc_challenge", "positive",
+                        {"anchor_class": "F9", "where": "reply_text"}, "r-f9-typed#Mixing")
+        self.store.step("r1", "p11", "gate", "verified", {"extracted_support": {"person": "Ann"}, "f9": True},
+                        "r-f9-typed#Mixing")
         t = tray.build(self.store, gate=lambda uid: (True, "allow"), tracks=lambda ids: {})
         self.assertEqual([a["request_id"] for a in t.approve], ["r-f9"])
         self.assertIn("F9", t.approve[0]["anchor"])
-        self.assertEqual(sorted(a["request_id"] for a in t.not_approvable), ["r-code-only", "r-f9-letter"])
+        self.assertEqual(sorted(a["request_id"] for a in t.not_approvable),
+                         ["r-code-only", "r-f9-letter", "r-f9-typed"])
         ok, why = tray._f9_anchor(self.store, "p10", "r-f9-letter#Mixing")
         self.assertEqual(ok, False)
         self.assertIn("not on a distributor/DSP dashboard", why)
+        ok, why = tray._f9_anchor(self.store, "p11", "r-f9-typed#Mixing")
+        self.assertEqual(ok, False)
+        self.assertIn("typed in the message", why)
         t = tray.build(self.store, gate=lambda uid: (False, "account gate hold"), tracks=lambda ids: {})
         self.assertEqual(t.approve, [])                                   # the gate still decides
 
@@ -4003,6 +4385,70 @@ class ChallengeTests(unittest.TestCase):
         self.assertIn("already used by another document", " ".join(other.detail["why"]))
         self.assertEqual(challenge.check("ACDE3467", used, user_id=7, received_at="2026-10-30T10:00:00Z").status, xc.WEAK)
 
+    def test_check_reads_the_code_from_the_reply_text_inside_its_window_only(self):
+        from credit_verify.docverify import challenge
+        code = "ACDEFGHJ"
+        chs = [{"id": 5, "user_id": 7, "code": code, "issued_at": "2026-11-01T00:00:00Z",
+                "expires_at": "2026-11-08T00:00:00Z", "consumed_at": None, "consumed_by": None}]
+
+        def check(doc="a dashboard", at="2026-11-02T00:00:00Z", typed_at="2026-11-02T00:00:09Z",
+                  typed=f"my code: {code.lower()}", **kw):
+            return challenge.check(doc, chs, user_id=7, received_at=at, consumer="intake:7:a",
+                                   reply=[{"at": typed_at, "text": typed}], **kw)
+        got = check()
+        self.assertEqual(got.status, xc.POSITIVE)
+        self.assertEqual(got.detail["where"], challenge.REPLY_TEXT)
+        self.assertEqual(got.detail["typed_at"], "2026-11-02T00:00:09Z")
+        self.assertNotIn(code, json.dumps(got.detail))
+        self.assertEqual(check(typed_at="2026-11-08T00:00:00Z").status, xc.POSITIVE)     # the window's last second
+        self.assertEqual(check(typed_at="2026-11-08T00:00:01Z").status, xc.WEAK)         # typed after it expired
+        self.assertEqual(check(typed_at="2026-10-31T23:59:59Z").status, xc.WEAK)         # typed before it existed
+        self.assertEqual(check(typed_at="").status, xc.WEAK)                             # a message with no time
+        self.assertEqual(check(at="2026-11-08T00:00:01Z").status, xc.WEAK)               # the DOCUMENT is outside
+        self.assertEqual(check(at="2026-10-31T00:00:00Z").status, xc.WEAK)
+        self.assertEqual(check(at=None).status, xc.WEAK)
+        self.assertEqual(check(reply_ok=False).status, xc.WEAK)                          # not a dashboard
+        self.assertEqual(check(typed="my code: ACDEFGHK").status, xc.WEAK)               # one character off
+        self.assertEqual(check(typed="").status, xc.WEAK)
+        # another account's code, a voided code and a code another filing used stay refused, typed or not
+        self.assertEqual(challenge.check("x", chs, user_id=8, received_at="2026-11-02T00:00:00Z",
+                                         reply=[{"at": "2026-11-02T00:00:09Z", "text": code}]).status, xc.WEAK)
+        used = [{**chs[0], "consumed_at": "2026-11-02T00:00:00Z", "consumed_by": "intake:7:first"}]
+        self.assertEqual(challenge.check("x", used, user_id=7, received_at="2026-11-02T00:00:00Z",
+                                         consumer="intake:7:second",
+                                         reply=[{"at": "2026-11-02T00:00:09Z", "text": code}]).status, xc.WEAK)
+        self.assertEqual(challenge.check("x", used, user_id=7, received_at="2026-11-02T00:00:00Z",
+                                         consumer="intake:7:first",
+                                         reply=[{"at": "2026-11-02T00:00:09Z", "text": code}]).status, xc.POSITIVE)
+        void = [{**chs[0], "consumed_at": "2026-11-02T00:00:00Z", "consumed_by": "void:held_send"}]
+        self.assertEqual(challenge.check("x", void, user_id=7, received_at="2026-11-02T00:00:00Z",
+                                         reply=[{"at": "2026-11-02T00:00:09Z", "text": code}]).status, xc.WEAK)
+        # no reply text at all is the old behaviour exactly
+        self.assertEqual(challenge.check(f"find {code}", chs, user_id=7,
+                                         received_at="2026-11-02T00:00:00Z").detail["where"], challenge.DOCUMENT)
+        self.assertEqual(challenge.check("nothing", chs, user_id=7, received_at="2026-11-02T00:00:00Z").status, xc.WEAK)
+
+    def test_the_ask_quoted_back_is_not_shown_and_the_markers_are_the_asks_own_words(self):
+        from credit_verify.docverify import challenge
+        code = "ACDEFGHJ"
+        ask = f"press Ctrl+F (or Cmd+F on a Mac), type this code in the find box: {code}, and take one screenshot"
+        self.assertFalse(challenge.shown(code, ask))
+        self.assertFalse(challenge.shown(code, ask[:ask.index(code) + len(code)]))       # the quote cut after the code
+        self.assertFalse(challenge.shown(code, ask[ask.index(code):]))                   # ... or before it
+        self.assertTrue(challenge.shown(code, ask + f"\n\nmy code is {code}"))          # quoted AND typed
+        self.assertTrue(challenge.shown(code, f"I put {code} in the find box"))
+        self.assertTrue(challenge.shown(code, "a c d e-f g h j"))
+        self.assertFalse(challenge.shown(code, ""))
+        self.assertFalse(challenge.shown(code, None))
+        # held to the sender's line: the code sits between exactly these words in the ask a customer receives
+        norm = challenge._norm(rendered_dashboard_ask(code))
+        self.assertIn(challenge.ASK_BEFORE + code + challenge.ASK_AFTER, norm)
+
+    def test_the_writer_keeps_no_message_further_from_the_document_than_a_code_lives(self):
+        from credit_verify.docverify import challenge
+        from credit_verify.proof import reply_text
+        self.assertEqual(reply_text.NEAR_DAYS, challenge.VALID_DAYS)
+
     def test_a_consumed_code_never_confirms_a_second_filing_end_to_end(self):
         with tempfile.TemporaryDirectory() as td:
             store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
@@ -4024,6 +4470,12 @@ class ChallengeTests(unittest.TestCase):
         o = gate.decide(h3_verdict="GENUINE", kind="distributor_portal", ex=ex, findings=[], checks=[f9],
                         account_held=False, extracted_support={"person": "Ann Alpha"})
         self.assertEqual(o.outcome, gate.VERIFIED)
+        typed = xc.Check("xc_challenge", xc.POSITIVE, {"anchor_class": "F9", "where": "reply_text"})
+        self.assertFalse(gate.f9_anchor([typed], ex, None))             # a typed code never anchors F9
+        o = gate.decide(h3_verdict="GENUINE", kind="distributor_portal", ex=ex, findings=[], checks=[typed],
+                        account_held=False, extracted_support={"person": "Ann Alpha"})
+        self.assertEqual(o.outcome, gate.UNVERIFIABLE)
+        self.assertNotIn("xc_challenge", o.detail.get("confirmed") or [])
         o = gate.decide(h3_verdict="GENUINE", kind="distributor_portal", ex=ex, findings=[], checks=[f9],
                         account_held=False, extracted_support=None)
         self.assertEqual(o.outcome, gate.UNVERIFIABLE)                  # a code alone confirms nothing

@@ -231,10 +231,16 @@ def _f9_anchor(store: Any, proof_id: str, key: str) -> tuple[bool, str]:
     """F9 (Fable 094, the captain's second form of stateless proof: 'a one-time code on a page the profile
     already controls'): the claim's latest xc_challenge is POSITIVE AND the gate recorded the extracted credit
     (the claimant in that role on that track). A code alone never approves."""
-    ch = store.db.execute("SELECT status FROM dv_steps WHERE proof_id=? AND request_id=? AND step='xc_challenge' "
-                          "ORDER BY id DESC LIMIT 1", (proof_id, key)).fetchone()
+    ch = store.db.execute("SELECT status, detail_json FROM dv_steps WHERE proof_id=? AND request_id=? AND "
+                          "step='xc_challenge' ORDER BY id DESC LIMIT 1", (proof_id, key)).fetchone()
     if not ch or ch[0] != "positive":
         return False, "no F9 code shown"
+    try:
+        ch_detail = json.loads(ch[1] or "{}")
+    except ValueError:
+        ch_detail = {}
+    if ch_detail.get("where") == "reply_text":
+        return False, "the F9 code was typed in the message, not shown on the dashboard"
     g = store.db.execute("SELECT detail_json FROM dv_steps WHERE proof_id=? AND request_id=? AND step='gate' "
                          "ORDER BY id DESC LIMIT 1", (proof_id, key)).fetchone()
     try:
