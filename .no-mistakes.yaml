@@ -1,0 +1,92 @@
+# Per-repo no-mistakes overrides. Trusted-only: the pipeline reads commands.test
+# from the DEFAULT-branch copy of this file, never from a pushed branch.
+#
+# Without this file the Test step had no command and fell back to an agent turn
+# bounded by a 30-minute wall clock; the turn was killed with SIGTERM (exit 143)
+# and the step reported `test, failed, 0 findings, ~1800000 ms` on several lanes.
+#
+# commands.test is the suite .github/workflows/pr-validate.yml runs, copied, not
+# invented. Keep it in step with that workflow when either side changes:
+#   1. job `bats-tests`, step "Run all bats suites under scripts/ + ops-admin gate
+#      tests": the same discovery roots, BATS_TEST_TIMEOUT, Slack-token scrub and
+#      `--filter-tags '!host-systemd'` (those cases run in the node-8 job only).
+#      CI shards the files over 4 runners and narrows a PR to the suites it
+#      concerns (scripts/ci/bats-scope.py); that selector needs a pull-request
+#      merge commit, so outside Actions it runs every suite, as here.
+#      `bats --jobs` refuses to run without GNU parallel. Where parallel is
+#      absent, files run 16 at a time (CI's total: 4 shards x --jobs 4) through
+#      `xargs -P`, one bats process per file (= --no-parallelize-within-files),
+#      slowest first (CI's `slow` list + the 3 long poles measured on ak47).
+#      xargs exits non-zero (123) when any file fails. NEVER serial: the corpus
+#      is ~10,000 cases; serial on ak47 ran 660 in 41 min, then SIGTERM (rc 143).
+#      At -P 8 without the ordering, 9,939 cases took 50 min (2026-11-16).
+#   2. job `py-tests`, step "Run outreach sender tests": the repo's pytest step.
+#      (The other py-tests steps are per-file stdlib unittest invocations.)
+# The command is POSIX sh (dash has no pipefail), so `find` is never piped: a
+# missing discovery root fails the step through `set -e` instead of silently
+# running fewer suites, and an empty discovery fails it too.
+# Bats runs first and pytest only after it passes, so a failure in either one
+# fails the step.
+#
+# KNOWN PRE-EXISTING FAILURE, not caused by your change: one test passes alone
+# and fails in a combined run because of test order:
+#   scripts/tests/test_credit_score_approve.py::UnreadableProfile::
+#     test_the_admin_client_raises_bad_request_on_http_400_only
+# It fails (AttributeError: 'NoneType' object has no attribute 'get', in
+# scripts/credit_review/admin.py) when it runs after
+# scripts/tests/test_credit_trust_decide.py in the same pytest process, and
+# passes when its file runs alone (142 passed). Measured on origin/main
+# 7a69bc93a, 2026-11-16: `pytest test_credit_trust_decide.py
+# test_credit_score_approve.py` -> 1 failed, 400 passed. CI runs each of those
+# files in its own process, so CI does not hit it; a broader local pytest run
+# that puts both files in one process will.
+commands:
+  test: |
+    set -eu
+    for v in $(env | sed -n 's/^\(MUSO_SLACK_BOT_TOKEN_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
+    export MUSO_SLACK_ENV_FILE=/dev/null
+    export BATS_TEST_TIMEOUT="${BATS_TEST_TIMEOUT:-600}"
+    export JEV_ENV_FILE=/dev/null
+    export JEV_SHADOW_DIR="${TMPDIR:-/tmp}/hydra-nm-jev-shadow-$$"
+    export JEV_EVAL_DIR="${TMPDIR:-/tmp}/hydra-nm-jev-eval-$$"
+    sa_dirs=""
+    for d in skills-all/*/scripts/tests; do [ -d "$d" ] && sa_dirs="$sa_dirs $d"; done
+    files=$(find scripts \
+      workspaces/operations/skills/muso-ops-admin/scripts/tests \
+      workspaces/operations/skills/muso-caroline-weekly-review/scripts/tests \
+      workspaces/operations/skills/muso-support-email-triage/scripts/tests \
+      workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/apply-verdicts.bats \
+      workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/compute-run-summary.bats \
+      workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-fraud-signals.bats \
+      workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/fraud-muso-only-lookup.bats \
+      workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/fraud-muso-only-snapshot-writer.bats \
+      workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/render-dry-run-summary.bats \
+      workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/verify-credit-request-status.bats \
+      workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/batch-flag-credits.bats \
+      workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/render-slack-summary.bats \
+      workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/apply-verdicts-attribution.bats \
+      workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/results-per-row-attribution.bats \
+      workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/dispatch-cv-batch.bats \
+      workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-backend-signals.bats \
+      workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
+      workspaces/support/skills/order-fulfillment/scripts/tests \
+      $sa_dirs \
+      -type f -name '*.bats')
+    files=$(printf '%s\n' $files | sort)
+    [ -n "$files" ] || { echo 'no *.bats files discovered' >&2; exit 1; }
+    if command -v parallel >/dev/null 2>&1; then
+      bats --jobs 4 --no-parallelize-within-files --filter-tags '!host-systemd' $files
+    else
+      slow="scripts/tests/credit-verify-outbound.bats scripts/tests/bats-main-report.bats
+        scripts/tests/bats-scope.bats scripts/tests/merge-landing-watchdog.bats
+        scripts/tests/rollback.bats scripts/tests/close-duplicate-conversations.bats
+        scripts/tests/prod-log-alert-watchdog.bats scripts/tests/sync-help-centre.bats
+        scripts/tests/deploy-agents-bound-probe.bats scripts/tests/support-changelog-sync.bats
+        scripts/tests/rollback-preserves-mcp.bats scripts/tests/codex-quota-probe.bats
+        scripts/tests/qa-approval-retry.bats scripts/tests/cron-store.bats
+        scripts/tests/qa-review-reconcile.bats"
+      { for f in $slow; do printf '%s\n' $files | grep -Fx -- "$f" || true; done
+        printf '%s\n' $files | grep -vFx "$(printf '%s\n' $slow)" || true; } |
+        xargs -P 16 -n 1 bats --filter-tags '!host-systemd'
+    fi &&
+    python3 -m pytest -q tests/test_metadata.py tests/test_worker.py tests/test_gates.py tests/test_gmail_client.py tests/test_nocodb_client.py tests/test_sender_worker_cli.py
