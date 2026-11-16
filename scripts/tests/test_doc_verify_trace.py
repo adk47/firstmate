@@ -288,6 +288,7 @@ READERS: dict[str, frozenset[str]] = {
     "scripts/credit_review/proof_reviewer.py": EMITTED,
     "scripts/credit_review/proposals.py": frozenset(),
     "scripts/credit_review/reply_due_scan.py": frozenset(),
+    "scripts/credit_review/stage2_gap.py": frozenset(),  # names the table in prose; reads no outcome word
     "scripts/credit_verify/docverify/l11.py": frozenset({"forged", "forged_positive", "verified"}),
     "scripts/credit_verify/docverify/runner.py": frozenset(),  # writes what the gate returns; names no word
     "scripts/credit_verify/docverify/store.py": frozenset({"unknown", "unverifiable", "verified"}),
