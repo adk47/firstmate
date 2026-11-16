@@ -15,14 +15,18 @@ Buckets (first match wins, so they partition the open population exactly and
   3. needs documents, user told — we asked (ledger ask note or core noticeSentAt)
   4. needs documents, not told  — we decided something, the user was never asked
   5. user sent documents, we owe a look — a document is on file / the reply is unreviewed
-  6. sitting with a person      — a human-review hold, a support@ contact, a reply, a flagged hold
+  6. sitting with a person      — a support ticket/hold a person must clear, a reply, a flagged hold
   7. held for fraud / watchlist — the fraud watchlist or the fraud-lens holds
   8. muted, no more messages    — a messaging refusal hold suppresses further notes
   9. declined in the last 24h   — flow, not open (core updatedat window)
 
 The precedence order matters and is deliberate: a row a human or the fraud lens owns
 must never be counted as "waiting on the user", and "not touched by us" must mean
-literally nothing was ever written — that is the bucket the captain acts on.
+literally nothing was ever written — that is the bucket the captain acts on. The mirror
+of that rule: a row the AI can move must never be parked with a person. Having emailed
+support@ in the last 90 days is therefore NOT bucket 6 (captain 2026-11-16, #1992/#2090):
+the decider asks those users in the verify notes, and the report counts them where the
+ask ladder can see them — untouched, told, muted or not told.
 
 Definitions reused from the measurement the ops steward already runs
 (data/verification-ops-steward-s1/s1_tick.py + scoreboard.md) and from the queue-arm
@@ -853,6 +857,10 @@ def intake_1h() -> dict:
 CLASSIFICATION_LANES = {"credits_untouched", "credits_docs_in", "claims_untouched",
                         "claims_docs_in"}
 
+# Only the claim lanes read the proof feed: `classify_claim` holds a support@ contact, while
+# `classify_credit` takes its proof tags from the ledger and reads no contact list at all.
+PROOF_FEED_LANES = {"claims_untouched", "claims_docs_in"}
+
 
 def _EMPTY_FACTS() -> dict:
     """The shape every reader expects, so an unreadable ledger degrades to "nothing known"
@@ -1134,17 +1142,26 @@ def classify_credit(user: int, facts: dict, credit: dict, wz: frozenset) -> str:
     on_file = (reason.startswith("proof on file: human review")
                or (reason.startswith("proof on file")
                    and (lat.get("decision") == "hold" or bool(lat.get("proof_id")))))
-    # NOT `decision == "support"`: that write is our OWN ask, not a ticket and not a person
-    # (captain 2026-11-16, "the only people involved should be the requester"). decide.py's
-    # REQUEST SUPPORT moves the row to user_verification_needed and Knock sends the "more
-    # info needed" notice, so the requester is the one who was told and the row carries on
-    # down the ask/approve/no ladder: `told` once core records that notice, `not_told` while
-    # the write has not landed (the report's own decided-not-closed class). Calling it a
-    # support ticket parked every asked row on a person who was never working it.
+    # Neither a support@ contact nor a `decision == "support"` write is a person (captain
+    # 2026-11-16: "the only people involved should be the requester. our AI should handle
+    # everything else").
+    # - The `support` write is our OWN ask: decide.py's REQUEST SUPPORT moves the row to
+    #   user_verification_needed and Knock sends the "more info needed" notice, so the
+    #   requester is the one who was told and the row carries on down the ask/approve/no
+    #   ladder: `told` once core records that notice, `not_told` while the write has not
+    #   landed. Calling it a support ticket parked every asked row on a person who was never
+    #   working it.
+    # - Having emailed support@ is not work either: the decider stopped parking those users on
+    #   2026-11-14 (#1992) and asks them through the verify notes instead (#2090), and the
+    #   credit classifier reads no contact list at all. The ledger is append-only, so the old
+    #   "emailed support@ … never asked" sentences are still on file; no code treats them as a
+    #   hold, and such a row falls through to muted / told / untouched / not_told.
+    # A CLAIM whose claimant emailed support@ is still a person (classify_claim below:
+    # claim_proof_ask still holds those claimants), and only a hold a person must actually
+    # clear stays here.
     if on_file \
-            or "emailed support@" in reason \
             or "support already requested" in reason or user in facts["replied"] \
-            or user in facts["flagged"] or user in facts["support_contacts"]:
+            or user in facts["flagged"]:
         return "human"
     if user in facts["muted"]:
         return "muted"
@@ -1670,8 +1687,12 @@ def comms_build(credits: dict, claims: dict, facts: dict, classify_c, classify_k
     # of those reads failed this tick (the sentinel's CLASSIFICATION_LANES are in `unmeasured`),
     # the classifier is running on EMPTY facts: an already-asked user reads as `untouched`,
     # which is not backlog growth but a blind read (QA @ac05f37). Those classes are unmeasured.
-    if unmeasured & CLASSIFICATION_LANES:
-        for key in ("credits_waiting_us", "credits_owing_proof", "claims_pending"):
+    # The gate is per family: a failed proof feed blinds only the claim lanes, so the credit
+    # classes stay measured.
+    credit_blind = bool(unmeasured & (CLASSIFICATION_LANES - PROOF_FEED_LANES))
+    claim_blind = bool(unmeasured & CLASSIFICATION_LANES)
+    if credit_blind:
+        for key in ("credits_waiting_us", "credits_owing_proof"):
             out[key]["measured"] = False
     else:
         for uid, item in credits.items():
@@ -1680,6 +1701,9 @@ def comms_build(credits: dict, claims: dict, facts: dict, classify_c, classify_k
                 add("credits_waiting_us", item["paid"], item["oldest"])
             elif b == "not_told":
                 add("credits_owing_proof", item["paid"], item["oldest"])
+    if claim_blind:
+        out["claims_pending"]["measured"] = False
+    else:
         for uid, item in claims.items():
             if classify_k(uid, item) == "untouched":
                 add("claims_pending", item["paid"], item["oldest"])
@@ -2365,7 +2389,9 @@ def selftest() -> int:
         ("5c a dated document OLDER than the request is not proof", 17, "not_told", cred()),
         ("5d a core response newer than its request is docs_in", 18, "docs_in",
          cred(reply_at="2026-10-26T00:00:00Z", core_reply=True)),
-        ("6 emailed support@", 6, "human", cred()),
+        # A legacy hold row naming the support@ contact is not a person any more: the row was
+        # decided (so not untouched) and nobody ever asked (so not told).
+        ("6 emailed support@", 6, "not_told", cred()),
         ("6b support@ BUT a newer dated document wins", 16, "docs_in", cred()),
         ("6c an OLD tag beside a NEW one still qualifies", 19, "docs_in", cred()),
         ("7 untouched", 7, "untouched", cred()),
@@ -2471,9 +2497,10 @@ def main(argv: list[str]) -> int:
             facts["support_contacts"] = support_contacts
         except Exception as e:                                 # noqa: BLE001
             errors.append(f"proof feed: {type(e).__name__}: {e}")
-            # the 90-day support@ contact list comes from that feed: without it the human /
-            # docs_in split is unknown, so those lanes are unmeasured, never reclassified
-            local_failed |= CLASSIFICATION_LANES
+            # the 90-day support@ contact list comes from that feed, and only the claim lanes
+            # read it: without it a claim's human / docs_in split is unknown, so those lanes
+            # are unmeasured, never reclassified. The credit lanes read no contact list.
+            local_failed |= PROOF_FEED_LANES
     if light:
         wz, wz_profiles = frozenset(), frozenset()
     else:
@@ -2567,10 +2594,11 @@ def main(argv: list[str]) -> int:
         key for prefix, keys in (("credits", ("credits_untouched", "credits_docs_in")),
                                  ("claims", ("claims_untouched", "claims_docs_in")))
         for key in keys if any(e.startswith(prefix + ":") for e in m["errors"]))
-    # A failed watchlist or proof feed blinds the CLASSIFICATION itself: `watch` would read
-    # empty and `human`/`docs_in` would lose their support@ contact evidence, so the sentinel
-    # could post a false backlog page built on facts it never read. Those lanes carry their last
-    # known set and read unmeasured, exactly like a failed population query (QA @4a25b33).
+    # A failed watchlist or proof feed blinds the lanes that read it: the watchlist feeds
+    # `watch` for both families, and the proof feed feeds a CLAIM's support@ contact evidence
+    # (the credit classifier reads no contact list), so the sentinel could post a false backlog
+    # page built on facts it never read. Those lanes carry their last known set and read
+    # unmeasured, exactly like a failed population query (QA @4a25b33).
     failed_pop = failed_pop | frozenset(local_failed)
     probe_base = read_sentinel_state()
     probe_base_ts = (probe_base or {}).get("ts")

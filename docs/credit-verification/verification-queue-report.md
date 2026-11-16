@@ -65,12 +65,19 @@ mismatch instead of printing a total it cannot defend).
    undated `proof on file` hold does **not** count — the proof feed carries no timestamps, so
    such a hold is structurally an old accepted document and the decider itself files it as
    "human review" (see the Fable ruling below).
-3. **Sitting with a person** — a human-review hold (`emailed support@`, `support already
-   requested`), a per-role split
+3. **Sitting with a person** — a never-re-ask hold (`support already requested`), a per-role split
    (`approve_partial`) whose reason carries the `proof on file: human review` sentence or a
    recorded `proof_id` (a catalog-only split has no document, so it is NOT documents on file),
-   the user replying to a note (`extension_requested_at`), a flagged refusal hold already posted
-   to #cs_priority, or the user being in the proof feed's `gmail_contacts_90d`.
+   the user replying to a note (`extension_requested_at`), or a flagged refusal hold already
+   posted to #cs_priority. **Having emailed support@ is NOT this bucket** (captain
+   2026-11-16: "the only people involved should be the requester. our AI should handle
+   everything else"; #1992 stopped the decider's hold and #2090 asks these users in the
+   verify notes). The ledger is append-only, so the pre-#1992 sentences are still on file,
+   but no code matches them any more: such a row is simply not a hold. Neither those rows
+   nor a credit user in the proof feed's `gmail_contacts_90d` (the credit classifier reads
+   no contact list at all) is counted with a person; both fall through to muted / told /
+   untouched / not told, the ask-or-no ladder's own population. A CLAIM whose claimant
+   emailed support@ is still bucket 3 (see "Claims are classified..." below).
 4. **Muted — no more messages** — a messaging refusal hold whose `next_recheck_at` is
    still in the future.
 5. **Needs documents — user told** — an ASK note went out (`verify-live`, `retro-past`,
@@ -96,10 +103,12 @@ touched.
 ## Deliberate limits
 
 - **Not an Intercom assignee census.** "Sitting with a person" means our own machinery
-  handed the row to a human (human-review hold / reply / flagged hold /
-  support@ contact). Mapping Intercom `admin_assignee_id` to a Muso user id per run is not
+  handed the row to a human (the never-re-ask hold / a reply / a flagged
+  hold). Mapping Intercom `admin_assignee_id` to a Muso user id per run is not
   reliable enough to put in a number the captain acts on; the open-conversation arithmetic
-  already lives in the ops steward's `s1_tick.py` scoreboard.
+  already lives in the ops steward's `s1_tick.py` scoreboard. A support@ contact is
+  deliberately outside this bucket: it is ours to ask or decide, and the zero-human target
+  is measured on exactly that reading.
 - **Read-only.** Trino replica (with `query_max_execution_time='90s'` and a hard subprocess
   timeout), the hydra ledger opened `mode=ro`, and two local JSON feeds. The only writes
   are one Slack DM and `/var/lib/hydra/verification-queue-report/last.json`, which is what

@@ -233,15 +233,31 @@ class CreditBuckets(unittest.TestCase):
         self.assertEqual(bucket, "told")
 
     def test_human_review_holds_are_with_a_person(self):
-        for reason in ("emailed support@ in the last 90 days: human review, never asked",
-                       "support already requested for this credit once: never re-ask"):
+        for reason in ("support already requested for this credit once: never re-ask",):
             f = facts(latest={8: {"decision": "hold", "reason": reason,
                                   "doc_required": 0, "at": ""}}, decided={8})
             self.assertEqual(vqr.classify_credit(8, f, CREDIT, frozenset()), "human", reason)
 
-    def test_a_user_who_emailed_support_is_with_a_person(self):
+    def test_a_legacy_support_at_hold_row_is_not_with_a_person(self):
+        # reason 6 of the human bucket (captain 2026-11-16: "the only people involved should be
+        # the requester. our AI should handle everything else"). The ledger is append-only, so the
+        # pre-#1992 sentences are still on file; the row is the AI's to move, and the decider
+        # already asks these users in the verify notes (#2090).
+        f = facts(latest={8: {"decision": "hold",
+                              "reason": "emailed support@ in the last 90 days: human review, never asked",
+                              "doc_required": 0, "at": ""}}, decided={8})
+        self.assertEqual(vqr.classify_credit(8, f, CREDIT, frozenset()), "not_told")
+
+    def test_a_user_who_emailed_support_is_not_with_a_person(self):
+        # the proof feed's 90-day contact list names a user, and nobody ever wrote to them: the
+        # honest bucket is the one the ask ladder works from, never a human.
         self.assertEqual(vqr.classify_credit(9, facts(support_contacts={9}), CREDIT,
-                                            frozenset()), "human")
+                                            frozenset()), "untouched")
+
+    def test_a_user_who_emailed_support_and_was_asked_is_told(self):
+        # and once an ask went out they are waiting on the user, not on a person.
+        f = facts(support_contacts={9}, asked={9: "2026-10-01"})
+        self.assertEqual(vqr.classify_credit(9, f, CREDIT, frozenset()), "told")
 
     def test_a_flagged_refusal_hold_is_with_a_person(self):
         self.assertEqual(vqr.classify_credit(10, facts(flagged={10: "2026-10-01"}), CREDIT,
@@ -1240,7 +1256,8 @@ class QA870cebb(unittest.TestCase):
 
 class QA4a25b33(unittest.TestCase):
     """The tag is chosen AFTER the comparison (an old tag must not hide a new one), and a failed
-    watchlist / proof feed must blind the sentinel as well as the table."""
+    watchlist / proof feed must blind the sentinel as well as the table — the watchlist for both
+    families, the proof feed for the claim lanes only."""
 
     NOW = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
 
@@ -1275,6 +1292,23 @@ class QA4a25b33(unittest.TestCase):
         self.assertEqual(vqr.CLASSIFICATION_LANES,
                          {"credits_untouched", "credits_docs_in", "claims_untouched",
                           "claims_docs_in"})
+
+    def test_a_failed_proof_feed_blinds_only_the_claim_classes(self):
+        # `classify_credit` reads no contact list, so a failed proof feed leaves the credit
+        # classes measurable and only the claim ones blind.
+        credits = {7: {"paid": True, "oldest": "2026-10-01 00:00:00.000000 UTC"}}
+        claims = {8: {"paid": True, "oldest": "2026-10-01 00:00:00.000000 UTC"}}
+        args = (credits, claims, facts(), lambda u, i: "untouched", lambda u, i: "untouched",
+                frozenset(), frozenset(), {}, {}, self.NOW)
+        fed = vqr.comms_build(*args, unmeasured=vqr.PROOF_FEED_LANES)
+        self.assertTrue(fed["credits_waiting_us"]["measured"])
+        self.assertTrue(fed["credits_owing_proof"]["measured"])
+        self.assertEqual(fed["credits_waiting_us"]["paid"], 1)
+        self.assertFalse(fed["claims_pending"]["measured"])
+        blind = vqr.comms_build(*args, unmeasured=vqr.CLASSIFICATION_LANES)
+        self.assertFalse(blind["credits_waiting_us"]["measured"])
+        self.assertFalse(blind["credits_owing_proof"]["measured"])
+        self.assertFalse(blind["claims_pending"]["measured"])
 
 
 class QAecfa985(unittest.TestCase):
