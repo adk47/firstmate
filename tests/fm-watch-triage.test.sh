@@ -2312,6 +2312,9 @@ test_ordinary_steer_is_held_quiet_while_the_gateway_stall_is_open() {
 
 # Writes the fixture the two cases share: a claude crew whose hooks last
 # recorded a turn IN FLIGHT, with an ordinary steer aged past the inbox grace.
+# The cases below isolate the ladder, so the independent overdue signal is
+# disabled for them; their steer is deliberately ancient and would otherwise
+# surface as overdue before the ladder's own bookkeeping is exercised.
 # Prints the steer's record path.
 make_uncapturable_steer_case() {  # <dir> <task>
   local dir=$1 task=$2 state="$1/state" steer
@@ -2345,6 +2348,7 @@ test_uncapturable_window_still_escalates_its_unread_steer() {
     FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_TASK_INBOX_RING_MAX=1 \
+    FM_TASK_INBOX_OVERDUE_SECS=999999999 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 1800 || fail "the watcher never surfaced the unread steer of a window it cannot capture: $(cat "$out")"
@@ -2373,6 +2377,7 @@ test_uncapturable_busy_window_is_waited_on() {
     FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_TASK_INBOX_RING_MAX=1 \
+    FM_TASK_INBOX_OVERDUE_SECS=999999999 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited on a busy crew's capture blip: $(cat "$out")"; }
