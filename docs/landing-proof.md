@@ -10,8 +10,8 @@ This page is the operator view of that loop; each piece's script header owns its
   `bin/fm-dod-lib.sh` installs it at `state/acceptance/<task>.sh` (mode 0700) with its sha256 in `state/acceptance/<task>.trust`, refuses a probe that reads a project clone or task worktree, and renders the Definition of done that tells the worker done means the probe passing and forbids editing it.
 - **The row.** `bin/fm-change-watch.sh claim` registers the claim as a durable change-watch row (`kind: claim`, `pr_url` null until a PR exists) carrying `acceptance {probe_path, sha256, last_exit, last_epoch}`, with readings at the claim and at +15m, +1h, and +6h.
   The row reads `proven` on the first exit 0 and `absent` if the probe still fails at +6h; `absent` is a terminal failure distinct from `regressed`.
-- **The runner.** `bin/fm-landing-police.sh tick` registers a claim when a ship task's newest status line is `done:`, runs each due probe from `/` with a clean environment and a timeout, and records the exit code.
-  It re-checks the probe's hash first and records exit 125 without running an edited probe.
+- **The runner.** `bin/fm-landing-police.sh tick` registers a claim when a ship task's newest status line is `done:`, and takes each due reading with `bin/fm-change-watch.sh acceptance`, which runs the bound probe itself from `/` with a clean environment and a timeout and accepts no exit code from its caller.
+  The probe's hash is re-checked first, and an edited probe records exit 125 without running.
   It reports a `done:` with no probe, an edited probe, a claim past its one-hour deadline (at most once an hour), and a claim that read absent; it prints nothing otherwise.
   `bin/fm-landing-police.sh arm` writes and registers `state/landing-police.check.sh` through `bin/fm-check-register.sh`, so the watcher runs it on every poll.
 - **The gate.** `fm_landed_proven` in `bin/fm-landed-lib.sh` reads the claim row, and `bin/fm-teardown.sh` refuses cleanup of a ship task that has a probe until its row is `proven`.

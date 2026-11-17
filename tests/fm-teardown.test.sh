@@ -3955,7 +3955,7 @@ test_acceptance_probe_unproven_refuses_teardown() {
   add_fork_with_pushed_branch "$case_dir"
   mkdir -p "$case_dir/state/acceptance"
   probe="$case_dir/state/acceptance/task-x1.sh"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$probe"
+  printf '#!/usr/bin/env bash\ntest -e %q\n' "$case_dir/landed" > "$probe"
   chmod 0700 "$probe"
 
   set +e
@@ -3967,7 +3967,7 @@ test_acceptance_probe_unproven_refuses_teardown() {
   grep -q 'no claim row for task-x1' "$case_dir/stderr" || fail "acceptance-unproven: the refusal did not say the claim row is missing"
 
   run_change_watch "$case_dir" claim task-x1 "$probe" > /dev/null 2>&1 || fail "acceptance-unproven: claim failed"
-  run_change_watch "$case_dir" acceptance task-x1-claim 0 1 > /dev/null 2>&1 || fail "acceptance-unproven: acceptance failed"
+  run_change_watch "$case_dir" acceptance task-x1-claim 0 > /dev/null 2>&1 || fail "acceptance-unproven: acceptance failed"
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -3976,7 +3976,8 @@ test_acceptance_probe_unproven_refuses_teardown() {
   grep -q 'task-x1 is open: the acceptance probe exited 1' "$case_dir/stderr" || fail "acceptance-unproven: the refusal did not name the open claim: $(cat "$case_dir/stderr")"
   [ -e "$case_dir/state/task-x1.meta" ] || fail "acceptance-unproven: the task meta was removed despite the refusal"
 
-  run_change_watch "$case_dir" acceptance task-x1-claim 900 0 > /dev/null 2>&1 || fail "acceptance-unproven: acceptance failed"
+  touch "$case_dir/landed"
+  run_change_watch "$case_dir" acceptance task-x1-claim 900 > /dev/null 2>&1 || fail "acceptance-unproven: acceptance failed"
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?

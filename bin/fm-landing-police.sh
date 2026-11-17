@@ -13,23 +13,23 @@
 #     `bin/fm-change-watch.sh claim` (once per distinct done line), binding the
 #     task's acceptance probe (bin/fm-dod-lib.sh owns the probe and its binding);
 #     a done: with no probe, or a probe whose bytes no longer match, is reported.
-#   - every open claim with a reading due (claim time, +15m, +1h, +6h) has its
-#     probe re-verified and run from / with a clean environment and a timeout,
-#     and the exit code is recorded with `bin/fm-change-watch.sh acceptance`;
-#     an edited probe records exit 125 and is never run.
+#   - every open claim with a reading due (claim time, +15m, +1h, +6h) is read
+#     with `bin/fm-change-watch.sh acceptance`, which runs the bound probe
+#     itself (re-hashed, from / with a clean environment and a timeout) and
+#     takes no exit code from its caller; an edited probe records exit 125
+#     and is never run.
 #   - an open claim past its deadline is reported as claimed but not landed,
 #     at most once an hour; a claim that just read absent is reported once.
 # It prints nothing when there is nothing to report, so as a registered check
 # it wakes firstmate only on a finding. At most FM_POLICE_MAX_RUNS probes
-# (default 2) run per tick, each bounded by FM_POLICE_PROBE_TIMEOUT seconds
-# (default 8), so a tick stays inside the watcher's check timeout.
+# (default 2) run per tick, each bounded by change-watch's
+# FM_CW_CLAIM_PROBE_TIMEOUT, so a tick stays inside the watcher's check timeout.
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME="${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CW="${FM_POLICE_CW:-$SCRIPT_DIR/fm-change-watch.sh}"
 MAX_RUNS=${FM_POLICE_MAX_RUNS:-2}
-PROBE_TIMEOUT=${FM_POLICE_PROBE_TIMEOUT:-8}
 NOW=${FM_CW_NOW:-$(date +%s)}
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
@@ -37,10 +37,6 @@ NOW=${FM_CW_NOW:-$(date +%s)}
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 cw() { FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$CW" "$@"; }
 mark() { printf '%s\n' "$2" > "$(fm_acceptance_dir "$STATE")/.police-$1"; }
-bounded() {
-  if command -v timeout >/dev/null 2>&1; then timeout "$PROBE_TIMEOUT" "$@"
-  else perl -e 'alarm shift; exec @ARGV or exit 127' "$PROBE_TIMEOUT" "$@"; fi
-}
 marked() { [ "$(cat "$(fm_acceptance_dir "$STATE")/.police-$1" 2>/dev/null)" = "$2" ]; }
 
 register_claims() {
@@ -50,7 +46,7 @@ register_claims() {
     id=$(basename "$meta" .meta)
     [ "$(sed -n 's/^kind=//p' "$meta" | tail -1)" = ship ] || continue
     line=$(last_status_line "$STATE/$id.status" 2>/dev/null)
-    [ "$(status_line_verb "$line")" = done ] || continue
+    [ "$(status_line_verb "$line")" = "done" ] || continue
     key=$(printf '%s' "$line" | cksum | cut -d' ' -f1)
     marked "claim-$id" "$key" && continue
     probe=$(fm_acceptance_verify "$STATE" "$id"); rc=$?
@@ -65,19 +61,18 @@ register_claims() {
 }
 
 run_due() {
-  local id task claimed probe sha due last deadline runs=0 rc out hour
+  local id task claimed probe sha due last deadline runs=0 out hour
   while IFS=$'\t' read -r id task claimed probe sha due last deadline; do
     [ -n "$id" ] || continue
     if [ "$due" != - ] && [ "$runs" -lt "$MAX_RUNS" ]; then
       runs=$((runs + 1))
-      if [ "$(fm_acceptance_verify "$STATE" "$task")" = "$probe" ] && [ "$(sed -n 2p "$(fm_acceptance_trust_path "$STATE" "$task")")" = "$sha" ]; then
-        (cd / && bounded env -i HOME="${HOME:-/}" PATH="$PATH" "$probe" >/dev/null 2>&1); rc=$?
-      else
-        rc=125
-      fi
-      out=$(cw acceptance "$id" "$due" "$rc" 2>&1)
-      case "$out" in *" absent: "*) echo "landing-police: CLAIMED DONE BUT ABSENT $task: ${out#*absent: }"; continue ;; esac
-      last=$rc
+      out=$(cw acceptance "$id" "$due" 2>&1)
+      case "$out" in
+        *" absent: "*) echo "landing-police: CLAIMED DONE BUT ABSENT $task: ${out#*absent: }"; continue ;;
+        *" proven: "*) continue ;;
+      esac
+      last=$(printf '%s\n' "$out" | sed -n 's/.* exited \([0-9][0-9]*\) at .*/\1/p' | tail -1)
+      last=${last:--}
     fi
     if [ "$NOW" -ge "$deadline" ] && [ "$last" != 0 ]; then
       hour=$((NOW / 3600))
