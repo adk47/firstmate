@@ -2631,6 +2631,8 @@ J
   export CVO_CLAIM_LIST="$CVO_STATE.claims.json"
   run -0 "$SCRIPT"
   grep -q -- "^claim-proof-ask --list .*/claims-filtered.json --segment free .*--check-recipients" "$CALLS"
+  # [key=claim-check-lookahead]: the check's lookahead is bounded by a share of the slice it was given
+  grep -q -- "^claim-proof-ask --list .*/claims-filtered.json --segment free .*--check-budget-s [0-9][0-9]* --check-recipients" "$CALLS"
   # QA #1919: the apply is sized to what fits in the claim group's SLICE (1,500 s x 6 workers / 40 s a user = 225), not
   # in the tick - so the default cap of 250 is cut, and the log says by what. A cap the slice cannot carry is not sent.
   n="$(grep -m1 -- "^claim-proof-ask --list .*/claims-filtered.json --segment free .*--mode apply" "$CALLS" | sed -E 's/.*--max-users ([0-9]+).*/\1/')"
@@ -3476,6 +3478,16 @@ PY
   if grep -q -- "^claim-" "$CALLS"; then false; fi                 # no claim family was started
   grep -q -- "^uvn-status .*--mode apply" "$CALLS"                 # the slice is the claims' own: credit is not charged for it
   grep -q "^need-build" "$CALLS.need"
+}
+
+@test "outbound tick ([key=claim-check-lookahead]): a family with under 4s of slice left skips its check with a stated reason, never a silent zero budget" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  CVO_CLAIM_GROUP_BUDGET_S=2 run -0 "$SCRIPT"
+  grep -q "claim-proof-ask-paid: only [0-9]*s of the slice left, not enough for the recipient check; this family waits for the next tick" "$(newest_tick)"
+  if grep -q -- "--check-budget-s 0" "$CALLS"; then false; fi       # an unusable budget is never passed as 0
+  if grep -q -- "^claim-proof-ask .*--check-recipients" "$CALLS"; then false; fi
+  grep -q -- "^uvn-status .*--mode apply" "$CALLS"
 }
 
 @test "outbound tick ([key=claims-never-starved]): the slice bounds the claim group, never the credit families - claims run first and credit still applies" {

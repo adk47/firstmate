@@ -501,6 +501,12 @@ class BacklogSentinel(unittest.TestCase):
                                 "support_unanswered", "fable_decider"])
         self.assertTrue(all(lane and sla > 0 for _, _, lane, sla in vqr.SENTINEL_BUCKETS))
 
+    def test_the_untouched_claims_owner_is_a_seat_that_exists(self):
+        # claim-untouched-1050-r1: claim-lane-resume-c2 exists in no home, so the bucket was orphaned
+        owners = {k: lane for k, _, lane, _ in vqr.SENTINEL_BUCKETS}
+        self.assertIn("claim-untouched-1050-r1", owners["claims_untouched"])
+        self.assertNotIn("claim-lane-resume-c2", owners["claims_untouched"])
+
     def page(self, items, prev=None):
         msgs, state, page_map = vqr.sentinel_page(
             self.evaluate("credits_untouched", items), prev, self.NOW, False)
@@ -1179,6 +1185,25 @@ class CommsCoverage(unittest.TestCase):
                                lambda u, i: vqr.classify_claim(u, f, i, frozenset(), frozenset()),
                                frozenset(), frozenset(), clickup or {},
                                never or {}, self.NOW)
+
+    def test_the_claims_class_owner_is_the_seat_that_exists(self):
+        c = self.build()
+        sentinel = {k: owner for k, _label, owner, _sla in vqr.SENTINEL_BUCKETS}
+        self.assertEqual(c["claims_pending"]["owner"], sentinel["claims_untouched"])
+        self.assertNotIn("claim-lane-resume-c2", c["claims_pending"]["owner"])
+
+    def test_no_owner_the_report_prints_names_a_seat_that_exists_in_no_home(self):
+        dead = ("claim-lane-resume-c2",)
+        owners = [owner for _k, _l, owner, _s in vqr.SENTINEL_BUCKETS]
+        owners += [owner for _k, _l, owner, _p in vqr.comms_classes()]
+        owners += [c["owner"] for c in self.build().values()]
+        stored = {k: {"count": 1, "oldest_h": 1, "owner": "stored"} for k in vqr.CAPTAIN_HELD}
+        for lanes in (vqr.read_held_lanes(), {}):
+            owners += [row["owner"] for row in vqr.held_words_now(stored, {}, lanes).values()]
+        for owner in owners:
+            self.assertTrue(owner)
+            for seat in dead:
+                self.assertNotIn(seat, owner)
 
     def test_a_truncated_intercom_scan_is_unmeasured_not_a_count(self):
         # QA @059da4d: a partial never_answered map must not print as a complete count

@@ -39,6 +39,8 @@ replied to the note is never reminded: the reminder is closed (claimant replied)
 A claim whose key already has a note in the ledger (attempted, sent, refused or skipped) is
 dropped before the run's budget is spent, so repeated runs keep reaching new claims. The gate applies the same
 recipient checks as to the first note, the 7-day human-reply deferral included.
+[key=claim-check-lookahead] The recipient check fills the budget with users the gate ACCEPTS: users it defers
+(replied, proof on file, a recent core notice) no longer hold every slot of every tick (_check_until_full).
 
 claim-status (run_status; Fable claims-documentation-readiness-1023 ruling 3): the no-ask status note
 "it is with our team for review" to every listed pending claim that gets NO proof ask: a row whose
@@ -56,6 +58,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -113,6 +116,9 @@ class ClaimReport(verify_notify.Report):
     second_claim: int = 0
     already_asked: int = 0
     over_daily_max: int = 0
+    check_stopped: int = 0            # candidates the lookahead never offered because the check stopped
+    recently_deferred: int = 0        # candidates moved behind the rest: the gate deferred them on an earlier check
+    deferral_memory: str = ""         # why the deferral memory was not used or not saved; empty when it was
     closed_reminders: int = 0
     not_in_list: int = 0
     no_readable_surface: int = 0
@@ -333,7 +339,8 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
         preview_dir: str | None = None, query: Query = trino, wrapper: str = verify_notify.WRAPPER,
         runner: verify_notify.Runner = verify_notify._run, ledger_path: str | None = None,
         support_contacts: frozenset[str] | None = None, now: datetime | None = None,
-        export_path: str | None = None, check_recipients: bool = False) -> ClaimReport:
+        export_path: str | None = None, check_recipients: bool = False,
+        check_budget_s: float | None = None) -> ClaimReport:
     if check_recipients and reminders:
         raise ValueError("check_recipients applies to first notes only, not reminders (QA #1516)")
     report = ClaimReport()
@@ -382,6 +389,20 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
     # the hold is read per USER from their pending credit requests (never_ever_users -> policy.never_ask).
     never = never_ever_users(sorted({int(c["user_id"]) for c in keep}), query) if keep else {}
     budget = _budget(db, day, max_users)
+    # [key=claim-check-lookahead] the recipient check (never the apply) offers the gate up to CHECK_LOOKAHEAD x budget
+    # candidates and stops as soon as `budget` are accepted - see _check_until_full.
+    lookahead = check_recipients and mode != "apply"
+    memory_path = deferral_memory_path(ledger_path)
+    clock = now or datetime.now(timezone.utc)
+    remembered: dict[str, str] = {}
+    if lookahead:
+        remembered, why_not = load_deferrals(memory_path, now=clock)
+        if why_not:
+            report.deferral_memory = why_not
+        # [key=claim-check-deferral-memory] stable sort: a user the gate deferred on an earlier check goes behind
+        # everyone it has not, in the same paid-first / oldest-claim order. Never removed: reached once the rest run out.
+        keep.sort(key=lambda c: str(int(c["user_id"])) in remembered)
+        report.recently_deferred = len({int(c["user_id"]) for c in keep if str(int(c["user_id"])) in remembered})
     seen: set[int] = set()
     payloads: list[dict[str, Any]] = []
     for c in keep:
@@ -423,12 +444,19 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
             report.outcomes.append({"user": str(uid), "result": "filtered", "reason": "not_in_signed_accepted"})
             seen.add(uid)                                # [key=per-user-counters]: ONE row per user, not per claim
             continue
-        if len(payloads) >= budget:
+        if len(payloads) >= (budget * CHECK_LOOKAHEAD if lookahead else budget):
             report.over_daily_max += 1                   # [key=per-user-counters]: ONE per user
             seen.add(uid)
             continue
         seen.add(uid)
         payloads.append(_payload(c, acct))
+    if lookahead:
+        _check_until_full(payloads, report, budget=budget, wrapper=wrapper, runner=runner, preview_dir=preview_dir,
+                          budget_s=check_budget_s)
+        why_not = save_deferrals(memory_path, remembered, report, now=clock)
+        if why_not:
+            report.deferral_memory = why_not
+        return report
     report.users = len(payloads)
     # TEMPORARY (apply_queue.py names the removal condition): a first note's apply goes through the durable queue
     # when policies/apply-queue.json switches this campaign on and /etc/hydra/apply-queue.disabled is absent.
@@ -581,6 +609,114 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
     return report
 
 
+def _check_until_full(payloads: list[dict[str, Any]], report: ClaimReport, *, budget: int, wrapper: str,
+                      runner: verify_notify.Runner, preview_dir: str | None, budget_s: float | None = None) -> None:
+    """[key=claim-check-lookahead] The recipient check fills the budget with users the gate ACCEPTS, not with the
+    first `budget` candidates in claim order.
+
+    Measured on node-8 2026-11-16 (claim-untouched-1050-r1): the candidates are paid-first then oldest claim id, and
+    the same 24 paid / 25 free claimants sat at the front of that order on every tick, each deferred by the gate
+    (comm_state: they replied or have proof on file; a core notice inside 7 days). A tick's 25 slots went to them, the
+    check accepted 0-1 users, and 1,030 listed claims (815 users, 83 paid) had never been sent anything. A deferral is
+    a fact about that user for now, not a reason to stop reaching everyone behind them.
+
+    So the check offers the gate the next `budget - accepted` candidates, again and again, until `budget` users are
+    accepted, the candidates run out, or CHECK_LOOKAHEAD x budget have been offered (a wall of holds is a bounded
+    scan, never a crawl). The accepted set never exceeds the budget, so the apply that sends exactly that signed set
+    (verify_notify.signed_set_mismatch) is unchanged, and so are every hold, the gate and the copy. Candidates never
+    offered are counted as over today's cap (next run), as before; candidates the check never reached because it
+    stopped are counted under their own reason."""
+    started = time.monotonic()
+    i = 0
+    stopped = False
+    while i < len(payloads) and len(report.accepted) < budget:
+        if budget_s is not None and time.monotonic() - started >= budget_s:
+            stopped = True
+            break
+        batch = payloads[i:i + (budget - len(report.accepted))]
+        i += len(batch)
+        verify_notify.send_all(batch, report, mode="dry-run", wrapper=wrapper, runner=runner,
+                               extra=["--campaign", CAMPAIGN], preview_dir=preview_dir, check_recipients=True)
+        if report.halted or report.stopped_on_unmeasured or report.stopped_on_failures:
+            stopped = True
+            break
+    report.users = i
+    if stopped:
+        report.check_stopped += len(payloads) - i
+    else:
+        report.over_daily_max += len(payloads) - i
+
+
+# [key=claim-check-deferral-memory] QA on #2122: the lookahead alone still strands everyone behind a wall of more than
+# CHECK_LOOKAHEAD x budget standing deferrals, because every tick re-offers the same front of the order. The check
+# therefore remembers whom the gate deferred or refused, for DEFERRAL_MEMORY_H, and the next check offers them last.
+# It decides nobody's eligibility: the gate still checks everyone it is offered, and an unreadable or unwritable
+# memory only falls back to plain claim order (the reason is printed). It sits beside the ledger.
+DEFERRAL_MEMORY_FILE = "claim-check-deferred.json"
+DEFERRAL_MEMORY_H = 24
+_GATE_HOLDS = ("deferred", "refused")
+_NOT_GATE = ("not_in_signed_accepted", "apply_budget")
+
+
+def deferral_memory_path(ledger_path: str | None) -> str:
+    return os.path.join(os.path.dirname(ledger_path or verify_ledger.DEFAULT_PATH), DEFERRAL_MEMORY_FILE)
+
+
+def load_deferrals(path: str, *, now: datetime) -> tuple[dict[str, str], str]:
+    """{user id: when the gate last held them} for holds younger than DEFERRAL_MEMORY_H, and why-not."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except FileNotFoundError:
+        return {}, ""
+    except (OSError, ValueError) as exc:
+        return {}, f"deferral memory unreadable ({type(exc).__name__}); claim order only"
+    users = doc.get("users") if isinstance(doc, dict) else None
+    if not isinstance(users, dict):
+        return {}, "deferral memory malformed; claim order only"
+    fresh: dict[str, str] = {}
+    for uid, at in users.items():
+        try:
+            when = datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if when.tzinfo is not None and 0 <= (now - when).total_seconds() < DEFERRAL_MEMORY_H * 3600:
+            fresh[str(uid)] = str(at)
+    return fresh, ""
+
+
+def save_deferrals(path: str, remembered: dict[str, str], report: ClaimReport, *, now: datetime) -> str:
+    """Record this check's gate holds (and forget anyone it accepted); atomic. Returns why-not, empty on success."""
+    users = dict(remembered)
+    at = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for o in report.outcomes:
+        uid = str(o.get("user") or "")
+        if not uid:
+            continue
+        if o.get("result") in _GATE_HOLDS and not str(o.get("reason") or "").startswith(_NOT_GATE):
+            users[uid] = at
+    for a in report.accepted:
+        users.pop(str(a.get("user") if isinstance(a, dict) else a), None)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"updated_at": at, "ttl_hours": DEFERRAL_MEMORY_H, "users": users}, fh, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return f"deferral memory not saved ({type(exc).__name__}); next check uses claim order"
+    return ""
+
+
+# [key=claim-check-lookahead] how many candidates per budget slot a recipient check may offer the gate in one run.
+# 4 x the 25-user tick cap is 100 gate checks (CHECK_WORKERS in parallel), enough to pass the 24-25 standing
+# deferrals measured per segment on 2026-11-16 and still fill the budget.
+CHECK_LOOKAHEAD = 4
+
+
 def _budget(db: Any, day: str, max_users: int) -> int:
     """Messages this run may send: max_users, within what is left of today's shared claim cap
     after every claim-proof-ask message (first note or reminder) already claimed today."""
@@ -720,6 +856,8 @@ def render(report: ClaimReport, mode: str, segment: str, reminders: bool = False
                       report.never_asked),
                      ("no account email", report.no_email),
                      ("another claim of the same user (next run)", report.second_claim),
+                     ("not offered: the recipient check stopped (next run)", report.check_stopped),
+                     ("offered last: the gate held them on a check in the last 24h", report.recently_deferred),
                      ("over today's cap (next run)", report.over_daily_max),
                      ("already asked (earlier run)", report.already_asked),
                      ("routed to the claim-status note", report.status_audience),
@@ -740,4 +878,6 @@ def render(report: ClaimReport, mode: str, segment: str, reminders: bool = False
             parts.append(f"{label} {v}")
     # C11: every deferral is shown with its user and the gate's reason (never a bare count)
     detail = report.deferrals[:20] + (report.refusals + report.failures)[:5]
+    if report.deferral_memory:
+        parts.append(report.deferral_memory)
     return "; ".join(parts) + "." + (" " + "; ".join(detail) if detail else "")

@@ -1198,9 +1198,20 @@ family_run() {
   fi
   FAMILY_REACHED=1   # family() clears the not-reached count on the way out, unless the slice ends this run first
   local s_end; s_end="$(step_end)"   # what bounds this family's read-only steps: the slice's end, or TICK_HARD_S
+  # [key=claim-check-lookahead]: the claim ask's check may offer the gate CHECK_LOOKAHEAD x cap candidates, so it gets
+  # at most a quarter of what is left of the slice - the lookahead can never outrun the slice the tick gave it.
+  local cb=()
+  if [ "$name" = claim-proof-ask ]; then
+    local have=$(( s_end - $(elapsed) )); [ "$have" -lt 0 ] && have=0
+    if [ "$have" -lt 4 ]; then
+      not_reached "$tag" "$name" "$seg" "only ${have}s of the slice left, not enough for the recipient check"
+      return 0
+    fi
+    cb=(--check-budget-s "$(( have / 4 ))")
+  fi
   run_transient "$tag" check "$OUT/$tag-check.out" \
     py_ro "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode dry-run --max-users "$cap" \
-    --check-recipients --outcomes-json "$OUT/$tag-check.json"; rc=$?
+    "${cb[@]}" --check-recipients --outcomes-json "$OUT/$tag-check.json"; rc=$?
   [ "$rc" = 2 ] && return 2
   rc="$RC"
   log "$tag check (rc=$rc): $(head -c 600 "$OUT/$tag-check.out")"

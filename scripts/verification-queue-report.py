@@ -125,8 +125,10 @@ SENTINEL_BUCKETS = (
     ("credits_untouched", "credits nobody has touched", "verify-ask-wiring-h2", 24),
     ("credits_docs_in", "credit documents back, we owe a look",
      "verification worker, creds home (firstmate-assigned 2026-11-13)", 24),
-    ("claims_untouched", "profile claims nobody has touched", "claim-lane-resume-c2", 24),
-    ("claims_docs_in", "claim documents back, we owe a look", "claim-lane-resume-c2", 24),
+    ("claims_untouched", "profile claims nobody has touched",
+     "claim-untouched-1050-r1, creds home (firstmate-assigned 2026-11-16)", 24),
+    ("claims_docs_in", "claim documents back, we owe a look",
+     "claim-untouched-1050-r1, creds home (firstmate-assigned 2026-11-16)", 24),
     ("merges_waiting", "profile merges waiting on us", "merge-queue-clear-q1", 24),
     ("intercom_customer_last", "Intercom: the customer spoke last", "intercom-backlog-i1", 4),
     ("support_unanswered", "support@ emails with no reply", "intercom-backlog-i1", 4),
@@ -1889,10 +1891,11 @@ def grid_render(title: str, g: dict, unit: str) -> list[str]:
 
 def comms_classes() -> tuple:
     """(key, label, owner job, paid-aware) for the five classes, in report order."""
+    owners = {key: owner for key, _label, owner, _sla in SENTINEL_BUCKETS}
     return (
         ("credits_waiting_us", "credits waiting on us, never told", "verify-ask-wiring-h2", True),
         ("credits_owing_proof", "credits owing proof, never asked", "verify-ask-wiring-h2", True),
-        ("claims_pending", "profile claims pending, never told", "claim-lane-resume-c2", True),
+        ("claims_pending", "profile claims pending, never told", owners["claims_untouched"], True),
         ("merges_pending", "profile merges pending, never told", "merge-queue-clear-q1", False),
         ("intercom_inbound", "Intercom inbound, never answered", "intercom-backlog-i1", False),
     )

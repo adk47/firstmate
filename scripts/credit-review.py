@@ -965,7 +965,7 @@ def cmd_claim_proof_ask(args: argparse.Namespace) -> int:
         return 2
     report = claim_proof_ask.run(list_path=args.list, segment=args.segment, mode=args.mode,
                                  max_users=args.max_users, reminders=args.reminders, preview_dir=args.preview,
-                                 check_recipients=args.check_recipients)
+                                 check_recipients=args.check_recipients, check_budget_s=getattr(args, "check_budget_s", None))
     werr = write_outcomes(args, report)
     print(claim_proof_ask.render(report, args.mode, args.segment, reminders=args.reminders)
           + (f" OUTCOMES NOT WRITTEN: {werr}." if werr else ""))
@@ -1491,6 +1491,8 @@ def parser() -> argparse.ArgumentParser:
                     help="with --signed-accepted: the run may send a subset (the outbound tick pages by design)")
     cp.add_argument("--apply-budget-s", type=int, default=None, metavar="SECONDS",
                     help="[key=note-step-budget] the seconds this apply may spend (the tick's remaining share)")
+    cp.add_argument("--check-budget-s", type=float, default=None, metavar="SECONDS",
+                    help="[key=claim-check-lookahead] the seconds the recipient check may spend offering candidates")
     cp.add_argument("--preview-accepted", default="", metavar="CHECK_JSON",
                     help="with --preview: render exactly the users this --check-recipients outcomes file accepted "
                          "(t01b 584: a deferred user takes no render and no slot)")

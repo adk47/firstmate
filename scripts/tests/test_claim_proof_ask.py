@@ -1091,5 +1091,280 @@ class ScopedProofOnFileTest(unittest.TestCase):
             self.holds()                                         # both stale: refuse all, never admit
 
 
+class CheckLookaheadTest(unittest.TestCase):
+    """[key=claim-check-lookahead] claim-untouched-1050-r1: on node-8 2026-11-16 the same 24 paid / 25 free claimants
+    sat at the front of the candidate order on every tick, each deferred by the gate, so the 25-user budget was spent
+    on them and 1,030 listed claims (815 users, 83 paid) were never sent anything. The recipient check now keeps
+    offering the gate candidates until the budget is ACCEPTED, bounded, and never accepts more than the budget."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ledger = str(Path(self.tmp.name) / "l.sqlite3")
+        self.export = str(Path(self.tmp.name) / "asked.jsonl")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    lst = ClaimProofAskTests.lst
+
+    def check(self, claims, deferred, *, max_users, check_recipients=True, mode="dry-run"):
+        """Run the claim ask with a gate that defers every user in `deferred` and accepts the rest."""
+        offered = []
+
+        def gate(argv):
+            uid = json.loads(Path(argv[argv.index("--credits-file") + 1]).read_text())["user"]["id"]
+            offered.append(uid)
+            if uid in deferred:
+                return subprocess.CompletedProcess(argv, 3, "DEFERRED comm_state credits=1 (replied: proof_on_file)\n", "")
+            return subprocess.CompletedProcess(argv, 0, "RECIPIENT OK credits=1\n", "")
+        users = sorted({c["user_id"] for c in claims})
+        q = replica({c["claim_id"]: ("pending", c["user_id"]) for c in claims}, {u: f"u{u}@x.com" for u in users})
+        with mock.patch.object(claim_proof_ask.verify_notify, "attach_identities", lambda ps, r: (ps, None)):
+            rep = claim_proof_ask.run(list_path=self.lst(claims), segment="paid", mode=mode, max_users=max_users,
+                                      query=q, wrapper="/gate", runner=gate, ledger_path=self.ledger,
+                                      support_contacts=frozenset(), now=NOW, export_path=self.export,
+                                      check_recipients=check_recipients)
+        return rep, offered
+
+    def test_standing_deferrals_at_the_front_no_longer_take_the_budget(self):
+        claims = [claim(c, c) for c in range(1, 9)]
+        rep, offered = self.check(claims, {"1", "2", "3"}, max_users=3)
+        accepted = sorted(a["user"] for a in rep.accepted)
+        self.assertEqual(accepted, ["4", "5", "6"])
+        self.assertEqual(sorted(offered), ["1", "2", "3", "4", "5", "6"])
+        self.assertEqual(rep.deferred_users, 3)
+        self.assertEqual(rep.over_daily_max, 2)
+
+    def test_the_accepted_set_never_exceeds_the_budget(self):
+        claims = [claim(c, c) for c in range(1, 21)]
+        rep, offered = self.check(claims, {"2"}, max_users=4)
+        self.assertEqual(len(rep.accepted), 4)
+        self.assertEqual(len(offered), 5)
+
+    def test_the_scan_is_bounded_by_the_lookahead(self):
+        claims = [claim(c, c) for c in range(1, 41)]
+        rep, offered = self.check(claims, {str(u) for u in range(1, 41)}, max_users=2)
+        self.assertEqual(len(offered), 2 * claim_proof_ask.CHECK_LOOKAHEAD)
+        self.assertEqual(rep.accepted, [])
+        self.assertEqual(rep.over_daily_max, 40 - 2 * claim_proof_ask.CHECK_LOOKAHEAD)
+
+    def _run_with_gate(self, claims, gate, *, max_users, check_budget_s=None):
+        users = sorted({c["user_id"] for c in claims})
+        q = replica({c["claim_id"]: ("pending", c["user_id"]) for c in claims}, {u: f"u{u}@x.com" for u in users})
+        with mock.patch.object(claim_proof_ask.verify_notify, "attach_identities", lambda ps, r: (ps, None)):
+            return claim_proof_ask.run(list_path=self.lst(claims), segment="paid", mode="dry-run",
+                                       max_users=max_users, query=q, wrapper="/gate", runner=gate,
+                                       ledger_path=self.ledger, support_contacts=frozenset(), now=NOW,
+                                       export_path=self.export, check_recipients=True,
+                                       check_budget_s=check_budget_s)
+
+    def _offer(self, offered, argv):
+        offered.append(json.loads(Path(argv[argv.index("--credits-file") + 1]).read_text())["user"]["id"])
+
+    def test_an_unmeasured_stop_ends_the_lookahead(self):
+        claims = [claim(c, c) for c in range(1, 21)]
+        offered = []
+
+        def gate(argv):
+            self._offer(offered, argv)
+            raise claim_proof_ask.verify_notify.NoteTimeout("the gate call timed out")
+        rep = self._run_with_gate(claims, gate, max_users=5)
+        self.assertTrue(rep.stopped_on_unmeasured)
+        self.assertEqual(len(offered), 5)
+
+    def test_a_systemic_failure_stop_ends_the_lookahead(self):
+        claims = [claim(c, c) for c in range(1, 21)]
+        offered = []
+
+        def gate(argv):
+            self._offer(offered, argv)
+            return subprocess.CompletedProcess(argv, 1, "", "ERROR the gate could not read the account\n")
+        rep = self._run_with_gate(claims, gate, max_users=5)
+        self.assertTrue(rep.stopped_on_failures)
+        self.assertEqual(len(offered), 5)
+
+    def test_the_check_budget_bounds_the_lookahead(self):
+        claims = [claim(c, c) for c in range(1, 21)]
+        offered = []
+
+        def gate(argv):
+            self._offer(offered, argv)
+            return subprocess.CompletedProcess(argv, 0, "RECIPIENT OK credits=1\n", "")
+        rep = self._run_with_gate(claims, gate, max_users=5, check_budget_s=0)
+        self.assertEqual(offered, [])
+        self.assertEqual(rep.accepted, [])
+
+    def test_candidates_the_stop_kept_back_are_not_reported_as_over_the_cap(self):
+        claims = [claim(c, c) for c in range(1, 21)]
+        offered = []
+
+        def gate(argv):
+            self._offer(offered, argv)
+            raise claim_proof_ask.verify_notify.NoteTimeout("the gate call timed out")
+        rep = self._run_with_gate(claims, gate, max_users=5)
+        self.assertTrue(rep.stopped_on_unmeasured)
+        self.assertEqual(rep.check_stopped, 15)
+        self.assertEqual(rep.over_daily_max, 0)
+        self.assertIn("not offered: the recipient check stopped (next run) 15",
+                      claim_proof_ask.render(rep, "dry-run", "paid"))
+
+    def test_a_plain_dry_run_and_the_apply_keep_the_budget_as_before(self):
+        claims = [claim(c, c) for c in range(1, 9)]
+        _rep, offered = self.check(claims, {"1"}, max_users=3, check_recipients=False)
+        self.assertEqual(sorted(offered), ["1", "2", "3"])
+
+    def test_paid_claimants_are_offered_before_free_ones_in_their_own_segment(self):
+        claims = [claim(1, 1, paid=False), claim(2, 2), claim(3, 3, paid=False), claim(4, 4)]
+        _rep, offered = self.check(claims, set(), max_users=5)
+        self.assertEqual(sorted(offered), ["2", "4"])
+
+
+class DeferralMemoryTest(unittest.TestCase):
+    """[key=claim-check-deferral-memory] QA on #2122 and firstmate 005: the lookahead alone strands every claimant
+    behind more than CHECK_LOOKAHEAD x budget standing gate deferrals, tick after tick. The check now remembers whom
+    the gate held and offers them last, so the queue moves; a held claimant is never dropped and is accepted the
+    moment the gate's answer changes (the reset on a real state change)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ledger = str(Path(self.tmp.name) / "l.sqlite3")
+        self.export = str(Path(self.tmp.name) / "asked.jsonl")
+        self.memory = claim_proof_ask.deferral_memory_path(self.ledger)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    lst = ClaimProofAskTests.lst
+
+    def tick(self, claims, held, *, max_users, now):
+        """One tick's recipient check; the gate defers every user in `held` and accepts the rest."""
+        offered = []
+
+        def gate(argv):
+            uid = json.loads(Path(argv[argv.index("--credits-file") + 1]).read_text())["user"]["id"]
+            offered.append(uid)
+            if uid in held:
+                return subprocess.CompletedProcess(argv, 3, "DEFERRED comm_state credits=1 (replied: proof_on_file)\n", "")
+            return subprocess.CompletedProcess(argv, 0, "RECIPIENT OK credits=1\n", "")
+        users = sorted({c["user_id"] for c in claims})
+        q = replica({c["claim_id"]: ("pending", c["user_id"]) for c in claims}, {u: f"u{u}@x.com" for u in users})
+        with mock.patch.object(claim_proof_ask.verify_notify, "attach_identities", lambda ps, r: (ps, None)):
+            rep = claim_proof_ask.run(list_path=self.lst(claims), segment="paid", mode="dry-run", max_users=max_users,
+                                      query=q, wrapper="/gate", runner=gate, ledger_path=self.ledger,
+                                      support_contacts=frozenset(), now=now, export_path=self.export,
+                                      check_recipients=True)
+        return rep, offered
+
+    def test_a_wall_of_more_than_the_lookahead_no_longer_strands_the_claimants_behind_it(self):
+        budget = 5
+        wall = budget * claim_proof_ask.CHECK_LOOKAHEAD + 3          # 23 standing deferrals in front
+        claims = [claim(c, c) for c in range(1, wall + 11)]
+        held = {str(u) for u in range(1, wall + 1)}
+        first, _ = self.tick(claims, held, max_users=budget, now=NOW)
+        second, offered = self.tick(claims, held, max_users=budget, now=NOW + timedelta(hours=1))
+        self.assertEqual(first.accepted, [])
+        self.assertEqual(sorted(int(a["user"]) for a in second.accepted), list(range(wall + 1, wall + 1 + budget)))
+        self.assertEqual(second.recently_deferred, budget * claim_proof_ask.CHECK_LOOKAHEAD)
+        self.assertIn("offered last: the gate held them on a check in the last 24h 20",
+                      claim_proof_ask.render(second, "dry-run", "paid"))
+
+    def test_every_claimant_behind_the_wall_is_reached_within_a_few_ticks(self):
+        budget = 5
+        wall = 3 * budget * claim_proof_ask.CHECK_LOOKAHEAD             # 60 standing deferrals in front
+        claims = [claim(c, c) for c in range(1, wall + 6)]
+        held = {str(u) for u in range(1, wall + 1)}
+        reached = set()
+        for t in range(4):
+            rep, _ = self.tick(claims, held, max_users=budget, now=NOW + timedelta(hours=t))
+            reached |= {a["user"] for a in rep.accepted}
+        self.assertEqual(reached, {str(u) for u in range(wall + 1, wall + 6)})
+
+    def test_a_claimant_held_a_hundred_times_is_accepted_once_the_gate_stops_holding_them(self):
+        claims = [claim(1, 1)]
+        for t in range(100):
+            rep, offered = self.tick(claims, {"1"}, max_users=1, now=NOW + timedelta(minutes=t))
+            self.assertEqual(offered, ["1"])
+        rep, offered = self.tick(claims, set(), max_users=1, now=NOW + timedelta(minutes=100))
+        self.assertEqual([a["user"] for a in rep.accepted], ["1"])
+        self.assertNotIn("1", json.loads(Path(self.memory).read_text())["users"])
+
+    def test_a_held_claimant_is_offered_last_never_dropped(self):
+        claims = [claim(1, 1), claim(2, 2), claim(3, 3)]
+        self.tick(claims, {"1"}, max_users=3, now=NOW)
+        _rep, offered = self.tick(claims, {"1"}, max_users=3, now=NOW + timedelta(hours=1))
+        self.assertIn("1", offered)
+
+    def test_the_memory_expires_after_a_day(self):
+        claims = [claim(c, c) for c in range(1, 4)]
+        self.tick(claims, {"1"}, max_users=1, now=NOW)
+        rep, _ = self.tick(claims, set(), max_users=1,
+                           now=NOW + timedelta(hours=claim_proof_ask.DEFERRAL_MEMORY_H, minutes=1))
+        self.assertEqual(rep.recently_deferred, 0)
+        self.assertEqual([a["user"] for a in rep.accepted], ["1"])
+
+    def test_an_unreadable_memory_falls_back_to_claim_order_and_says_so(self):
+        Path(self.memory).write_text("{not json")
+        rep, offered = self.tick([claim(1, 1), claim(2, 2)], set(), max_users=1, now=NOW)
+        self.assertEqual([a["user"] for a in rep.accepted], ["1"])
+        self.assertIn("deferral memory unreadable", claim_proof_ask.render(rep, "dry-run", "paid"))
+
+    def test_the_apply_neither_reads_nor_writes_the_memory(self):
+        claims = [claim(1, 1), claim(2, 2)]
+        users = [1, 2]
+        q = replica({c["claim_id"]: ("pending", c["user_id"]) for c in claims}, {u: f"u{u}@x.com" for u in users})
+        gate = lambda argv: subprocess.CompletedProcess(argv, 0, "SENT\n", "")  # noqa: E731
+        with mock.patch.object(claim_proof_ask.verify_notify, "attach_identities", lambda ps, r: (ps, None)):
+            claim_proof_ask.run(list_path=self.lst(claims), segment="paid", mode="dry-run", max_users=2, query=q,
+                                wrapper="/gate", runner=gate, ledger_path=self.ledger, support_contacts=frozenset(),
+                                now=NOW, export_path=self.export, check_recipients=False)
+        self.assertFalse(Path(self.memory).exists())
+
+
+class NeverApprovesTest(unittest.TestCase):
+    """claim-untouched-1050-r1 acceptance (26 Oct 23:30Z order): a validator-declined row is never approved and a
+    name match alone never approves. The claim ask's only outcome is the ask; an approval on a found one-time code is
+    the daily code check's, and a row whose code was found is never asked."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ledger = str(Path(self.tmp.name) / "l.sqlite3")
+        self.export = str(Path(self.tmp.name) / "asked.jsonl")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    lst = ClaimProofAskTests.lst
+    go = ClaimProofAskTests.go
+
+    def test_a_validator_declined_name_matched_claimant_is_asked_never_approved(self):
+        declined = {7: {"is_approved": False, "rule_risk_percent": {}}}
+        q = replica({1: ("pending", 7)}, {7: "u7@x.com"}, verdicts=declined)
+        rep, gate = self.go(self.lst([claim(1, 7, profile_name="Jane")]), q)
+        argv = gate.calls[0][0]
+        self.assertEqual(len(gate.calls), 1)
+        self.assertEqual(argv[argv.index("--campaign") + 1], "claim-proof-ask")
+        self.assertEqual(argv[1], "send")
+        self.assertNotIn("approved", argv)
+
+    def test_a_found_code_is_never_asked(self):
+        q = replica({1: ("pending", 7)}, {7: "u7@x.com"})
+        rep, gate = self.go(self.lst([claim(1, 7, code_found=True)]), q)
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.code_found, 1)
+
+    def test_an_apply_over_declined_and_name_matched_rows_spawns_nothing_but_the_ask_gate(self):
+        declined = {7: {"is_approved": False, "rule_risk_percent": {}}, 8: {"is_approved": False}}
+        q = replica({1: ("pending", 7), 2: ("pending", 8)}, {7: "u7@x.com", 8: "u8@x.com"}, verdicts=declined)
+        rows = [claim(1, 7, profile_name="Jane"), claim(2, 8, profile_name="Big Star")]
+        spawned = []
+        with mock.patch.object(subprocess, "run", side_effect=lambda *a, **k: spawned.append(a)), \
+                mock.patch.object(subprocess, "Popen", side_effect=lambda *a, **k: spawned.append(a)):
+            rep, gate = self.go(self.lst(rows), q)
+        self.assertEqual(spawned, [])
+        self.assertEqual(sorted(p["user"]["id"] for _, p in gate.calls), ["7", "8"])
+        self.assertEqual({a[1] for a, _ in gate.calls}, {"send"})
+        self.assertEqual({a[a.index("--campaign") + 1] for a, _ in gate.calls}, {"claim-proof-ask"})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -157,7 +157,7 @@ free** with the oldest age on each side and **the job that owns sending the mess
 |---|---|---|
 | credits waiting on us, never told | no ask, no message and no decision has ever been written (`untouched`) | verify-ask-wiring-h2 |
 | credits owing proof, never asked | we decided something but never asked for the document (`not_told`) | verify-ask-wiring-h2 |
-| profile claims pending, never told | no claim note ever went out (`untouched`) | claim-lane-resume-c2 |
+| profile claims pending, never told | no claim note ever went out (`untouched`) | claim-untouched-1050-r1, creds home |
 | profile merges pending, never told | the ClickUp ticket carries no "we have touched this" tag | merge-queue-clear-q1 |
 | Intercom inbound, never answered | the customer is waiting and **no admin has ever replied** | intercom-backlog-i1 |
 
@@ -190,8 +190,8 @@ BACKLOG FORMING: credit documents back, we owe a look 3 items, oldest 2d, owner 
 |---|---|---|
 | credits nobody has touched | 24h | verify-ask-wiring-h2 |
 | credit documents back, we owe a look | 24h | verification worker, creds home (firstmate-assigned 2026-11-13) |
-| profile claims nobody has touched | 24h | creds (carried in `policies/queue-report-held-lanes.json`) |
-| claim documents back, we owe a look | 24h | claim-lane-resume-c2 |
+| profile claims nobody has touched | 24h | claim-untouched-1050-r1, creds home (`SENTINEL_BUCKETS`; while the lane is held, `policies/queue-report-held-lanes.json` names `creds`) |
+| claim documents back, we owe a look | 24h | claim-untouched-1050-r1, creds home (`SENTINEL_BUCKETS`) |
 | profile merges waiting on us | 24h | profile-merge-ops-m1 |
 | Intercom: the customer spoke last | 4h | cs-systemic-c3 |
 | support@ emails with no reply | 4h | cs-systemic-c3 |
