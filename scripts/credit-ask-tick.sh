@@ -479,7 +479,11 @@ if killed; then log "stop file placed during the build; nothing sent"; finish 0 
 # counted against today's proof-need-ask ledger rows, both segments together - the same count room() makes, because
 # need_asks keeps no per-segment record. Both are read again before every batch, so what a batch spent is what the next
 # one sees: the ledger, not this script, is the count. A read that cannot answer sends nothing.
-read_caps() { # prints: <tick cap> <daily cap> <today's rows>  |  POLICY|LEDGER 0 0 <why>
+read_caps() { # prints: <tick cap> <daily cap> <today's rows> <shared credit room>  |  POLICY|LEDGER 0 0 0 <why>
+  # The shared credit room is the group's own allocation minus what EVERY credit campaign has already spent today
+  # (sent + attempted, both segments). Without it this tick could spend its whole daily row on top of what the
+  # outbound tick already sent from the same 2,500-email allocation: room() enforces the group total on that path,
+  # and this is the same rule for this one (QA on #2120, 2026-11-16).
   "$PY" - "$POLICY" "$LEDGER" "$FAMILY" "$seg" "$PAGE" <<'PY'
 import datetime, json, sqlite3, sys
 path, ledger, family, seg, page = sys.argv[1:6]
@@ -487,24 +491,37 @@ try:
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
 except (OSError, ValueError) as exc:
-    print("POLICY", "0", "0", str(exc)[:160].replace("\n", " ")); sys.exit(0)
+    print("POLICY", "0", "0", "0", str(exc)[:160].replace("\n", " ")); sys.exit(0)
 tick = ((doc.get("tick_cap") or {}).get(family) or {}).get(seg)
 daily = ((doc.get("daily_cap") or {}).get(family) or {}).get(seg)
 if isinstance(daily, bool) or not isinstance(daily, int) or daily < 0:
-    print("POLICY", "0", "0", f"daily_cap.{family}.{seg} is not a whole number"); sys.exit(0)
+    print("POLICY", "0", "0", "0", f"daily_cap.{family}.{seg} is not a whole number"); sys.exit(0)
 if tick is None:
     tick = int(page)
 elif isinstance(tick, bool) or not isinstance(tick, int) or tick < 0:
-    print("POLICY", "0", "0", f"tick_cap.{family}.{seg} is not a whole number"); sys.exit(0)
+    print("POLICY", "0", "0", "0", f"tick_cap.{family}.{seg} is not a whole number"); sys.exit(0)
+# the group this family belongs to, and that group's shared day allocation (absent = no shared row, no bound)
+group = next((g for g, cs in (doc.get("groups") or {}).items() if family in cs), None)
+shared = ((doc.get("shared_daily_cap") or {}).get(group)) if group else None
+if shared is not None and (isinstance(shared, bool) or not isinstance(shared, int) or shared < 0):
+    print("POLICY", "0", "0", "0", f"shared_daily_cap.{group} is not a whole number"); sys.exit(0)
 day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 try:
     db = sqlite3.connect(f"file:{ledger}?mode=ro", uri=True)
     used = db.execute("SELECT count(*) FROM verify_messages WHERE day=? AND campaign=? "
                       "AND status IN ('sent','attempted')", (day, family)).fetchone()[0]
+    if shared is None:
+        shared_left = daily          # no shared row for this group: the family's own day row is the only bound
+    else:
+        members = [c for c in (doc.get("groups") or {}).get(group, [])]
+        marks = ",".join("?" * len(members))
+        group_used = db.execute(f"SELECT count(*) FROM verify_messages WHERE day=? AND campaign IN ({marks}) "
+                                "AND status IN ('sent','attempted')", (day, *members)).fetchone()[0]
+        shared_left = max(0, int(shared) - int(group_used))
     db.close()
 except sqlite3.Error as exc:
-    print("LEDGER", "0", "0", str(exc)[:160].replace("\n", " ")); sys.exit(0)
-print(tick, daily, int(used))
+    print("LEDGER", "0", "0", "0", str(exc)[:160].replace("\n", " ")); sys.exit(0)
+print(tick, daily, int(used), int(shared_left))
 PY
 }
 # <path> <segment-or-empty>: the first entry after the page a sender's file records, wrapping to 0 at the end
@@ -534,14 +551,15 @@ while :; do
     end_state=budget_spent; break
   fi
 
-  read -r tick daily used detail <<<"$(read_caps)"
+  read -r tick daily used shared_left detail <<<"$(read_caps)"
   case "$tick" in
     POLICY) log "POLICY UNREADABLE: $POLICY gave no per-tick and per-day cap for $FAMILY/$seg ($detail); nothing sent"
             finish 1 policy_unreadable "$seg" 0 "$start_cur" "$cur" ;;
     LEDGER) log "LEDGER UNREADABLE: $LEDGER could not answer today's $FAMILY sends ($detail); nothing sent"
             finish 1 ledger_unreadable "$seg" 0 "$start_cur" "$cur" ;;
   esac
-  if ! [[ "$tick" =~ ^[0-9]{1,6}$ ]] || ! [[ "$daily" =~ ^[0-9]{1,9}$ ]] || ! [[ "$used" =~ ^[0-9]{1,9}$ ]]; then
+  if ! [[ "$tick" =~ ^[0-9]{1,6}$ ]] || ! [[ "$daily" =~ ^[0-9]{1,9}$ ]] || ! [[ "$used" =~ ^[0-9]{1,9}$ ]] \
+     || ! [[ "$shared_left" =~ ^[0-9]{1,9}$ ]]; then
     log "POLICY UNREADABLE: $POLICY gave no per-tick and per-day cap for $FAMILY/$seg; nothing sent"
     finish 1 policy_unreadable "$seg" 0 "$start_cur" "$cur"
   fi
@@ -552,6 +570,11 @@ while :; do
     finish 0 tick_cap_zero "$seg" 0 "$start_cur" "$cur"
   fi
   left=$(( daily - used )); tick_left=$(( tick - (used - tick0) ))
+  # the group's shared allocation is a ceiling over this family's own day row, never under it
+  if [ "$shared_left" -lt "$left" ]; then
+    left="$shared_left"
+    [ "$left" -gt 0 ] || log "$FAMILY/$seg: the credit group's shared day allocation is spent ($shared_left left); this family sends nothing more today"
+  fi
   if [ "$left" -le 0 ]; then
     printf '%s\n' "$other" > "$STATE/next-segment"
     log "$FAMILY/$seg: today's $used sends have used the policy's daily cap of $daily; nothing more sent, the next run takes $other"

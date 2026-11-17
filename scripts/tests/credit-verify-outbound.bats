@@ -24,6 +24,12 @@ SH
   # are pinned by the --print-config cases and the [key=walk-size] / [key=send-page-per-family] cases below, which
   # unset these.
   export CVO_CHECK_ENTRIES=200 CVO_CHECK_ENTRIES_SEND=200
+  # The HARNESS's caps, not the shipped ones: every scenario below was written against the pre-[key=scale-2026-11-16]
+  # numbers (CAP 250, R1_CAP 250, CLAIM_CAP 250, FIRST_CAP 100, R14_CAP 50, NR_CAP 5, PR_CAP 100, 100-entry pages), and
+  # the shipped defaults are now the send-gateway allocations. The shipped values are pinned by the --print-config case
+  # and by `outbound tick (verif-caps-scale-r1)`, which unset these.
+  export CVO_CAP=250 CVO_R1_CAP=250 CVO_CLAIM_CAP=250 CVO_FIRST_CAP=100 CVO_R14_CAP=50 CVO_R14_ENTRIES=100 \
+         CVO_NR_CAP=5 CVO_NR_ENTRIES=100 CVO_PR_CAP=100 CVO_PR_ENTRIES=100 CVO_RD_CAP=100
   # spec-deploy-lock-deferral-m1: the retry schedules are constants in production; the arms shrink them to 0 s
   export CVO_APPLY_RETRY_SLEEPS="0 0 0 0 0" CVO_TRANSIENT_RETRY_SLEEPS="0 0 0"
   export CVO_TIMEOUT_BIN="$(command -v timeout)"
@@ -397,16 +403,16 @@ POLICY=/opt/hydra/policies/credit-verify-outbound.json
 CLAIM_LIST=/var/lib/hydra/credit-verify-outbound/claim-list.json
 CAP=250
 R1_CAP=250
-CLAIM_CAP=250
+CLAIM_CAP=500
 REFUSAL_SPIKE=0.20
 NEED_RUNNER=/opt/hydra/scripts/credit_review/need_asks.py
-FIRST_CAP=100
-R14_CAP=100
+FIRST_CAP=2500
+R14_CAP=2500
 R14_ENTRIES=100
-NR_CAP=5
+NR_CAP=2500
 NR_ENTRIES=100
 PR_RUNNER=/opt/hydra/scripts/credit_review/proof_refusal.py
-PR_CAP=100
+PR_CAP=2500
 PR_ENTRIES=100
 UNSIGNED_ALL=0
 JUDGE=/opt/hydra/scripts/credit-batch-judge.py
@@ -594,7 +600,7 @@ r1_check_cap() { # <segment>: the --max-users of that segment's r1 recipient che
   grep -q "^uvn-status .*--mode apply" "$CALLS"
   # outside the harness the seam is a constant 0
   run -0 env -u BATS_TEST_TMPDIR CVO_UNSIGNED_ALL=1 "$SCRIPT" --print-config
-  [[ "$output" == *"UNSIGNED_ALL=0"* ]]; [[ "$output" == *"FIRST_CAP=100"* ]]
+  [[ "$output" == *"UNSIGNED_ALL=0"* ]]; [[ "$output" == *"FIRST_CAP=2500"* ]]
 }
 
 @test "outbound tick ([key=scale-now-openclaw]): every family writes the batch judge's items (body + the renderer's facts object) and the judge runs in SHADOW - a STOP verdict blocks nothing" {
@@ -2065,7 +2071,7 @@ src = open(sys.argv[2]).read()
 assert p["shared_daily_cap"]["credit"] == 2500, p["shared_daily_cap"]
 claim_cap = int(re.search(r'^CLAIM_CAP="\$\(cfg CVO_CLAIM_CAP (\d+)\)"$', src, re.M).group(1))
 runs = len(p["groups"]["claim"]) * 2                                   # two claim families x paid/free
-assert claim_cap == 250 and runs * claim_cap == 1000, (claim_cap, runs)   # what the four runs ask for
+assert claim_cap == 500 and runs * claim_cap == 2000, (claim_cap, runs)   # what the four runs ask for; room()'s shared 500 is the day bound, so the four together never exceed the allocation
 # #2076 carries the group's ONE claim value and steps it: 25 today, 200 on deploy 7, 500 only once the
 # per-user daily gate is live and a day is clean (500 is the send gateway's allocation for this route).
 # This branch deliberately carries NO claim hunk (firstmate 015), so until #2076 merges it holds main's 25
@@ -2092,42 +2098,47 @@ PY
 # refuse to START a user whose worst case does not fit the share the tick hands it, so a bigger cap defers the rest to
 # the next tick instead of losing the artefact. This test reads the shipped file AND drives the real call site: a cap
 # that is only in the JSON and not in the argv the runner gets is not a cap.
-@test "outbound tick (verif-caps-arm-c1): the shipped policy raises the shared claim day cap to 200 and the free uvn-status tick cap to 100, and the tick hands both to the runner" {
+@test "outbound tick (verif-caps-scale-r1): the shipped policy raises every verification cap to its send-gateway allocation, and the tick hands the code caps to the runner" {
   python3 - "$SHIPPED_POLICY" <<'PY'
 import json, sys
 p = json.load(open(sys.argv[1]))
-# 1. the shared claim day cap: 200, inside m2's 500-a-day claim ceiling, and the claim group's own rows still fit it
-assert p["shared_daily_cap"]["claim"] == 200, p["shared_daily_cap"]
+# 1. the shared claim day cap: 500, the claim allocation of the send-gateway warm-up ceiling itself
+assert p["shared_daily_cap"]["claim"] == 500, p["shared_daily_cap"]
 assert p["shared_daily_cap"]["claim"] <= 500, p["shared_daily_cap"]          # m2's ceiling, never above it
 assert p["groups"]["claim"] == ["claim-status", "claim-proof-ask"], p["groups"]["claim"]
 for c in p["groups"]["claim"]:
     assert all(0 < v <= 500 for v in p["daily_cap"][c].values()), (c, p["daily_cap"][c])
 assert "claim-status" not in p["tick_cap"]        # the shared day cap is what bounds it, not a per-tick row
-# 2. the free uvn-status tick cap: 100, and the daily row is still the binding cap (24 hourly ticks x 100 > 2,000)
-assert p["tick_cap"]["uvn-status"] == {"free": 100, "paid": 50}, p["tick_cap"]["uvn-status"]
+# 2. every verification row now sits at its group allocation (credit 2,500 / claim 500), so no policy row throttles
+#    below the code cap any more; the code caps (CAP 250, CLAIM_CAP 250) are what the tick hands the runner
+assert p["tick_cap"]["uvn-status"] == {"free": 100, "paid": 50}, p["tick_cap"]["uvn-status"]      # OBSERVE-only: unchanged
 assert p["daily_cap"]["uvn-status"] == {"paid": 2000, "free": 2000}, p["daily_cap"]["uvn-status"]
 assert p["tick_cap"]["uvn-status"]["free"] <= p["daily_cap"]["uvn-status"]["free"], p["tick_cap"]["uvn-status"]
 # 3. nothing else moved: every other tick_cap row, the credit shared cap, and the arming rows are as they were
 assert p["shared_daily_cap"]["credit"] == 2500, p["shared_daily_cap"]
-assert p["tick_cap"]["proof-need-ask"] == {"free": 100, "paid": 100}, p["tick_cap"]["proof-need-ask"]   # reach-every-request-r1 raises it to FIRST_CAP
-assert p["tick_cap"]["claim-proof-ask"] == {"paid": 25, "free": 25}, p["tick_cap"]["claim-proof-ask"]
-assert p["tick_cap"]["uvn-new-rows"] == {"paid": 5, "free": 5}, p["tick_cap"]["uvn-new-rows"]
-assert p["tick_cap"]["proof-refusal"] == {"paid": 100, "free": 100}, p["tick_cap"]["proof-refusal"]
+assert p["tick_cap"]["proof-need-ask"] == {"free": 2500, "paid": 2500}, p["tick_cap"]["proof-need-ask"]
+assert p["tick_cap"]["claim-proof-ask"] == {"paid": 500, "free": 500}, p["tick_cap"]["claim-proof-ask"]
+assert p["tick_cap"]["uvn-new-rows"] == {"paid": 2500, "free": 2500}, p["tick_cap"]["uvn-new-rows"]
+assert p["tick_cap"]["proof-refusal"] == {"paid": 2500, "free": 2500}, p["tick_cap"]["proof-refusal"]
 assert p["armed_families"]["claim-status"] == {"live": True, "paid": True, "unsigned_from": "2026-10-31T17:55Z"}, p["armed_families"].get("claim-status")
 PY
-  # 4. the real call site: the free uvn-status check is handed 100 (not 50), and claim-status is handed the shared 200
+  # 4. the real call site: the code caps are what the runner is handed (uvn-status 250 per segment, claim-status 250)
   claim_list
+  # the SHIPPED caps, not the harness's: unset the pins the harness sets for the pre-scale scenarios
   export CVO_POLICY="$SHIPPED_POLICY" CVO_UNSIGNED_ALL=0
+  unset CVO_CAP CVO_R1_CAP CVO_CLAIM_CAP CVO_FIRST_CAP CVO_R14_CAP CVO_NR_CAP CVO_PR_CAP
   run -0 "$SCRIPT"
   t="$(newest_tick)"
   if grep -qiE "malformed|ARMING ROW IGNORED" "$t"; then false; fi
+  # uvn-status is OBSERVE-only: its rows stay at today's values, so the free check is still handed 100 (its policy row),
+  # not the code CAP 250
   [ "$(grep -- '--segment free .*--campaign uvn-status .*--max-users [0-9]*' "$CALLS" | grep -o -- '--max-users [0-9]*' | head -1)" = "--max-users 100" ]
   [ "$(grep -- '--segment paid .*--campaign uvn-status .*--max-users [0-9]*' "$CALLS" | grep -o -- '--max-users [0-9]*' | head -1)" = "--max-users 50" ]
-  [ "$(grep -- '^claim-status --list .*--segment paid .*--max-users [0-9]*' "$CALLS" | grep -o -- '--max-users [0-9]*' | head -1)" = "--max-users 100" ]
-  # 100, not 250: the family's own per-tick clamp is `family_cap` (FIRST_CAP, script:966) - a family the tick has not
-  # been given a FULL_CAP_FROM date for is held at FIRST_CAP per segment per tick. The raised shared cap is the DAY
-  # ceiling (200 across both claim families), not a per-tick one; this assertion is the one that says a tick with the
-  # shipped file gets the whole 100 rather than the old shared-and-family 25.
+  [ "$(grep -- '^claim-status --list .*--segment paid .*--max-users [0-9]*' "$CALLS" | grep -o -- '--max-users [0-9]*' | head -1)" = "--max-users 500" ]
+  # claim-status is handed 500, not 250: its own cap is CLAIM_CAP (500 since [key=scale-2026-11-16]) and the shared
+  # claim day row is now the same 500, so the day row and the family cap agree. uvn-status is handed 250 because CAP
+  # (250) is still its per-tick cap - raising CAP raises SEND_WALK, and SEND_WORST_S = 2 x SEND_WALK x 4 + 300 must stay
+  # under TICK_HARD_S 6,900 s, so CAP is a separate change with its own deadline arithmetic.
   # the shared claim cap is what bounds the DAY: lower that one row below the 100 and the SAME tick hands the apply the
   # lower number (room() = min(cap, daily - done, shared - used); claim-proof-ask is switched off in this copy so the
   # claim group's `used` is 0 and the number is exact, not "40 minus whatever ran before it")
@@ -2150,20 +2161,17 @@ ALLOC = int(re.search(r"allocates this route \*\*([\d,]+)/day\*\*",
 r = "uvn-reminder-14"
 assert p["armed_families"][r] == {"live": True, "paid": True, "unsigned_from": "2026-11-13T15:08Z"}, p["armed_families"].get(r)
 assert r in p["groups"]["credit"] and r not in p["groups"]["claim"]
-assert p["daily_cap"][r] == {"paid": 832, "free": 832}, p["daily_cap"].get(r)      # reach-every-request-r1: the 782 due, inside the 2,500 credit warm-up allocation
-assert all(0 < v <= 100 for v in p["tick_cap"][r].values()) and set(p["tick_cap"][r]) == {"paid", "free"}
-assert p["tick_cap"][r] == {"paid": 100, "free": 100}, p["tick_cap"].get(r)   # 50 -> 100: FIRST_CAP is the ceiling for a family with no FULL_CAP_FROM line, so 150 would be an inert digit (QA on #2086)
+assert p["daily_cap"][r] == {"paid": 2500, "free": 2500}, p["daily_cap"].get(r)      # the credit allocation
+assert p["tick_cap"][r] == {"paid": 2500, "free": 2500}, p["tick_cap"].get(r)        # the code's R14_CAP is the binder
 # the values that were live on node-8 when this file was reconciled ride along unchanged (nothing is raised by a deploy)
-assert p["tick_cap"]["uvn-status"] == {"free": 100, "paid": 50}   # verif-caps-arm-c1 (#2076): free 50 -> 100, inside its 2,000-a-day row
-assert p["tick_cap"]["proof-need-ask"] == {"free": 100, "paid": 100}   # free 5 -> 50 (ask-never-asked-r1, 2026-11-14), then 50 -> 100 (reach-every-request-r1): 100 = FIRST_CAP, the family's real ceiling
-assert p["tick_cap"]["claim-proof-ask"] == {"paid": 25, "free": 25}
+assert p["tick_cap"]["uvn-status"] == {"free": 100, "paid": 50}   # OBSERVE-only: stays at today's value
+assert p["tick_cap"]["proof-need-ask"] == {"free": 2500, "paid": 2500}   # at the credit allocation since [key=scale-2026-11-16]
+assert p["tick_cap"]["claim-proof-ask"] == {"paid": 500, "free": 500}
 assert p["daily_cap"]["uvn-status"] == {"paid": 2000, "free": 2000}
-assert p["daily_cap"]["proof-need-ask"] == {"paid": 1585, "free": 1585}   # reach-every-request-r1: min(1,585 listed, 2,500 credit warm-up allocation)
+assert p["daily_cap"]["proof-need-ask"] == {"paid": 2500, "free": 2500}
 assert p["shared_daily_cap"]["credit"] == 2500, p["shared_daily_cap"]
-assert p["shared_daily_cap"]["claim"] <= ALLOC, (p["shared_daily_cap"], ALLOC)
-# ^ claim is #2076's value and this PR does not set it: 200 as merged, and the target is the gateway's allocation
-assert {k: v["unsigned_from"] for k, v in p["armed_families"].items() if k not in (r, "wait-apology")} == {
-    "uvn-status": "2026-10-31T18:02Z", "status-doc-received": "2026-11-03T12:56Z",
+assert p["shared_daily_cap"]["claim"] == 500, p["shared_daily_cap"]
+assert {k: v["unsigned_from"] for k, v in p["armed_families"].items() if k not in (r, "wait-apology")} == {    "uvn-status": "2026-10-31T18:02Z", "status-doc-received": "2026-11-03T12:56Z",
     "claim-proof-ask": "2026-11-03T18:58Z", "proof-need-ask": "2026-11-10T02:17Z", "uvn-new-rows": "2026-11-14T22:48Z",
     "claim-status": "2026-10-31T17:55Z",    # claim-status-arm-policy-r1: its own row, read by the tests below
     # node-8's live row of 2026-11-15T08:18Z, carried so a deploy of this file does not disarm it (the file is git-wins)
@@ -2176,18 +2184,18 @@ assert p["armed_families"][w] == {"live": True, "paid": True}, p["armed_families
 assert "unsigned_from" not in p["armed_families"][w]
 assert w in p["groups"]["credit"]
 assert '[wait-apology]=""' in src                                    # the code's own SIGNED-only date, still empty
-# proof-refusal: its own row, in the credit group, at most 100 a run and 395 a day
+# proof-refusal: its own row, in the credit group, at the credit allocation a run and a day since [key=scale-2026-11-16]
 f = "proof-refusal"
 assert p["armed_families"][f] == {"live": True, "paid": True, "unsigned_from": "2026-11-15T13:41Z"}, p["armed_families"].get(f)
 assert f in p["groups"]["credit"] and f not in p["groups"]["claim"]
-assert p["tick_cap"][f] == {"paid": 100, "free": 100}, p["tick_cap"].get(f)
-assert p["daily_cap"][f] == {"paid": 395, "free": 395}, p["daily_cap"].get(f)
-# uvn-new-rows (ask-never-asked-r1): its own row, in the credit group, and LOW: 5 a tick, 24 ticks a day
+assert p["tick_cap"][f] == {"paid": 2500, "free": 2500}, p["tick_cap"].get(f)
+assert p["daily_cap"][f] == {"paid": 2500, "free": 2500}, p["daily_cap"].get(f)
+# uvn-new-rows (ask-never-asked-r1): its own row, in the credit group, at the credit allocation since [key=scale-2026-11-16]
 n = "uvn-new-rows"
 assert p["armed_families"][n] == {"live": True, "paid": True, "unsigned_from": "2026-11-14T22:48Z"}, p["armed_families"].get(n)
 assert n in p["groups"]["credit"] and n not in p["groups"]["claim"]
-assert p["tick_cap"][n] == {"paid": 5, "free": 5}, p["tick_cap"].get(n)
-assert p["daily_cap"][n] == {"paid": 120, "free": 120}, p["daily_cap"].get(n)
+assert p["tick_cap"][n] == {"paid": 2500, "free": 2500}, p["tick_cap"].get(n)
+assert p["daily_cap"][n] == {"paid": 2500, "free": 2500}, p["daily_cap"].get(n)
 PY
   # the tick itself reads the shipped file as POLICY arming: no row is malformed or ignored, and the reminder's row is its own
   export CVO_POLICY="$SHIPPED_POLICY" CVO_UNSIGNED_ALL=0
@@ -2238,7 +2246,8 @@ assert p["groups"]["claim"] == ["claim-status", "claim-proof-ask"]
 assert p["daily_cap"][s] == {"paid": 500, "free": 500}, p["daily_cap"][s]
 assert s not in p["tick_cap"]                                         # no cap added or raised by arming it
 ALLOC = int(__import__("re").search(r"allocates this route \*\*([\d,]+)/day\*\*", open(__import__("os").environ["REPORT"]).read()).group(1).replace(",", ""))
-assert p["shared_daily_cap"]["claim"] <= ALLOC, (p["shared_daily_cap"], ALLOC)   # the group's one value, #2076's, never above the allocation
+assert p["shared_daily_cap"]["claim"] == 500, p["shared_daily_cap"]        # [key=scale-2026-11-16]
+assert p["shared_daily_cap"]["claim"] <= ALLOC, (p["shared_daily_cap"], ALLOC)   # never above the gateway allocation
 PY
 }
 
@@ -2457,14 +2466,15 @@ pr_cap() { # <segment> <dry-run|apply>: the --max-users the refusal check / appl
 @test "outbound tick (proof-refusal): the day cannot exceed the policy's daily cap, counted on the campaign's own ledger rows across both segments" {
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
   day="$(date -u +%F)"
-  python3 - "$CVO_LEDGER" "$day" <<'PY'
-import sqlite3, sys
+  python3 - "$CVO_LEDGER" "$day" "$SHIPPED_POLICY" <<'PY'
+import json, sqlite3, sys
+cap = json.load(open(sys.argv[3]))["daily_cap"]["proof-refusal"]["paid"]
 d = sqlite3.connect(sys.argv[1])
 d.executemany("INSERT INTO verify_messages (campaign, day, status, account_id) VALUES ('proof-refusal', ?, 'sent', ?)",
-              [(sys.argv[2], str(9000 + i)) for i in range(380)])
+              [(sys.argv[2], str(9000 + i)) for i in range(cap - 15)])
 d.commit()
 PY
-  # 380 of 395 are sent today: 15 are left for the day, whichever segment asks
+  # the day's row is 15 short of the policy's daily cap: 15 are left, whichever segment asks
   STUB_PR_USERS="2 3" STUB_ROWS=0 run -0 "$SCRIPT"
   [ "$(pr_cap paid apply)" = 15 ]
   [ "$(pr_cap free apply)" = 15 ]
@@ -3774,13 +3784,15 @@ PY2
   # row, so its grant is its own (FIRST_CAP 100 here, CLAIM_CAP 250 at most); under the old shared 25 this same run was
   # stretched to --max-users 25, which is the held send this change removes. The property checked is the grant the run
   # started from: MORE than the old shared 25, never above CLAIM_CAP. claim-proof-ask is NOT the case that proves it -
-  # its 25 comes from its own `tick_cap[claim-proof-ask]` row, which this change neither raises nor touches.
+  # its number comes from its own `tick_cap[claim-proof-ask]` row (25, then 500 on [key=scale-2026-11-16]).
   claim_rows 0
   n="$(grep -E -- "^claim-status --list .*--segment paid .*--mode apply --max-users " "$CALLS" | sed -E 's/.*--max-users ([0-9]+) .*/\1/' | head -1)"
   [ -n "$n" ] || false
   [ "$n" -gt 25 ] || false
   [ "$n" -le 250 ] || false
-  grep -qE -- "^claim-proof-ask --list .*--segment paid .*--mode apply --max-users 25 " "$CALLS"
+  # claim-proof-ask is undated, so the harness's CVO_FIRST_CAP pin (100) is what the tick hands it here; the shipped
+  # policy row (500) and CLAIM_CAP (500) are above that clamp and this change raises neither of those two binders
+  grep -qE -- "^claim-proof-ask --list .*--segment paid .*--mode apply --max-users 100 " "$CALLS"
   # and the shipped policy carries the number all three runs read
   # #2076 carries the group's claim value, which is the gateway's allocation; this branch carries no claim hunk, so
   # pre-rebase the shipped file holds main's 25 and the rebase onto #2076 is what moves it. Either way it is never

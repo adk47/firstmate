@@ -644,7 +644,7 @@ The no-ask note for a pending claimant who gets **no** proof ask: holds, organiz
   - The list must be at most 30 hours old. No daily code check is required: the note promises none.
   - Without an explicit `audience`, a band-A or bandless row gets neither note (it is on the approval path).
   - A claim whose code was found is skipped.
-  - The run uses the same replica, support@, email and professional-id checks as the ask: paid first, one claim per user per run, at most `shared_daily_cap.claim` notes a day (the two claim campaigns together; 200 since 2026-11-16, `verif-caps-arm-c1`, inside send-gateway's 500-a-day claim ceiling - 500 is a follow-up once the per-person daily gate is live).
+  - The run uses the same replica, support@, email and professional-id checks as the ask: paid first, one claim per user per run, at most `shared_daily_cap.claim` notes a day (the two claim campaigns together; 500 since 2026-11-16, `verif-caps-scale-r1`, the claim allocation of send-gateway's warm-up ceiling).
 
 ## Removal notices (`--campaign removal-notice`)
 
@@ -1175,7 +1175,7 @@ the configured caps were not among the ones that bound:
   still run past the slice is never a new send: a user whose send outruns its own worst case (the loop only starts
   one whose worst case, `WORST_USER_S`, fits), and that apply's own read-backs. At the default slice one claim apply carries at most
   225 users (1,500 s x 6 workers / 40 s a user), under the default `CLAIM_CAP` of 250; node-8's shared claim day cap
-  was 25 until 2026-11-16 (`verif-caps-arm-c1` raised it to 200, inside send-gateway's 500-a-day claim allocation), and a claim
+  was 25 until 2026-11-16 (`verif-caps-arm-c1` raised it to 200, then `verif-caps-scale-r1` to 500, send-gateway's own claim allocation), and a claim
   family is in any case clamped per segment per tick to `FIRST_CAP` (100) until the tick holds a `FULL_CAP_FROM` date
   for it.
   A family that is started and then cut by the slice keeps its not-reached count: it sent nothing, so two ticks of
@@ -1210,7 +1210,7 @@ the configured caps were not among the ones that bound:
   unmeasured bar on the same users twice is a slow gate, not slow accounts: time one call before touching either.
 - **The other reasons the claim families sent nothing from 11-07 to 11-12 were not the order**: through 11-12 04:35Z
   every tick skipped them at `list_signed_on_stale` (fixed by the `claim-list-build.timer`, #1903), and the
-  `shared_daily_cap.claim` row on node-8 was 25 a DAY across both claim campaigns (200 since 2026-11-16,
+  `shared_daily_cap.claim` row on node-8 was 25 a DAY across both claim campaigns (500 since 2026-11-16,
   `verif-caps-arm-c1`). Read the tick's own line before
   blaming the budget.
 

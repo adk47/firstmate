@@ -102,26 +102,30 @@ R1_CAP="$(cfg CVO_R1_CAP 250)"
 # walked them at ~600 a day. The three ticks before the raise read 0.0 % (50 contacts), 0.0 % (5) and 1.82 %
 # (1 of 55) hard bounces - one bounce in 110 contacts, 0 complaints, 0 unsubscribes - and the route's own
 # auto-kill still stops the family above 2 %. 150 a tick clears the list in about six ticks, inside one day.
-R14_CAP="$(cfg CVO_R14_CAP 100)"
+R14_CAP="$(cfg CVO_R14_CAP 2500)"  # 150 -> 2,500 on [key=scale-2026-11-16] (Aaron: free up verification to run at scale)
 R14_ENTRIES="$(cfg CVO_R14_ENTRIES 100)"
 # uvn-new-rows (ask-never-asked-r1, firstmate 2026-11-14 22:48Z): the follow-up ask to a user we already asked, about
 # owed requests no ask named (the owing builder's uvn_new_rows class). NR_CAP is the family's cap per TICK across paid
-# + free together (SHARED_TICK_CAP below), paid first. It is LOW on purpose: the family has never sent, and the first
-# runs must be small enough to read and judge before it scales. NR_ENTRIES is the page it walks per segment.
-# The cap rises only by PR, on the evidence of those runs: constants, never env or a state file.
-NR_CAP="$(cfg CVO_NR_CAP 5)"
+# + free together (SHARED_TICK_CAP below), paid first. It was 5 while the family had never sent; it is 2,500 since
+# [key=scale-2026-11-16] (Aaron: free up verification to run at scale), on the read of its first runs (50 sent
+# 2026-11-15, 19 by mid-day 2026-11-16) and because the page, not this number, now bounds a tick: NR_ENTRIES walks 100
+# per segment and family() CUTS that page to what fits before TICK_HARD_S. The cap rises only by PR, on evidence:
+# constants, never env or a state file.
+NR_CAP="$(cfg CVO_NR_CAP 2500)"
 NR_ENTRIES="$(cfg CVO_NR_ENTRIES 100)"
 # proof-refusal (captain 2026-11-15): the note that tells a person why the document they sent did not verify a credit
 # and what would. PR_RUNNER builds its list from the proof reviewer's rejected rows and sends through the gate.
-# PR_CAP is the family's cap per TICK across paid + free together (SHARED_TICK_CAP below), paid first: one run sends at
-# most 100, and the next run starts only after the read-back of every note sent so far (refusal_families).
-# PR_ENTRIES is the page it walks per segment. The cap rises only by PR: constants, never env or a state file.
+# PR_CAP is the family's cap per TICK across paid + free together (SHARED_TICK_CAP below), paid first; the next run
+# starts only after the read-back of every note sent so far (refusal_families). It was 100; it is 2,500 since
+# [key=scale-2026-11-16] on the evidence of its own runs (40 sent 2026-11-16, 0 complaints, read-back clean) and because
+# PR_ENTRIES (100 per segment) and family()'s deadline cut now bound a tick, not this number.
+# The cap rises only by PR: constants, never env or a state file.
 PR_RUNNER="$(cfg CVO_PR_RUNNER "$HYDRA_ROOT/scripts/credit_review/proof_refusal.py")"
-PR_CAP="$(cfg CVO_PR_CAP 100)"
+PR_CAP="$(cfg CVO_PR_CAP 2500)"
 PR_ENTRIES="$(cfg CVO_PR_ENTRIES 100)"
-CLAIM_CAP="$(cfg CVO_CLAIM_CAP 250)"
+CLAIM_CAP="$(cfg CVO_CLAIM_CAP 500)"
 REFUSAL_SPIKE="$(cfg CVO_REFUSAL_SPIKE 0.20)"
-FIRST_CAP=100                          # [key=scale-now]: a family's first unsigned ticks, until v1's 10-sample line
+FIRST_CAP="$(cfg CVO_FIRST_CAP 2500)"  # [key=scale-now]: a family's first unsigned ticks, until v1's 10-sample line; 2500 from [key=scale-2026-11-16] (Aaron: free up verification to run at scale) so no undated family is clamped below its group's day allocation
 # p1 22:0xZ / 519, b1 518, QA #1587: a live-gate check costs ~6-15 s a user (10-31), and the 20:00Z dry tick ran past
 # 22:00Z holding the lock, so the 22:00Z tick exited. A tick had to end inside its 2 h cadence.
 # Since 2026-11-13 the cron is HOURLY and the two deadlines below were NOT shortened with it (cutting them is how

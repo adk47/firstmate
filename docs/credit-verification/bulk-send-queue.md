@@ -222,7 +222,7 @@ Kill run, 1,000 intents, 8 workers, 4 killed with 8 in flight (ak47, 2026-11-12)
 had in fact been delivered), 0 requests delivered twice, 0 orphans.
 
 What bounds claim asks today is not this queue. It is the shared claim day cap in
-`policies/credit-verify-outbound.json` (`shared_daily_cap.claim` - 200 a day since 2026-11-16, `verif-caps-arm-c1`, inside the warm-up ceiling's 500 claim allocation;
+`policies/credit-verify-outbound.json` (`shared_daily_cap.claim` - 500 a day since 2026-11-16, `verif-caps-scale-r1`, the warm-up ceiling's own claim allocation;
 25 before that, and always under send-gateway's 500-a-day claim ceiling) plus a per-segment per-tick clamp: a claim
 family with no `FULL_CAP_FROM` date is held at `FIRST_CAP` (100), and `tick_cap` rows of 25 on `claim-proof-ask` pin
 that family lower. The repo copy carries all of these.

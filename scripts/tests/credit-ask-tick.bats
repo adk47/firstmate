@@ -574,6 +574,56 @@ delta_step() {
   [ "$(cat "$T/state/next-segment")" = free ]
 }
 
+# QA on #2120 (2026-11-16): raising proof-need-ask's rows to the send-gateway allocation let this tick spend its whole
+# daily row on top of what the outbound tick had already sent from the SAME 2,500-email credit allocation. room() in
+# credit-verify-outbound.sh enforces the group total on that path; read_caps now returns the same room for this one.
+group_rows() { # <campaign> <n>: today's rows for another credit campaign
+  python3 - "$ASK_TICK_LEDGER" "$1" "$2" <<'PY'
+import datetime, sqlite3, sys
+day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+db = sqlite3.connect(sys.argv[1])
+for _ in range(int(sys.argv[3])):
+    db.execute("INSERT INTO verify_messages (campaign, day, status) VALUES (?, ?, 'sent')", (sys.argv[2], day))
+db.commit()
+PY
+}
+shared_policy() { # <shared credit> <family daily>
+  echo "{\"armed_families\": {\"proof-need-ask\": {\"live\": true, \"paid\": true}}, \"groups\": {\"credit\": [\"uvn-status\", \"proof-need-ask\"]}, \"shared_daily_cap\": {\"credit\": $1}, \"tick_cap\": {\"proof-need-ask\": {\"paid\": 50, \"free\": 50}}, \"daily_cap\": {\"proof-need-ask\": {\"paid\": $2, \"free\": $2}}}" > "$ASK_TICK_POLICY"
+}
+
+@test "the credit group's shared allocation bounds this family's day, not just its own row" {
+  shared_policy 2500 2500
+  group_rows uvn-status 2480                       # 20 of the shared 2,500 left, though this family's own row has 2,500
+  run bash "$TICK"
+  [ "$status" -eq 0 ]
+  grep -q -- '--segment paid .*--max-users 20 ' "$CALLS"
+}
+
+@test "a spent shared allocation sends nothing even with the family's own day row untouched" {
+  shared_policy 2500 2500
+  group_rows uvn-status 2500
+  run bash "$TICK"
+  [ "$status" -eq 0 ]
+  [ "$(sends)" -eq 0 ]
+  [ "$(last_run state)" = daily_cap_used ]
+}
+
+@test "the family's own day row still binds when it is the smaller number" {
+  export ASK_TICK_PAGE=60
+  shared_policy 2500 30                            # 2,500 of the shared allocation left, 30 of the family's own row
+  run bash "$TICK"
+  [ "$status" -eq 0 ]
+  grep -q -- '--segment paid .*--max-users 30 ' "$CALLS"   # the family's own 30, not the shared room and not the page
+}
+
+@test "a policy with no shared row for the group leaves the family's own day row as the only bound" {
+  echo '{"armed_families": {"proof-need-ask": {"live": true, "paid": true}}, "groups": {"credit": ["proof-need-ask"]}, "tick_cap": {"proof-need-ask": {"paid": 50, "free": 50}}, "daily_cap": {"proof-need-ask": {"paid": 400, "free": 400}}}' > "$ASK_TICK_POLICY"
+  ledger_rows 380
+  run bash "$TICK"
+  [ "$status" -eq 0 ]
+  grep -q -- '--segment paid .*--max-users 20 ' "$CALLS"
+}
+
 @test "the daily cap clamps the sender's --max-users to what is left of it" {
   ledger_rows 380                                  # 20 of the day's 400 left, under the per-tick 50
   run bash "$TICK"
