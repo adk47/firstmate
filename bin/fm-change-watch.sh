@@ -3438,7 +3438,7 @@ cw_record_absent() {  # <watch-id> <offset-seconds> <metric> <target> <value>
   printf '%s\n' "$line" | cw_write "$(cw_verdict_path "$id")"
   cw_row_write "$id" absent "$line"
   printf '%s\n' "$line"
-  cw_mark_once "$(cw_watch_dir "$id")/reported" || return 0
+  cw_mark_once "$(cw_watch_dir "$id")/absent-reported" || return 0
   fm_wake_append check "change-watch-$id-absent" \
     "check: change-watch $task $url absent (deploy run failed at +${tick}m on $target)" 2>/dev/null \
     || notice "change-watch: could not queue the absent wake for $url"
@@ -4156,8 +4156,9 @@ cmd_gate() {  # <task-id> [--terminal-gap]
 
 # The 7-day acceptance, measured. It fails when any status log under state/
 # carries the literal "change-watch completed unmeasured" line, or when any
-# durable row completed inside the window ended unmeasurable-with-reason. Both
-# are the same disease: a merge that landed with no evidence it was safe.
+# durable row completed inside the window ended unmeasurable-with-reason or
+# absent. Both are the same disease: a merge that landed with no evidence it was
+# safe.
 cmd_audit() {  # [<days>]
   local days=${1:-7} now since rows row state completed hits=0 bad=0 total=0
   case "$days" in ''|*[!0-9]*) die "invalid day count: $days" ;; esac
@@ -4357,9 +4358,9 @@ cmd_doctor() {
 # A claim row is the durable row of a worker's done claim, registered at CLAIM
 # time, before any PR exists, so its pr_url may be null. Its evidence is the
 # task's acceptance probe: a hash-bound script that reads the live consumer
-# surface and exits 0 only when the change is there. The probe is run by
-# something other than the worker (bin/fm-landing-police.sh), which records each
-# result here with `acceptance`. The claim record lives beside the rows in
+# surface and exits 0 only when the change is there. `acceptance` re-hashes the
+# bound probe, runs it from / under a clean environment with a bounded timeout,
+# and records the result. The claim record lives beside the rows in
 # state/change-watch/claims/<watch-id>.meta (key=value) and .log
 # ("<epoch><TAB><offset><TAB><exit>"), and the row is rewritten from them.
 #
@@ -4423,7 +4424,7 @@ cw_claim_row_write() {  # <watch-id>
   esac
   readings=''
   for offset in $CLAIM_OFFSETS; do
-    reading=$(awk -F'\t' -v o="$offset" '$2 == o { printf "{\"at\": %s, \"exit\": %s}", $1, $3 }' \
+    reading=$(awk -F'\t' -v o="$offset" '$2 == o { line = sprintf("{\"at\": %s, \"exit\": %s}", $1, $3) } END { if (line != "") printf "%s", line }' \
       "$(cw_claim_log_path "$id")" 2>/dev/null)
     readings="$readings${readings:+, }\"$offset\": ${reading:-null}"
   done

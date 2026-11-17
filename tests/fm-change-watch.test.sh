@@ -2816,4 +2816,16 @@ grep -q '"last_exit": 125' "$HOME_CL/state/change-watch/rows/cl2-claim.json" \
   || fail "an edited probe was not recorded as 125: $(cat "$HOME_CL/state/change-watch/rows/cl2-claim.json")"
 grep -q '"terminal_state": "open"' "$HOME_CL/state/change-watch/rows/cl2-claim.json" \
   || fail "an edited probe proved the claim: $(cat "$HOME_CL/state/change-watch/rows/cl2-claim.json")"
+probe3="$HOME_CL/probe3.sh"
+printf '#!/usr/bin/env bash\n[ -f "%s" ]\n' "$HOME_CL/probe3-ok" > "$probe3"
+chmod 0700 "$probe3"
+run_cw "$HOME_CL" 1790031000 claim cl3 "$probe3" >/dev/null || fail "claim failed"
+run_cw "$HOME_CL" 1790031000 acceptance cl3-claim 0 >/dev/null || fail "acceptance failed"
+touch "$HOME_CL/probe3-ok"
+run_cw "$HOME_CL" 1790031100 acceptance cl3-claim 0 >/dev/null || fail "acceptance failed"
+row3="$HOME_CL/state/change-watch/rows/cl3-claim.json"
+grep -q '}{' "$row3" && fail "a repeated offset produced invalid JSON: $(cat "$row3")"
+grep -q '"0": {"at": 1790031100, "exit": 0}' "$row3" \
+  || fail "a repeated offset did not keep its last reading: $(cat "$row3")"
+grep -q '"last_exit": 0' "$row3" || fail "a repeated offset left a stale last exit: $(cat "$row3")"
 pass "a claim row registers with no PR, binds its probe, and reads proven or absent from its probe alone"
