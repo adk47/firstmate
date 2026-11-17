@@ -3345,8 +3345,8 @@ EOF
 // so the keep-alive ladder (bin/fm-gateway-retry-lib.sh) can re-ring it;
 // every agent_start forgets the last error because a retry or continuation
 // is a new run. "ui_prompt_start"/"ui_prompt_end" bracket a blocking Pi
-// dialog (select, confirm, input, editor, custom - the /model picker is a
-// select) as dialog-open / dialog-closed carrying kind and title, on
+// extension dialog (select, confirm, input, editor, custom) as dialog-open /
+// dialog-closed carrying kind and title, on
 // whichever side of a run the dialog opened; a dialog closing on an idle
 // run that had ended on an error restores stop-failure so the stall stays
 // recorded. "turn_end" fires at every inner turn boundary (one LLM response

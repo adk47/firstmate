@@ -843,8 +843,8 @@ BUSY_VERDICT=''
 if [ "$KIND" != secondmate ] && [ "$HAVE_TARGET" = 1 ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   BUSY_SOURCE=${BUSY_VERDICT#* }
-  # A crew whose own record says it is waiting in a blocking harness dialog
-  # (the Pi extension's dialog-open event, e.g. the /model picker) can read no
+  # A crew whose own record says it is waiting in a blocking extension dialog
+  # (the Pi extension's dialog-open event) can read no
   # steer until the dialog closes, whichever side of a run it opened on. Only
   # Escape closes it, and the documented recovery for a backend that cannot
   # deliver Escape (docs/agent-control.md) is exit plus a fresh spawn; nothing

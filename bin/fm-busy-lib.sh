@@ -42,9 +42,11 @@
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled,
 #                    plus stop-failure when the settled run ended on an
 #                    assistant stopReason of error, and dialog-open /
-#                    dialog-closed around a blocking ui_prompt such as the
-#                    /model picker; the state carried by a dialog event is
-#                    whichever side of the run the dialog opened on)
+#                    dialog-closed around a blocking extension ui_prompt; the
+#                    built-in /model picker is an interactive overlay this
+#                    event does not cover and is read from its rendered rows
+#                    below; the state carried by a dialog event is whichever
+#                    side of the run the dialog opened on)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
