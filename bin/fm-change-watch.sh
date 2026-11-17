@@ -3738,7 +3738,8 @@ cw_rearm() {  # <watch-id> <url>
     # the readings are taken again and the row goes back to open.
     rm -f -- "$(cw_sampled_path "$id")" "$(cw_verdict_path "$id")" \
       "$(cw_reasons_path "$id")" \
-      "$(cw_watch_dir "$id")/noted" "$(cw_watch_dir "$id")/interrupted-reported"
+      "$(cw_watch_dir "$id")/noted" "$(cw_watch_dir "$id")/interrupted-reported" \
+      "$(cw_watch_dir "$id")/absent-reported"
     : > "$(cw_samples_path "$id")"
     rm -f -- "$(cw_watch_dir "$id")"/last.*
     cw_meta_set "$id" t0 "$(cw_now)"
@@ -3749,7 +3750,8 @@ cw_rearm() {  # <watch-id> <url>
   attempt=$(cw_meta_get "$id" arm_attempt || true)
   case "$attempt" in ''|*[!0-9]*) attempt=1 ;; esac
   attempt=$((attempt + 1))
-  rm -f -- "$(cw_verdict_path "$id")" "$(cw_watch_dir "$id")/interrupted-reported"
+  rm -f -- "$(cw_verdict_path "$id")" "$(cw_watch_dir "$id")/interrupted-reported" \
+    "$(cw_watch_dir "$id")/absent-reported"
   # The watch is in flight again, so its durable row must not keep the
   # interrupted terminal state it just left: a stale terminal row would make the
   # audit report a gap for a watch that is still measuring.
@@ -3786,11 +3788,11 @@ cmd_register() {
   if cw_watch_exists "$id"; then
     cw_reconcile_drive "$id"
     case "$(cat "$(cw_verdict_path "$id")" 2>/dev/null || true)" in
-      interrupted*|unmeasurable-with-reason*) cw_rearm "$id" "$url"; return 0 ;;
+      interrupted*|unmeasurable-with-reason*|absent*) cw_rearm "$id" "$url"; return 0 ;;
     esac
     row_state=$(cw_row_state "$id")
     case "$row_state" in
-      unmeasurable-with-reason) cw_rearm "$id" "$url"; return 0 ;;
+      unmeasurable-with-reason|absent) cw_rearm "$id" "$url"; return 0 ;;
     esac
     printf 'change-watch: %s already registered for %s\n' "$id" "$url"
     return 0
