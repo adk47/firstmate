@@ -3728,11 +3728,12 @@ cw_arm() {  # <watch-id> <when-name> <url>
   fi
 }
 
-# Re-arm an interrupted watch for the samples it has not taken.
+# Re-arm a watch that ended interrupted, unmeasurable, or absent.
 cw_rearm() {  # <watch-id> <url>
-  local id=$1 url=$2 remaining old attempt when_name arm_cmd
+  local id=$1 url=$2 remaining old attempt when_name arm_cmd state
+  state=$(cw_row_state "$id")
   remaining=$(cw_remaining_count "$id")
-  if [ "$remaining" -eq 0 ]; then
+  if [ "$remaining" -eq 0 ] || [ "$state" = absent ]; then
     # A completed schedule has nothing left to sample, so re-arming it would
     # only recompute the same terminal state. Recovery re-measures from now:
     # the readings are taken again and the row goes back to open.
@@ -4371,6 +4372,8 @@ cmd_doctor() {
 # claimed_epoch + CLAIM_DEADLINE_SECS; an open row past it is what the landing
 # police pages on.
 CLAIM_OFFSETS="0 900 3600 21600"
+# The scope's runner step pages when a claim row is past this deadline unproven,
+# and the follow-up landing police reads the deadline column from `claims`.
 CLAIM_DEADLINE_SECS=${FM_CW_CLAIM_DEADLINE_SECS:-3600}
 case "$CLAIM_DEADLINE_SECS" in ''|*[!0-9]*) CLAIM_DEADLINE_SECS=3600 ;; esac
 

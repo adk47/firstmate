@@ -2738,11 +2738,11 @@ grep -q '"terminal_state": "open"' "$ROW_AB" \
   || fail "re-registering an absent watch did not reopen its row: $(cat "$ROW_AB")"
 [ ! -e "$HOME_AB/state/change-watch/ab1-1990/absent-reported" ] \
   || fail "re-registering an absent watch kept its absent-reported marker"
-hydra_runs "$HOME_AB" "[$(hydra_run 2026-09-21T15:30:00Z completed success "$MERGED")]"
-run_hydra_cw "$HOME_AB" 1790044000 drive ab1-1990 >/dev/null || fail "resumed drive failed"
+hydra_runs "$HOME_AB" "[$(hydra_run 2026-09-21T15:30:00Z completed failure "$MERGED"), $(hydra_run 2026-09-21T16:30:00Z completed success "$MERGED")]"
+run_hydra_cw "$HOME_AB" 1790051000 drive ab1-1990 >/dev/null || fail "resumed drive failed"
 grep -q '"terminal_state": "proven"' "$ROW_AB" \
   || fail "a re-registered absent watch was not proven by a successful deploy: $(cat "$ROW_AB")"
-run_hydra_cw "$HOME_AB" 1790044000 gate ab1 >/dev/null \
+run_hydra_cw "$HOME_AB" 1790051000 gate ab1 >/dev/null \
   || fail "the gate refused a re-registered proven watch"
 pass "a failed deploy reads absent with its deciding reading in the row, and the gate refuses it"
 

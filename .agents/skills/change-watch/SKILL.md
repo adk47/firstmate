@@ -98,7 +98,7 @@ Absent is a FAILURE: the change is not on the live surface, so the done claim is
 For a merge watch the deploy run carrying the merge failed, and the owning task has already been steered with that; for a claim row the task's acceptance probe still did not pass at its last reading.
 1. Read the row at `state/change-watch/rows/<watch-id>.json` for the readings and, on a claim row, the acceptance binding.
 2. Route it to the owning task, or to a fresh task when that one is gone, to get the change deployed or fixed; a merged PR is not landed while its row reads absent.
-3. Teardown refuses the task until a re-registered watch or a fresh claim proves it; never delete the row to clear it.
+3. Teardown refuses the task until a re-registered watch proves it; never delete the row to clear it.
 4. Escalate to the captain only when the fix needs a decision, with the service and what is not live.
 5. Acknowledge the wake through the ordinary `check` acknowledgement.
 
