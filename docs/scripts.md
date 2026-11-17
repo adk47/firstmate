@@ -41,7 +41,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-hold-digest.py`      | Render the capped, grouped digest of held work from a scan and the ruling ledger |
 | `fm-tmp-top`             | Show a bounded `/tmp` total, top entries, and entry count with one `du` pass, never a per-entry fork |
 | `fm-brief.sh`            | Scaffold ship (explicit `--mode`), scout, secondmate-charter, and Herdr-lab briefs, with Captain's intent and Firstmate spec subsections on ship/scout |
-| `fm-dod-lib.sh`          | One owner of the ship definition of done and of the no-mistakes `--intent` contract |
+| `fm-dod-lib.sh`          | One owner of the ship definition of done, the no-mistakes `--intent` contract, and the acceptance probe's install and hash binding at `state/acceptance/<task>.sh` (docs/landing-proof.md) |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |
@@ -160,7 +160,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-parent-channel-lib.sh` | Resolve a secondmate home's parent channel and append a captain-facing outcome line to it at most once |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode, and write the ship instructions carrying that mode's definition of done |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, refuse a task whose change watch ended without a measurement verdict, retire secondmate homes |
-| `fm-landed-lib.sh`       | Single owner of whether a worktree's work has landed: remote reachability, a merged PR head containing the work, or content already in the default branch |
+| `fm-landed-lib.sh`       | Single owner of whether a worktree's work has landed: remote reachability, a merged PR head containing the work, or content already in the default branch; `fm_landed_proven` reads whether a task's acceptance probe proved it landed (docs/landing-proof.md) |
+| `fm-landing-police.sh`   | Run every ship claim's acceptance probe at the claim, +15m, +1h, and +6h, record each exit in its change-watch claim row, and report late, absent, unprobed, and edited claims; `arm` registers it as a check (docs/landing-proof.md) |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-deepseek-gateway.sh` | Lifecycle for the second local Anthropic-compatible gateway that serves DeepSeek V4.1 Flash to opt-in lanes |
 | `fm-lane-model-switch.sh` | Switch one live lane's model in place behind a composer-empty refusal, with an optional repoint at the DeepSeek gateway |

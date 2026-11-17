@@ -22,6 +22,130 @@
 # restating the rule.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
+# This file is also the one owner of a ship task's acceptance probe: the script
+# Firstmate writes at intake that reads the LIVE consumer surface and exits 0
+# only once the change is there. fm_acceptance_install binds it at
+# state/acceptance/<task>.sh (mode 0700) with its sha256 in
+# state/acceptance/<task>.trust, the same content binding a custom check gets;
+# fm_acceptance_verify re-checks that binding before anything runs it, so an
+# edited probe is never trusted; and fm_dod_block's third argument renders the
+# rule that done means the probe exits 0 when something other than the worker
+# runs it, and that the worker never edits it. bin/fm-landing-police.sh runs it,
+# bin/fm-change-watch.sh records it, and bin/fm-landed-lib.sh gates teardown.
+
+FM_ACCEPTANCE_TRUST_VERSION='fm-acceptance-probe-v1'
+
+fm_acceptance_dir() { printf '%s/acceptance\n' "$1"; }  # <state-dir>
+fm_acceptance_path() { printf '%s/acceptance/%s.sh\n' "$1" "$2"; }  # <state-dir> <task-id>
+fm_acceptance_trust_path() { printf '%s/acceptance/%s.trust\n' "$1" "$2"; }  # <state-dir> <task-id>
+
+fm_acceptance_sha256() {  # <file>
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+# Refuse a probe that cannot prove anything about the live surface: an empty
+# file, or one that reads a local copy of the code (a project clone or a task
+# worktree) instead of the system the customer uses.
+fm_acceptance_source_ok() {  # <source-file>
+  local src=$1
+  [ -f "$src" ] && [ ! -L "$src" ] || { echo "error: acceptance probe $src is not a regular file" >&2; return 1; }
+  grep -q '[^[:space:]]' "$src" || { echo "error: acceptance probe $src is empty" >&2; return 1; }
+  if grep -Eq '(/projects/|\.treehouse/|/worktrees?/)' "$src"; then
+    echo "error: acceptance probe $src reads a local copy of the code; it must read the live consumer surface (served bytes, bucket object, running revision, production row count)" >&2
+    return 1
+  fi
+}
+
+# Install the probe into the state dir and bind its bytes. Prints the path.
+# Installing the same bytes again is a no-op, so a retried intake succeeds;
+# different bytes over an existing probe are refused, because a task's probe is
+# written once.
+fm_acceptance_install() {  # <state-dir> <task-id> <source-file>
+  local state=$1 id=$2 src=$3 dir dest trust sha tmp
+  fm_acceptance_source_ok "$src" || return 1
+  dir=$(fm_acceptance_dir "$state")
+  dest=$(fm_acceptance_path "$state" "$id")
+  trust=$(fm_acceptance_trust_path "$state" "$id")
+  if ! { mkdir -p "$dir" && chmod 0700 "$dir"; }; then
+    echo "error: cannot create $dir" >&2
+    return 1
+  fi
+  tmp=$(umask 077; mktemp "$dir/.probe.XXXXXX") || return 1
+  if ! { { head -c 2 "$src" | grep -q '^#!' || printf '#!/usr/bin/env bash\n'; cat "$src"; } > "$tmp" && chmod 0700 "$tmp"; }; then
+    rm -f "$tmp"
+    echo "error: cannot write $dest" >&2
+    return 1
+  fi
+  sha=$(fm_acceptance_sha256 "$tmp")
+  if [ -z "$sha" ]; then
+    rm -f "$tmp"
+    echo "error: cannot hash $src" >&2
+    return 1
+  fi
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    rm -f "$tmp"
+    if fm_acceptance_verify "$state" "$id" >/dev/null && [ "$(sed -n 2p "$trust")" = "$sha" ]; then
+      printf '%s\n' "$dest"
+      return 0
+    fi
+    echo "error: $dest already exists with different bytes; a task's acceptance probe is written once, at intake" >&2
+    return 1
+  fi
+  # The binding lands before the probe, so an interrupted install leaves no
+  # probe (a retry installs it) rather than an unbound one (never trusted).
+  local bind
+  bind=$(umask 077; mktemp "$dir/.trust.XXXXXX") || { rm -f "$tmp"; return 1; }
+  if ! { printf '%s\n%s\n' "$FM_ACCEPTANCE_TRUST_VERSION" "$sha" > "$bind" && chmod 0600 "$bind" && mv -f "$bind" "$trust"; }; then
+    rm -f "$tmp" "$bind"
+    echo "error: cannot write $trust" >&2
+    return 1
+  fi
+  if ! mv -f "$tmp" "$dest"; then
+    rm -f "$tmp"
+    echo "error: cannot write $dest" >&2
+    return 1
+  fi
+  printf '%s\n' "$dest"
+}
+
+# 0 when the task has a probe whose bytes still match its binding and print its
+# path; 1 when it has none; 2 when it exists but is not trusted (edited, wrong
+# mode, a symlink, or no binding).
+fm_acceptance_verify() {  # <state-dir> <task-id>
+  local state=$1 id=$2 dest trust want have mode
+  dest=$(fm_acceptance_path "$state" "$id")
+  trust=$(fm_acceptance_trust_path "$state" "$id")
+  [ -e "$dest" ] || [ -L "$dest" ] || return 1
+  [ -f "$dest" ] && [ ! -L "$dest" ] || return 2
+  mode=$(stat -c %a "$dest" 2>/dev/null || stat -f %Lp "$dest" 2>/dev/null)
+  [ "$mode" = 700 ] || return 2
+  [ "$(sed -n 1p "$trust" 2>/dev/null)" = "$FM_ACCEPTANCE_TRUST_VERSION" ] || return 2
+  want=$(sed -n 2p "$trust" 2>/dev/null)
+  have=$(fm_acceptance_sha256 "$dest")
+  [ -n "$want" ] && [ "$want" = "$have" ] || return 2
+  printf '%s\n' "$dest"
+}
+
+fm_acceptance_block() {  # <probe-path>
+  local probe=$1
+  cat <<EOF
+
+## Acceptance probe
+Your \`done:\` is a claim. Done means this task's acceptance probe exits 0 when something other than you runs it:
+\`$probe\`
+Firstmate wrote it at intake. It reads the LIVE consumer surface - the served bytes, the bucket object, the running revision, the production row count - never the repo or your local copy.
+Never edit, move, or replace that file: its bytes are bound by hash, an edited probe is never trusted, and the task cannot be proven or cleaned up until firstmate restores it.
+You may run it read-only to see where you stand. When it exits non-zero after you believe the work is finished, the work has not landed: find out why (not merged, not deployed, wrong bytes served) and fix that, or report \`blocked:\` with the probe's output.
+If the probe itself is wrong, say so with \`blocked:\` and the evidence; never claim done around it.
+After your \`done:\` line, the landing police runs the probe at the claim and again at +15m, +1h, and +6h; a claim still failing past its deadline is reported as claimed but not landed, and a claim still failing at +6h is recorded absent.
+EOF
+}
 
 # Return 0 when a Task subsection still consists only of its scaffold
 # placeholder. A missing file and legacy briefs carry no such placeholders.
@@ -174,7 +298,13 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
+fm_dod_block() {  # <mode> <task-id> [<acceptance-probe-path>]
+  local mode=$1 id=$2 probe=${3:-}
+  fm_dod_mode_block "$mode" "$id" || return 1
+  [ -z "$probe" ] || fm_acceptance_block "$probe"
+}
+
+fm_dod_mode_block() {  # <mode> <task-id>
   local mode=$1 id=$2
   case "$mode" in
     direct-PR)

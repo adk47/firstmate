@@ -58,6 +58,9 @@
 # still RUNNING does not refuse teardown: state/change-watch/ is not a task
 # record, so the watch outlives the task and keeps sampling on its own, and
 # blocking on it would stall every merge for 12 hours.
+# REFUSES a ship task that has an acceptance probe until its claim row is proven
+# (fm_landed_proven in bin/fm-landed-lib.sh): the probe, run by the landing
+# police rather than the worker, must have exited 0 against the live surface.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -3197,6 +3200,12 @@ if [ "$FORCE" != "--force" ]; then
     echo "REFUSED: task $ID has a change watch that ended without a measurement verdict." >&2
     printf '%s\n' "$CHANGE_WATCH_GAP" >&2
     echo "A merge is not safe until its watch says so. Record what the watch measured with bin/fm-change-watch.sh verdict <watch-id>, diagnose the read path with bin/fm-change-watch.sh doctor <watch-id>, and re-register the watch once the read path is fixed." >&2
+    exit 1
+  fi
+  if [ "$KIND" = ship ] && ! LANDING_UNPROVEN=$(fm_landed_proven "$ID" "$STATE"); then
+    echo "REFUSED: task $ID claimed done but its acceptance probe has not proven it landed." >&2
+    printf '%s\n' "$LANDING_UNPROVEN" >&2
+    echo "Done means the probe at $STATE/acceptance/$ID.sh exits 0 when the landing police runs it against the live surface; get the change live, let bin/fm-landing-police.sh tick record it, or get explicit OK to discard, then --force." >&2
     exit 1
   fi
 fi

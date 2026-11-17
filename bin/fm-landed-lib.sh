@@ -197,3 +197,26 @@ fm_landed_work_is_landed() {  # <worktree> <branch> [pr-target]
   fi
   fm_landed_content_in_default "$wt"
 }
+
+# Landed for a task with an acceptance probe also means PROVEN: the probe,
+# run by something other than the worker (bin/fm-landing-police.sh), exited 0
+# against the live consumer surface, recorded as the task's claim row
+# <state>/change-watch/rows/<task>-claim.json (bin/fm-change-watch.sh owns the
+# row; bin/fm-dod-lib.sh owns the probe at <state>/acceptance/<task>.sh).
+# Returns 0 when the claim row is proven, or when the task has no acceptance
+# probe at all (a task briefed before probes existed); otherwise prints why the
+# task is unproven on stdout and returns 1.
+fm_landed_proven() {  # <task-id> <state-dir>
+  local task=$1 state=$2 row tstate reason
+  [ -e "$state/acceptance/$task.sh" ] || [ -L "$state/acceptance/$task.sh" ] || return 0
+  row="$state/change-watch/rows/$task-claim.json"
+  if [ ! -f "$row" ]; then
+    printf 'no claim row for %s: the task has not claimed done, or the landing police has not registered the claim yet\n' "$task"
+    return 1
+  fi
+  tstate=$(sed -n 's/.*"terminal_state": "\([^"]*\)".*/\1/p' "$row" | tail -1)
+  [ "$tstate" = proven ] && return 0
+  reason=$(sed -n 's/.*"reason": "\(.*\)"}$/\1/p' "$row" | tail -1)
+  printf '%s is %s: %s\n' "$task" "${tstate:-unreadable}" "${reason:-no reason recorded}"
+  return 1
+}

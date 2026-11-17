@@ -202,7 +202,7 @@ test_ship_modes_generate_clean_briefs() {
   for id_mode in "brief-nomistakes-a1:no-mistakes" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only"; do
     id=${id_mode%%:*}
     mode=${id_mode##*:}
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1; status=$?
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --probe "$FM_TEST_PROBE" >/dev/null 2>&1; status=$?
     expect_code 0 "$status" "fm-brief.sh $id --mode $mode should exit 0"
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
@@ -268,7 +268,7 @@ test_ship_mode_is_explicit_not_registry() {
   local home brief
   home="$TMP_ROOT/explicit-over-registry-home"
   write_registry "$home"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a5 direct-proj --mode no-mistakes >/dev/null 2>&1 \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a5 direct-proj --mode no-mistakes --probe "$FM_TEST_PROBE" >/dev/null 2>&1 \
     || fail "explicit no-mistakes brief on a direct-PR project should scaffold"
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
@@ -277,7 +277,7 @@ test_ship_mode_is_explicit_not_registry() {
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only --probe "$FM_TEST_PROBE" >/dev/null 2>&1 \
     || fail "unregistered project should still scaffold from the explicit mode"
   grep -qx "Delivery contract: mode=local-only" "$home/data/brief-explicit-a6/brief.md" \
     || fail "unregistered project did not honour the explicit --mode"
@@ -312,14 +312,14 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   home="$TMP_ROOT/configured-authority-home"
   write_registry "$home"
   id="brief-direct-authority-a4"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR --probe "$FM_TEST_PROBE" >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
     "direct-PR brief lost configured merge authority"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
   id="brief-local-authority-a4"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only --probe "$FM_TEST_PROBE" >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
     "local-only brief lost configured merge authority and guarded landing"
@@ -330,7 +330,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   assert_no_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$home/data/$id/brief.md" \
     "local-only brief must not include the no-mistakes --intent contract"
   id="brief-direct-intent-a4"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR --probe "$FM_TEST_PROBE" >/dev/null 2>&1
   assert_no_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$home/data/$id/brief.md" \
     "direct-PR brief must not include the no-mistakes --intent contract"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
@@ -343,7 +343,7 @@ test_no_mistakes_dod_wording() {
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --probe "$FM_TEST_PROBE" >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
@@ -390,7 +390,7 @@ test_ask_user_escalation_format() {
   home="$TMP_ROOT/ask-user-home"
   mkdir -p "$home/data"
   id="brief-ask-user-d1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --probe "$FM_TEST_PROBE" >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
 
@@ -426,7 +426,7 @@ test_ask_user_escalation_format() {
 
   for mode in direct-PR local-only; do
     other_id="brief-no-ask-user-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --mode "$mode" >/dev/null 2>&1
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --mode "$mode" --probe "$FM_TEST_PROBE" >/dev/null 2>&1
     other_brief="$home/data/$other_id/brief.md"
     assert_no_grep "nm-<run>-findings.txt" "$other_brief" \
       "$mode brief received a no-mistakes-only escalation format"
@@ -442,7 +442,7 @@ test_ship_project_memory_wording() {
   home="$TMP_ROOT/project-memory-home"
   mkdir -p "$home/data"
   id="brief-memory-c1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --probe "$FM_TEST_PROBE" >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
@@ -459,7 +459,7 @@ test_herdr_lab_contract_is_explicit_and_complete() {
   home="$TMP_ROOT/herdr-lab-home"
   mkdir -p "$home/data"
   id="brief-herdr-lab-d1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --herdr-lab >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --probe "$FM_TEST_PROBE" --herdr-lab >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "Herdr lab brief was not scaffolded"
   assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
@@ -511,7 +511,7 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
     if [ "$kind" = scout ]; then
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
     else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --probe "$FM_TEST_PROBE" >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
     assert_grep "# Herdr lifecycle declaration - NOT ENABLED" "$brief" \
@@ -540,7 +540,7 @@ test_documented_global_replace_leaves_the_herdr_gate_intact() {
     if [ "$kind" = scout ]; then
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
     else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --probe "$FM_TEST_PROBE" >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$kind brief was not scaffolded"
@@ -783,7 +783,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     case "$kind" in
       ship)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
-          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --probe "$FM_TEST_PROBE" >/dev/null 2>&1
         ;;
       scout)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
@@ -915,7 +915,54 @@ test_house_wiki_stanza_is_on_workers_not_secondmates() {
   pass "fm-brief.sh: house-wiki stanza is on ship/scout workers, not secondmate charters"
 }
 
+# Every ship brief needs an acceptance probe (bin/fm-dod-lib.sh): without one
+# it is refused; with one the probe is installed at state/acceptance/<task>.sh,
+# mode 0700 and hash-bound, and the brief tells the worker done means that probe
+# exits 0 when something else runs it, and never to edit it.
+test_ship_brief_requires_and_binds_an_acceptance_probe() {
+  local home out status probe mode
+  home="$TMP_ROOT/probe-home"
+  write_registry "$home"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" probe-none-p1 some-proj --mode direct-PR 2>&1); status=$?
+  expect_code 1 "$status" "a ship brief without --probe was not refused"
+  assert_contains "$out" "ship briefs require --probe <file>" "the refusal did not name --probe"
+  [ ! -e "$home/data/probe-none-p1/brief.md" ] || fail "a refused ship brief was still written"
+  printf 'cat /home/x/projects/app/version.txt\n' > "$home/repo-probe.sh"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" probe-repo-p2 some-proj --mode direct-PR --probe "$home/repo-probe.sh" 2>&1); status=$?
+  expect_code 1 "$status" "a probe that reads a project clone was accepted"
+  assert_contains "$out" "must read the live consumer surface" "the repo-probe refusal did not say why"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" probe-scout-p3 some-proj --scout --probe "$FM_TEST_PROBE" 2>&1); status=$?
+  expect_code 1 "$status" "--probe on a scout was accepted"
+  printf 'curl -fsS https://example.invalid/sample | grep -q "about 1.36M"\n' > "$home/live-probe.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" probe-ok-p4 some-proj --mode no-mistakes --probe "$home/live-probe.sh" >/dev/null 2>&1 \
+    || fail "a ship brief with a live probe failed"
+  probe="$home/state/acceptance/probe-ok-p4.sh"
+  [ -f "$probe" ] || fail "the probe was not installed at $probe"
+  mode=$(stat -c %a "$probe" 2>/dev/null || stat -f %Lp "$probe")
+  [ "$mode" = 700 ] || fail "the installed probe is mode $mode, not 0700"
+  head -1 "$probe" | grep -q '^#!' || fail "the installed probe has no interpreter line"
+  # shellcheck source=bin/fm-dod-lib.sh
+  . "$ROOT/bin/fm-dod-lib.sh"
+  [ "$(fm_acceptance_verify "$home/state" probe-ok-p4)" = "$probe" ] || fail "the installed probe is not trusted"
+  assert_grep "## Acceptance probe" "$home/data/probe-ok-p4/brief.md" "the brief has no acceptance probe section"
+  assert_grep "$probe" "$home/data/probe-ok-p4/brief.md" "the brief does not name the probe path"
+  assert_grep "Done means this task's acceptance probe exits 0 when something other than you runs it" \
+    "$home/data/probe-ok-p4/brief.md" "the brief does not redefine done as the probe passing"
+  assert_grep "Never edit, move, or replace that file" "$home/data/probe-ok-p4/brief.md" "the brief does not forbid editing the probe"
+  out=$(fm_acceptance_install "$home/state" probe-ok-p4 "$home/live-probe.sh") || fail "reinstalling the same bytes was refused: $out"
+  printf 'exit 0\n' > "$home/other-probe.sh"
+  fm_acceptance_install "$home/state" probe-ok-p4 "$home/other-probe.sh" >/dev/null 2>&1 \
+    && fail "different bytes replaced an installed probe"
+  printf 'exit 0\n' >> "$probe"
+  fm_acceptance_verify "$home/state" probe-ok-p4 >/dev/null; status=$?
+  expect_code 2 "$status" "an edited probe was still trusted"
+  fm_acceptance_verify "$home/state" no-such-task >/dev/null; status=$?
+  expect_code 1 "$status" "a task with no probe did not read as having none"
+  pass "fm-brief.sh: a ship brief requires, installs, and hash-binds a live acceptance probe"
+}
+
 test_script_parses
+test_ship_brief_requires_and_binds_an_acceptance_probe
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs

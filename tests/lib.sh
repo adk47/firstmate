@@ -54,6 +54,10 @@ export FM_AGENT_PROC_OPEN_FILES=/nonexistent/fm-agent-proc-open-files
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The acceptance probe every ship brief and promotion now requires; a fixture
+# that never reaches a network (bin/fm-dod-lib.sh owns the probe contract).
+# shellcheck disable=SC2034
+FM_TEST_PROBE="$ROOT/tests/fixtures/acceptance-probe.sh"
 
 # --- reporters --------------------------------------------------------------
 
