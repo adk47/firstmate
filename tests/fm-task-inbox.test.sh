@@ -860,6 +860,16 @@ test_overdue_liveness_policy() {
   out=$(FM_TASK_INBOX_OVERDUE_SECS=60 inbox_lib "$state" fm_task_inbox_overdue "$state" t1) \
     || fail "the next aged message must be overdue on its own"
   [ "${out% *}" = "$rec" ] || fail "the next overdue decision must name the new record, got: $out"
+  # A record that vanishes between being listed and being aged (a concurrent
+  # crewmate acks it) reports the stat-failure sentinel, which must stay silent
+  # rather than surface 'unacknowledged for 16666m'.
+  bash -c '
+    . "$1"
+    state=$2
+    fm_task_inbox_oldest_unhandled() { printf "%s\n" "$state/t1.inbox/vanished.msg"; }
+    fm_task_inbox_overdue "$state" t1 >/dev/null
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state" \
+    && fail "a record that vanished before its age was read must not be overdue"
   pass "inbox: an instruction unacknowledged past 2x the cadence is overdue once per message, whatever its ladder state"
 }
 

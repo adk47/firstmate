@@ -904,18 +904,21 @@ fm_busy_pi_tail_model_picker() {
   t=$(grep -v '^[[:space:]]*$' | tail -24)
   [ -n "$t" ] || return 1
   printf '%s\n' "$t" | awk '
-    /^[[:space:]]*(>|```|[-*][[:space:]])/ { styled=1; run=0; next }
+    /^[[:space:]]*```/ { infence = !infence; run=0; next }
     /to select · .* to set as default · .* to cancel/ {
-      if (!styled && ((run>=2 && NR-runend<=12) || (noanchor && NR-noanchor<=12))) found=1
+      if (!infence && !index($0, "`") && ((run>=2 && NR-runend<=12) || (noanchor && NR-noanchor<=12))) found=1
       next
     }
     /^[[:space:]]*((→|✓|✔)[[:space:]]*)*[A-Za-z0-9._\/-]+ (\([^)]*\))? \[[A-Za-z0-9._-]+\]([[:space:]]+·[[:space:]]+default)?[[:space:]]*$/ {
-      if (index($0, "`")) { styled=1; run=0; next }
+      if (infence || index($0, "`")) { run=0; next }
       if (NR==prevrow+1) run++
       else { run=1; noanchor=0 }
       runend=NR; prevrow=NR; next
     }
-    /^[[:space:]]*No matching models[[:space:]]*$/ { run=0; noanchor=NR; next }
+    /^[[:space:]]*No matching models[[:space:]]*$/ {
+      if (infence || index($0, "`")) { run=0; next }
+      run=0; noanchor=NR; next
+    }
     END { exit found ? 0 : 1 }
   '
 }

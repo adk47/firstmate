@@ -955,6 +955,8 @@ fm_task_inbox_overdue() {  # <state-dir> <task-id>
   dir=$(fm_task_inbox_dir "$1" "$2")
   oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2") || return 1
   age=$(fm_path_age "$oldest")
+  [ "$age" = 999999 ] && return 1
+  [ -e "$oldest" ] || return 1
   [ "$age" -ge "$(fm_task_inbox_overdue_secs)" ] || return 1
   [ "$(cat "$dir/.overdue" 2>/dev/null || true)" != "${oldest##*/}" ] || return 1
   printf '%s %s' "$oldest" "$age"

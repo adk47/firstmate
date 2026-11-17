@@ -1134,6 +1134,12 @@ test_pi_model_picker_on_screen_reads_blocked() {
   out=$(run_crew_state "$d" feat-pick)
   assert_contains "$out" "state: blocked" "the picker's no-matching-models row and hint row carry the verdict"
 
+  # A markdown bullet or quote in the transcript above the picker belongs to
+  # the transcript, not to the candidate picker block, so it cannot veto it.
+  FM_FAKE_BUSY_TEXT=$'Fixed the parser.\n- reran the suite\n'"$list_row"$'\n'"$list_row2"$'\n'"$hint_row"$'\n'"$footer"
+  out=$(run_crew_state "$d" feat-pick)
+  assert_contains "$out" "state: blocked" "a styled transcript line above a real picker screen does not veto the verdict"
+
   # A pane that merely prints the hint line and a badge-looking line in the
   # source's order (hint then badge) is not the picker.
   FM_FAKE_BUSY_TEXT=$'  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel\n  printf '\''%s\\n'\'' tail | grep -qE '\''\\[[A-Za-z0-9._-]+\\]'\'''

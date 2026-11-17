@@ -45,8 +45,12 @@ GEN=$("$ROOT/bin/fm-busy-event.sh" arm "$LAB/state" "$ID") || fail "could not ar
 
 # The exact extension bin/fm-spawn.sh writes for a Pi task, rendered from its
 # own heredoc so this guard cannot drift from production wiring.
-sed -n '/^    pi|pi-signed)$/,/^EOF$/p' "$ROOT/bin/fm-spawn.sh" | sed -n '/cat > /,/^EOF$/p' | sed '1d;$d' > "$LAB/ext.tpl"
-[ -s "$LAB/ext.tpl" ] || fail "could not extract the Pi extension heredoc from bin/fm-spawn.sh"
+awk '
+  /cat > "\$STATE\/\$ID\.pi-ext\.ts" <<EOF/ { inside=1; next }
+  inside && /^EOF$/ { exit }
+  inside { print }
+' "$ROOT/bin/fm-spawn.sh" > "$LAB/ext.tpl"
+[ -s "$LAB/ext.tpl" ] || fail "could not extract the Pi extension heredoc for \$STATE/\$ID.pi-ext.ts from bin/fm-spawn.sh"
 turnend="$LAB/state/$ID.turn-ended"
 FM_ROOT=$ROOT STATE_REAL="$LAB/state" ID=$ID BUSY_GEN=$GEN TURNEND="$turnend" \
   bash -c 'eval "cat <<EOF
