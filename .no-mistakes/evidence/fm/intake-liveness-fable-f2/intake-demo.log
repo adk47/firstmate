@@ -1,0 +1,46 @@
+[status] fm-intake: (cleared)
+--- captain types while the turn is running:
+[info] intake #1 queued; it is handled after the current turn and kept at state/intake/1.prompt
+[status] fm-intake: intake: 1 queued
+{ action: 'handled' }
+[info] intake #2 queued; it is handled after the current turn and kept at state/intake/2.prompt
+[status] fm-intake: intake: 2 queued
+{ action: 'handled' }
+
+--- what Pi was asked to queue (deliverAs):
+#1 deliverAs=followUp
+Firstmate intake #1 (typed 07:12:53Z while the previous turn was still running; acknowledge it in one line, then handle it):
+
+please also fix the footer
+
+#2 deliverAs=followUp
+Firstmate intake #2 (typed 07:12:53Z while the previous turn was still running; acknowledge it in one line, then handle it):
+
+and update the nav copy
+
+--- durable records on disk:
+state/intake/1.prompt:
+schema=fm-captain-intake.v1
+seq=1
+at=2026-11-17T07:12:53.198Z
+session=demo-session
+--
+please also fix the footer
+
+state/intake/2.prompt:
+schema=fm-captain-intake.v1
+seq=2
+at=2026-11-17T07:12:53.199Z
+session=demo-session
+--
+and update the nav copy
+
+--- Pi starts the queued run and consumes intake #1 (exact wrapped text):
+[status] fm-intake: intake: 1 queued
+state/intake: 2.prompt
+state/intake/handled: 1.prompt
+
+--- /intake listing:
+[info] captain intake: on
+pending: #2
+handled: 1 (latest) · released: none (latest) · records under /tmp/fm-intake-demo.YGSgyl/state/intake

@@ -1,0 +1,208 @@
+===== tests/fm-pi-captain-intake.test.sh
+ok - with config/captain-intake absent every prompt keeps Pi's native steer and nothing is written
+ok - a prompt typed mid-turn is recorded verbatim, re-delivered as one headed follow-up, and acknowledged in one line
+ok - several prompts typed in one turn are captured in order with ascending sequence numbers
+ok - commands, bash lines, short interrupts, idle prompts, explicit follow-ups, and non-interactive input keep their native lane
+ok - consumption is matched on the exact wrapped text at message_start or before_agent_start and moves the record to handled/
+ok - an abort releases the record (Pi already returned the text to the editor) instead of delivering it twice
+ok - a record Pi accepted but never consumed is re-sent after the settle grace, while a consumed one is not
+ok - a follow-up restored by Pi dequeue and resubmitted is not re-sent at settle
+ok - a follow-up Pi reports as dequeued is released instead of re-sent at settle
+ok - a reload re-attaches to pending records without re-sending them, and consumption still moves them to handled
+ok - a record left pending by a replaced or crashed session is re-sent at session start and the sequence continues
+ok - when Pi refuses the follow-up the prompt keeps its native steer and no stale record is left behind
+ok - /intake reports whether intake is on and what is pending
+all fm-pi-captain-intake tests passed
+(exit 0)
+===== tests/fm-busy-state.test.sh
+ok - arm mints a gen sidecar and seeds busy fm-spawn at seq=1
+ok - apply advances seq under the armed gen and attributes the writing source
+ok - firstmate-owned interrupt and recovery events bind to the current gen
+ok - a detail is bounded, follows only the event that carried it, hides behind a superseded gen, and goes with retire
+ok - apply is refused for a task whose busy contract was never armed
+ok - retire waits for the writer lock and cannot remove a new incarnation
+ok - retire treats only an absent sidecar as already retired
+ok - orphan retire removes a record only while its sidecar is still absent
+ok - the writer breaks a stale lock instead of dying on GNU stat output
+ok - a late event from a previous incarnation is rejected, record unchanged
+ok - a record from a stale incarnation classifies unknown, never idle
+ok - a converted adapter with no record classifies unknown, never idle
+ok - malformed records classify unknown malformed, never busy or idle
+ok - a record with no armed gen sidecar classifies unknown
+ok - a record is trusted only by the adapter whose source wrote it
+ok - converted adapters never classify busy from rendered footer text
+ok - the grok fallback is regex-scoped to grok and classifies only grok tasks
+ok - codex classifies unknown until a semantic source passes its verification gate
+ok - standalone kimi classifies unknown until the live verification gate opens
+ok - cursor classifies only from its transcript fold, never rendered text or native state
+ok - endpoint death is the only process-level override and yields dead, never busy
+ok - herdr's native verdict is trusted for busy only, and records outrank it
+ok - record parsing never clobbers the caller's positional parameters, glob setting, or fields
+ok - the boolean view reports busy only on an exact busy verdict
+all fm-busy-state tests passed
+(exit 0)
+===== tests/fm-busy-adapter-wiring.test.sh
+ok - pi extension reports agent_start busy, settles idle only via ctx.isIdle(), and keeps turn_end a notification
+ok - pi extension records stop-failure with Pi's own error text at an error-ended settle, and a retried or clean run settles normally
+ok - pi extension brackets a blocking dialog as dialog-open/dialog-closed with kind and title on either side of a run, and restores a recorded stall when the dialog closes
+ok - pi extension awaits agent_settled before the next agent_start without a test delay
+ok - pi extension events from a superseded incarnation are rejected as stale
+ok - kimi and grok install no unverified semantic wiring and classify through their own gates
+ok - opencode plugin classifies from session.status, scoped to the latched worker session
+ok - claude hooks open on UserPromptSubmit and close on Stop, StopFailure, and SessionEnd
+ok - claude hook events from a superseded incarnation are rejected without breaking the hook
+ok - gemini hooks open on BeforeAgent and close on AfterAgent and a repeated SessionEnd
+ok - gemini hook events from a superseded incarnation are rejected without breaking the hook
+ok - raw gemini launch remains unwired and classifies unknown
+ok - gemini is refused as a secondmate because it has no primary supervision protocol
+ok - codex classifies unknown until a semantic source is verified, never idle or footer-matched
+ok - a secondmate arms the busy contract but never touches a turn-end marker in the parent's state
+ok - a crewmate spawn still touches the turn-end notification marker
+all fm-busy-adapter-wiring tests passed
+(exit 0)
+===== tests/fm-gateway-keepalive.test.sh
+ok - text classifier accepts every transient gateway error this fleet has produced, bare and above the idle footer
+ok - the deny list beats a transient code inside a permanent failure
+ok - the deny list matches anywhere in the capture while the transient match reads only the tail
+ok - a recovered agent whose scrollback still holds the old error is not re-rung
+ok - repository text naming the errors without the rendered API Error shape is not a stall
+ok - the recorded turn end gates the ladder: an API-error end with the error enters it, a normal end never does, and a normal end ends it
+ok - the rendered error still opens the ladder when the pane wraps it, word wrapped and hard wrapped
+ok - text classifier accepts the transient errors Pi renders and refuses Pi's credential, key, and unreachable-gateway failures
+ok - a Pi crew enters the ladder on its own recorded error, a recorded permanent failure keeps it out, and a normal settle ends it
+ok - a crew recorded as waiting in a blocking dialog is never re-rung by the ladder
+ok - no record, an event neither harness writes, and an unreadable record all stay out of the ladder
+ok - an unreachable gateway is left to surface as an outage
+ok - the ladder stops at its attempt bound
+ok - the ladder stops at its wall-clock horizon independently of the attempt count
+ok - the busy-clear window stays wall clock at every poll cadence, past the harness's own retry
+ok - re-sighting an open stall moves neither the horizon anchor nor the backoff anchor
+ok - the first attempt waits out its own backoff rather than firing on sight
+ok - the backoff ladder repeats its last step past its own length
+ok - a spent budget declares a keyed external wait rather than a wedge
+ok - a recovered agent's declared gateway wait is closed, leaving no open gateway-503 phase
+(exit 0)
+===== tests/fm-crew-state.test.sh
+ok - active run-step is authoritative
+ok - stale needs-decision over active run is superseded
+ok - stale blocked over active run is superseded
+ok - genuine parked run is not flagged superseded
+ok - scalar gate parked run is not flagged superseded
+ok - gate block parked run is not flagged superseded
+ok - ci-ready status log beats monitoring run
+ok - ci-monitoring run with checks already green surfaces done
+ok - top-level ci status uses ci log green marker
+ok - terminal no-checks ci-monitor marker surfaces done
+ok - base-advance rearm after green stays working
+ok - pending no-checks ci-monitor marker stays working
+ok - ci-monitoring run with checks not yet green stays working
+ok - a fresh issue after an earlier green reading is not masked
+ok - stale checks-green status log does not mask CI relapse
+ok - ci fixing is not overridden by an earlier green marker
+ok - top-level fixing is not overridden by a stale ci running row
+ok - top-level fixing is not overridden by a stale done log
+ok - terminal passed run is authoritative
+ok - a run whose CI step was automatically skipped is failed, never checks-green
+ok - terminal failed run is authoritative
+ok - cross-branch run is attributed via the real runs list
+ok - repo cache key groups a linked worktree with its primary checkout
+ok - runs-list cache reuses a shared per-repo listing
+ok - cross-branch attribution picks the branch's most recent row
+ok - coarse run does not probe another branch's ci log
+ok - another branch's run is ignored, falls back
+ok - no run + a busy semantic record with a live agent reads working, attributed to its source
+ok - a busy record with no live agent process reads unknown/stale, never working
+ok - a gemini busy record is corroborated from the node process's arguments
+ok - a pull-sourced busy verdict is corroborated against a live agent
+ok - a crew recorded as waiting in a blocking dialog reads blocked with the dialog and the exit-and-respawn recovery named, on either side of a run
+ok - a Pi crew showing its /model picker reads blocked from its hint row plus two consecutive list rows, while quoted picker text does not, and only for Pi
+ok - a converted adapter never reads working from rendered footer text
+ok - grok still reads working through its isolated rendered-tail fallback
+ok - herdr's native busy verdict reads working with no record present
+ok - a herdr CLI that fails to answer reads unknown/unreachable, never gone
+ok - an alive endpoint whose scrollback read failed stays working
+ok - a husk pane (agent gone) still reads gone for reclaim
+ok - a mid-tool-call crew stays working because its record outranks herdr's generation state
+ok - an idle record with idle agent_status stays not-busy (no regression for a human-blocked agent)
+ok - no run + idle pane uses the status-log verb
+ok - no run + idle pane parses keyed status syntax
+ok - no run + idle pane on a paused: status reports state: paused with its reason
+ok - no run + idle pane honors the configured paused verb
+ok - a trailing resolved: event does not corrupt state render (idle stays idle)
+ok - dead window ignores stale status log
+ok - a tmux that fails to answer reads unknown/unreachable, never gone
+ok - closed pane still reports a terminal run-step
+ok - closed pane still reports an active run-step
+ok - no timeout command uses perl bound
+ok - scout skips the run lookup
+ok - torn-down worktree is handled gracefully
+ok - fm-crew-state remote: alive endpoint falls through to the routed status log
+ok - fm-crew-state remote: an idle alive endpoint reads alive, never gone or dead
+ok - fm-crew-state remote: an unreachable host reads unknown-remote, never gone or dead
+ok - fm-crew-state remote: the remote host's own dead verdict is reported truthfully
+ok - missing meta is handled gracefully
+ok - crew_is_provably_working absorbs a validating crew found only via the runs-list fallback
+ok - crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)
+ok - usage error exits 2
+ok - historical same-branch rewritten head is not attributed as current
+ok - active run with valid descendant fix head remains current
+ok - local work advanced past run head invalidates attribution
+ok - pipeline-owned active run binds without head equality and beats the failed row
+ok - a genuinely failed run with no later run is not hidden
+ok - coarse scan anchors the unresolvable active row instead of falling to an older one
+ok - coarse scan with a mismatched anchor stays unknown and lets the pane answer
+ok - the exemption requires branch_sync.state=pipeline_owned
+ok - the exemption never applies to a terminal run
+ok - missing run head falls back instead of matching by branch
+ok - active fix round with an unfetched pipeline head reads working
+ok - unanchored unverifiable active row is never attributed
+ok - unresolvable terminal row never reads as current
+ok - runs-list continuation attribution works when axi answers another branch
+ok - an orca task whose worktree has a live agent is never unknown
+ok - an orca task with no agent process is dead, not unknown and not working
+ok - a live idle agent that claims no state reads idle; an unreadable table decides nothing
+ok - a done line and a live agent's working line outrank the liveness answer
+ok - a stale working: line does not outvote an absent agent
+ok - absence in the process table is not death for a harness it cannot recognize
+ok - a missing window is not the last word: the process table decides alive or dead
+ok - a status log with no task record reads unowned, with its age and writer
+all fm-crew-state tests passed
+(exit 0)
+===== tests/fm-task-inbox.test.sh
+ok - inbox: a steer is written durably and round-trips byte-exact with a self-describing doorbell
+ok - inbox: the idempotent enqueue dedups an exact re-run onto the same record, handled or not
+ok - inbox: idempotent enqueue follows a record concurrently moved to handled
+ok - inbox: an idempotent re-run dedups onto a record surviving only as its hidden link
+ok - inbox: the handled mv is the idempotent ack and sequences are never reissued
+ok - inbox: concurrent writers lose nothing
+ok - inbox: a colliding writer can never overwrite an existing record
+ok - inbox: a writer whose lock wait expires refuses instead of writing blind
+fm-task-inbox: reclaimed stale lock: /tmp/fm-task-inbox.VPUDVN/stale-lock/state/t1.inbox/.seq.lock from dead holder pid=999999
+ok - inbox: a reclaimed stale lock never costs a queued record
+ok - inbox: acknowledgements racing a burst of writers lose no instruction
+ok - inbox: an unconfirmable record fails the write instead of reporting delivery
+ok - inbox: a record acknowledged while publishing is delivered, not lost
+ok - inbox: the doorbell's acknowledgement forms run for a quoted state path
+ok - inbox: unread records deleted by a worker's own cleanup are restored
+ok - inbox: a record surviving only as its hidden link keeps its sequence
+fm-task-inbox: coalesced 1 superseded unhandled record(s) into 002.msg
+ok - inbox: a superseded coalesced tick is never resurrected
+ok - inbox: the ack helper acknowledges records without hand-rolled inbox handling
+ok - inbox: a record the worker already deleted can still be acknowledged, from its hidden link
+fm-task-inbox: adopted 1 pre-existing unread record(s) in /tmp/fm-task-inbox.VPUDVN/adopt/state/t1.inbox for deletion repair
+ok - inbox: the repair adopts unread records queued before it existed
+ok - inbox: coalescing retires a superseded tick whose visible record was already deleted
+ok - inbox: the doorbell names the real inbox for a record already in handled/
+ok - inbox: a writer retries when a competing lock vanishes after its failed claim
+ok - inbox: ladder bookkeeping ignores a concurrently removed inbox
+ok - inbox: fire-and-forget records stay durable and outside the ladder
+ok - inbox: the re-ring ladder paces by grace, escalates once, and resets on ack
+ok - watcher: an unhandled aged message on an idle pane re-rings without waking firstmate, and the ack silences it
+ok - watcher: a busy pane just waits - the record is durable and no doorbell is typed
+ok - watcher: a healthy or empty inbox stays completely silent
+ok - watcher: acknowledgement silences an unwritable ladder without a stale wake
+ok - watcher: unwritable ladder bookkeeping surfaces a stale wake after the doorbell
+ok - watcher: a spent ring budget emits exactly one ordinary stale wake for recovery
+ok - inbox: an instruction unacknowledged past 2x the cadence is overdue once per message, whatever its ladder state
+ok - watcher: an instruction unacknowledged past the overdue bound surfaces once as a stale wake even on a busy pane, naming the recovery
+(exit 0)

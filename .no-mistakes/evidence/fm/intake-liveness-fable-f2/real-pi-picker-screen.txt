@@ -1,0 +1,72 @@
+[>7u
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                                        
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/tmp/fm-pi-model-picker.kbgmzO/proj (master)
+0.0%/1.0M (auto)                                                              deepseek/deepseek-v4.1-flash-1017 • medium ▀▀█  v1.5.2                                                                                                            
+ █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more                                   
+ Press ctrl+o to show full startup help and loaded resources.                                                           
+                                                                                                                        
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.                                  
+
+
+[Context]                                                                                                               
+  ~/.pi/agent/AGENTS.md                                                                                                 
+
+[Skills]                                                                                                                
+  bob-status, llm-wiki, movebox, no-mistakes                                                                            
+
+[Prompts]                                                                                                               
+  /wiki-digest, /wiki-discover, /wiki-ingest, /wiki-init, /wiki-lint, /wiki-query, /wiki-record, /wiki-req, /wiki-retro,
+/wiki-run, /wiki-skills, /wiki-status                                                                                   
+
+[Extensions]                                                                                                            
+  @zosmaai/pi-llm-wiki:llm-wiki, billion-context-pi-lean@0.2.5:lean, live.pi-ext.ts, orca-agent-status.ts,              
+orca-prefill.ts, orca-titlebar-spinner.ts, pi-web-access:dist, retry-truncated-thinking.ts                              
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                                        
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/tmp/fm-pi-model-picker.kbgmzO/proj (master)
+0.0%/1.0M (auto)                                           (openrouter-named) deepseek/deepseek-v4.1-flash-1017 • medium────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Package Updates Available                                                                                              
+ Package updates are available. Run pi update --extensions                                                              
+ Packages:                                                                                                              
+ - pi-web-access                                                                                                        
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                                        
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/tmp/fm-pi-model-picker.kbgmzO/proj (master)
+0.0%/1.0M (auto)                                           (openrouter-named) deepseek/deepseek-v4.1-flash-1017 • medium/model                                                                                                                  → model          <provider/model> — Select model (opens selector UI)                                                    
+  wiki-model     [u:npm:@zosmaai/pi-llm-wiki] View or set the model used for LLM Wiki background tasks (default: sessi  
+  scoped-models  Enable/disable models for Ctrl+P cycling                                                               
+/tmp/fm-pi-model-picker.kbgmzO/proj (master)
+0.0%/1.0M (auto)                                           (openrouter-named) deepseek/deepseek-v4.1-flash-1017 • medium────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Only showing models from configured providers. Use /login to add providers.                                             
+
+>                                                                                                                       
+
+→ ✓ deepseek/deepseek-v4.1-flash-1017 (OPENROUTER · DeepSeek V4.1 Flash 1017) [openrouter-named] · default              
+    claude-opus-5-5 (TOKEN POOL · Claude Opus 5.5) [mac-pool]                                                           
+    claude-fable-5-2 (TOKEN POOL · Claude Fable 5.2) [mac-pool]                                                         
+    claude-fable-5-1 (TOKEN POOL · Claude Fable 5.1) [mac-pool]                                                         
+    claude-fable-5 (TOKEN POOL · Claude Fable 5) [mac-pool]                                                             
+    claude-opus-5 (TOKEN POOL · Claude Opus 5) [mac-pool]                                                               
+    claude-sonnet-5 (TOKEN POOL · Claude Sonnet 5) [mac-pool]                                                           
+    claude-opus-4-8 (TOKEN POOL · Claude Opus 4.8) [mac-pool]                                                           
+    claude-opus-4-7 (TOKEN POOL · Claude Opus 4.7) [mac-pool]                                                           
+    claude-opus-4-6 (TOKEN POOL · Claude Opus 4.6) [mac-pool]                                                           
+  (1/40)                                                                                                                
+
+  Model Name: OPENROUTER · DeepSeek V4.1 Flash 1017                                                                     
+
+  Refreshing model catalogs…                                                                                            
+
+  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel                                                  
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/tmp/fm-pi-model-picker.kbgmzO/proj (master)
+0.0%/1.0M (auto)                                           (openrouter-named) deepseek/deepseek-v4.1-flash-1017 • medium  Model catalogs refreshed.                                                                                             

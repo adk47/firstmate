@@ -1,0 +1,1 @@
+state: blocked · source: pane · harness is showing its /model picker (select: Select model); it cannot read a steer until the picker closes - recover with bin/fm-control.sh feat-picker interrupt where the backend can deliver Escape, otherwise exit and respawn a fresh task (stuck-crewmate-recovery)
