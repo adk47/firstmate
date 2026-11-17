@@ -15,8 +15,9 @@ Captain, 2026-11-15: that rule is scoped, not dropped. There are two classes of 
 about a credit that was not verified (see "The two classes" below). Rule 3 applies in full
 to the first and is replaced by one fixed template in the second.
 
-A request for a document, sent before anything is decided, is neither class. One such
-message is admitted, word for word (see "The document ask" below).
+A request for a document, sent before anything is decided, is neither class. Two such
+messages are admitted, each word for word and each for its own population (see "The document
+ask" and "The neutral refusal" below).
 
 ## Hard rules (any one broken: not approve)
 
@@ -199,6 +200,91 @@ from this section: judge it by the rest of the rubric. In particular:
   beyond the closing: not approve.
 - Anything that says or implies a credit, a request or a claim is denied or was not
   verified: it is not a document ask. It is class 1 or class 2 and is judged there.
+- Anything that states or implies fraud, abuse, a fake or altered document, impersonation
+  or suspicious activity, or that names an internal gate, score, band, flag, list, rule
+  or threshold: refuse.
+
+## The neutral refusal
+
+This is a fourth kind of message. It is neither class and it is not a document ask.
+Nothing has been decided: the person sent us a document, it was read, and it does not
+confirm the credit they claim. The message says we could not confirm the credit from what
+they sent and asks for one of five kinds of document. It denies nothing and it does not
+say a credit was not verified. Approved by firstmate, and given GO by the reviewer
+2026-11-16T21:11Z on four rendered bodies with no required change. This section admits
+that one message in its own words. It loosens no rule for any other message.
+
+Who it is for: an open request with a document on file that was read and does not confirm
+the claim. It is not for a request with no document on file ("Thanks for {document}" and
+"from what you sent" would describe nothing), not for a file we could not read (that
+person gets the document ask, need line c), and not for a request already decided (that
+is class 1 or class 2).
+
+A message is a neutral refusal only when it is exactly this, word for word, with nothing
+added and nothing left out. The words in braces are the only slots.
+
+    Thanks for {document} for your {role} credit on {title} by {artist}. We couldn't confirm the credit from what you sent. To verify it, reply with one of these: a split sheet or agreement signed by the artist or label, a PRO registration that lists you in your role, a royalty statement that names the track, an invoice, or a letter from the label. Your request is still open.
+
+Its four parts, in this order:
+
+1. The opening: "Thanks for {document} for your {role} credit on {title} by {artist}."
+
+   {document} is filled as in the document ask: the kind of file and the day it was sent
+   ("the image you sent on October 18", "the PDF you sent on May 2, 2025", "the file you
+   sent on ...", "the documents you sent on ..."). {role} is the credit role the request
+   claims, {title} the track and {artist} its artist. The words name one track and one
+   role. No form for several tracks or several roles is listed here, so a message
+   carrying one is not approve until its words are.
+
+2. The statement: "We couldn't confirm the credit from what you sent."
+
+3. The need line: "To verify it, reply with one of these: a split sheet or agreement
+   signed by the artist or label, a PRO registration that lists you in your role, a
+   royalty statement that names the track, an invoice, or a letter from the label."
+
+4. The closing: "Your request is still open."
+
+The four parts are the whole message: no greeting, no sign-off and no subject.
+
+For a neutral refusal, and for no other message:
+
+- The statement says what the document the person sent did not do, while the request is
+  still open. It is not a denial and not "the verification did not prove out", so the
+  message is not class 1, and the sentences of rules 1 and 4 that begin "A denial" do not
+  apply to it. It is not class 2, which is the message for a decided request. It names no
+  check and gives no reason for a decision, so it is not a reason for a denial (rule 3)
+  and not "which check failed" (rule 2). It is admitted in these words only.
+- The need line names the same five documents as line a of the document ask, and no
+  others: a split sheet or agreement signed by the artist or label, a PRO registration, a
+  royalty statement, an invoice, a letter from the label. A message that names any other
+  document, or that says a screenshot, a link or a credits page can verify, is not a
+  neutral refusal.
+- The need line is one ask with one way to send it ("reply"). It serves the `ask` stage
+  and it is not asking twice (rule 8). No email address, no link, no upload page.
+- The closing tells the person where the request stands today (rule 7). It describes
+  today and is not a promise about later (rule 5). It is admitted in these words only: no
+  date, no outcome, nothing about what happens next.
+- Every other hard rule applies unchanged.
+
+How it differs from the document ask. The document ask says nothing has been decided,
+says the document on its own is not something we can check against an outside source,
+and asks for a document we can check. The neutral refusal says we could not confirm the
+credit from what was sent and asks for one of five kinds of document. They are different
+messages for different populations, and neither stands in for the other: the document
+ask's opening is false about a document that was read and does not confirm the claim, and
+the neutral refusal does not ask the person whose file we could not read for a readable
+copy. A message that takes parts from both (the document ask's greeting, opening, need
+line, closing or sign-off together with any part of this message) is built from neither
+and gets nothing from either section.
+
+A message that has some of these words and is not built from all four parts gets nothing
+from this section: judge it by the rest of the rubric. In particular:
+
+- A part reworded, left out or out of order, or an added word, sentence or clause, a
+  greeting, a sign-off, a date, a deadline, an outcome, or anything about removal: not
+  approve.
+- Anything that says or implies a credit, a request or a claim is denied or was not
+  verified: it is not a neutral refusal. It is class 1 or class 2 and is judged there.
 - Anything that states or implies fraud, abuse, a fake or altered document, impersonation
   or suspicious activity, or that names an internal gate, score, band, flag, list, rule
   or threshold: refuse.
