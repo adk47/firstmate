@@ -2747,17 +2747,25 @@ grep -q '"terminal_state": "not-applicable"' "$ROW_ND" \
 grep -q '"terminal_state": "regressed"' "$ROW_ND" && fail "a docs and CI only change read regressed"
 pass "a change that touches nothing deployable is not-applicable, never a deploy regression"
 
-# A watch that still expected no deploy (recorded before its run target was
-# dropped) reads a failed run as not-applicable rather than absent.
+# A docs/CI-only diff keeps its Sentry monitoring but expects no deploy: the
+# durable row records the deploy as not-applicable through normal registration,
+# and no deploy-run target is kept.
 HOME_NA=$(hydra_world na "$MERGED")
-run_hydra_cw "$HOME_NA" 1790000000 register na1 'https://github.com/Muso-AI/hydra/pull/1992' >/dev/null \
-  || fail "hydra register failed"
-sed -i.bak 's/^deploy_expected=yes$/deploy_expected=no/' "$HOME_NA/state/change-watch/na1-1992/watch.meta"
-hydra_runs "$HOME_NA" "[$(hydra_run 2026-09-21T15:30:00Z completed failure "$MERGED")]"
-run_hydra_cw "$HOME_NA" 1790000900 sample na1-1992 900 >/dev/null || fail "sample failed"
-grep -q '"terminal_state": "not-applicable"' "$HOME_NA/state/change-watch/rows/na1-1992.json" \
-  || fail "a failed run on a watch expecting no deploy was not not-applicable: $(cat "$HOME_NA/state/change-watch/rows/na1-1992.json")"
-pass "a failed deploy run on a watch that expects no deploy is not-applicable"
+printf 'hydra run:Muso-AI/hydra#.github/workflows/deploy.yml sentry:hydra\n' > "$HOME_NA/config/change-watch-repos"
+printf '[]\n' > "$HOME_NA/sentry/issues-hydra.json"
+printf 'docs/runbook.md\n.github/workflows/ci.yml\n' > "$HOME_NA/forge/files.txt"
+out=$(CW_CLUSTER_DIR='' FM_CW_GH_DIR="$HOME_NA/gh" FM_CW_SENTRY_DIR="$HOME_NA/sentry" \
+  run_cw "$HOME_NA" 1790000000 register na1 'https://github.com/Muso-AI/hydra/pull/1992') \
+  || fail "a docs-only register with Sentry failed: $out"
+grep -qx 'deploy_expected=no' "$HOME_NA/state/change-watch/na1-1992/watch.meta" \
+  || fail "a docs-only change did not record that no deploy is expected"
+[ "$(cat "$HOME_NA/state/change-watch/na1-1992/sentry")" = hydra ] \
+  || fail "a docs-only change dropped its Sentry monitoring"
+[ ! -e "$HOME_NA/state/change-watch/na1-1992/runs" ] \
+  || fail "a docs-only change kept a deploy-run target"
+grep -q '"deploy": "not-applicable"' "$HOME_NA/state/change-watch/rows/na1-1992.json" \
+  || fail "a docs-only change did not record the deploy as not-applicable: $(cat "$HOME_NA/state/change-watch/rows/na1-1992.json")"
+pass "a docs-only change keeps Sentry and records its deploy as not-applicable"
 
 # A claim row is registered at claim time with no PR: null pr_url, its
 # acceptance probe bound by sha256, open until the probe is run. It is proven
@@ -2775,21 +2783,37 @@ grep -q "\"acceptance\": {\"probe_path\": \"$probe\", \"sha256\": \"[0-9a-f]\{64
 grep -q '"terminal_state": "open"' "$ROW_CL" || fail "a new claim was not open"
 [ "$(run_cw "$HOME_CL" 1790000000 claims | cut -f1,2,6)" = "cl1-claim	cl1	0" ] \
   || fail "a new claim was not due at claim time: $(run_cw "$HOME_CL" 1790000000 claims)"
-run_cw "$HOME_CL" 1790000000 acceptance cl1-claim 0 1 >/dev/null || fail "acceptance failed"
+run_cw "$HOME_CL" 1790000000 acceptance cl1-claim 0 >/dev/null || fail "acceptance failed"
 [ "$(run_cw "$HOME_CL" 1790000500 claims | cut -f6,7)" = "-	1" ] \
   || fail "a claim between offsets was due: $(run_cw "$HOME_CL" 1790000500 claims)"
+run_cw "$HOME_CL" 1790003600 acceptance cl1-claim 3600 >/dev/null || fail "acceptance failed"
+[ "$(run_cw "$HOME_CL" 1790003600 claims | cut -f6)" = 900 ] \
+  || fail "a missing due offset was skipped: $(run_cw "$HOME_CL" 1790003600 claims)"
 [ "$(run_cw "$HOME_CL" 1790030000 claims | cut -f6)" = 21600 ] \
   || fail "a claim that missed offsets was not due once at the latest: $(run_cw "$HOME_CL" 1790030000 claims)"
-run_cw "$HOME_CL" 1790030000 acceptance cl1-claim 21600 1 >/dev/null || fail "acceptance failed"
+run_cw "$HOME_CL" 1790030000 acceptance cl1-claim 21600 >/dev/null || fail "acceptance failed"
 grep -q '"terminal_state": "absent"' "$ROW_CL" || fail "a probe failing at +6h did not read absent: $(cat "$ROW_CL")"
 grep -q '"last_exit": 1, "last_epoch": 1790030000' "$ROW_CL" || fail "the last probe result was not recorded: $(cat "$ROW_CL")"
 grep -q 'change-watch cl1 claim absent' "$HOME_CL/state/.wake-queue" || fail "an absent claim queued no wake"
 run_cw "$HOME_CL" 1790030000 gate cl1 >/dev/null && fail "the gate passed an absent claim"
+run_cw "$HOME_CL" 1790030000 verdict cl1-claim >/dev/null && fail "verdict passed an absent claim"
 [ -z "$(run_cw "$HOME_CL" 1790030000 claims)" ] || fail "an absent claim is still listed as open"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$probe"
 run_cw "$HOME_CL" 1790031000 claim cl1 "$probe" 'https://github.com/Muso-AI/hydra/pull/1993' >/dev/null || fail "re-claim failed"
-run_cw "$HOME_CL" 1790031000 acceptance cl1-claim 0 0 >/dev/null || fail "acceptance failed"
+run_cw "$HOME_CL" 1790031000 acceptance cl1-claim 0 >/dev/null || fail "acceptance failed"
 grep -q '"terminal_state": "proven"' "$ROW_CL" || fail "a probe exiting 0 did not prove the claim: $(cat "$ROW_CL")"
 grep -q '"pr_url": "https://github.com/Muso-AI/hydra/pull/1993"' "$ROW_CL" || fail "a re-claim lost its PR url"
 run_cw "$HOME_CL" 1790031000 gate cl1 >/dev/null || fail "the gate refused a proven claim"
+run_cw "$HOME_CL" 1790031000 verdict cl1-claim >/dev/null || fail "verdict refused a proven claim"
 run_cw "$HOME_CL" 1790031000 claim cl1 relative/probe.sh >/dev/null 2>&1 && fail "a relative probe path was accepted"
+probe2="$HOME_CL/probe2.sh"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$probe2"
+chmod 0700 "$probe2"
+run_cw "$HOME_CL" 1790031000 claim cl2 "$probe2" >/dev/null || fail "claim failed"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$probe2"
+run_cw "$HOME_CL" 1790031000 acceptance cl2-claim 0 >/dev/null || fail "acceptance failed"
+grep -q '"last_exit": 125' "$HOME_CL/state/change-watch/rows/cl2-claim.json" \
+  || fail "an edited probe was not recorded as 125: $(cat "$HOME_CL/state/change-watch/rows/cl2-claim.json")"
+grep -q '"terminal_state": "open"' "$HOME_CL/state/change-watch/rows/cl2-claim.json" \
+  || fail "an edited probe proved the claim: $(cat "$HOME_CL/state/change-watch/rows/cl2-claim.json")"
 pass "a claim row registers with no PR, binds its probe, and reads proven or absent from its probe alone"
