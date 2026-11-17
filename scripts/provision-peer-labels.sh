@@ -32,9 +32,14 @@ OPENCLAW_JSON="${OPENCLAW_HOME}/openclaw.json"
 OPENCLAW_BIN="${OPENCLAW_BIN:-/usr/bin/openclaw}"
 PEER_LABELS_WAIT_SECS="${PEER_LABELS_WAIT_SECS:-180}"
 
-# Port + label map by profile. Only main hosts the 10-agent roster.
+# Port + label map by profile. Only main hosts the 9-agent roster.
 # Edge has an isolated single-agent workflow (support) and does not need
 # peer resolution.
+# `support` (@CS) lives on edge only since #352 (2026-05-27). Listing it under
+# main made every 5-min tick send main a sessions.create for an agent main does
+# not have (`Unknown agent id "support"` in the gateway journal). A peer the
+# profile's own agents.list does not name is also skipped below, so a roster
+# change cannot bring that error back.
 case "$PROFILE" in
   main)
     GATEWAY_URL="ws://127.0.0.1:18789/"
@@ -48,7 +53,6 @@ case "$PROFILE" in
       [operations]="@Ops"
       [devops]="@DevOps"
       [scout]="@Scout"
-      [support]="@CS"
     )
     ;;
   edge)
@@ -116,6 +120,18 @@ wait_for_gateway() {
   log "ERROR: gateway at $GATEWAY_URL did not respond within ${PEER_LABELS_WAIT_SECS}s"
   return 1
 }
+
+# Only the agents this profile's config actually lists. An unreadable list
+# keeps the whole map (the old behaviour) rather than labelling nobody.
+if CONFIGURED=$(jq -er '[.agents.list[]?.id] | if length > 0 then .[] else error("empty") end' \
+    "$OPENCLAW_JSON" 2>/dev/null); then
+  for agent in "${!PEERS[@]}"; do
+    if ! grep -qxF -- "$agent" <<<"$CONFIGURED"; then
+      log "skip ${agent}: not in agents.list of $OPENCLAW_JSON"
+      unset "PEERS[$agent]"
+    fi
+  done
+fi
 
 wait_for_gateway || exit 1
 

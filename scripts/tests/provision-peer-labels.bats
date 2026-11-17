@@ -91,3 +91,50 @@ teardown() {
   [ "$status" -eq 1 ]
   [ "$(wc -l < "$PROBES" | tr -d ' ')" -ge 1 ]
 }
+
+# A gateway that answers health and records every sessions.create it is sent.
+answering_gateway() {
+  CALLS="$TEST_TMPDIR/calls"; export CALLS
+  : > "$CALLS"
+  cat > "$TEST_TMPDIR/openclaw-stub" <<'STUB'
+#!/usr/bin/env bash
+case " $* " in
+  *" sessions.create "*) echo "create $*" >> "$CALLS"; echo '{"ok":true}' ;;
+esac
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/openclaw-stub"
+}
+
+@test "main's peer map names only agents openclaw-main.json configures (support is edge-only since #352)" {
+  # Every peer under main must be a main agent, or each 5-min tick sends main a
+  # sessions.create it answers with: Unknown agent id "<peer>".
+  peers=$(awk '/^  main\)/{m=1;next} m&&/^    \)/{exit} m&&match($0,/\[[a-z]+\]/){print substr($0,RSTART+1,RLENGTH-2)}' "$SCRIPT" | sort)
+  agents=$(jq -r '.agents.list[].id' "$HYDRA_REPO/openclaw-main.json" | sort)
+  [ -n "$peers" ]
+  extra=$(comm -23 <(echo "$peers") <(echo "$agents"))
+  [ -z "$extra" ] || { echo "peers main does not configure: $extra"; false; }
+}
+
+@test "a peer the profile's agents.list does not name gets no sessions.create" {
+  answering_gateway
+  # A main roster without cto: the script must skip it, never ask the gateway to create it.
+  jq -n '{gateway:{auth:{token:"t"}},agents:{list:[{id:"clio"},{id:"ceo"},{id:"cmo"},{id:"qa"},{id:"finance"},{id:"operations"},{id:"devops"},{id:"scout"}]}}' \
+    > "$TEST_TMPDIR/home/openclaw.json"
+  run env PEER_LABELS_WAIT_SECS=3 "$TEST_TMPDIR/scripts/provision-peer-labels.sh" main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skip cto: not in agents.list"* ]]
+  # A bare `! grep` that is not the last command never fails a Bats test (bash ignores `set -e`
+  # on a negated pipeline), so the absence is asserted as a count (QA on #2143).
+  [ "$(grep -c '"agentId":"cto"' "$CALLS")" -eq 0 ]
+  grep -q '"agentId":"clio"' "$CALLS"
+  [ "$(grep -c 'sessions.create' "$CALLS")" -eq 8 ]
+}
+
+@test "an unreadable agents.list keeps the whole peer map" {
+  answering_gateway
+  run env PEER_LABELS_WAIT_SECS=3 "$TEST_TMPDIR/scripts/provision-peer-labels.sh" main
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"skip "* ]]
+  [ "$(grep -c 'sessions.create' "$CALLS")" -eq 9 ]
+}
