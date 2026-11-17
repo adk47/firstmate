@@ -23,6 +23,9 @@ _vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come
 
 NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
 
+#: Core's profile burst guard, clear for every profile: the live reader is never run by a test.
+NO_BURST = lambda rs: {str(r.get("profileId") or "").lower(): None for r in rs}
+
 
 def row(rid, *, uid=500, pid="p1", risk=0, approved=True, pop=20, roles=("Producer",), rules=None, status=decide.UVN,
         created="2026-10-19T00:00:00Z", meta=None, band="A"):
@@ -128,7 +131,7 @@ class ScoreApprove(unittest.TestCase):
             "users": len({e["user_id"] for e in entries}), "entries": entries}))
 
     def go(self, rows, *, mode="apply", sp=None, pol=None, convo=None, admin=None, anchors=None, fanout=None,
-           editorial_velocity=None, gate=None, writer=None, now=None):
+           editorial_velocity=None, gate=None, writer=None, now=None, profile_burst=None):
         sp = sp or sa.ScorePolicy(enabled=True)
         w = writer or Writer()
         cands = lambda risk, limit: [(r["id"], r["profileId"], float(r["verificationData"]["total_risk_percent"]),
@@ -143,6 +146,8 @@ class ScoreApprove(unittest.TestCase):
                      readback=lambda status, ids: set(), now=now or NOW, sleep=lambda _s: None, conversations=conversations,
                      anchors=anchors or (lambda rs: {str(r["id"]): ("none", None) for r in rs}),
                      fanout=fanout or (lambda rs: {}),
+                     profile_burst=profile_burst or (lambda rs: {str(r.get("profileId") or "").lower(): None
+                                                               for r in rs}),
                      editorial_velocity=editorial_velocity or (lambda rs: {}), account_gate=gate)
         return res, w
 
@@ -191,7 +196,8 @@ class ScoreApprove(unittest.TestCase):
         res = sa.run(Limited(rows), self.db, mode="apply", policy=policy(), sp=sa.ScorePolicy(enabled=True),
                      candidates=cands, writer=w, readback=lambda s, i: set(), now=NOW, sleep=slept.append,
                      conversations=lambda users: {u: False for u in users},
-                     anchors=lambda rs: {str(r["id"]): ("none", None) for r in rs}, fanout=lambda rs: {})
+                     anchors=lambda rs: {str(r["id"]): ("none", None) for r in rs}, fanout=lambda rs: {},
+                     profile_burst=NO_BURST)
         self.assertEqual([i for c in w.calls for i in c[1]], ["a"])
         self.assertIn("HTTP 429", res.note)
         self.assertNotIn("b", self.decisions(), "an unread row is not decided")
@@ -827,7 +833,7 @@ class ScoreApprove(unittest.TestCase):
                          candidates=cands, writer=w, readback=lambda st, i: set(), now=NOW, sleep=lambda _s: None,
                          conversations=lambda users: {u: False for u in users},
                          anchors=lambda rs: {str(r["id"]): ("none", None) for r in rs},
-                         fanout=lambda rs: {}, editorial_velocity=lambda rs: {})
+                         fanout=lambda rs: {}, editorial_velocity=lambda rs: {}, profile_burst=NO_BURST)
         self.assertEqual(len(w.calls), 1, "the second batch is not started")
         out = dict(self.db.execute("SELECT request_id, outcome FROM decision_outcomes WHERE run_id=?", (res.run_id,)))
         self.assertEqual(sorted(out.values()), ["approved", "skipped:time_budget"])
@@ -854,7 +860,7 @@ class ScoreApprove(unittest.TestCase):
                 res = sa.run(FakeAdmin(rows), self.db, mode="apply", policy=policy(), sp=sa.ScorePolicy(enabled=True),
                              candidates=cands, writer=w, readback=lambda st, i: set(), now=NOW, sleep=lambda _s: None,
                              conversations=lambda users: {u: False for u in users}, anchors=anchors,
-                             fanout=lambda rs: {}, editorial_velocity=lambda rs: {})
+                             fanout=lambda rs: {}, editorial_velocity=lambda rs: {}, profile_burst=NO_BURST)
         self.assertEqual(w.calls, [])
         out = [o for (o,) in self.db.execute("SELECT outcome FROM decision_outcomes WHERE run_id=?", (res.run_id,))]
         self.assertEqual(out, ["skipped:write_lock_busy"])
@@ -872,6 +878,7 @@ class ScoreApprove(unittest.TestCase):
                 deadlines[name] = deadline
                 return lambda rs: order.append(name) or {}
             return make
+        self.assertLess(sa.PROFILE_BURST_BUDGET_S, sa.ANCHOR_BUDGET_S)
         self.assertLess(sa.ANCHOR_BUDGET_S, sa.EDITORIAL_BUDGET_S)
         self.assertLess(sa.EDITORIAL_BUDGET_S, sa.FANOUT_BUDGET_S)
         r = row("ed1", uid=960, pid="ed", roles=("Producer", "Editorial"))
@@ -881,14 +888,16 @@ class ScoreApprove(unittest.TestCase):
         with mock.patch.object(sa, "live_anchors", factory("anchors")), \
                 mock.patch.object(sa, "live_editorial_velocity", factory("editorial")), \
                 mock.patch.object(sa, "live_fanout", factory("fanout")), \
+                mock.patch.object(sa, "live_profile_burst", factory("burst")), \
                 mock.patch("time.monotonic", return_value=1000.0):
             w = Writer()
             sa.run(FakeAdmin([r]), self.db, mode="shadow", policy=pol, sp=sa.ScorePolicy(enabled=True),
                    candidates=lambda risk, limit: [(r["id"], r["profileId"], 0.0, r["status"], r["userId"])],
                    writer=w, readback=lambda s, i: set(), now=NOW, sleep=lambda _s: None,
                    conversations=lambda users: {u: False for u in users})
-        self.assertEqual(order, ["anchors", "editorial", "fanout"])
-        self.assertEqual(deadlines, {"anchors": 1000.0 + sa.ANCHOR_BUDGET_S,
+        self.assertEqual(order, ["burst", "anchors", "editorial", "fanout"])
+        self.assertEqual(deadlines, {"burst": 1000.0 + sa.PROFILE_BURST_BUDGET_S,
+                                     "anchors": 1000.0 + sa.ANCHOR_BUDGET_S,
                                      "editorial": 1000.0 + sa.EDITORIAL_BUDGET_S,
                                      "fanout": 1000.0 + sa.FANOUT_BUDGET_S})
 
@@ -901,7 +910,8 @@ class ScoreApprove(unittest.TestCase):
         self.assertGreater(run.call_args.kwargs["timeout"], sa.CANDIDATES_BUDGET_S - 5)
         self.assertLessEqual(run.call_args.kwargs["timeout"], sa.CANDIDATES_BUDGET_S)
         self.assertLess(sa.CANDIDATES_BUDGET_S, sa.READ_BUDGET_S)
-        self.assertLess(sa.READ_BUDGET_S, sa.ANCHOR_BUDGET_S)
+        self.assertLess(sa.READ_BUDGET_S, sa.PROFILE_BURST_BUDGET_S)
+        self.assertLess(sa.PROFILE_BURST_BUDGET_S, sa.ANCHOR_BUDGET_S)
         self.assertLess(sa.ANCHOR_BUDGET_S, sa.FANOUT_BUDGET_S)
         self.assertLessEqual(sa.FANOUT_BUDGET_S, 900 - 120, "room for caps + writes under the 900 s cron")
     def test_a_verdict_without_band_hint_is_held_like_core_refuses_it(self):
@@ -1568,7 +1578,7 @@ class PopularityReread(unittest.TestCase):
         return dict(readback=lambda status, ids: set(), now=NOW, sleep=lambda _s: None,
                     conversations=lambda users: {u: (convo or {}).get(u, False) for u in users},
                     anchors=lambda rs: {str(r["id"]): ("none", None) for r in rs}, fanout=lambda rs: {},
-                    editorial_velocity=lambda rs: {})
+                    editorial_velocity=lambda rs: {}, profile_burst=NO_BURST)
 
     def go(self, rows, tracks, *, mode="apply", on=True, popularity=None, pol=None, convo=None):
         admin, w = TrackAdmin(rows, tracks), Writer()
@@ -2229,6 +2239,164 @@ class LostRace(unittest.TestCase):
         self.assertEqual(self.outcomes("x"), ["skipped:lost_race:state_unread:RuntimeError"])
         self.assertEqual(len(res.write_errors), 1)
         self.assertEqual(res.guard_refused, 0)
+
+
+class ProfileBurstGate(unittest.TestCase):
+    """Core's PROFILE burst guard (`notProfileBurstSql`) is a pin INSIDE the approving UPDATE, so a
+    refused row matches nothing, reads back exactly as it was, and is reported as `lost_race` — the same
+    word core uses for a real race. 2026-11-16: 34 requests on 5 profiles (every profile carrying a
+    `review_hourly_velocity_profile` sibling inside 7 days) were re-decided and re-refused every tick
+    for up to a day, and the queue report printed them as 1,036 `core_guard_refused` rows.
+
+    The executor now reads the guard's EFFECT and DEFERS the row, naming the rule, the sibling and the
+    date the window lapses. Nothing is relaxed: core still refuses, and the row is approved by the first
+    run after that date. Doc: data/decided-not-closed-core-guard-r1/report.md."""
+
+    def test_a_fired_rule_is_a_burst_and_zero_null_or_absent_is_not(self):
+        # core: key present, jsonb value not numeric-zero (a NON-numeric value counts as fired)
+        cases = [({"review_hourly_velocity_profile": 100}, "review_hourly_velocity_profile"),
+                 ({"reject_high_velocity_profile": 1}, "reject_high_velocity_profile"),
+                 ({"review_high_velocity_profile": "55"}, "review_high_velocity_profile"),
+                 ({"review_hourly_velocity_profile": "abc"}, "review_hourly_velocity_profile"),
+                 ({"review_hourly_velocity_profile": True}, "review_hourly_velocity_profile"),
+                 ({"review_hourly_velocity_profile": 0}, None),
+                 ({"review_hourly_velocity_profile": "0"}, None),
+                 ({"review_hourly_velocity_profile": "0.0"}, None),
+                 ({"review_hourly_velocity_profile": None}, None),
+                 ({"review_editing_role_without_trusted_credit": None}, None),
+                 ({"track_credit": 0}, None),
+                 ({}, None)]
+        for rules, want in cases:
+            self.assertEqual(sa.burst_rule_fired(rules), want, repr(rules))
+
+    def test_the_window_lapses_seven_days_after_the_sibling_was_created(self):
+        self.assertEqual(sa.PROFILE_BURST_WINDOW, timedelta(days=7))
+        self.assertEqual(sa.burst_clears_at("2026-11-14 01:01:44 UTC", NOW), "2026-11-21T01:01:44Z")
+        self.assertEqual(sa.burst_clears_at("2026-11-14T01:01:44Z", NOW), "2026-11-21T01:01:44Z")
+        self.assertEqual(sa.burst_clears_at("", NOW), "unknown")   # never a date it did not read
+
+    def test_the_reason_names_the_rule_the_sibling_and_the_date(self):
+        r = row("burst1", uid=700, pid="bp1")
+        bursts = (("review_hourly_velocity_profile", "sib1", "2026-11-14 01:01:44 UTC"),)
+        why = sa.burst_hold(r, bursts, NOW)
+        self.assertTrue(why.startswith(sa.PROFILE_BURST_PREFIX), why)
+        self.assertIn("notProfileBurstSql", why)
+        self.assertIn("review_hourly_velocity_profile", why)
+        self.assertIn("sib1", why)
+        self.assertIn("2026-11-21T01:01:44Z", why)
+        self.assertIsNone(sa.burst_hold(r, None, NOW), "a clear profile is not held")
+        self.assertIsNone(sa.burst_hold(r, (), NOW))
+
+    def test_a_row_never_holds_its_own_profile(self):
+        r = row("self1", pid="sp1")
+        self.assertIsNone(sa.burst_hold(r, (("review_hourly_velocity_profile", "self1",
+                                            "2026-11-14 01:01:44 UTC"),), NOW))
+
+    def test_a_clock_answer_is_deferred_not_held(self):
+        self.assertTrue(sa.PROFILE_BURST_PREFIX in sa.CLOCK_DEFER_PREFIXES)
+
+    def test_the_live_reader_asks_one_statement_for_every_profile(self):
+        rows = [row("a", pid="Pa"), row("b", pid="pb")]
+        verdict = json.dumps({"review_hourly_velocity_profile": 100})
+        # one CSV line as trino-query.sh prints it: quoted fields, the JSON object included
+        out = '"pa","b1","2026-11-14 01:01:44 UTC","{}"\n'.format(verdict.replace('"', '""'))
+        with _mock.patch.object(sa.subprocess, "run",
+                                return_value=_mock.Mock(returncode=0, stdout=out)) as run:
+            got = sa.live_profile_burst(NOW, deadline=1000.0, clock=lambda: 0.0)([rows[0]])
+        self.assertEqual(got, {"pa": (("review_hourly_velocity_profile", "b1",
+                                       "2026-11-14 01:01:44 UTC"),)})
+        self.assertEqual(run.call_count, 1, "one replica statement for every profile of the run")
+        sql = run.call_args.kwargs["input"]
+        self.assertIn("postgresql_core.public.credit_requests", sql)
+        self.assertIn("rule_risk_percent", sql)
+        self.assertIn("'pa'", sql, "the profile ids are the run's, lowercased")
+        self.assertIn("createdat > TIMESTAMP '2026-10-13 12:00:00'", sql, "core's 7-day window")
+
+    def test_a_successful_but_malformed_response_never_clears_a_profile(self):
+        # Trino exits 0 on a truncated or malformed response. A row this cannot read is a row it cannot
+        # rule out: skipping it would let the only burst sibling of a profile vanish and the profile read
+        # clear, which is the 15-minute core_guard_refused loop this reader exists to stop.
+        r = row("m1", pid="mp1")
+        good = '"mp1","sib","2026-11-14 01:01:44 UTC","{""review_hourly_velocity_profile"":100}"'
+        cases = {
+            "a truncated row": '"mp1","sib","2026-11-14 01:01:44 UTC"',
+            "a verdict that is not JSON": '"mp1","sib","2026-11-14 01:01:44 UTC","{oops"',
+            "a row naming no profile of the run": '"other","sib","2026-11-14 01:01:44 UTC","{}"',
+            "a good row beside a truncated one": good + '\n"mp1","sib2"',
+        }
+        for why, out in cases.items():
+            with _mock.patch.object(sa.subprocess, "run",
+                                    return_value=_mock.Mock(returncode=0, stdout=out)):
+                got = sa.live_profile_burst(NOW, deadline=1000.0, clock=lambda: 0.0)([r])
+            self.assertIs(got["mp1"], sa.BURST_UNREADABLE, why)
+        # and the well-formed response still reads as a burst, so the rule is not "always unreadable"
+        with _mock.patch.object(sa.subprocess, "run",
+                                return_value=_mock.Mock(returncode=0, stdout=good)):
+            got = sa.live_profile_burst(NOW, deadline=1000.0, clock=lambda: 0.0)([r])
+        self.assertEqual(got["mp1"], (("review_hourly_velocity_profile", "sib",
+                                       "2026-11-14 01:01:44 UTC"),))
+
+    def test_an_unreadable_replica_is_never_a_clear_profile(self):
+        r = row("u1", pid="up1")
+        for side in (sa.subprocess.TimeoutExpired("trino", 5), OSError("no trino"),
+                     _mock.Mock(returncode=1, stdout="")):
+            kw = {"side_effect": side} if isinstance(side, BaseException) else {"return_value": side}
+            with _mock.patch.object(sa.subprocess, "run", **kw):
+                got = sa.live_profile_burst(NOW, deadline=1000.0, clock=lambda: 0.0)([r])
+            self.assertIs(got["up1"], sa.BURST_UNREADABLE)
+            self.assertIn("unreadable", repr(got["up1"]))
+        with _mock.patch.object(sa.subprocess, "run") as run:
+            past = sa.live_profile_burst(NOW, deadline=10.0, clock=lambda: 99.0)([r])
+        run.assert_not_called()
+        self.assertIs(past["up1"], sa.BURST_UNREADABLE)
+
+
+class ProfileBurstDecisions(unittest.TestCase):
+    """The burst guard's effect on the ROW: deferred by name, never approved while core would refuse."""
+
+    # The fixture of ScoreApprove, without running its tests a second time.
+    setUp, proof, go, decisions = ScoreApprove.setUp, ScoreApprove.proof, ScoreApprove.go, ScoreApprove.decisions
+
+    def test_a_bursting_profile_is_deferred_with_the_guard_named_and_writes_nothing(self):
+        rows = [row("hit", uid=701, pid="bp1"), row("clean", uid=702, pid="bp2")]
+        res, w = self.go(rows, profile_burst=lambda rs: {
+            "bp1": (("review_hourly_velocity_profile", "sib1", "2026-11-14 01:01:44 UTC"),),
+            "bp2": None})
+        self.assertEqual([i for c in w.calls for i in c[1]], ["clean"])
+        d = self.decisions()["hit"]
+        self.assertEqual(d["decision"], "defer", "a clock answer is not a person's queue")
+        self.assertIn(sa.PROFILE_BURST_PREFIX, d["reason"])
+        self.assertIn("sib1", d["reason"])
+        self.assertEqual(res.burst_held, 1)
+        self.assertEqual(res.approved, 1)
+
+    def test_a_deferred_burst_row_is_never_counted_against_a_cap(self):
+        # the defer happens before the caps: 3 rows on one user, 2 bursting, max_per_run caps nothing away
+        rows = [row("d1", uid=703, pid="bp1"), row("d2", uid=703, pid="bp1"), row("d3", uid=703, pid="bp2")]
+        res, w = self.go(rows, pol=policy(per_user=1), profile_burst=lambda rs: {
+            "bp1": (("review_hourly_velocity_profile", "sib1", "2026-11-14 01:01:44 UTC"),),
+            "bp2": None})
+        self.assertEqual(res.burst_held, 2)
+        self.assertEqual([i for c in w.calls for i in c[1]], ["d3"])
+
+    def test_an_unreadable_burst_read_holds_the_row_and_is_never_cooled_for_six_hours(self):
+        rows = [row("unk", uid=704, pid="bp1")]
+        res, w = self.go(rows, profile_burst=lambda rs: {})
+        self.assertEqual(w.calls, [])
+        why = self.decisions()["unk"]["reason"]
+        self.assertIn(sa.PROFILE_BURST_PREFIX, why)
+        self.assertIn("notProfileBurstSql", why)
+        self.assertEqual(res.burst_held, 1)
+        self.assertTrue(any(t in why for t in sa.TRANSIENT_HOLD), "retried next run, not parked 6h")
+
+    def test_the_run_line_says_how_many_rows_core_s_burst_guard_deferred(self):
+        rows = [row("hit", uid=705, pid="bp1")]
+        res, _w = self.go(rows, profile_burst=lambda rs: {
+            "bp1": (("review_hourly_velocity_profile", "sib1", "2026-11-14 01:01:44 UTC"),)})
+        self.assertIn("core's profile burst guard", res.line())
+        self.assertIn("notProfileBurstSql", res.line())
+        quiet, _w2 = self.go([row("ok2", uid=706, pid="bp9")], profile_burst=NO_BURST)
+        self.assertNotIn("core's profile burst guard", quiet.line())
 
 
 if __name__ == "__main__":

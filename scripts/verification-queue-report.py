@@ -2061,36 +2061,44 @@ def decided_not_closed(days: int = 7) -> dict:
     Read from the ledger alone, so it runs on node-8 with no Mac and no tray files: for every
     apply-mode approve/support decision in the window, the latest recorded outcome decides
     whether it executed. A missing outcome is the loudest case — the write was never attempted
-    or never returned — and is counted, never assumed done."""
+    or never returned — and is counted, never assumed done.
+
+    ONE ROW PER REQUEST, read from its NEWEST apply-mode decision (2026-11-16). The window used to be
+    counted over DECISION rows, and an executor that re-decides a request it cannot land (score-approve
+    ticks every 15 min) turned 34 requests into 1,036 rows while this line printed them as "requests":
+    the newest ruling is what the request is waiting on, and a request whose newest ruling is ``defer``
+    or ``hold`` was never "decided but not closed". Rationale + the measurement:
+    data/decided-not-closed-core-guard-r1/report.md."""
     if OFFLINE:
         return {"rows": None, "users_lb": None, "unmeasured": True, "by_outcome": {},
                 "by_ruling": {}}
     try:
         db = sqlite3.connect(f"file:{LEDGER}?mode=ro", uri=True)
         try:
+            #: the same CTE + FROM serve both statements: the newest apply-mode DECISION per request and
+            #: the newest OUTCOME per request (an outcome is written by the send, not by the decision).
+            cte = ("WITH newest_decision AS (SELECT request_id, max(id) AS did FROM decisions "
+                   "WHERE mode='apply' GROUP BY request_id), "
+                   "latest_outcome AS (SELECT request_id, max(id) AS oid FROM decision_outcomes "
+                   "GROUP BY request_id) ")
+            body = ("FROM decisions d "
+                    "JOIN newest_decision n ON n.did = d.id "
+                    "LEFT JOIN latest_outcome l ON l.request_id = d.request_id "
+                    "LEFT JOIN decision_outcomes o ON o.id = l.oid "
+                    "WHERE d.mode='apply' AND d.decision IN ('approve','support') "
+                    "AND d.decided_at > datetime('now', ?) ")
             rows = db.execute(
-                "WITH latest AS (SELECT request_id, max(id) AS mid FROM decision_outcomes "
-                "GROUP BY request_id) "
-                "SELECT d.decision, coalesce(o.outcome, ''), count(*), count(distinct d.user_id) "
-                "FROM decisions d LEFT JOIN latest l ON l.request_id = d.request_id "
-                "LEFT JOIN decision_outcomes o ON o.id = l.mid "
-                "WHERE d.mode='apply' AND d.decision IN ('approve','support') "
-                "AND d.decided_at > datetime('now', ?) GROUP BY 1, 2",
+                cte + "SELECT d.decision, coalesce(o.outcome, ''), count(*), count(distinct d.user_id) "
+                + body + "GROUP BY 1, 2",
                 (f"-{days} day",)).fetchall()
             # the exact distinct-user count for the non-terminal rows (the per-outcome groups
             # above overlap, so a max() over them would be a lower bound)
             exact_users = db.execute(
-                "WITH latest AS (SELECT request_id, max(id) AS mid FROM decision_outcomes "
-                "GROUP BY request_id) "
-                "SELECT count(distinct d.user_id) FROM decisions d "
-                "LEFT JOIN latest l ON l.request_id = d.request_id "
-                "LEFT JOIN decision_outcomes o ON o.id = l.mid "
-                "WHERE d.mode='apply' AND d.decision IN ('approve','support') "
-                "AND d.decided_at > datetime('now', ?) "
+                cte + "SELECT count(distinct d.user_id) " + body
                 # the SAME predicate the row loop uses: a row is unresolved when its outcome is
                 # not the terminal one FOR ITS OWN RULING. A global terminal list made a
                 # support-with-approved row count in rows but not in users (QA @987d77e).
-                "AND coalesce(o.outcome,'') <> CASE d.decision "
+                + "AND coalesce(o.outcome,'') <> CASE d.decision "
                 "WHEN 'approve' THEN 'approved' ELSE 'user_verification_needed' END",
                 (f"-{days} day",)).fetchone()
         finally:

@@ -698,6 +698,32 @@ class DecidedNotClosed(unittest.TestCase):
                          "the distinct-user count must use the same rule as the row count")
         self.assertEqual(out["by_ruling"], {"support": 2, "approve": 1})
 
+    def test_a_request_re_decided_every_tick_is_counted_once(self):
+        """2026-11-16: 34 requests re-decided every 15 min printed as 1,036 "requests". The newest
+        apply-mode decision is what the request is waiting on, so the window counts requests, not
+        decision rows — and a request whose newest ruling is `defer` was never decided-not-closed."""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        db = sqlite3.connect(self.path)
+        for _ in range(30):
+            db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, decision,"
+                       " reason, mode) VALUES ('r', ?, 'req-e', 8, 'support', 'x', 'apply')", (now,))
+            db.execute("INSERT INTO decision_outcomes (run_id, at, request_id, action, outcome)"
+                       " VALUES ('r', ?, 'req-e', 'support', 'skipped:core_guard_refused')", (now,))
+        # the newest ruling on req-d is a defer: the clock answers it, no person is owed anything
+        db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, decision,"
+                   " reason, mode) VALUES ('r', ?, 'req-d', 7, 'defer', 'profile_burst_hold: x', 'apply')",
+                   (now,))
+        db.commit(); db.close()
+        old = vqr.LEDGER
+        vqr.LEDGER = self.path
+        try:
+            out = vqr.decided_not_closed(days=1)
+        finally:
+            vqr.LEDGER = old
+        self.assertEqual(out["rows"], 2, "req-b and req-e, once each")
+        self.assertEqual(out["users_lb"], 2)
+        self.assertEqual(out["by_ruling"], {"support": 2})
+
 
 class QA62baa91(unittest.TestCase):
     """A COMPLETE Intercom scan must still hand back the never-answered ledger, or the comms

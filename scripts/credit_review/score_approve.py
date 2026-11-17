@@ -516,6 +516,8 @@ CANDIDATES_BUDGET_S = 240  # the whole replica candidate walk (each page stateme
 READ_BUDGET_S = 420        # reread: the profile-filtered list reads
 POPULARITY_BUDGET_S = 480  # the stored-0 popularity re-read (off by default): after the list reads, before
 #                            anchors. A row it does not reach is held this run and read on a later one.
+PROFILE_BURST_BUDGET_S = 500  # core's profile burst guard: ONE replica statement for every profile of the run,
+#                               before anchors (a row it would refuse is never worth an evidence read)
 ANCHOR_BUDGET_S = 540      # live anchors
 EDITORIAL_BUDGET_S = 600   # editorial velocity: runs right after anchors, BEFORE fan-out (QA @1347: run after
                            # fan-out, its deadline had always passed and every editorial row was held)
@@ -795,6 +797,179 @@ def live_fanout(admin: admin_api.Admin, now: datetime, sleep: Callable[[float], 
             out[uid] = None if unreadable and (len(such) < FANOUT_MIN or unchecked_admitted) else such
         return out
     return fetch
+
+
+# ── Core's PROFILE-level burst guard, mirrored ────────────────────────────────────────────────────
+#
+# core-backend `services/credit-requests/lowRiskEngagement.js` `notProfileBurstSql()` (Fable
+# GO-WITH-NOTES (d) on core#10733): the validator-approved low-risk automation may not approve a
+# request whose PROFILE carries a profile velocity rule above 0 on ANY OTHER request created in the
+# last 7 days, even when this row's own verdict is clean. It is a literal inside core's approving
+# UPDATE, so the write matches no row and core answers only `lost_race` — the one word it uses for
+# both a race and a guard. Hydra therefore recorded `skipped:core_guard_refused` and re-decided the
+# same rows every tick, forever: 1,036 decision rows over 34 requests on 5 profiles from 2026-11-15
+# to 11-16, not one of which could land (measured 2026-11-16, firstmate decided-not-closed-core-
+# guard-r1).
+#
+# `policy.server_approval_refusal` mirrors core's ROW-level guards only; this one is a fact about the
+# PROFILE, which is why nothing named it. Mirroring it is what NAMES it: the row is deferred with the
+# rule, the sibling request and the date the window lapses, and the first run after that date approves
+# it. Nothing is relaxed — the row is never approved while core would refuse it, and the sibling rows
+# are read, never re-verdict.
+PROFILE_BURST_RULES = ("review_hourly_velocity_profile", "reject_high_velocity_profile",
+                       "review_high_velocity_profile")
+PROFILE_BURST_WINDOW = timedelta(days=7)
+PROFILE_BURST_PREFIX = "profile_burst_hold"
+#: A reason answered by the CLOCK, not by a person or a stage-2 review: deferred (decided again by a
+#: later run), never a hold waiting on an ask.
+CLOCK_DEFER_PREFIXES = (PROFILE_BURST_PREFIX,)
+
+
+class _BurstUnreadable:
+    """A profile whose sibling rows this run could not read: held, retried, never approved."""
+
+    def __repr__(self) -> str:
+        return "unreadable"
+
+
+BURST_UNREADABLE = _BurstUnreadable()
+
+#: `CAST(createdat AS varchar)` of a replica timestamp: fixed width, one zone, so a value in any other
+#: shape is a read this cannot place (and so a hold, never an approval).
+_REPLICA_TS = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})")
+
+
+def burst_rule_fired(rules: Any) -> str | None:
+    """Core's own test, in Python: the first PROFILE_BURST_RULES entry whose value is present, is not
+    JSON null and is not numeric zero. A value core cannot read as a number counts as FIRED (core's
+    `NOT COALESCE(... ~ '^[0-9]+(\\.[0-9]+)?$' ..., FALSE)`), so an odd verdict holding a row is
+    always the fail-closed direction."""
+    if not isinstance(rules, dict):
+        return None
+    for name in PROFILE_BURST_RULES:
+        if name not in rules:
+            continue
+        v = rules[name]
+        if v is None:
+            continue
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v == 0:
+            continue
+        if isinstance(v, str) and re.match(r"^[0-9]+(\.[0-9]+)?$", v) and float(v) == 0:
+            continue
+        return name
+    return None
+
+
+def burst_clears_at(created: str, now: datetime) -> str:
+    """The instant the 7-day window of the sibling that fires the guard lapses: its createdAt + the
+    window. That is the first moment core's UPDATE can match this row again, and the date the defer
+    reason prints. Unreadable timestamp = 'unknown', which still names the hold."""
+    m = _REPLICA_TS.match(created or "")
+    if not m:
+        return "unknown"
+    try:
+        at = datetime(*(int(x) for x in m.groups()), tzinfo=timezone.utc)
+    except ValueError:
+        return "unknown"
+    return (at + PROFILE_BURST_WINDOW).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+ProfileBurst = Callable[[list[dict[str, Any]]], "dict[str, Any]"]
+
+
+def live_profile_burst(now: datetime, deadline: float | None = None,
+                       clock: Callable[[], float] | None = None) -> ProfileBurst:
+    """{profile id (lower) -> tuple of (rule, sibling request id, sibling createdAt) that fired the
+    PROFILE burst guard | BURST_UNREADABLE | None (clear)} for the profiles of the given rows.
+
+    ONE core replica (Trino) statement for every profile of the run — a replica question costs ~2 s
+    whatever it asks (docs/credit-verification/gate-replica-read.md), and this is per PROFILE, not
+    per row. The window, the three rules and the zero/null exemptions are core's; ``deletedat`` is
+    NOT filtered because core's own subquery does not filter it either (a deleted sibling holds the
+    profile, which is the fail-closed direction).
+
+    The caller compares each fired sibling against the row's OWN id: core's subquery is
+    ``o.id <> credit_requests.id``, so a profile whose only fired row is the row being decided is
+    clear.
+
+    A response this cannot read is UNREADABLE, never clear: a row with the wrong field count, a
+    verdict that is not JSON, or a row whose first field names no profile of the run. Trino exits 0
+    on a truncated or malformed response, so a skipped row would be a burst sibling that silently
+    clears its profile — the exact loop this reader exists to stop."""
+    now_fn = clock or time.monotonic
+
+    def fetch(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        pids = sorted({str(r.get("profileId") or "").lower() for r in rows} - {""})
+        if not pids:
+            return {}
+        since = (now - PROFILE_BURST_WINDOW).strftime("%Y-%m-%d %H:%M:%S")
+        sql = ("SELECT CAST(profileid AS varchar), CAST(id AS varchar), CAST(createdat AS varchar), "
+               "json_format(json_extract(verificationdata, '$.rule_risk_percent')) "
+               "FROM postgresql_core.public.credit_requests "
+               f"WHERE CAST(profileid AS varchar) IN ({','.join(repr(p) for p in pids)}) "
+               f"AND createdat > TIMESTAMP '{since}' ORDER BY createdat")
+        left = 600 if deadline is None else int(deadline - now_fn())
+        if left < 5:
+            return {p: BURST_UNREADABLE for p in pids}
+        try:
+            p = subprocess.run([TRINO], input=sql, capture_output=True, text=True,
+                               timeout=min(600, left), check=False)
+        except (subprocess.TimeoutExpired, OSError):
+            # A replica this cannot run (no binary, no route, past the budget) is UNREADABLE, never clear.
+            return {p: BURST_UNREADABLE for p in pids}
+        if p.returncode != 0:
+            return {p: BURST_UNREADABLE for p in pids}
+        fired: dict[str, list[tuple[str, str, str]]] = {}
+        unreadable: set[str] = set()
+        for line in csv.reader(io.StringIO(p.stdout)):
+            if not line or not any(f.strip() for f in line):
+                continue                      # a blank line is not a row
+            pid = (line[0] or "").strip().lower()
+            if len(line) != 4 or pid not in pids:
+                # A row this cannot read is a row it cannot rule out. Attribute it to its profile when
+                # the first field names one; a row it cannot even attribute could belong to ANY profile
+                # of the run, so the whole read is unreadable. Never skip it: a skipped row is a burst
+                # sibling that silently clears its profile, which is the loop this reader exists to stop.
+                if pid in pids:
+                    unreadable.add(pid)
+                else:
+                    return {p: BURST_UNREADABLE for p in pids}
+                continue
+            try:
+                rules = json.loads(line[3]) if line[3] else None
+            except ValueError:
+                unreadable.add(pid)           # a verdict this cannot parse may be the one that fired
+                continue
+            rule = burst_rule_fired(rules)
+            if rule:
+                fired.setdefault(pid, []).append((rule, line[1], line[2]))
+        out: dict[str, Any] = {}
+        for pid in pids:
+            hits = fired.get(pid)
+            if pid in unreadable:
+                out[pid] = BURST_UNREADABLE
+            elif hits:
+                out[pid] = tuple(sorted(hits, key=lambda h: h[2]))
+            else:
+                out[pid] = None
+        return out
+    return fetch
+
+
+def burst_hold(row: dict[str, Any], bursts: Any, now: datetime) -> str | None:
+    """The defer reason for a row its PROFILE's burst guard refuses, or None (clear / unreadable —
+    the caller holds an unreadable profile itself)."""
+    if not isinstance(bursts, tuple) or not bursts:
+        return None
+    rid = str(row.get("id") or "")
+    others = [b for b in bursts if str(b[1]) != rid]
+    if not others:
+        return None
+    rule, sib, created = others[-1]
+    return (f"{PROFILE_BURST_PREFIX}: core's low-risk automation refuses this profile "
+            f"(notProfileBurstSql, Fable GO-WITH-NOTES (d) on core#10733): {rule} fired on request "
+            f"{sib} created {created}; no request of this profile is approved before "
+            f"{burst_clears_at(created, now)}")
 
 
 EditorialVelocity = Callable[[list[dict[str, Any]]], "dict[str, Any]"]
@@ -1207,6 +1382,10 @@ class ScoreResult:
     no_anchor: int = 0
     editorial_held: int = 0
     fanout_held: int = 0
+    # Rows core's PROFILE burst guard (notProfileBurstSql) refuses: deferred with the rule, the sibling
+    # request and the date the window lapses, or held when the sibling read failed. Never approved while
+    # core would refuse it, and never re-sent every tick either.
+    burst_held: int = 0
     # The stored-0 popularity re-read (only when ScorePolicy.popularity_reread is on): rows per answer, and
     # each row's (state, value, detail) by request id.
     pop_reread: dict[str, int] = field(default_factory=dict)
@@ -1262,6 +1441,9 @@ class ScoreResult:
                 + (f"; {self.editorial_held} editorial-role rows held (trusted anchor under pop "
                    f"{decide.EDITORIAL_MID_POPULARITY} only)" if self.editorial_held else "")
                 + f"; {self.fanout_held} held by {FANOUT_PREFIX} (velocity-class)"
+                + (f"; {self.burst_held} deferred by core's profile burst guard ({PROFILE_BURST_PREFIX}): "
+                   "notProfileBurstSql refuses the whole profile until its 7-day window lapses"
+                   if self.burst_held else "")
                 + (f"; popularity re-read of {sum(self.pop_reread.values())} stored-0 row(s): "
                    f"{self.pop_reread.get(POP_CAPTURED, 0)} hold 1 or more, "
                    f"{self.pop_reread.get(POP_MEASURED_ZERO, 0)} a measured 0, "
@@ -1298,7 +1480,8 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
         anchors: Anchors | None = None, fanout: Fanout | None = None,
         editorial_velocity: EditorialVelocity | None = None,
         account_gate: Callable[[Any], "account_gate_mod.GateResult"] | None = None,
-        popularity: PopularityReread | None = None) -> ScoreResult:
+        popularity: PopularityReread | None = None,
+        profile_burst: ProfileBurst | None = None) -> ScoreResult:
     if mode not in ("shadow", "apply"):
         raise ValueError("mode must be shadow or apply")
     decide.ensure_schema(db)
@@ -1395,6 +1578,10 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
     admitted = [r for r in survivors if why_not(r, sp, policy, engaged) is None]
     # Phase order = deadline order (anchors 540 s, editorial velocity 600 s, fan-out 720 s), so every phase
     # starts before its own deadline unless the one before it overran (then its rows read None: held, transient).
+    # Core's PROFILE burst guard, read BEFORE the anchor and velocity phases: a row it refuses is never
+    # written and never worth an evidence read, and naming it is what stops the re-decision loop.
+    burst_of = ((profile_burst or live_profile_burst(now, deadline=t0 + PROFILE_BURST_BUDGET_S))(admitted)
+                if admitted else {})
     anchor_of = ((anchors or live_anchors(admin, sleep, deadline=t0 + ANCHOR_BUDGET_S, builder=builder))(admitted)
                  if admitted else {})
     editorial_rows = [r for r in admitted
@@ -1421,6 +1608,21 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
             why = popularity_hold(res.pop_rows[str(r.get("id"))])
         if why and why.startswith(ENGAGED_PREFIX):
             res.engaged_excluded += 1
+        if why is None:
+            # Core's PROFILE burst guard (notProfileBurstSql): a pin inside core's approving UPDATE, so
+            # a send matches no row, reads back as the row it already was, and is recorded as a core
+            # guard refusal — for up to 7 days, once per tick. Deferred by name instead, and approved by
+            # the first run after the date the reason prints. Unreadable = held (never approved).
+            bursts = burst_of.get(str(r.get("profileId") or "").lower(), BURST_UNREADABLE)
+            if bursts is BURST_UNREADABLE:
+                why = (f"{PROFILE_BURST_PREFIX}: core's profile burst guard could not be read this run "
+                       "(notProfileBurstSql): held, retried")
+                res.burst_held += 1
+            else:
+                held_by_burst = burst_hold(r, bursts, now)
+                if held_by_burst:
+                    why = held_by_burst
+                    res.burst_held += 1
         kind = None
         if why is None and isinstance(r.get("userId"), int):
             such = fan_of.get(r["userId"], set())
@@ -1519,8 +1721,11 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
             fleet += 1
             res.paid_first += 1 if d.paid_priority else 0
         else:
-            d.outcome_class = "ask" if ask else ("defer" if "next run" in why or "today" in why else "hold")
-            decide._set(d, "defer" if "next run" in why or "today" in why else "hold",
+            # A reason the CLOCK answers (a core guard's window, the per-run pace, a daily cap) is
+            # DEFERRED: it waits on time, not on a person, so no stage-2 reader is owed an ask.
+            deferred = ("next run" in why or "today" in why or why.startswith(CLOCK_DEFER_PREFIXES))
+            d.outcome_class = "ask" if ask else ("defer" if deferred else "hold")
+            decide._set(d, "defer" if deferred else "hold",
                         f"score approval not now: {why}{popularity_tag(r)}")
             res.held[_reason_class(why)] = res.held.get(_reason_class(why), 0) + 1
         res.outcomes[d.request_id] = d.outcome_class or "hold"

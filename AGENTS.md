@@ -824,6 +824,23 @@ falls back to the per-row path and is counted, never batched. Before changing th
 defect. It bought fewer evaluations and a per-person worklist, not wall clock - the cost is the live
 evidence build, which it does not skip (that is not equivalent, and needs a ruling).
 
+**Core's `lost_race` is one word for every guarded `UPDATE` that matched no row, so a guard refusal
+looks exactly like a race — and the executor must DEFER a row it can name, never re-send it every
+tick.** Core's low-risk approve carries its own pins (`NOT_VALIDATOR_CONFLICT_SQL`,
+`agentApprovalAllowedSql`, `notEngagedSql`, `notProfileBurstSql`, `capDayStillSql`); a pin failing
+matches nothing, the row reads back unchanged, and hydra records `skipped:core_guard_refused`. Score
+approve ticks every 15 min, so one stuck request became ~30 decision rows: on 2026-11-16 the
+`DECIDED-NOT-CLOSED` line printed **1,036 rows that were 34 requests on 5 profiles**, every profile
+carrying a `review_hourly_velocity_profile` sibling inside core's 7-day window. `decided_not_closed()`
+now counts the **newest apply-mode decision per request** (a `defer`/`hold` is not a decision, so such
+a row is not in the class at all), and `score_approve.live_profile_burst` reads `notProfileBurstSql`'s
+EFFECT from the replica (one statement per run, before the anchors, `PROFILE_BURST_BUDGET_S`) and
+records `defer` with `profile_burst_hold: … <rule> fired on request <sibling> created <at>; no request
+of this profile is approved before <date>`. **Do not relax a core guard to make a row land** — it is a
+fraud/velocity gate (Fable GO-WITH-NOTES (d) on core#10733); name it and wait for its window. A reason
+the CLOCK answers defers (`CLOCK_DEFER_PREFIXES`), so it never reaches a person's queue, and an
+unreadable replica HOLDS the row, never reads as a clear profile. `data/decided-not-closed-core-guard-r1/report.md`.
+
 ## Claim documents get one recorded decision, in shadow, and none of them is a person's
 
 `scripts/claim-doc-ladder.py` (`claim-doc-ladder.timer`, every 4 h) is the claim twin of `doc_approve.py`: every open
