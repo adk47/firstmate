@@ -981,6 +981,94 @@ test_a_dry_run_reports_every_lane_and_changes_nothing() {
   pass "a dry run reports every lane's plan and touches nothing"
 }
 
+# The watchdog resolves FM_HOME from its own path when the environment does not
+# carry one, and every command it runs refuses to act without it: bin/fm-control.sh
+# and bin/fm-send.sh both fail closed on an unset FM_HOME. A pass that keeps its
+# resolution local therefore runs, reports, and heals nothing - which is exactly
+# what the first live timer pass did (2026-11-07: 24 relaunches and 1 interrupt,
+# all refused with "FM_HOME is not set").
+test_the_watchdog_exports_its_home_to_every_command_it_runs() {
+  local home now out recorded
+  home=$(make_home export-home); fake_tools "$home"
+  worker "$home" w1 dead
+  cat > "$home/fakebin/fake-control" <<SH
+#!/usr/bin/env bash
+printf 'control-home %s\n' "\${FM_HOME:-UNSET}" >> "$home/calls"
+printf 'relaunched %s\n' "\$1"
+SH
+  chmod +x "$home/fakebin/fake-control"
+  now=$(start_clock)
+  # FM_HOME is deliberately absent from the environment, so the script has to
+  # resolve it and pass that resolution on.
+  out=$(env -u FM_HOME PATH="$home/fakebin:$PATH" \
+    FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_WATCHDOG_NOW="$now" FM_WATCHDOG_BOOT_ID=off \
+    FM_WATCHDOG_CONTROL_BIN="$home/fakebin/fake-control" \
+    FM_WATCHDOG_SEND_BIN="$home/fakebin/fake-send" \
+    FM_WATCHDOG_CREW_STATE_BIN="$home/fakebin/fake-crew-state" \
+    FM_WATCHDOG_SYSTEMCTL_BIN="$home/fakebin/systemctl" \
+    FM_WATCHDOG_AGENT_STATE_DIR="$home/fix" \
+    FM_WATCHDOG_CAPTURE_DIR="$home/fix" \
+    FM_WATCHDOG_CHAIR_TARGET=firstmate:chair \
+    FM_WATCHDOG_BACKLOG=off \
+    "$CHECK" 2>&1)
+  recorded=$(grep '^control-home ' "$home/calls" 2>/dev/null | head -1 | cut -d' ' -f2)
+  [ -n "$recorded" ] || fail "the watchdog never ran the control binary: $out"
+  [ "$recorded" != UNSET ] || fail "the watchdog did not export FM_HOME to the command it ran, so bin/fm-control.sh and bin/fm-send.sh refuse every action"
+  pass "the watchdog exports its resolved FM_HOME to every command it runs"
+}
+
+# Measured 2026-11-16 19:57Z: 79 of 190 lanes had already finished and were being
+# relaunched twice an hour, each relaunch buying a model run of work firstmate had
+# already been told was complete. A finished lane's endpoint is gone because its
+# work is done, so the liveness rung must leave it to firstmate - while an
+# unfinished lane with nobody at the controls is still recovered.
+test_a_finished_lane_is_left_alone_and_an_unfinished_one_is_recovered() {
+  local home now out
+  home=$(make_home finished); fake_tools "$home"
+  worker "$home" w1 dead
+  worker "$home" w2 dead
+  worker "$home" w3 dead
+  printf 'state: done · source: status-log · shipped and merged\n' > "$home/crew/w1"
+  printf 'state: failed · source: process · the agent exited without a claim\n' > "$home/crew/w3"
+  printf 'state: blocked · source: status-log · waiting on a credential\n' > "$home/crew/w2"
+  now=$(start_clock)
+  out=$(tick "$home" "$now")
+  assert_eq "$(counter "$home" '^control w1 ')" "0" \
+    "a finished lane was relaunched, so a done task was resurrected at model cost: $out"
+  assert_eq "$(counter "$home" '^control w3 ')" "0" \
+    "a failed lane was relaunched, so a task firstmate already knows about was resurrected"
+  assert_eq "$(counter "$home" '^control w2 ')" "1" \
+    "an unfinished lane with nobody at the controls was not recovered: $out"
+  [ "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" = 0 ] \
+    || fail "a finished lane was charged a relaunch"
+  pass "a finished lane is left alone and an unfinished one is still recovered"
+}
+
+# Measured 2026-11-16 19:57Z: a pass ran thirty minutes over 250 lanes and was
+# terminated by its unit, so the record was never written and every budget charge
+# it had just spent was lost. The pass now carries a wall-clock deadline, and a
+# lane it never reached keeps the history the pass before it recorded.
+test_a_pass_that_runs_out_of_budget_still_records_its_history() {
+  local home now out
+  home=$(make_home budget); fake_tools "$home"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  assert_eq "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" "1" \
+    "the first pass did not record its relaunch, so the budget test proves nothing"
+  out=$(tick "$home" "$now" FM_WATCHDOG_PASS_BUDGET_SECS=0)
+  assert_contains "$out" "pass used its 0s budget at w1" \
+    "a spent pass did not report the lane it stopped at: $out"
+  assert_eq "$(counter "$home" '^control w1 ')" "1" \
+    "a spent pass still acted on a lane"
+  [ -e "$home/state/.watchdog-worker.json" ] \
+    || fail "a spent pass wrote no record, so every budget charge it made was lost"
+  assert_eq "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" "1" \
+    "a lane the pass never reached lost its recorded relaunch history"
+  pass "a pass that runs out of budget still records its history"
+}
+
 test_a_held_task_is_never_relaunched_or_paged() {
   local home now out
   home=$(make_home held); fake_tools "$home"
@@ -1270,6 +1358,9 @@ test_a_pi_lane_is_never_asked_to_move_to_a_model_it_cannot_reach
 test_a_review_seat_keeps_its_model_and_a_permanent_error_is_never_retried
 test_in_flight_backlog_items_without_a_record_are_reported_once
 test_a_dry_run_reports_every_lane_and_changes_nothing
+test_the_watchdog_exports_its_home_to_every_command_it_runs
+test_a_finished_lane_is_left_alone_and_an_unfinished_one_is_recovered
+test_a_pass_that_runs_out_of_budget_still_records_its_history
 test_a_held_task_is_never_relaunched_or_paged
 test_a_dry_run_plan_matches_the_connection_relaunch_model
 test_a_reboot_rebuilds_the_fleet_and_starts_the_chair_last

@@ -85,6 +85,17 @@
 # dead and its hourly relaunch budget is spent" every hour, filling the wake
 # queue to 45.
 #
+# A FINISHED LANE IS NOT A CASUALTY. Before relaunching a gone endpoint this
+# pass asks bin/fm-crew-state.sh what the lane actually is, and a lane reading
+# `done` or `failed` is left alone: its worker is gone because its work is
+# over, and resurrecting it buys a whole model run of work firstmate has
+# already been told is complete, then wakes firstmate to say so. Measured
+# 2026-11-16 19:57Z: 79 of 190 lanes had already finished and were being
+# relaunched twice an hour. Every other state - parked, blocked, paused,
+# unknown - is still recovered, because those are unfinished lanes with nobody
+# at the controls, and a finished lane that firstmate wants resumed is
+# firstmate's to relaunch through bin/fm-control.sh.
+#
 # THE STALL LADDER. A live worker whose pane keeps one SHAPE for
 # no_progress_secs while it reads busy is stalled. Shape means printable ASCII
 # with digits folded and non-ASCII dropped, so a ticking timer, a spinner glyph,
@@ -151,6 +162,17 @@
 # record: a wrong endpoint binding is worse than a lane that is visibly
 # unowned.
 #
+# A PASS ALWAYS FITS ITS UNIT. The whole pass is one systemd unit with a start
+# timeout, so an overrun is not a slow pass: the unit is killed, the record is
+# never written, and every budget charge the pass just spent is lost, which
+# hands the hourly caps back to the crash loop they exist to stop. Measured
+# 2026-11-16 19:57Z: a pass ran thirty minutes over 250 lanes, was terminated
+# by systemd, and left the record frozen at the previous pass. The pass
+# therefore carries one wall-clock deadline (fm_watchdog_pass_budget_secs, 20
+# minutes), checked before each lane; once it is spent the remaining lanes keep
+# their recorded history untouched and the record is written with what the
+# pass actually did.
+#
 # CAPS. Relaunches, unit restarts, rings, and idle steers are each counted per
 # object per rolling hour and capped (3, 3, 2, and 1 by default), so a crash
 # loop or a genuinely broken object cannot burn the fleet; spending a relaunch,
@@ -201,7 +223,7 @@
 #   FM_WATCHDOG_CAPTURE_LINES (24)         FM_WATCHDOG_READ_TIMEOUT_SECS (10)
 #   FM_WATCHDOG_RELAUNCH_TIMEOUT_SECS (240)
 #   FM_WATCHDOG_REFUSAL_RETRY_SECS (21600)
-#   FM_WATCHDOG_BOOT_BUDGET_SECS (1500)
+#   FM_WATCHDOG_PASS_BUDGET_SECS (1200)    FM_WATCHDOG_BOOT_BUDGET_SECS (1500)
 #   FM_WATCHDOG_INBOX_RING_SECS (1200)     FM_WATCHDOG_INBOX_INTERRUPT_SECS (2700)
 #   FM_WATCHDOG_INBOX_RELAUNCH_SECS (5400)
 #   FM_WATCHDOG_CONNECTION_SECS (600)      FM_WATCHDOG_CONNECTION_STRIKES (3)
@@ -264,6 +286,9 @@ CONNECTION_STRIKES=3
 FALLBACK_MODEL=''
 FALLBACK_KINDS=''
 HELD_IDS=''
+PASS_BUDGET_SECS=1200
+PASS_DEADLINE=''
+PASS_SPENT_NOTED=0
 BACKLOG_ENABLED=on
 BACKLOG_BIN=''
 BACKLOG_LIST_MAX=25
@@ -965,6 +990,11 @@ boot_pass() {  # <boot>
   local sig since stage stage_at rings relaunches steers strikes
   local istage istage_at ibase refusal='' refusal_at=0 refusal_state='' woke=false
   deadline=$(( $(now_epoch) + BOOT_BUDGET_SECS ))
+  # The boot pass is the first thing a pass does, so it can never spend the
+  # whole pass's budget and leave the task pass and the record unwritten.
+  if [ -n "$PASS_DEADLINE" ] && [ "$PASS_DEADLINE" -lt "$deadline" ]; then
+    deadline=$PASS_DEADLINE
+  fi
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -1107,6 +1137,49 @@ crew_reads_working() {  # <id>
   return 0
 }
 
+# task_has_finished <id>: 0 when firstmate's own state read says this lane's
+# work is over. Only the two terminal claims count, so a lane whose status log
+# is merely old, parked, or blocked is still recovered by the liveness rung: the
+# question here is not "is this lane working" but "is there anything left to
+# work on".
+task_has_finished() {  # <id>
+  local crew state
+  [ -n "$CREW_STATE_BIN" ] || return 1
+  crew=$(fm_run_timed "$READ_TIMEOUT_SECS" "$CREW_STATE_BIN" "$1" 2>/dev/null) || return 1
+  state=$(printf '%s\n' "$crew" | sed -n 's/^state: \([a-z-]*\).*/\1/p' | head -1)
+  case "$state" in
+    done|failed) return 0 ;;
+  esac
+  return 1
+}
+
+# pass_spent: 0 once this pass has used its whole wall-clock budget.
+pass_spent() {
+  [ -n "$PASS_DEADLINE" ] || return 1
+  [ "$(now_epoch)" -ge "$PASS_DEADLINE" ]
+}
+
+# pass_budget_note <id>: one line, the first time the budget runs out, naming
+# the lane the pass stopped at so the journal explains the leftover work.
+pass_budget_note() {  # <id>
+  [ "$PASS_SPENT_NOTED" = 1 ] && return 0
+  PASS_SPENT_NOTED=1
+  printf 'watchdog: pass used its %ss budget at %s; the remaining lanes keep their records and are swept next pass\n' \
+    "$PASS_BUDGET_SECS" "$1"
+}
+
+# task_store_prior <id>: carry a lane this pass never reached into the record
+# exactly as it was loaded. record_store rebuilds the task table from the
+# entries this pass wrote, so a lane skipped without one would lose the
+# relaunches and strikes a truncated pass just spent, and the next pass would
+# read them as unspent.
+task_store_prior() {  # <id>
+  [ "$DRY_RUN" = 1 ] && return 0
+  [ -f "$WORK/entry.$1.json" ] && return 0
+  jq -c --arg id "$1" '{ key: $id, value: (.[$id] // {}) }' "$WORK/tasks.json" \
+    > "$WORK/entry.$1.json" 2>/dev/null || true
+}
+
 # conn_error_shape <text>: 0 when the rendered pane shows a connection-level
 # failure. The permanent list is consulted first and beats every match, because
 # those sentences are never fixed by re-ringing, and only the last twelve
@@ -1139,6 +1212,11 @@ task_pass() {
     # The boot pass already acted on this task in this pass.
     [ -e "$WORK/touched.$id" ] && continue
     task_is_skipped "$id" && continue
+    if pass_spent; then
+      pass_budget_note "$id"
+      task_store_prior "$id"
+      continue
+    fi
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
@@ -1169,6 +1247,18 @@ task_pass() {
     case "$state" in
       alive) ;;
       dead|missing)
+        # A finished lane's endpoint is gone because its work is done. Recovering
+        # it would spend a model re-reading shipped work and then wake firstmate
+        # about it, so it is left to firstmate, which can validate or clean it up
+        # and can still relaunch it by hand.
+        if task_has_finished "$id"; then
+          if [ "$DRY_RUN" = 1 ]; then
+            printf '%s\t%s\tn/a\t-\t%d\t%d\twould skip (finished)\n' \
+              "$id" "$state" "$(quiet_minutes_of "$id" "$now")" "$(inbox_minutes_of "$id")"
+          fi
+          task_store "$id"
+          continue
+        fi
         if [ "$DRY_RUN" = 1 ]; then
           if task_refusal_active "$state"; then
             printf '%s\t%s\tn/a\t-\t%d\t%d\twould escalate (relaunch refused; retried after %sh)\n' \
@@ -1581,6 +1671,11 @@ inbox_pass() {
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
     task_is_skipped "$id" && continue
+    if pass_spent; then
+      pass_budget_note "$id"
+      task_store_prior "$id"
+      continue
+    fi
     [ -d "$STATE/$id.inbox" ] || continue
     oldest=$(inbox_oldest "$id") || continue
     base=${oldest##*/}
@@ -1802,6 +1897,7 @@ main() {
   # A refused relaunch is re-attempted only after this window, long enough for
   # whatever refused it (a backend capability gap, a repaired record) to change.
   REFUSAL_RETRY_SECS=$(conf_int FM_WATCHDOG_REFUSAL_RETRY_SECS 21600)
+  PASS_BUDGET_SECS=$(conf_int FM_WATCHDOG_PASS_BUDGET_SECS 1200)
   BOOT_BUDGET_SECS=$(conf_int FM_WATCHDOG_BOOT_BUDGET_SECS 1500)
   INBOX_RING_SECS=$(conf_int FM_WATCHDOG_INBOX_RING_SECS 1200)
   INBOX_INTERRUPT_SECS=$(conf_int FM_WATCHDOG_INBOX_INTERRUPT_SECS 2700)
@@ -1819,6 +1915,10 @@ main() {
   AGENT_STATE_DIR=${FM_WATCHDOG_AGENT_STATE_DIR:-}
   CAPTURE_DIR=${FM_WATCHDOG_CAPTURE_DIR:-}
 
+  # The deadline is fixed once, before any pass runs, so every pass below is
+  # racing the same clock and the record always lands inside the unit's timeout.
+  PASS_DEADLINE=""
+  [ "$DRY_RUN" = 1 ] || PASS_DEADLINE=$(( $(now_epoch) + PASS_BUDGET_SECS ))
   record_load
   printf '%s' "$PRIOR_TASKS" > "$WORK/tasks.json" 2>/dev/null || printf '{}' > "$WORK/tasks.json"
 
