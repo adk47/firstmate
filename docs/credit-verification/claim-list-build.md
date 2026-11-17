@@ -16,11 +16,15 @@ as one run. Nothing in it is new policy: the audience rules are the ones of the 
 |---|---|---|
 | `claim-list-build.timer` | every 2 h at :20 (odd hours UTC) | 40 min ahead of the even-hour outbound tick. The tick is hourly since 2026-11-13 and this timer was not moved with it: the odd-hour tick reads the same list, 100 min old |
 | `claim-list-build.path` | `/opt/hydra/.deployed-sha` changed | a deploy gets a list signed on the new head within minutes |
+| `deploy.sh` post-flight | end of every deploy, while it still holds the outbound tick's lock | the rebuild takes ~6.5 min, and a tick starting inside those minutes skipped both claim families (11-16 02:00Z). The deploy runs the build to completion before it frees the tick, so no tick reads a list signed on the old head |
 
-Both start `claim-list-build.service`. All three are written by `scripts/install-aux-units.sh`, which
-**fails the deploy** if either trigger cannot be enabled, started, or is not `active` afterwards: with
-neither running the list is never rebuilt, both claim families go silent, and the service's `OnFailure`
-cannot page because the service never runs.
+The two units start `claim-list-build.service`; the deploy's post-flight starts it directly
+(`systemctl start`, bounded by `HYDRA_DEPLOY_CLAIM_LIST_WAIT_SECS`, default 900s, and non-fatal: the
+deploy has already landed, so a failed or overrunning rebuild is the unit's own `OnFailure` page and
+the tick reports `list_signed_on_stale` until one lands). Both units are written by
+`scripts/install-aux-units.sh`, which **fails the deploy** if either trigger cannot be enabled,
+started, or is not `active` afterwards: with neither running the list is never rebuilt, both claim
+families go silent, and the service's `OnFailure` cannot page because the service never runs.
 
 ## What one run does
 

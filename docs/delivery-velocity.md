@@ -21,9 +21,15 @@ Not measured, and so not claimed: brief -> worker start, start -> first commit, 
 
 ## What changed
 
+- **Deploy, 2026-11-16 (firstmate 074).** The prewait and the boundary gate below are gone:
+  sleeping to a tick boundary walked the deploy into that tick's apply (run 43807967494 slept
+  329s and was refused at 05:11:00Z). `deploy.sh` now takes the outbound tick's flock and the
+  apply lock itself (`scripts/lib/main-prune-lock.sh`, `flock -w 600` each, waits logged, the
+  last 24h of tick lengths logged on a refusal), holds both for the run, and rebuilds the claim
+  list on the new head before it releases them. The history below is kept for the measurements.
 - **Deploy (rank 2).** The nightly run moved from 04:00Z, a send tick boundary, to
   05:00Z (05:38Z since 2026-11-13, below), and `deploy.sh` now waits up to 15 minutes for a
-  tick before it takes any lock (`scripts/lib/deploy-send-tick-wait.sh`) instead of refusing
+  tick before it takes any lock (`scripts/lib/deploy-send-tick-wait.sh`, removed 2026-11-16) instead of refusing
   in the same second.
   Before: refused on 11-07, 11-08, 11-10 and 11-11. After: not yet measured on the host.
   The first scheduled run after this merges is the measurement; re-run

@@ -12,6 +12,7 @@ setup() {
     echo 'log() { echo "$*"; }'
     echo 'fail() { echo "FATAL: $*"; exit 1; }'
     echo "source '$LIB'"
+    echo 'deploy_tick_durations_24h() { echo TICK-LENGTHS-LOGGED; }'
     echo 'HYDRA_LOCAL=${HYDRA_LOCAL:-true}'
     awk '/^# Serialise with scripts\/main-prune-restart.sh BEFORE the first node-8 mutation/ { on = 1 }
          /^# -- end of the deploy locks: everything below runs under them/ { on = 0 }
@@ -66,6 +67,16 @@ line_of() {
   [[ "$output" != *"REACHED-MARKER-CLAIM"* ]]
 }
 
+@test "an unopenable tick lock names the tick lock file, not the prune lock" {
+  export DEPLOY_TICK_LOCK_FILE="$TEST_TMPDIR/nope/tick.lock"
+  printf 'x' > "$TEST_TMPDIR/nope"
+  run bash "$TEST_TMPDIR/block.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot open $DEPLOY_TICK_LOCK_FILE"* ]]
+  [[ "$output" != *"cannot open $MAIN_PRUNE_LOCK_FILE"* ]]
+  [[ "$output" != *"REACHED-MARKER-CLAIM"* ]]
+}
+
 # ssh mode: the lock must be held ON node-8 (MUS-3742 bot finding, 12 Oct). _ssh_block builds deploy.sh's REAL lock
 # block with HYDRA_LOCAL=false and a fake `ssh` (given as $1, a function body) so the real remote flock + FIFO hold run.
 _ssh_block() {
@@ -74,6 +85,7 @@ _ssh_block() {
     echo 'fail() { echo "FATAL: $*"; exit 1; }'
     echo "source '$LIB'"
     echo 'SSH_KEY=k; SSH_OPTS=(-o X=y); NODE8_USER=u; NODE8_IP=h; HYDRA_LOCAL=false'
+    echo 'DEPLOY_TICK_RUNS_DIR=/nonexistent; deploy_tick_durations_24h() { echo TICK-LENGTHS-LOGGED; }'
     echo "ssh() { $1; }"
     awk '/^# Serialise with scripts\/main-prune-restart.sh BEFORE the first node-8 mutation/ { on = 1 }
          /^# -- end of the deploy locks: everything below runs under them/ { on = 0 }
@@ -103,6 +115,16 @@ FAKE_SSH_OK='bash -c "${!#}"'
   kill "$holder" 2>/dev/null || true
   [ "$status" -ne 0 ]
   [[ "$output" == *"FATAL"*"could not take"* ]]
+  [[ "$output" != *"REACHED-MARKER-CLAIM"* ]]
+}
+
+@test "ssh-mode deploy: an unopenable tick lock names the tick lock file" {
+  export DEPLOY_TICK_LOCK_FILE="$TEST_TMPDIR/nope/tick.lock"
+  printf 'x' > "$TEST_TMPDIR/nope"
+  _ssh_block "$FAKE_SSH_OK" ''
+  run bash "$TEST_TMPDIR/ssh-block.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot open $DEPLOY_TICK_LOCK_FILE"* ]]
   [[ "$output" != *"REACHED-MARKER-CLAIM"* ]]
 }
 
@@ -250,7 +272,7 @@ _hold_shared() { bash -c 'exec 8>>"$1"; flock -n -s 8 && exec sleep "$2"' _ "$1"
   mkdir -p "$TEST_TMPDIR/cr"
   _hold_shared "$DEPLOY_APPLY_LOCK_FILE" 30; holder=$!
   sleep 1
-  run bash "$TEST_TMPDIR/block.sh"
+  DEPLOY_APPLY_LOCK_WAIT_SECS=1 run bash "$TEST_TMPDIR/block.sh"
   kill "$holder" 2>/dev/null || true
   [ "$status" -ne 0 ]
   [[ "$output" == *"FATAL: deploy refused: a credit-message apply is in flight on node-8"* ]]
@@ -270,7 +292,7 @@ _hold_shared() { bash -c 'exec 8>>"$1"; flock -n -s 8 && exec sleep "$2"' _ "$1"
   _hold_shared "$DEPLOY_APPLY_LOCK_FILE" 30; holder=$!
   sleep 1
   _ssh_block "$FAKE_SSH_OK" ''
-  run bash "$TEST_TMPDIR/ssh-block.sh"
+  DEPLOY_APPLY_LOCK_WAIT_SECS=1 run bash "$TEST_TMPDIR/ssh-block.sh"
   kill "$holder" 2>/dev/null || true
   [ "$status" -ne 0 ]
   [[ "$output" == *"FATAL: deploy refused: a credit-message apply is in flight on node-8"* ]]
@@ -290,4 +312,221 @@ _hold_shared() { bash -c 'exec 8>>"$1"; flock -n -s 8 && exec sleep "$2"' _ "$1"
   ro=$(line_of '^if \[\[ "\$REPORT_ONLY" == "1" \]\]; then')
   sync=$(line_of 'Step 4b/8')
   [ "$ro" -lt "$locks" ] && [ "$locks" -lt "$prune" ] && [ "$prune" -lt "$endl" ] && [ "$endl" -lt "$pin" ] && [ "$pin" -lt "$sync" ]
+}
+
+# ── firstmate 073/074 (2026-11-16): WAIT for an apply or a tick in flight, never sleep to a tick boundary ──────────
+# Run 43807967494 slept 329s to a tick boundary holding no lock (05:05:31->05:11:00Z), met that tick's apply and
+# refused: a whole deploy window lost. The deploy now takes the tick's own flock and the apply lock, each with a
+# bounded wait, and holds both for the run.
+
+@test "apply lock (local): an apply that ENDS inside the wait delays the deploy, it does not refuse it" {
+  export DEPLOY_APPLY_LOCK_FILE="$TEST_TMPDIR/cr/apply.lock"
+  mkdir -p "$TEST_TMPDIR/cr"
+  _hold_shared "$DEPLOY_APPLY_LOCK_FILE" 3; holder=$!
+  sleep 1
+  { cat "$TEST_TMPDIR/block.sh"; echo 'echo "APPLY-WAITED=$DEPLOY_APPLY_LOCK_WAITED"'; } > "$TEST_TMPDIR/block2.sh"
+  DEPLOY_APPLY_LOCK_WAIT_SECS=30 run bash "$TEST_TMPDIR/block2.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"deploy refused"* ]]
+  [[ "$output" == *"REACHED-MARKER-CLAIM"* ]]
+  w=$(sed -n 's/^APPLY-WAITED=//p' <<<"$output")
+  [ "$w" -ge 1 ] && [ "$w" -lt 30 ]
+}
+
+@test "apply lock (ssh mode): an apply that ENDS inside the wait delays the deploy, it does not refuse it" {
+  export DEPLOY_APPLY_LOCK_FILE="$TEST_TMPDIR/cr/apply.lock"
+  mkdir -p "$TEST_TMPDIR/cr"
+  _hold_shared "$DEPLOY_APPLY_LOCK_FILE" 3; holder=$!
+  sleep 1
+  _ssh_block "$FAKE_SSH_OK" 'echo "APPLY-WAITED=$DEPLOY_APPLY_LOCK_WAITED"'
+  DEPLOY_APPLY_LOCK_WAIT_SECS=30 run bash "$TEST_TMPDIR/ssh-block.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"deploy refused"* ]]
+  [[ "$output" == *"REACHED-MARKER-CLAIM"* ]]
+  w=$(sed -n 's/^APPLY-WAITED=//p' <<<"$output")
+  [ "$w" -ge 1 ] && [ "$w" -lt 30 ]
+}
+
+@test "tick lock: the deploy locks the same tick.lock the outbound tick's own config names" {
+  out="$BATS_TEST_DIRNAME/../credit-verify-outbound.sh"
+  state=$(BATS_TEST_TMPDIR="$TEST_TMPDIR" bash "$out" --print-config | sed -n 's/^STATE=//p')
+  [ -n "$state" ]
+  # run the deploy's REAL send-tick section to learn the path it locks
+  awk '/^# -- the send tick: no sleep/{on=1} on{print} on&&/^# -- end of the send tick --/{exit}' "$DEPLOY" > "$TEST_TMPDIR/send.sh"
+  printf 'printf "%%s\\n" "$DEPLOY_TICK_LOCK_FILE"\n' >> "$TEST_TMPDIR/send.sh"
+  run bash "$TEST_TMPDIR/send.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$state/tick.lock" ]
+}
+
+@test "no sleep before the lock attempt: the lifted lock block reaches the marker in under 5s" {
+  [ ! -e "$BATS_TEST_DIRNAME/../lib/deploy-send-tick-wait.sh" ]
+  [ ! -e "$BATS_TEST_DIRNAME/../lib/deploy-send-tick-hold.sh" ]
+  t0=$SECONDS
+  run bash "$TEST_TMPDIR/block.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"REACHED-MARKER-CLAIM"* ]]
+  [ $(( SECONDS - t0 )) -lt 5 ]
+}
+
+@test "the lib takes prune, then tick, then apply: a held prune stops before the tick, a held tick before the apply" {
+  export DEPLOY_TICK_LOCK_FILE="$TEST_TMPDIR/cvo/tick.lock" DEPLOY_APPLY_LOCK_FILE="$TEST_TMPDIR/cr/apply.lock"
+  mkdir -p "$TEST_TMPDIR/cvo"
+  _hold_lock "$MAIN_PRUNE_LOCK_FILE" 30; holder=$!
+  sleep 1
+  MAIN_PRUNE_LOCK_WAIT_SECS=1 run bash "$TEST_TMPDIR/block.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"still holds"* ]]
+  [ ! -e "$TEST_TMPDIR/cvo/tick.lock" ]
+  [ ! -e "$TEST_TMPDIR/cr/apply.lock" ]
+  _hold_lock "$DEPLOY_TICK_LOCK_FILE" 30; holder=$!
+  sleep 1
+  DEPLOY_TICK_LOCK_WAIT_SECS=1 run bash "$TEST_TMPDIR/block.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"credit send tick is in flight"* ]]
+  [ ! -e "$TEST_TMPDIR/cr/apply.lock" ]
+}
+
+@test "tick lock (local): a tick in flight past the wait refuses the deploy, logs tick lengths, touches nothing" {
+  export DEPLOY_TICK_LOCK_FILE="$TEST_TMPDIR/cvo/tick.lock" DEPLOY_APPLY_LOCK_FILE="$TEST_TMPDIR/cr/apply.lock"
+  mkdir -p "$TEST_TMPDIR/cvo"
+  _hold_lock "$DEPLOY_TICK_LOCK_FILE" 30; holder=$!
+  sleep 1
+  DEPLOY_TICK_LOCK_WAIT_SECS=1 run bash "$TEST_TMPDIR/block.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"TICK-LENGTHS-LOGGED"* ]]
+  [[ "$output" == *"FATAL: deploy refused: a credit send tick is in flight on node-8"* ]]
+  [[ "$output" != *"REACHED-MARKER-CLAIM"* ]]
+  [ ! -e "$TEST_TMPDIR/cr/apply.lock" ]          # never reached the apply lock
+}
+
+@test "tick lock (local): a tick that ends inside the wait delays the deploy; then no tick can start and tick.holder names the deploy" {
+  export DEPLOY_TICK_LOCK_FILE="$TEST_TMPDIR/cvo/tick.lock" DEPLOY_APPLY_LOCK_FILE="$TEST_TMPDIR/cr/apply.lock"
+  mkdir -p "$TEST_TMPDIR/cvo"
+  _hold_lock "$DEPLOY_TICK_LOCK_FILE" 3; holder=$!
+  sleep 1
+  # the tick's own take: credit-verify-outbound.sh `exec 9>>"$STATE/tick.lock"; flock -n 9`
+  { cat "$TEST_TMPDIR/block.sh"
+    echo 'echo "TICK-WAITED=$DEPLOY_TICK_LOCK_WAITED"'
+    echo 'exec 9>>"$DEPLOY_TICK_LOCK_FILE"; if flock -n 9; then echo TICK-COULD-START; else echo TICK-EXCLUDED; fi'
+    echo 'read -r hpid hstart < "$(dirname "$DEPLOY_TICK_LOCK_FILE")/tick.holder"; echo "HOLDER=$hpid"'; } > "$TEST_TMPDIR/block2.sh"
+  DEPLOY_TICK_LOCK_WAIT_SECS=30 run bash "$TEST_TMPDIR/block2.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"REACHED-MARKER-CLAIM"* ]]
+  [[ "$output" == *"TICK-EXCLUDED"* ]]
+  [[ "$output" == *"HOLDER=deploy:"* ]]
+  w=$(sed -n 's/^TICK-WAITED=//p' <<<"$output")
+  [ "$w" -ge 1 ] && [ "$w" -lt 30 ]
+}
+
+@test "tick lock (ssh mode): a tick in flight refuses; a tick that ends inside the wait is waited for and then excluded" {
+  export DEPLOY_TICK_LOCK_FILE="$TEST_TMPDIR/cvo/tick.lock" DEPLOY_APPLY_LOCK_FILE="$TEST_TMPDIR/cr/apply.lock"
+  mkdir -p "$TEST_TMPDIR/cvo"
+  _hold_lock "$DEPLOY_TICK_LOCK_FILE" 30; holder=$!
+  sleep 1
+  _ssh_block "$FAKE_SSH_OK" ''
+  DEPLOY_TICK_LOCK_WAIT_SECS=1 run bash "$TEST_TMPDIR/ssh-block.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FATAL: deploy refused: a credit send tick is in flight on node-8"* ]]
+  [[ "$output" != *"REACHED-MARKER-CLAIM"* ]]
+  _hold_lock "$DEPLOY_TICK_LOCK_FILE" 3; holder=$!
+  sleep 1
+  _ssh_block "$FAKE_SSH_OK" 'echo "TICK-WAITED=$DEPLOY_TICK_LOCK_WAITED"; exec 6>>"$DEPLOY_TICK_LOCK_FILE"; if flock -n 6; then echo TICK-COULD-START; else echo TICK-EXCLUDED; fi'
+  DEPLOY_TICK_LOCK_WAIT_SECS=30 run bash "$TEST_TMPDIR/ssh-block.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TICK-EXCLUDED"* ]]
+  [[ "$output" == *"REACHED-MARKER-CLAIM"* ]]
+  w=$(sed -n 's/^TICK-WAITED=//p' <<<"$output")
+  [ "$w" -ge 1 ] && [ "$w" -lt 30 ]
+}
+
+@test "the tick-length line reads first and last tick.log timestamps of the last 24h, and says so when it cannot" {
+  fn="$(awk '/^deploy_tick_durations_24h\(\) \{/{on=1} on{print} on&&/^\}/{exit}' "$DEPLOY")"
+  [ -n "$fn" ]
+  mkdir -p "$TEST_TMPDIR/runs/A" "$TEST_TMPDIR/runs/B"
+  printf '2026-11-16T04:02:08Z tick start\n2026-11-16T05:02:46Z tick done\n' > "$TEST_TMPDIR/runs/A/tick.log"
+  printf '2026-11-16T02:02:16Z tick start\n2026-11-16T02:12:16Z done\n' > "$TEST_TMPDIR/runs/B/tick.log"
+  run bash -c "DEPLOY_TICK_RUNS_DIR='$TEST_TMPDIR/runs'; $fn; deploy_tick_durations_24h"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"n=2 max=3638s"* ]]
+  [[ "$output" == *"600s"* ]]
+  run bash -c "DEPLOY_TICK_RUNS_DIR='$TEST_TMPDIR/none'; $fn; deploy_tick_durations_24h"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no outbound tick.log of the last 24h readable"* ]]
+}
+
+# Lift deploy.sh's REAL post-flight claim-list block and run it with stubbed systemctl/timeout.
+_claim_list_block() {
+  {
+    echo 'log() { echo "$*" || true; }'
+    echo 'HYDRA_LOCAL=true; DEPLOYED_SHA=abcdef1234567890; SSH_KEY=k; SSH_OPTS=(); NODE8_USER=u; NODE8_IP=h'
+    echo 'systemctl() { printf "%s\n" "$*" >>"$TEST_TMPDIR/systemctl.argv"; case "$1" in cat) return "${STUB_CAT:-0}" ;; start) return "${STUB_START_RC:-0}" ;; esac; return 0; }'
+    echo 'timeout() { printf "%s\n" "$*" >>"$TEST_TMPDIR/timeout.argv"; shift; "$@"; }'
+    awk '/^# Post-flight: the claim list is signed on THIS head/{on=1} on{print} on&&/^esac$/{exit}' "$DEPLOY"
+    echo 'echo REACHED-AFTER-CLAIM-LIST'
+  } > "$TEST_TMPDIR/claim.sh"
+}
+
+@test "the claim list is rebuilt on this head, bounded, and a failed rebuild does not fail the deploy" {
+  _claim_list_block
+  run bash "$TEST_TMPDIR/claim.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"claim list rebuilt and signed"* ]]
+  [[ "$output" == *"REACHED-AFTER-CLAIM-LIST"* ]]
+  [ "$(cat "$TEST_TMPDIR/systemctl.argv")" = "cat claim-list-build.service"$'\n'"start claim-list-build.service" ]
+  [ "$(cut -d' ' -f1 "$TEST_TMPDIR/timeout.argv")" = "900" ]
+  STUB_START_RC=1 run bash "$TEST_TMPDIR/claim.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING: claim list rebuild did not succeed"* ]]
+  [[ "$output" == *"REACHED-AFTER-CLAIM-LIST"* ]]
+  STUB_CAT=1 run bash "$TEST_TMPDIR/claim.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"claim-list-build.service not installed"* ]]
+  [[ "$output" == *"REACHED-AFTER-CLAIM-LIST"* ]]
+}
+
+@test "the tick lock is still held while the post-flight claim list runs, and free once the deploy exits" {
+  # The point of the post-flight rebuild is that no tick can read the stale list WHILE it rebuilds. That is a
+  # property of the fds the lock block leaves open, so it has to be asserted in the same process as the real block.
+  _claim_list_block
+  export DEPLOY_TICK_LOCK_FILE="$TEST_TMPDIR/cvo/tick.lock"
+  mkdir -p "$TEST_TMPDIR/cvo"
+  {
+    echo 'probe() { exec 5>>"$DEPLOY_TICK_LOCK_FILE"; if flock -n 5; then echo TICK-LOCK-FREE; else echo TICK-LOCK-HELD; fi >>"$TEST_TMPDIR/probe.log"; exec 5>&-; }'
+    head -n -1 "$TEST_TMPDIR/block.sh"                 # deploy.sh's REAL lock block, minus its trailing marker echo
+    sed 's|case "\$1" in cat)|probe; case "$1" in cat)|' "$TEST_TMPDIR/claim.sh"   # probe on each systemctl call
+  } > "$TEST_TMPDIR/combined.sh"
+  run bash "$TEST_TMPDIR/combined.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"REACHED-AFTER-CLAIM-LIST"* ]]
+  # held at `systemctl cat` and at `systemctl start` (the cat probe's stdout is redirected, so it is logged)
+  [ "$(grep -c TICK-LOCK-HELD "$TEST_TMPDIR/probe.log")" -eq 2 ]
+  ! grep -q TICK-LOCK-FREE "$TEST_TMPDIR/probe.log"
+  # the deploy process is gone: the tick's own take succeeds
+  run bash -c 'exec 9>>"$DEPLOY_TICK_LOCK_FILE"; flock -n 9 && echo TICK-CAN-START'
+  [[ "$output" == *"TICK-CAN-START"* ]]
+}
+
+@test "the deploy step's timeout covers the four bounded waits plus the deploy's own work" {
+  WF="$BATS_TEST_DIRNAME/../../.github/workflows/deploy.yml"
+  # the first timeout-minutes after the step's name is that step's (the step carries a long comment above it)
+  t=$(awk '/name: Deploy with target/{on=1} on&&/^ *timeout-minutes:/{sub(/.*timeout-minutes: */,"");print;exit}' "$WF")
+  [ -n "$t" ]
+  prune=$(bash -c "source '$LIB'; printf '%s' \"\$MAIN_PRUNE_LOCK_WAIT_SECS\"")
+  tick=$(bash -c "source '$LIB'; printf '%s' \"\$DEPLOY_TICK_LOCK_WAIT_SECS\"")
+  apply=$(bash -c "source '$LIB'; printf '%s' \"\$DEPLOY_APPLY_LOCK_WAIT_SECS\"")
+  _claim_list_block
+  run bash "$TEST_TMPDIR/claim.sh"
+  claim=$(cut -d' ' -f1 "$TEST_TMPDIR/timeout.argv")
+  [ -n "$prune" ] && [ -n "$tick" ] && [ -n "$apply" ] && [ -n "$claim" ]
+  waits=$(( prune + tick + apply + claim ))
+  [ "$t" -ge $(( (waits + 59) / 60 + 25 )) ]
 }

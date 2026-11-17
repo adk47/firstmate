@@ -968,6 +968,16 @@ RSYNC_EXCLUDES=(
   # rsync --delete does not halt the Step 4a pre-flight; safe to remove from
   # node-8 manually anytime.
   --exclude='scripts/weekly-cleanup.sh'
+  # Retired deploy/send-tick boundary wait (PR #2116). scripts/lib/deploy-send-tick-wait.sh
+  # and -hold.sh are deleted from the repo: the deploy now takes the outbound tick's
+  # own tick.lock with a bounded flock (scripts/lib/main-prune-lock.sh) instead of
+  # sleeping to a boundary, so neither is sourced by anything. They still exist on
+  # /opt/hydra/ from the last deploy that shipped them, and a delta deploy never
+  # deletes them, but the Step 4a pre-flight reads any repo-deleted path that exists
+  # on the server as a blocking deletion. Excluded until ops cleanup; safe to remove
+  # from node-8 manually anytime.
+  --exclude='scripts/lib/deploy-send-tick-wait.sh'
+  --exclude='scripts/lib/deploy-send-tick-hold.sh'
   # CTO clone-hook guard files, GENERATED on the server by
   # scripts/lib/setup-cto-clone-hooks.sh (run at deploy time from
   # install-aux-units.sh). They live inside the rsync-managed tree but are
@@ -2361,88 +2371,64 @@ if [[ "$REPORT_ONLY" == "1" ]]; then
   exit 0
 fi
 
-# -- the send-tick wait, BEFORE any lock (measured 2026-11-12) --
-# Four of the five scheduled deploys 11-07..11-11 died in their first second on "7200 tick-in-flight ... would exceed
-# 900s": the gate further down compares a held flock's worst case (a whole cadence) to its budget before it sleeps
-# once, so its bounded wait never waited, and every PR merged after 11-09 22:49Z stayed off node-8. That gate cannot
-# be made patient where it stands: it runs UNDER the apply lock taken just below, and a tick that finds the apply
-# lock held defers its sends - a deploy waiting there would be why the tick sent nothing. So the waiting is done
-# here, holding nothing, and the gate under the locks keeps its one look and its refusal.
-DEPLOY_TICK_HOLD_MIN="${HYDRA_DEPLOY_TICK_HOLD_MIN:-10}"
-DEPLOY_TICK_HOLD_MAX_S="${HYDRA_DEPLOY_TICK_HOLD_MAX_S:-900}"
-DEPLOY_TICK_CADENCE_S="${HYDRA_DEPLOY_TICK_CADENCE_S:-3600}"   # the outbound cron's period: hourly since 2026-11-13
-DEPLOY_TICK_PREWAIT_MAX_S="${HYDRA_DEPLOY_TICK_PREWAIT_MAX_S:-900}"
-if [ "${HYDRA_DEPLOY_SKIP_TICK_HOLD:-0}" != "1" ]; then
-  prewait_rc=0
-  bash "$SCRIPT_DIR/lib/deploy-send-tick-wait.sh" --max "$DEPLOY_TICK_PREWAIT_MAX_S" --poll 60 \
-       --cadence "$DEPLOY_TICK_CADENCE_S" --hold-min "$DEPLOY_TICK_HOLD_MIN" || prewait_rc=$?
-  case "$prewait_rc" in
-    0) ;;
-    1) fail "deploy refused: a credit send tick was still in the way after the ${DEPLOY_TICK_PREWAIT_MAX_S}s wait (the line above says which). No lock was taken and nothing was changed; main stays UNDEPLOYED until a run gets through - re-dispatch outside the tick's window (or HYDRA_DEPLOY_SKIP_TICK_HOLD=1 to override)." ;;
-    *) fail "the send-tick wait cannot decide (rc=$prewait_rc, see above); refusing to deploy without it (no lock was taken, nothing was changed)" ;;
-  esac
-fi
-# -- end of the send-tick wait --
+# -- the send tick: no sleep to its boundary (firstmate 074, 2026-11-16) --
+# This used to SLEEP, holding no lock, until the send-tick guard said GO, then take the locks. Sleeping to a tick
+# boundary walks the deploy straight into that tick: run 43807967494 slept 329s (05:05:31->05:11:00Z) and met the
+# tick's apply. The deploy now takes the tick's own flock below, waiting (bounded) for a tick in flight, and holds it
+# for the whole run, so no tick can start under it. Measured tick lengths are logged so a refusal says why.
+DEPLOY_TICK_LOCK_FILE="/var/lib/hydra/credit-verify-outbound/tick.lock"
+DEPLOY_TICK_RUNS_DIR="${HYDRA_DEPLOY_TICK_RUNS_DIR:-/root/h2-runs/sched}"   # credit-verify-outbound.sh OUT_ROOT
+# One line: the outbound ticks of the last 24h, first to last tick.log line (each tick's applies run inside it).
+# apply.lock keeps no hold record of its own, so the tick is the measured unit. Best effort: unreadable = says so.
+deploy_tick_durations_24h() {
+  local f a b durs="" n=0 max=0 d
+  for f in $(find "$DEPLOY_TICK_RUNS_DIR" -mindepth 2 -maxdepth 2 -name tick.log -mmin -1440 2>/dev/null | sort); do
+    a=$(head -1 "$f" | cut -d' ' -f1); b=$(tail -1 "$f" | cut -d' ' -f1)
+    a=$(date -u -d "$a" +%s 2>/dev/null) || continue; b=$(date -u -d "$b" +%s 2>/dev/null) || continue
+    d=$(( b - a )); [ "$d" -ge 0 ] || continue
+    n=$((n + 1)); [ "$d" -le "$max" ] || max=$d; durs="$durs ${d}s"
+  done
+  if [ "$n" -eq 0 ]; then echo "no outbound tick.log of the last 24h readable under $DEPLOY_TICK_RUNS_DIR"; return 0; fi
+  echo "outbound ticks, last 24h: n=$n max=${max}s (${durs# })"
+}
+# -- end of the send tick --
 
 # Fable [key=signed-on-sha] (2) / r5 747 / QA #1604 (11-01 04:21Z: a deploy landed between a signed batch and its
 # apply): the deploy holds the credit-message apply lock EXCLUSIVELY with the prune lock below, for its whole run - an
-# apply in flight refuses the deploy (nothing changed), and no apply can start while it mutates node-8.
+# apply in flight is waited for (DEPLOY_APPLY_LOCK_WAIT_SECS, default 600s, lib/main-prune-lock.sh) and only then refuses
+# the deploy (nothing changed), and no apply can start while it mutates node-8. The outbound tick's lock (above) is taken
+# first, the same way: waited for up to DEPLOY_TICK_LOCK_WAIT_SECS (600s), then held for the run.
 DEPLOY_APPLY_LOCK_FILE="/var/lib/hydra/credit-review/apply.lock"
 # Serialise with scripts/main-prune-restart.sh BEFORE the first node-8 mutation (MUS-3742): a restart during its
 # offline cleanup would race it. Held until exit (lib/main-prune-lock.sh); failing here touched nothing.
 if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
   lock_rc=0
-  log "Taking the main prune/restart lock (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  log "Taking the main prune/restart lock (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune, then up to ${DEPLOY_TICK_LOCK_WAIT_SECS}s for an in-flight outbound tick, then up to ${DEPLOY_APPLY_LOCK_WAIT_SECS}s for an in-flight credit-message apply)..."
   acquire_main_prune_lock || lock_rc=$?
   case "$lock_rc" in
     0) ;;
     1) fail "a main prune/restart still holds $MAIN_PRUNE_LOCK_FILE after ${MAIN_PRUNE_LOCK_WAIT_SECS}s; refusing to deploy underneath it (nothing was changed). Re-run once it finishes." ;;
-    3) fail "deploy refused: a credit-message apply is in flight on node-8 (it holds $DEPLOY_APPLY_LOCK_FILE). A signed batch is for one deploy head; nothing was changed. Re-run once the apply ends." ;;
-    *) fail "cannot open $MAIN_PRUNE_LOCK_FILE (rc=$lock_rc); refusing to deploy without the main prune/restart lock (nothing was changed)" ;;
+    3) fail "deploy refused: a credit-message apply is in flight on node-8 (it held $DEPLOY_APPLY_LOCK_FILE for the whole ${DEPLOY_APPLY_LOCK_WAIT_SECS}s wait). A signed batch is for one deploy head; nothing was changed. Re-run once the apply ends." ;;
+    4) log "$(deploy_tick_durations_24h)"
+       fail "deploy refused: a credit send tick is in flight on node-8 (it held $DEPLOY_TICK_LOCK_FILE for the whole ${DEPLOY_TICK_LOCK_WAIT_SECS}s wait; tick lengths are on the line above). Nothing was changed; re-run once the tick ends." ;;
+    *) fail "cannot open ${MAIN_PRUNE_LOCK_OPEN_FAILED:-$MAIN_PRUNE_LOCK_FILE} (rc=$lock_rc); refusing to deploy without the deploy locks (nothing was changed)" ;;
   esac
 else
   # ssh mode: the lock must live on node-8 (a local flock would not exclude the prune there), held by a background ssh
   # for the life of this process; refused = fail closed, same as the local branch.
   lock_rc=0
-  log "Taking the main prune/restart lock ON node-8 (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  log "Taking the main prune/restart lock ON node-8 (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune, then up to ${DEPLOY_TICK_LOCK_WAIT_SECS}s for an in-flight outbound tick, then up to ${DEPLOY_APPLY_LOCK_WAIT_SECS}s for an in-flight credit-message apply)..."
   acquire_main_prune_lock_remote ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" || lock_rc=$?
-  [ "$lock_rc" != 3 ] || fail "deploy refused: a credit-message apply is in flight on node-8 (it holds $DEPLOY_APPLY_LOCK_FILE). A signed batch is for one deploy head; nothing was changed. Re-run once the apply ends."
-  [ "$lock_rc" = 0 ] || fail "could not take $MAIN_PRUNE_LOCK_FILE on node-8 (rc=$lock_rc: a main prune/restart still holds it, or node-8 is unreachable); refusing to deploy underneath it (nothing was changed). Re-run once it finishes."
+  if [ "$lock_rc" = 4 ]; then
+    tick_lengths=$(ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" "$(declare -p DEPLOY_TICK_RUNS_DIR); $(declare -f deploy_tick_durations_24h); deploy_tick_durations_24h" 2>/dev/null) || tick_lengths="tick lengths unreadable over ssh"  # hydra-hook: reviewed-indirection (ships the read-only deploy_tick_durations_24h above: find + head/tail on tick.log, no write)
+    log "$tick_lengths"
+    fail "deploy refused: a credit send tick is in flight on node-8 (it held $DEPLOY_TICK_LOCK_FILE for the whole ${DEPLOY_TICK_LOCK_WAIT_SECS}s wait; tick lengths are on the line above). Nothing was changed; re-run once the tick ends."
+  fi
+  [ "$lock_rc" != 3 ] || fail "deploy refused: a credit-message apply is in flight on node-8 (it held $DEPLOY_APPLY_LOCK_FILE for the whole ${DEPLOY_APPLY_LOCK_WAIT_SECS}s wait). A signed batch is for one deploy head; nothing was changed. Re-run once the apply ends."
+  [ "$lock_rc" = 0 ] || fail "could not take the deploy locks on node-8 (rc=$lock_rc${MAIN_PRUNE_LOCK_OPEN_FAILED:+: cannot open $MAIN_PRUNE_LOCK_OPEN_FAILED}; a main prune/restart still holds $MAIN_PRUNE_LOCK_FILE, or node-8 is unreachable); refusing to deploy underneath it (nothing was changed). Re-run once it finishes."
 fi
 # -- end of the deploy locks: everything below runs under them (QA #1604) --
-
-# firstmate 768 (3), measured 11-04: the credit outbound tick was 2-hourly and a deploy dispatched at 04:00Z ran INTO
-# the 04:03Z round - node-8 was mid-rsync while a tick built its audiences and read the ledger this deploy replaces.
-# The apply lock above cannot help: it protects an apply that has ALREADY started, and it says nothing about a tick
-# that begins 3 minutes after the rsync does. #1756 gives the outbound script deploy-lock awareness; until it lands
-# the deploy side holds the line - no deploy STARTS within HOLD_MIN of a tick boundary, and none starts while a tick
-# holds its flock. We WAIT (bounded) for the window, then fail closed: nothing is changed, a human re-dispatches.
-# The tick is hourly since 2026-11-13, so there is a boundary every hour and the cadence default is 3600.
-# This is the GATE, and it is deliberately impatient about a tick in flight (no --poll: the guard answers a whole
-# cadence, which no budget here covers) - the patient wait already happened above, before the locks. Reaching this
-# line with a tick running means one started in the seconds between that wait and the locks.
-# (DEPLOY_TICK_HOLD_MIN / _MAX_S / _CADENCE_S are set with the wait above.)
-if [ "${HYDRA_DEPLOY_SKIP_TICK_HOLD:-0}" != "1" ]; then
-  hold_spent=0
-  hold_last=""
-  while :; do
-    hold_out="$(bash "$SCRIPT_DIR/lib/deploy-send-tick-hold.sh" --cadence "$DEPLOY_TICK_CADENCE_S" \
-                  --hold-min "$DEPLOY_TICK_HOLD_MIN" 2>&1)" && break
-    hold_rc=$?
-    if [ "$hold_rc" != 3 ]; then
-      fail "the send-tick guard cannot decide ($hold_out); refusing to deploy without it (nothing was changed)"
-    fi
-    hold_secs="${hold_out%% *}"; hold_last="$hold_out"
-    case "$hold_secs" in ''|*[!0-9]*) hold_secs=300 ;; esac
-    if [ "$(( hold_spent + hold_secs ))" -gt "$DEPLOY_TICK_HOLD_MAX_S" ]; then
-      fail "deploy refused: a credit send tick window is open (${hold_last}) and waiting it out would exceed ${DEPLOY_TICK_HOLD_MAX_S}s. A tick that overruns its cadence - or a window that will not clear - is a human's call. Nothing was changed; re-dispatch outside the window (or HYDRA_DEPLOY_SKIP_TICK_HOLD=1 to override)."
-    fi
-    log "holding ${hold_secs}s for the credit send tick (${hold_last}): a deploy must not start inside a tick's window"
-    sleep "$hold_secs"
-    hold_spent=$(( hold_spent + hold_secs ))
-  done
-fi
-# -- end of the send-tick window hold (firstmate 768) --
+log "deploy locks held: waited ${DEPLOY_TICK_LOCK_WAITED:-?}s for $DEPLOY_TICK_LOCK_FILE, ${DEPLOY_APPLY_LOCK_WAITED:-?}s for $DEPLOY_APPLY_LOCK_FILE; no outbound tick or credit-message apply can start until this deploy exits"
 
 # -------------------------------------------------------------------
 # Step 4a.5: pin the muso CLI — BEFORE anything is synced.
@@ -4295,6 +4281,37 @@ else
     || fail "deploy landed but could not clear $DEPLOY_PATH/.deploy-mutating on node-8; remove it by hand or every later deploy refuses to claim it"
 fi
 log "  Cleared mutation marker"
+
+# -------------------------------------------------------------------
+# Post-flight: the claim list is signed on THIS head before any tick can read it (firstmate 064/066/075)
+# -------------------------------------------------------------------
+# The outbound tick refuses a claim list not signed on the deployed head (list_signed_on_stale), and the rebuild that
+# claim-list-build.path starts on the .deployed-sha write above takes ~6.5 min (measured 11-16 02:03:25Z). A tick that
+# started inside those minutes skipped both claim families (11-16 02:00Z), which is why deploys were confined to a
+# :05-:20 dispatch window by hand. The window is now this step: the deploy still holds the outbound tick's lock, so
+# it runs the rebuild to completion (`systemctl start` on a oneshot joins the job the path unit started) and only then
+# exits and frees the tick. Bounded and non-fatal: the deploy has landed; a rebuild that fails or overruns is the
+# unit's own OnFailure page, and the tick reports list_signed_on_stale loudly as before.
+DEPLOY_CLAIM_LIST_WAIT_SECS="${HYDRA_DEPLOY_CLAIM_LIST_WAIT_SECS:-900}"
+claim_list_cmd="if systemctl cat claim-list-build.service >/dev/null 2>&1; then timeout $DEPLOY_CLAIM_LIST_WAIT_SECS systemctl start claim-list-build.service; else echo 'claim-list-build.service not installed'; exit 3; fi"
+claim_list_rc=0
+claim_list_t0=$SECONDS
+log "Post-flight: rebuilding the claim list on $(cut -c1-10 <<<"${DEPLOYED_SHA:-unknown}") while the tick lock is held (up to ${DEPLOY_CLAIM_LIST_WAIT_SECS}s)..."
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+  # the same steps as claim_list_cmd, written plainly (no interpreter over a runtime string)
+  if systemctl cat claim-list-build.service >/dev/null 2>&1; then
+    timeout "$DEPLOY_CLAIM_LIST_WAIT_SECS" systemctl start claim-list-build.service || claim_list_rc=$?  # hydra-hook: reviewed-indirection reviewed-argv (systemctl by literal name; the expansion is the timeout ARG)
+  else
+    echo 'claim-list-build.service not installed'; claim_list_rc=3
+  fi
+else
+  ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" "$claim_list_cmd" || claim_list_rc=$?
+fi
+case "$claim_list_rc" in
+  0) log "  claim list rebuilt and signed in $(( SECONDS - claim_list_t0 ))s; the next tick reads a list signed on this head" ;;
+  124) log "  WARNING: the claim list rebuild was still running after ${DEPLOY_CLAIM_LIST_WAIT_SECS}s; releasing the tick lock anyway (the rebuild continues; a tick before it ends reports list_signed_on_stale)" ;;
+  *) log "  WARNING: claim list rebuild did not succeed (rc=$claim_list_rc, $(( SECONDS - claim_list_t0 ))s); claim-list-build.service's OnFailure pages, the tick reports list_signed_on_stale until a rebuild lands" ;;
+esac
 
 # -------------------------------------------------------------------
 # Post-flight: rebuild Caroline's RAG vector index (edge/support)
