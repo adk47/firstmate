@@ -93,14 +93,14 @@
 #           verdict, and the status line each say the rollout was never proven
 #           for it.
 #           Registering an existing watch whose drive stopped before the end of
-#           its schedule, or whose schedule ended unmeasurable, re-arms it: a
-#           completed schedule is reset and re-measured from that point, its
-#           samples, previous values and read failures are cleared, its
-#           measurement epoch moves to the re-registration, and its durable row
-#           goes back to open, so no evidence from before the re-registration
-#           can score. The durable row decides this as well as the verdict, so a
-#           deleted verdict cannot hide a gap. Any other existing watch is left
-#           alone. Registration is read-only against the cluster; it
+#           its schedule, whose schedule ended unmeasurable, or whose row ended
+#           absent re-arms it: a completed schedule, and any absent watch, is
+#           reset and re-measured from that point, its samples, previous values
+#           and read failures are cleared, its measurement epoch moves to the
+#           re-registration, and its durable row goes back to open, so no
+#           evidence from before the re-registration can score. The durable row
+#           decides this as well as the verdict, so a deleted verdict cannot
+#           hide a gap. Any other existing watch is left alone. Registration is read-only against the cluster; it
 #           writes only under this home's state/ directory. Its forge reads
 #           share one budget (default 60s) and its baseline capture the sample
 #           budget below, so a merge or watcher cycle is never stalled by it.
@@ -116,7 +116,8 @@
 #           with a stated bar, and append one sample record. Degrades to
 #           "unmeasured" per metric rather than failing the whole watch.
 # verdict   Print "change-watch clean", "change-watch unmeasurable-with-reason:
-#           <reason>", "change-watch interrupted at +Nm", or
+#           <reason>", "change-watch interrupted at +Nm",
+#           "change-watch absent at +Nm: <reason>", or
 #           "change-watch regressed at +Nm on <metric> (<value> vs baseline <value>)".
 #           Clean means every target had at least one scored reading across the
 #           schedule AND the +15m, +1h and +6h readings all scored something.
@@ -124,12 +125,12 @@
 #           recorded as such, never as health. A beta regression exits 1 as well,
 #           so a beta failure is never read as a pass. The exit status is the
 #           done-claim block: 0 for clean or regressed, 1 for
-#           unmeasurable-with-reason, interrupted, or a beta regression.
+#           unmeasurable-with-reason, absent, interrupted, or a beta regression.
 # gate      The done-claim gate for one task: exit 0 only when every watch that
 #           task registered has reached a terminal state that is not a
 #           measurement gap. A watch still running is not a pass, and an
-#           unmeasurable watch is a failure, so a task cannot claim done while
-#           its merge has no evidence. bin/fm-teardown.sh calls it with
+#           unmeasurable or absent watch is a failure, so a task cannot claim done
+#           while its merge has no evidence. bin/fm-teardown.sh calls it with
 #           --terminal-gap, which fails only for a terminal measurement gap: a
 #           running watch never blocks teardown, because state/change-watch/ is
 #           not a task record and keeps sampling after the task is gone. Both
@@ -139,7 +140,7 @@
 # audit     The 7-day acceptance, measured. It fails (exit 1) when any status log
 #           under state/ carries the literal "change-watch completed unmeasured"
 #           line, or when any durable row completed inside the window ended
-#           unmeasurable-with-reason. Default window 7 days.
+#           unmeasurable-with-reason or absent. Default window 7 days.
 # status    Print one line per registered watch (all of them, or one).
 # doctor    Live self-test of the read path. It prints the kubeconfig in use,
 #           proves the cluster answers, and with a watch id reads every target
