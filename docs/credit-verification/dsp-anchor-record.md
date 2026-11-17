@@ -25,9 +25,9 @@ stored verdict that has drifted from its packet cannot produce one.
 
 Step 5 writes nothing while `fable-decider.apply_enabled` is false in `policies/credit-approval-automation.json`
 (it ships false). With the switch on, the same entry's `apply_filter` block decides which rows may be approved,
-and `fable_executor.registry_apply_filter` holds its floor in code: a registry edit can tighten the block (a lower
-`per_run_cap`, more excluded bands) and a missing, malformed or weaker block refuses every row
-(`apply_filter_invalid`).
+and `fable_executor.apply_filter_floor` holds its floor in code (`registry_apply_filter` reads this entry and
+calls it): a registry edit can tighten the block (a lower `per_run_cap`, more excluded bands) and a missing,
+malformed or weaker block refuses every row (`apply_filter_invalid`).
 
 | key | what it enforces | refusal |
 |---|---|---|
@@ -47,6 +47,22 @@ that list.
 
 A cap only slows how fast wrong approvals are written; the filter is what keeps the known-wrong classes out.
 The filter does not arm anything: `doc_class.shadow` and the switch are separate decisions.
+
+### The same block on the document class
+
+`document_small_track.doc_class.apply_filter` carries the same six keys and is read by the same code: the floor
+is `fable_executor.apply_filter_floor`, the row rule is `fable_executor.filter_refusal`, and the decider calls
+them through `fable_executor.approve_filter` at its own write (`decide.doc_filter_refusals`, apply mode only; a
+shadow or judge run writes nothing and its record is unchanged). A document approval the filter keeps out is
+recorded as a `refused` event with gate `apply_filter`, deferred to the next run, and counted on the run line
+(`doc approval(s) kept out by the approve filter`). `credit-review.py decide --mode apply --batch-id ID` supplies
+the batch id; without one every document approval of the run is `batch_id_missing`.
+
+With the block as checked in, the document class writes no approval at all: a document-verified approval cites
+no DSP verdict, so the `outcome` key refuses each one as `outcome_not_credit_anchored_approve`. That is the
+ruling's "credit-anchored-approve only" applied to both writers. Letting the document class write is a change to
+this block's floor in code plus the registry, and it is a separate decision from `doc_class.shadow` and
+`approved`.
 
 ## Record (JSON, schema `dsp-anchor/1`)
 

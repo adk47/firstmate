@@ -2,15 +2,17 @@
 """credit-doc-close: the coded document closes C3 `junk_proof` and C8 `fraud_document` (credit_review/doc_close.py).
 
   credit-doc-close.py --rule junk  --preview    decide, print the per-user split, write nothing
-  credit-doc-close.py --rule fraud --rulings F --shadow   + append SHADOW rows to the decider ledger (coded-close
-                                                          shape); F = the labelled rulings (a 'not' always holds)
+  credit-doc-close.py --rule fraud --rulings F  + append SHADOW rows to the decider ledger (coded-close shape);
+                                                 F = the labelled rulings (a 'not' always holds); shadow is the default
+  credit-doc-close.py --rule junk --mode apply --batch-id B   write the coded CLOSES, refused unless the rule's
+                                                 apply_enabled is true in policies/credit-doc-close.json
 
 Inputs, all read-only:
   - the doc-verify store (artifact kinds; the forged_positive outcomes and their history);
   - proof_intake (the filings);
   - core facts (Trino replica, fable_executor.fetch_facts), V9 anchors, the account gate, the R8 hold set.
 It never writes a credit status. Apply is decided by the per-rule policy switch (policies/credit-doc-close.json) and is
-not offered by this CLI yet, with t01b's executor consuming the apply rows. Summary JSON on stdout.
+read at the write: a rule whose entry is not `apply_enabled` refuses the run and writes nothing. Summary JSON on stdout.
 """
 from __future__ import annotations
 
@@ -82,9 +84,12 @@ def fraud_rows(dv_path: str, pdb: sqlite3.Connection, paid: frozenset[int] | Non
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rule", choices=("junk", "fraud"), required=True)
-    m = ap.add_mutually_exclusive_group(required=True)
+    m = ap.add_mutually_exclusive_group()
     m.add_argument("--preview", action="store_true")
-    m.add_argument("--shadow", action="store_true")
+    m.add_argument("--mode", choices=dc.MODES, default="shadow",
+                   help="shadow (default) records the decisions only; apply writes the coded closes and is refused "
+                        "unless the rule's apply_enabled is true in policies/credit-doc-close.json")
+    ap.add_argument("--batch-id", help="tags every row of an apply run (required with --mode apply)")
     ap.add_argument("--ledger", default=LEDGER)
     ap.add_argument("--doc-verify-store", default=DV_STORE)
     ap.add_argument("--proof-store", default=PROOF_STORE)
@@ -92,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
                                       "--rule fraud so a known false forgery always holds (QA #1571)")
     ap.add_argument("--sample", type=int, default=0)
     a = ap.parse_args(argv)
+    if a.mode != "apply" and a.batch_id is not None:
+        print(json.dumps({"refused": "--batch-id tags an apply run only (--mode apply)"}))
+        return 2
     if a.rule == "fraud":
         try:
             rulings_text = Path(a.rulings).read_text(encoding="utf-8") if a.rulings else None
@@ -118,9 +126,14 @@ def main(argv: list[str] | None = None) -> int:
         out["mode"] = "preview (nothing written)"
     else:
         db = sqlite3.connect(a.ledger, timeout=30)
-        run_id = f"doc-close-{a.rule}-shadow-" + uuid.uuid4().hex[:10]
-        rec = dc.record(db, run_id, kind, rows, now)
-        out.update(mode="shadow", run_id=run_id, written_close=rec["close"], written_hold=rec["hold"],
+        run_id = f"doc-close-{a.rule}-{a.mode}-" + uuid.uuid4().hex[:10]
+        try:
+            rec = dc.record(db, run_id, kind, rows, now, mode=a.mode, batch_id=a.batch_id)
+        except dc.ApplyRefused as exc:
+            out.update(mode=a.mode, refused=str(exc), written_close=0)
+            print(json.dumps(out, default=str))
+            return 3
+        out.update(mode=a.mode, run_id=run_id, written_close=rec["close"], written_hold=rec["hold"],
                    duplicate=rec["duplicate"])
     print(json.dumps(out, default=str))
     return 0

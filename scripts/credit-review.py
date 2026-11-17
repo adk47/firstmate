@@ -394,7 +394,7 @@ def cmd_decide(args: argparse.Namespace) -> int:
                                             spent_today_usd=decide.spent_today_usd(ledger.db, day))
     res = decide.run(admin_api.AdminClient(), ledger.db, judge, mode=args.mode, policy=policy,
                      max_model_calls=args.max_model_calls, workers=args.workers, budget_s=args.budget_s,
-                     uvn_reader=decide.replica_uvn_rows)
+                     uvn_reader=decide.replica_uvn_rows, batch_id=getattr(args, "batch_id", None))
     log("decide " + res.line())
     prod_ledger = "/var/lib/hydra/credit-review/ledger.sqlite3"
     if res.mode == "apply" and os.path.realpath(args.ledger or prod_ledger) == prod_ledger:
@@ -1304,6 +1304,9 @@ def parser() -> argparse.ArgumentParser:
     dc = sub.add_parser("decide", help="trust-yet-verify decisions on the held queue (credit-trust-decide)")
     dc.add_argument("--mode", choices=["shadow", "apply", "judge"], default="shadow",
                     help="judge: decide and record (ledger mode='judge', read by stage 2) but write nothing")
+    dc.add_argument("--batch-id", default=None,
+                    help="apply only: tags this run's document-class approvals; the class's approve filter "
+                         "(document_small_track.doc_class.apply_filter) writes none without it")
     dc.add_argument("--max-rows", type=int, default=None, help="held rows per run (default: policy, 500)")
     dc.add_argument("--workers", type=int, default=6)
     dc.add_argument("--budget-s", type=int, default=720, help="stop building evidence after this many seconds")

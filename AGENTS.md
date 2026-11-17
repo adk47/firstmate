@@ -709,7 +709,14 @@ look like deletions in `git diff origin/main`, and "restoring" it with
 Any automation that can APPROVE a Muso credit request is listed in
 `policies/credit-approval-automation.json`. CI (`scripts/check-credit-approval-automation.sh`)
 fails if a cron runs one unregistered, or enabled without `approved: true` +
-`approved_by` + `approval_ref`. A cron whose `/etc/hydra` kill file is present is
+`approved_by` + `approval_ref`. **No shadow path waits on an r5 GO**: the captain retired that gate
+by name on 2026-11-14 (`retired_gates.r5_go` in the same file, with the sequencing that precedes any
+apply). The ruling armed nothing: shadow to apply is each entry's own switch, flipped in its own
+reviewed PR. **An approve write passes one filter, read from two blocks** (`fable-decider.apply_filter`,
+`document_small_track.doc_class.apply_filter`; `fable_executor.approve_filter` + `apply_filter_floor`): a new
+approve writer calls that function and never writes its own rule. As checked in the outcome key admits
+credit-anchored approvals only, so the document class writes none
+(`docs/credit-verification/dsp-anchor-record.md`). A cron whose `/etc/hydra` kill file is present is
 HELD: `policies/held-crons.json` + `scripts/check-held-cron-guard.py` (pre-commit
 `--staged`, PR Validation `--base`) refuse a diff that flips its `enabled` to true,
 changes its schedule or payload, deletes its row, or drops its registry entry

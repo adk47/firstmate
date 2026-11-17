@@ -2,7 +2,9 @@
 coded-close shape, every rail held, the 24 h unbroken fraud standing, and coverage before any fraud close."""
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import sqlite3
 import sys
@@ -10,6 +12,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -351,6 +354,100 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual((again["close"], again["duplicate"]), (0, 1))       # one apply close per request, any batch
         self.assertEqual(self.db.execute("SELECT batch_id FROM decisions WHERE mode='apply'").fetchall(),
                          [(self.BATCH,)])
+
+
+class MainModeTest(unittest.TestCase):
+    """The real CLI reaches the apply rails: shadow is the default, an apply run is refused by the per-rule policy
+    switch, and an enabled rule writes its coded closes with the batch id under the daily cap."""
+
+    BATCH = "batch-20261115-a"
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        root = Path(self.td.name)
+        for name in ("dv.sqlite", "proof.sqlite"):
+            sqlite3.connect(str(root / name)).close()
+        self.ledger = str(root / "ledger.sqlite3")
+        self.policy = root / "credit-doc-close.json"
+        self.saved = (dc.POLICY, dc.KILL_FILES)
+        dc.POLICY, dc.KILL_FILES = str(self.policy), ()
+        spec = importlib.util.spec_from_file_location(
+            "credit_doc_close_cli", Path(__file__).resolve().parents[1] / "credit-doc-close.py")
+        self.cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.cli)
+        self.rows = [close_row("r-1", 42), close_row("r-2", 43)]
+
+    def tearDown(self):
+        dc.POLICY, dc.KILL_FILES = self.saved
+        self.td.cleanup()
+
+    def enable(self, **over):
+        self.policy.write_text(json.dumps({"rules": {dc.JUNK: rule_entry(dc.JUNK, **over)}}), encoding="utf-8")
+
+    def written(self):
+        from credit_review import coded_close
+        db = sqlite3.connect(self.ledger)
+        try:
+            coded_close.ensure_columns(db)
+            return db.execute("SELECT decision, mode, batch_id FROM decisions ORDER BY id").fetchall()
+        finally:
+            db.close()
+
+    def run_cli(self, *argv, rows=None):
+        root = Path(self.td.name)
+        out = io.StringIO()
+        args = ["--rule", "junk", "--ledger", self.ledger, "--doc-verify-store", str(root / "dv.sqlite"),
+                "--proof-store", str(root / "proof.sqlite"), *argv]
+        rows = self.rows if rows is None else rows
+        with mock.patch.object(self.cli, "junk_rows", lambda dv, pdb, paid: (rows, 0)), \
+                mock.patch("credit_review.decide.paying_users", lambda: (frozenset({42, 43}), "")), \
+                contextlib.redirect_stdout(out):
+            rc = self.cli.main(args)
+        return rc, json.loads(out.getvalue().strip().splitlines()[-1])
+
+    def test_shadow_is_the_default_and_write_no_batch(self):
+        rc, out = self.run_cli()
+        self.assertEqual((rc, out["mode"], out["written_close"]), (0, "shadow", 2))
+        self.assertEqual(self.written(), [("close", "shadow", None), ("close", "shadow", None)])
+
+    def test_preview_writes_nothing(self):
+        rc, out = self.run_cli("--preview")
+        self.assertEqual((rc, out["mode"]), (0, "preview (nothing written)"))
+        self.assertEqual(self.written(), [])
+
+    def test_apply_is_refused_while_the_rule_is_off(self):
+        self.enable(apply_enabled=False)
+        rc, out = self.run_cli("--mode", "apply", "--batch-id", self.BATCH)
+        self.assertEqual((rc, out["written_close"]), (3, 0))
+        self.assertIn("apply_enabled is not true", out["refused"])
+        self.assertEqual(self.written(), [])
+
+    def test_an_enabled_rule_writes_the_batch_through_the_cli(self):
+        self.enable()
+        rc, out = self.run_cli("--mode", "apply", "--batch-id", self.BATCH)
+        self.assertEqual((rc, out["mode"], out["written_close"]), (0, "apply", 2))
+        self.assertEqual(self.written(), [("close", "apply", self.BATCH)] * 2)
+
+    def test_an_apply_run_without_a_batch_id_is_refused(self):
+        self.enable()
+        rc, out = self.run_cli("--mode", "apply")
+        self.assertEqual((rc, out["written_close"]), (3, 0))
+        self.assertIn("batch id", out["refused"])
+        self.assertEqual(self.written(), [])
+
+    def test_a_batch_id_outside_an_apply_run_writes_nothing(self):
+        self.enable()
+        rc, out = self.run_cli("--batch-id", self.BATCH)
+        self.assertEqual(rc, 2)
+        self.assertIn("--mode apply", out["refused"])
+        self.assertEqual(self.written(), [])
+
+    def test_the_daily_cap_is_reached_through_the_cli(self):
+        self.enable()
+        rows = [close_row(f"r-{i}", 40 + i) for i in range(dc.DAILY_CAP + 1)]
+        rc, out = self.run_cli("--mode", "apply", "--batch-id", self.BATCH, rows=rows)
+        self.assertEqual((rc, out["written_close"], out["written_hold"]), (0, dc.DAILY_CAP, {"daily_cap": 1}))
+        self.assertEqual(len(self.written()), dc.DAILY_CAP + 1)
 
 
 if __name__ == "__main__":

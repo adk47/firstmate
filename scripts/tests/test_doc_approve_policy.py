@@ -100,5 +100,33 @@ class DocApprovePolicy(unittest.TestCase):
         self.assertEqual(self.entry["doc_class"]["kill_switch"], str(decide.DOC_APPROVE_KILL))
 
 
+class R5GoRetirement(unittest.TestCase):
+    """The r5 GO is retired by name (captain 2026-11-14), and the retirement is a record, not a switch."""
+
+    def test_the_retirement_arms_nothing(self):
+        registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
+        doc = registry["automations"][decide.DOC_AUTOMATION]
+        self.assertIs(doc["approved"], False)
+        self.assertIs(doc["doc_class"]["shadow"], True)
+        close = json.loads((REGISTRY.parent / "credit-validator-reject-close.json").read_text(encoding="utf-8"))
+        self.assertIs(close["apply_enabled"], False)
+        self.assertIsNone(close["approved_by"])
+
+
+    def test_the_class_carries_the_approve_filter_and_stays_in_shadow(self):
+        """[key=approve-filter-two-blocks] The same keys as the tray executor's block, read by the same floor.
+        Adding the filter arms nothing: `shadow` stays true and `approved` stays false."""
+        from credit_review import fable_executor
+        entry = json.loads(REGISTRY.read_text(encoding="utf-8"))["automations"][decide.DOC_AUTOMATION]
+        cls = entry["doc_class"]
+        self.assertIs(cls["shadow"], True)
+        self.assertIs(entry["approved"], False)
+        self.assertEqual(set(cls["apply_filter"]), set(fable_executor.APPLY_FILTER_KEYS))
+        self.assertEqual(fable_executor.apply_filter_floor(cls["apply_filter"]), (cls["apply_filter"], ""))
+        self.assertEqual(decide.doc_class_apply_filter(REGISTRY), cls["apply_filter"])
+        executor = json.loads(REGISTRY.read_text())["automations"][fable_executor.AUTOMATION_ID]
+        self.assertEqual(cls["apply_filter"], executor["apply_filter"])
+
+
 if __name__ == "__main__":
     unittest.main()

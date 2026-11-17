@@ -1509,5 +1509,99 @@ class BatchCliTest(unittest.TestCase):
         self.assertIn("approve trays only", out.stdout)
 
 
+class SharedApproveFilterTest(unittest.TestCase):
+    """`approve_filter` is the one function a second approve writer (the decider's document class) calls, and
+    `apply_filter_floor` the one floor both policy blocks pass [key=approve-filter-two-blocks]."""
+
+    class Row:
+        def __init__(self, request_id, rule=fx.ANCHORED_RULE_ID, coded_outcome="dsp_verdicts:1"):
+            self.request_id, self.rule, self.coded_outcome = request_id, rule, coded_outcome
+
+    def ask(self, rows, block=FILTER, batch_id=BATCH, **kw):
+        kw.setdefault("filter_fn", clean)
+        return fx.approve_filter(block, rows, batch_id, **kw)
+
+    def test_a_clean_credit_anchored_row_is_admitted(self):
+        self.assertEqual(self.ask([self.Row(RID)]), {})
+
+    def test_every_row_rule_is_the_executors_own(self):
+        for facts, why in ((fx.FilterFacts("none", False, False), "band_excluded:none"),
+                           (fx.FilterFacts(None, False, False), "band_unmeasured"),
+                           (fx.FilterFacts("b", True, False), "conflict_rule_failure"),
+                           (fx.FilterFacts("b", None, False), "conflict_rule_unmeasured"),
+                           (fx.FilterFacts("b", False, True), "self_duplicate_group"),
+                           (fx.FilterFacts("b", False, None), "self_duplicate_unmeasured")):
+            with self.subTest(why=why):
+                row = self.Row(RID)
+                got = self.ask([row], filter_fn=lambda ids, f=facts: {RID: f})
+                self.assertEqual(got, {RID: why})
+                self.assertEqual(got[RID], fx.filter_refusal(row, FILTER, facts), "one rule, two callers")
+
+    def test_another_outcome_is_refused_and_never_measured(self):
+        reads = []
+        rows = [self.Row(RID, rule="document_small_track:doc_verified", coded_outcome=""),
+                self.Row(RID2, coded_outcome="dv_outcomes:7")]
+        got = self.ask(rows, filter_fn=lambda ids: reads.append(list(ids)) or {})
+        self.assertEqual(got, {RID: "outcome_not_credit_anchored_approve",
+                               RID2: "outcome_not_credit_anchored_approve"})
+        self.assertEqual(reads, [])
+
+    def test_an_unread_or_short_measurement_refuses(self):
+        def boom(ids):
+            raise RuntimeError("replica down")
+        self.assertEqual(self.ask([self.Row(RID)], filter_fn=boom), {RID: "apply_filter_unmeasured"})
+        self.assertEqual(self.ask([self.Row(RID), self.Row(RID2)], filter_fn=lambda ids: {RID: CLEAN}),
+                         {RID2: "apply_filter_unmeasured"})
+
+    def test_ids_are_matched_whatever_their_case(self):
+        rid = "abcdef01-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        self.assertEqual(self.ask([self.Row(rid.upper())], filter_fn=lambda ids: {rid: CLEAN}), {})
+        self.assertEqual(self.ask([self.Row(rid)], filter_fn=lambda ids: {rid.upper(): CLEAN}), {})
+
+    def test_a_block_below_the_floor_refuses_every_row(self):
+        for block in (None, {}, "x", {**FILTER, "exclude_bands": []}, {**FILTER, "per_run_cap": 51},
+                      {**FILTER, "outcome": "doc_verified"}, {**FILTER, "batch_id_required": False},
+                      {**FILTER, "extra": 1}):
+            with self.subTest(block=block):
+                self.assertEqual(self.ask([self.Row(RID)], block=block), {RID: "apply_filter_invalid"})
+                self.assertIsNone(fx.apply_filter_floor(block)[0])
+
+    def test_no_valid_batch_id_refuses_every_row(self):
+        for bad in (None, "", "short", "Has-Capitals-01", 7):
+            with self.subTest(batch_id=bad):
+                self.assertEqual(self.ask([self.Row(RID)], batch_id=bad), {RID: "batch_id_missing"})
+
+    def test_the_per_run_cap_counts_admitted_rows_and_what_the_run_already_wrote(self):
+        rows = [self.Row(RID), self.Row(RID2)]
+        self.assertEqual(self.ask(rows, block={**FILTER, "per_run_cap": 1}), {RID2: "per_run_cap_reached"})
+        self.assertEqual(self.ask(rows, block={**FILTER, "per_run_cap": 2}), {})
+        self.assertEqual(self.ask(rows, block={**FILTER, "per_run_cap": 2}, written=1),
+                         {RID2: "per_run_cap_reached"})
+        self.assertEqual(self.ask(rows, block={**FILTER, "per_run_cap": 2}, written=2),
+                         {RID: "per_run_cap_reached", RID2: "per_run_cap_reached"})
+        # a filtered row spends no room
+        got = self.ask(rows, block={**FILTER, "per_run_cap": 1},
+                       filter_fn=lambda ids: {RID: fx.FilterFacts("none", False, False), RID2: CLEAN})
+        self.assertEqual(got, {RID: "band_excluded:none"})
+
+    def test_the_executors_own_reader_uses_the_same_floor(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = Path(tmp) / "registry.json"
+            for block in (FILTER, {**FILTER, "exclude_bands": []}, {**FILTER, "per_run_cap": 0}):
+                reg.write_text(json.dumps({"automations": {fx.AUTOMATION_ID: {"apply_filter": block}}}))
+                self.assertEqual(fx.registry_apply_filter(str(reg)), fx.apply_filter_floor(block))
+
+    def test_both_checked_in_blocks_are_the_same_and_pass_the_floor(self):
+        reg = json.loads((Path(__file__).resolve().parents[2] / "policies"
+                          / "credit-approval-automation.json").read_text())["automations"]
+        executor = reg[fx.AUTOMATION_ID]["apply_filter"]
+        doc = reg["document_small_track"]["doc_class"]["apply_filter"]
+        self.assertEqual(executor, doc)
+        for block in (executor, doc):
+            self.assertEqual(fx.apply_filter_floor(block), (block, ""))
+        self.assertEqual(executor["per_run_cap"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

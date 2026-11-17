@@ -29,7 +29,7 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 
 import test_credit_review as T  # noqa: E402  (FakeAdmin, request(), raw(), PROFILES, TRACKS, NOW)
-from credit_review import decide  # noqa: E402
+from credit_review import decide, fable_executor  # noqa: E402
 from credit_review import verify_notify as _vn_r5  # noqa: E402
 _vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come from the replica in tests
 from credit_review.judge import JudgeResult  # noqa: E402
@@ -2246,6 +2246,13 @@ class DocApprovalDispatcher(Base):
         Path(decide.REGISTRY).write_text(json.dumps({"automations": {
             decide.AUTOMATION: {"approved": True, "approved_by": "captain", "approval_ref": "r0"},
             decide.DOC_AUTOMATION: {"approved": True, "approved_by": "Fable", "approval_ref": "doc-approval-doctrine"}}}))
+        # The approve filter sits in front of the document write and, as checked in, admits no document
+        # approval at all (`outcome_not_credit_anchored_approve`). These cases are about what the dispatcher
+        # does AFTER a row is admitted (caps, release, read-back), so the fixture admits every row; the
+        # cases named `..._approve_filter_...` put the real filter back (`real_filter`).
+        self._real_doc_filter = decide.doc_filter_refusals
+        decide.doc_filter_refusals = lambda decisions, batch_id, **kw: {}
+        self.addCleanup(setattr, decide, "doc_filter_refusals", self._real_doc_filter)
         self._doc_store, self._doc_proof = decide.DOC_STORE, decide.DOC_PROOF_STORE
         self._doc_kill = decide.DOC_APPROVE_KILL
         decide.DOC_STORE = Path(self.tmp) / "doc-verify.sqlite"
@@ -2324,6 +2331,102 @@ class DocApprovalDispatcher(Base):
 
     def approve_writes(self, w):
         return [i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]]
+
+    # ── the approve filter at the document write [key=approve-filter-two-blocks] ──────────────────
+    FILTER_BLOCK = {"outcome": "credit-anchored-approve", "exclude_bands": ["none"],
+                    "exclude_conflict_rule_failures": True, "exclude_self_duplicate_groups": True,
+                    "per_run_cap": 1, "batch_id_required": True}
+
+    def real_filter(self, block="floor"):
+        """Put the real filter back and write `block` on the document class (None = no block at all)."""
+        decide.doc_filter_refusals = self._real_doc_filter
+        reg = json.loads(Path(decide.REGISTRY).read_text())
+        cls = {} if block is None else {"apply_filter": dict(self.FILTER_BLOCK) if block == "floor" else block}
+        reg["automations"][decide.DOC_AUTOMATION]["doc_class"] = cls
+        Path(decide.REGISTRY).write_text(json.dumps(reg))
+
+    def doc_go(self, **kw):
+        return self.go([req(self.doc_rid, uid=900, track="small")], {}, judge=self.NOT_FOUND, **kw)
+
+    def filter_events(self):
+        return [r[0] for r in self.db.execute(
+            "SELECT reason FROM doc_approval_events WHERE state='refused' AND gate='apply_filter'")]
+
+    def assert_kept_out(self, res, w, why):
+        d = self.decisions()[self.doc_rid]
+        self.assertEqual(d["decision"], "defer", d["reason"])
+        self.assertIn(f"{decide.APPROVE_FILTER_DEFER} ({why})", d["reason"])
+        self.assertEqual(self.approve_writes(w), [], "a filtered document approval must never reach the PUT")
+        self.assertEqual(self.doc_rows(), [], "and must spend no slot")
+        self.assertEqual((res.doc_approved, res.doc_filtered), (0, {why: 1}))
+        self.assertEqual(len(self.filter_events()), 1)
+        self.assertTrue(self.filter_events()[0].startswith(why), self.filter_events())
+        self.assertIn(f"1 doc approval(s) kept out by the approve filter ({why} 1)", res.line())
+
+    def test_the_fixture_stub_is_what_lets_the_other_cases_write(self):
+        """Control for the stub in setUp: the same row, the same run, and the document approval is written."""
+        res, w = self.doc_go()
+        self.assertEqual((res.doc_approved, res.doc_filtered), (1, {}))
+        self.assertEqual(self.approve_writes(w), [self.doc_rid])
+
+    def test_an_admitted_document_approval_records_its_batch_id(self):
+        res, w = self.doc_go(batch_id="batch-test-01")
+        self.assertEqual(self.approve_writes(w), [self.doc_rid])
+        got = [tuple(r) for r in self.db.execute(
+            "SELECT request_id, reason FROM doc_approval_events WHERE state='batch' AND gate='apply_filter'")]
+        self.assertEqual(got, [(self.doc_rid, "batch-test-01")])
+
+    def test_the_approve_filter_keeps_a_document_approval_out_as_checked_in(self):
+        """The block's outcome key admits credit-anchored approvals only, and a document approval cites no
+        DSP verdict: with a valid block, a batch id and clean facts it is still not written. The replica is
+        not read for it, because no measurement could admit it."""
+        self.real_filter()
+        reads = []
+        res, w = self.doc_go(batch_id="batch-test-01", doc_filter_fn=lambda ids: reads.append(list(ids)) or {})
+        self.assert_kept_out(res, w, "outcome_not_credit_anchored_approve")
+        self.assertEqual(reads, [])
+
+    def test_the_approve_filter_refuses_a_class_with_no_block(self):
+        self.real_filter(None)
+        res, w = self.doc_go(batch_id="batch-test-01")
+        self.assert_kept_out(res, w, "apply_filter_invalid")
+
+    def test_the_approve_filter_refuses_a_block_below_the_floor(self):
+        """One weaker block through the dispatcher; every way a block can be weaker is the shared floor's own
+        test (`ApplyFilterPolicyTest` in test_credit_fable_executor.py)."""
+        self.real_filter({**self.FILTER_BLOCK, "outcome": "doc_verified"})
+        res, w = self.doc_go(batch_id="batch-test-01")
+        self.assert_kept_out(res, w, "apply_filter_invalid")
+
+    def test_the_approve_filter_refuses_an_apply_run_with_no_batch_id(self):
+        self.real_filter()
+        res, w = self.doc_go()
+        self.assert_kept_out(res, w, "batch_id_missing")
+
+    def test_the_approve_filter_refuses_an_apply_run_with_a_malformed_batch_id(self):
+        self.real_filter()
+        res, w = self.doc_go(batch_id="Has-Capitals-01")
+        self.assert_kept_out(res, w, "batch_id_missing")
+
+    def test_the_approve_filter_is_not_asked_in_a_run_that_writes_nothing(self):
+        """Shadow and judge runs keep recording what the document gates decided; the filter is the write's."""
+        asked = []
+        decide.doc_filter_refusals = lambda decisions, batch_id, **kw: asked.append(1) or {}
+        res, w = self.doc_go(mode="shadow")
+        d = self.decisions()[self.doc_rid]
+        self.assertEqual((d["decision"], d["evidence_kind"]), ("approve", "doc_verified"), d["reason"])
+        self.assertEqual((asked, res.doc_filtered, self.approve_writes(w)), ([], {}, []))
+        res, w = self.doc_go(mode="apply", batch_id="batch-test-01")
+        self.assertEqual(asked, [1], "control: the same spy is asked once the run can write")
+
+    def test_the_document_class_reads_its_own_block_with_the_executors_floor(self):
+        self.real_filter()
+        self.assertEqual(decide.doc_class_apply_filter(), self.FILTER_BLOCK)
+        self.assertEqual(fable_executor.apply_filter_floor(decide.doc_class_apply_filter())[1], "")
+        self.real_filter(None)
+        self.assertIsNone(decide.doc_class_apply_filter())
+        Path(decide.REGISTRY).write_text("{not json")
+        self.assertIsNone(decide.doc_class_apply_filter())
 
     def doc_rows(self):
         return [dict(zip(("request_id", "state", "ref"), r)) for r in

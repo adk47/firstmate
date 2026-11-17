@@ -405,9 +405,17 @@ def batch_refusal(batch_id: Any) -> str | None:
     return None
 
 
-def filter_refusal(row: TrayRow, apply_filter: dict[str, Any], ff: FilterFacts | None) -> str | None:
-    """Why the approve filter keeps this row out, or None. Unmeasured is its own refusal, never a pass."""
-    if row.rule != ANCHORED_RULE_ID or not row.coded_outcome.startswith("dsp_verdicts:"):
+def credit_anchored(row: Any) -> bool:
+    """Is this row the anchored feed's approve (rule C4, citing one DSP verdict)? Any other approval, a
+    document-verified one included, is a different outcome and the filter keeps it out."""
+    return (getattr(row, "rule", None) == ANCHORED_RULE_ID
+            and str(getattr(row, "coded_outcome", "") or "").startswith("dsp_verdicts:"))
+
+
+def filter_refusal(row: Any, apply_filter: dict[str, Any], ff: FilterFacts | None) -> str | None:
+    """Why the approve filter keeps this row out, or None. Unmeasured is its own refusal, never a pass. `row`
+    is anything carrying `rule` and `coded_outcome`: the tray executor's row and the decider's are read alike."""
+    if not credit_anchored(row):
         return "outcome_not_credit_anchored_approve"
     if ff is None:
         return "apply_filter_unmeasured"
@@ -813,6 +821,12 @@ def registry_apply_filter(path: str = REGISTRY) -> tuple[dict[str, Any] | None, 
         flt = json.loads(Path(path).read_text())["automations"][AUTOMATION_ID].get("apply_filter")
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None, "registry unreadable"
+    return apply_filter_floor(flt)
+
+
+def apply_filter_floor(flt: Any) -> tuple[dict[str, Any] | None, str]:
+    """(the block, "") when an `apply_filter` block is at least the floor, else (None, why). Every policy block
+    that can lead to an approve write is read by this one function, whichever automation it sits under."""
     if not isinstance(flt, dict):
         return None, "no apply_filter block"
     if set(flt) != APPLY_FILTER_KEYS:
@@ -830,6 +844,40 @@ def registry_apply_filter(path: str = REGISTRY) -> tuple[dict[str, Any] | None, 
     if not isinstance(cap, int) or isinstance(cap, bool) or not 1 <= cap <= APPROVE_CAP:
         return None, f"per_run_cap must be an integer 1..{APPROVE_CAP}"
     return flt, ""
+
+
+def approve_filter(block: Any, rows: Iterable[Any], batch_id: Any, *, written: int = 0,
+                   filter_fn: Callable[[Iterable[str]], dict[str, FilterFacts]] | None = None) -> dict[str, str]:
+    """request id -> why the approve filter keeps it out, for an approve writer that is not the tray executor
+    (the decider's document class). A row absent from the answer may be written. The same floor, row filter,
+    batch id rule and per-run cap as the executor's own path: `written` is what this run already wrote, and a
+    row past the cap waits for another run. The replica is read once, and only for rows whose outcome the
+    filter admits at all; a read that fails leaves them unmeasured, which refuses."""
+    rows = list(rows)
+    flt, _why = apply_filter_floor(block)
+    if flt is None:
+        return {r.request_id: "apply_filter_invalid" for r in rows}
+    if batch_refusal(batch_id):
+        return {r.request_id: "batch_id_missing" for r in rows}
+    ids = [r.request_id for r in rows if credit_anchored(r)]
+    measured: dict[str, FilterFacts] = {}
+    if ids:
+        try:
+            measured = {k.lower(): v for k, v in (filter_fn or approve_filter_facts)(ids).items()}
+        except Exception:  # noqa: BLE001 - an unread filter is unmeasured, never a pass
+            measured = {}
+    out: dict[str, str] = {}
+    room = flt["per_run_cap"] - max(0, int(written))
+    for r in rows:
+        why = filter_refusal(r, flt, measured.get(r.request_id.lower()))
+        if why is None:
+            if room <= 0:
+                why = "per_run_cap_reached"
+            else:
+                room -= 1
+        if why is not None:
+            out[r.request_id] = why
+    return out
 
 
 def batch_rows(batch_id: str, path: str = AUDIT_PATH) -> list[str]:

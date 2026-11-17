@@ -129,7 +129,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
-from . import account_gate, doc_approve
+from . import account_gate, doc_approve, fable_executor
 from . import admin as admin_api
 from . import dsp_gate, proof_parts
 from . import user_decision
@@ -159,6 +159,7 @@ from .runner import log
 from .user_decision import DENY_PROFILE_REASON, DENY_USER_REASON, NO_TRACK_REASON, conflict_reason
 
 AUTOMATION = "credit-trust-decide"
+APPROVE_FILTER_DEFER = "approve filter"
 # [key=doc-approval-doctrine] Fable 2026-11-03 19:3xZ (under Aaron's 11-03 delegation): a dv-4
 # forged-checked document may approve a T0/T1 credit without a DSP anchor. That class is a SEPARATE
 # registry entry, because it is narrower than this automation (which stays approved=false): apply
@@ -358,6 +359,34 @@ def doc_class_approved(path: Path | None = None) -> tuple[bool, str]:
     if not str(entry.get("approved_by") or "").strip() or not str(entry.get("approval_ref") or "").strip():
         return False, f"{DOC_AUTOMATION} has no approved_by / approval_ref"
     return True, f"approved by {entry['approved_by']}"
+
+
+def doc_class_apply_filter(path: Path | None = None) -> Any:
+    """The class's `apply_filter` block as the registry holds it, or None. Whether it is valid is not decided
+    here: `fable_executor.apply_filter_floor` reads this block and the tray executor's with the same rule."""
+    try:
+        entry = json.loads(Path(path or REGISTRY).read_text(encoding="utf-8"))["automations"][DOC_AUTOMATION]
+        return entry["doc_class"].get("apply_filter")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+@dataclass(frozen=True)
+class _FilterRow:
+    """What the shared approve filter reads of a decision. A document-verified approval cites no DSP verdict,
+    so `coded_outcome` is empty: the filter's outcome key decides it, not this class."""
+    request_id: str
+    rule: str
+    coded_outcome: str = ""
+
+
+def doc_filter_refusals(decisions: Sequence["Decision"], batch_id: Any, *, path: Path | None = None,
+                        filter_fn: Callable[[Iterable[str]], dict[str, Any]] | None = None) -> dict[str, str]:
+    """request id -> why the approve filter keeps this document approval from being written
+    [key=approve-filter-two-blocks]. One filter function for both approve writers
+    (`fable_executor.approve_filter`); this block is `document_small_track.doc_class.apply_filter`."""
+    rows = [_FilterRow(d.request_id, f"{DOC_AUTOMATION}:{d.evidence_kind}") for d in decisions]
+    return fable_executor.approve_filter(doc_class_apply_filter(path), rows, batch_id, filter_fn=filter_fn)
 
 
 def _freeze_db() -> sqlite3.Connection | None:
@@ -2176,6 +2205,7 @@ class RunResult:
     jev_calls: int = 0
     held: int = 0
     doc_approved: int = 0
+    doc_filtered: dict[str, int] = field(default_factory=dict)   # approve-filter refusals at the write, by reason
     doc_indeterminate: int = 0        # core may have committed; counted, not proof, a human reconciles
     doc_audit: str = ""               # R22 guard 8: the 14-day 100% audit window's state
     doc_refused_by_core: int = 0      # eligible documents whose row core's own agent guard would refuse
@@ -2273,6 +2303,9 @@ class RunResult:
         if self.doc_approved:
             detail.append(f"{self.doc_approved} approved by a dv-4 verified document "
                           f"(provisional {doc_approve.PROVISIONAL_DAYS}d)")
+        if self.doc_filtered:
+            detail.append(f"{sum(self.doc_filtered.values())} doc approval(s) kept out by the approve filter ("
+                          + ", ".join(f"{k} {v}" for k, v in sorted(self.doc_filtered.items())) + ")")
         if self.doc_indeterminate:
             detail.append(f"{self.doc_indeterminate} doc approval(s) INDETERMINATE (core may have "
                           "committed; reconcile before releasing)")
@@ -2923,7 +2956,11 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         workers: int = 6, budget_s: int = 720, rows: list[dict[str, Any]] | None = None,
         clock: Callable[[], datetime] | None = None,
         coded_out: Path | None = None,
-        uvn_reader: Callable[[], list[dict[str, Any]]] | None = None) -> RunResult:
+        uvn_reader: Callable[[], list[dict[str, Any]]] | None = None,
+        batch_id: str | None = None,
+        doc_filter_fn: Callable[[Iterable[str]], dict[str, Any]] | None = None) -> RunResult:
+    # `batch_id` tags an apply run's document approvals; the class's approve filter refuses every one
+    # of them without it (`doc_filter_refusals`). `doc_filter_fn` replaces the filter's replica read in tests.
     # `uvn_reader` (credit-review.py passes `replica_uvn_rows`) turns on the documented
     # user_verification_needed pass. A run without one behaves exactly as it did before that pass.
     # judge (Fable [key=l11b], 2026-10-27): exactly shadow - no approval PUT, no support/ask write,
@@ -3367,11 +3404,30 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     # if the PUT does not confirm, `write_ids` RELEASES the row again (QA #1684 finding 2), so no phantom
     # approval can stand in for a credit that was never approved.
     doc_committed: list[str] = []
+    # [key=approve-filter-two-blocks] The approve filter, at the write boundary and in apply mode only (a
+    # shadow or judge run writes nothing, so its record of what the gates decided is left as it was). The
+    # block is `doc_class.apply_filter`, read by the tray executor's own function: a document approval is
+    # written only if that filter admits it, under a batch id, inside the per-run cap.
+    doc_filtered: dict[str, str] = {}
+    if mode == "apply":
+        doc_filtered = doc_filter_refusals(
+            [d for _c, _ap, d, _p in doc_pending.values()
+             if d.decision == "approve" and d.evidence_kind == doc_approve.DOC_KIND],
+            batch_id, filter_fn=doc_filter_fn)
     for rid, (c, ap, d, partial_ok) in doc_pending.items():
         if d.decision == PARTIAL:
             continue              # a per-role split writes nothing until credit-per-role-write-c1 lands
         if d.decision != "approve" or d.evidence_kind != doc_approve.DOC_KIND:
             log(f"decide: doc-approve {d.request_id} not committed: a later guard set {d.decision}")
+            continue
+        kept_out = doc_filtered.get(d.request_id)
+        if kept_out:
+            res.doc_filtered[kept_out] = res.doc_filtered.get(kept_out, 0) + 1
+            doc_approve.record_event(db, now, c.request_id, c.user_id, ap.intake_id, "refused",
+                                     gate="apply_filter", reason=f"{kept_out} ({ap.ref})")
+            _set(d, "defer", f"{APPROVE_FILTER_DEFER} ({kept_out}): a dv-4 verified document ({ap.ref}) is on "
+                 "file and this run does not write its approval; decided again next run")
+            log(f"decide: doc-approve {d.request_id} kept out by the approve filter: {kept_out}")
             continue
         hids, husers = _doc_holds(d)
         got, answers = doc_approve.approve(c, db, doc_store=DOC_STORE, proof_store=DOC_PROOF_STORE,
@@ -3385,6 +3441,10 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             continue
         res.doc_approved += 1
         doc_committed.append(d.request_id)
+        if mode == "apply" and batch_id:
+            # the batch this approval was committed under, so a batch can be listed as a unit
+            doc_approve.record_event(db, now, c.request_id, c.user_id, ap.intake_id, "batch",
+                                     gate="apply_filter", reason=str(batch_id))
         # R22 guard 8: report the audit window's state with the approvals it covers, so "100% audit for
         # 14 days" is a fact in the run note rather than a claim in a doc.
         try:

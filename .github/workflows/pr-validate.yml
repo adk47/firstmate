@@ -2827,6 +2827,9 @@ jobs:
           # doc-verified T0/T1 (Fable [key=doc-approval-doctrine] 2026-11-03, caps in USERS 2026-11-04):
           # one CAN-FAIL test per gate, the provisional 7-day row and its revert, the atomic slot.
           python3 scripts/tests/test_doc_approve.py
+          # the doc class's registry entry equals the code's numbers, and the retired r5 GO record armed
+          # nothing (not run by PR Validation before; hermetic, reads the checked-in policy files only).
+          python3 scripts/tests/test_doc_approve_policy.py
           # decider SUPPORT-ONLY arm (Fable d2 [key=decider-support-arm]): approve verdict recorded and
           # never written, the write-boundary tripwire, the per-run USER cap, the ask ledgered for the
           # tick's gates, and the read-back gate before a second apply run. Plus the paging alert itself.

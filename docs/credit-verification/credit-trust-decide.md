@@ -282,6 +282,10 @@ a ticket.
    **Deploy order.** Hydra deploys this only after core-backend #10595 (live since 2026-10-17 02:22Z)
    and the credit-automation role rows for both accounts exist, and after both identity files are on
    node-8. Until then both automations write nothing.
+3. **Approve filter.** An apply run's document approvals pass `document_small_track.doc_class.apply_filter`
+   (`fable_executor.approve_filter`), which needs `--batch-id` and admits credit-anchored approvals only, so
+   as checked in this class writes none. The keys, the floor and the run-line counts are owned by
+   [`dsp-anchor-record.md`](./dsp-anchor-record.md) §"The same block on the document class".
 
 ## Money
 
