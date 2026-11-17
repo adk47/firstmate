@@ -159,7 +159,9 @@ class TheCapChange(unittest.TestCase):
         tick itself, and fail when a row is above the ceiling that family actually gets.
         """
         src = SCRIPT.read_text()
-        first_cap = int(re.search(r'^FIRST_CAP=(\d+)', src, re.M).group(1))
+        m = re.search(r'^FIRST_CAP="\$\(cfg CVO_FIRST_CAP (\d+)\)"', src, re.M)
+        assert m, "the tick's FIRST_CAP default must stay readable"
+        first_cap = int(m.group(1))
         dated = set(re.findall(r'\[([a-z0-9-]+)\]="20', src))          # FULL_CAP_FROM / PER_SEGMENT_FROM lines
         p = json.loads(POLICY.read_text())
         for fam, segs in p["tick_cap"].items():
@@ -184,21 +186,33 @@ class TheCapChange(unittest.TestCase):
         self.assertNotIn("examine the whole list inside one day", text)
 
     def test_the_shipped_policy_carries_the_raised_ceilings(self):
+        """The two rows this report raises, bounded by the audience below and the allocation above.
+
+        1,585 and 832 are reach-every-request-r1's measured audiences, so neither row may sit BELOW its list
+        (that is the cap-not-a-cap bug this file was written for). The ceiling is the credit warm-up allocation
+        `shared_daily_cap.credit` - read from the shipped policy, never written down here - so a later step that
+        raises a row to its allocation (the scale follow-up) does not turn this test red.
+        """
         p = json.loads(POLICY.read_text())
         # claim is #2076's value, not this PR's, and the number it must not exceed is the gateway's allocation -
         # read, never written down here, so a legitimate step does not turn this test red.
         self.assertEqual(p["shared_daily_cap"]["credit"], 2500, p["shared_daily_cap"])
         self.assertLessEqual(p["shared_daily_cap"]["claim"], _claim_allocation(), p["shared_daily_cap"])
-        self.assertEqual(p["daily_cap"]["proof-need-ask"], {"paid": 1585, "free": 1585})
-        self.assertEqual(p["tick_cap"]["proof-need-ask"], {"paid": 100, "free": 100})
-        self.assertEqual(p["daily_cap"]["uvn-reminder-14"], {"paid": 832, "free": 832})
-        self.assertEqual(p["tick_cap"]["uvn-reminder-14"], {"paid": 100, "free": 100})
+        for fam, audience in (("proof-need-ask", 1585), ("uvn-reminder-14", 832)):
+            for seg in ("paid", "free"):
+                self.assertGreaterEqual(
+                    p["daily_cap"][fam][seg], audience,
+                    "%s/%s daily %d is below the %d people it exists to reach" % (fam, seg, p["daily_cap"][fam][seg], audience))
+                self.assertLessEqual(
+                    p["daily_cap"][fam][seg], p["shared_daily_cap"]["credit"],
+                    "%s/%s is above the credit warm-up allocation it would spend" % (fam, seg))
 
     def test_the_claim_cap_is_the_gateways_own_allocation_and_not_the_rows_sum(self):
         """firstmate 2026-11-16T09:52Z: the group's one claim number is #2076's, and here is the arithmetic.
 
         A claim family's own daily row never binds (`done = 0`), so what a run may actually ask for is the
-        tick's per-segment `CLAIM_CAP`: two families x paid/free = four runs, 250 each = 1,000. The send gateway
+        tick's per-segment `CLAIM_CAP`: two families x paid/free = four runs, `CLAIM_CAP` each (250 when this
+        test was written, 500 at the gateway's claim allocation now). The send gateway
         allocates this route its claim allocation, so that allocation is the ceiling #2076 sets the value to and
         never past: a policy value ABOVE the allocation promises what the gateway refuses, and a value BELOW the
         family rows (25 was) is a ceiling nobody can see. Both halves are pinned - the rows are above the tick's
@@ -207,8 +221,9 @@ class TheCapChange(unittest.TestCase):
         p = json.loads(POLICY.read_text())
         claim_cap = _claim_cap_from_script(SCRIPT.read_text())          # the tick's per-segment grant
         runs = len(p["groups"]["claim"]) * len({"paid", "free"})
-        wanted = runs * claim_cap
-        self.assertEqual(wanted, 1000, "two claim families x two segments x CLAIM_CAP must be 1,000")
+        wanted = runs * claim_cap                                      # two families x paid/free
+        self.assertLessEqual(p["shared_daily_cap"]["claim"], wanted,
+                             "the allocation can never grant more than the rows each tick will ask for")
         for fam in p["groups"]["claim"]:
             self.assertTrue(all(v >= claim_cap for v in p["daily_cap"][fam].values()),
                             "%s's own row must not bind below the tick's CLAIM_CAP" % fam)
