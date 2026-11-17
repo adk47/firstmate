@@ -205,11 +205,17 @@ fm_landed_work_is_landed() {  # <worktree> <branch> [pr-target]
 # row; bin/fm-dod-lib.sh owns the probe at <state>/acceptance/<task>.sh).
 # Returns 0 when the claim row is proven, or when the task has no acceptance
 # probe at all (a task briefed before probes existed); otherwise prints why the
-# task is unproven on stdout and returns 1.
+# task is unproven on stdout and returns 1. A task has a probe when its script,
+# its trust binding, or its claim row exists, so deleting the script cannot turn
+# a bound or claimed task back into an ungated legacy one.
 fm_landed_proven() {  # <task-id> <state-dir>
   local task=$1 state=$2 row tstate reason
-  [ -e "$state/acceptance/$task.sh" ] || [ -L "$state/acceptance/$task.sh" ] || return 0
   row="$state/change-watch/rows/$task-claim.json"
+  if [ ! -e "$state/acceptance/$task.sh" ] && [ ! -L "$state/acceptance/$task.sh" ] \
+    && [ ! -e "$state/acceptance/$task.trust" ] && [ ! -L "$state/acceptance/$task.trust" ] \
+    && [ ! -f "$row" ]; then
+    return 0
+  fi
   if [ ! -f "$row" ]; then
     printf 'no claim row for %s: the task has not claimed done, or the landing police has not registered the claim yet\n' "$task"
     return 1

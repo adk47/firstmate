@@ -3976,6 +3976,17 @@ test_acceptance_probe_unproven_refuses_teardown() {
   grep -q 'task-x1 is open: the acceptance probe exited 1' "$case_dir/stderr" || fail "acceptance-unproven: the refusal did not name the open claim: $(cat "$case_dir/stderr")"
   [ -e "$case_dir/state/task-x1.meta" ] || fail "acceptance-unproven: the task meta was removed despite the refusal"
 
+  cp "$probe" "$case_dir/probe.saved"
+  rm -f "$probe"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "acceptance-unproven: deleting the probe must not bypass the gate"
+  grep -q 'task-x1 is open: the acceptance probe exited 1' "$case_dir/stderr" || fail "acceptance-unproven: the deleted probe was not gated by its claim: $(cat "$case_dir/stderr")"
+  cp "$case_dir/probe.saved" "$probe"
+  chmod 0700 "$probe"
+
   touch "$case_dir/landed"
   run_change_watch "$case_dir" acceptance task-x1-claim 900 > /dev/null 2>&1 || fail "acceptance-unproven: acceptance failed"
   set +e

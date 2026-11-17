@@ -15,7 +15,8 @@ This page is the operator view of that loop; each piece's script header owns its
   It reports a `done:` with no probe, an edited probe, a claim past its one-hour deadline (at most once an hour), and a claim that read absent; it prints nothing otherwise.
   `bin/fm-landing-police.sh arm` writes and registers `state/landing-police.check.sh` through `bin/fm-check-register.sh`, so the watcher runs it on every poll.
 - **The gate.** `fm_landed_proven` in `bin/fm-landed-lib.sh` reads the claim row, and `bin/fm-teardown.sh` refuses cleanup of a ship task that has a probe until its row is `proven`.
-  A task briefed before probes existed has no probe and is not gated.
+  A task has a probe when its script, its trust binding, or its claim row exists, so deleting the script cannot bypass the gate.
+  A task briefed before probes existed has none of those and is not gated.
 
 ## Writing a probe
 
