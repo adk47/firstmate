@@ -888,23 +888,34 @@ fm_busy_grok_tail_busy() {
 # fires for it (verified live on Pi 1.4.0, docs/verification/gateway-keepalive.md)
 # and the screen is the only source. It is never a busy/idle signal - a crew
 # with the picker open is BLOCKED, whichever side of a run it opened on - and
-# fm-crew-state.sh is its only consumer. The verdict needs a rendered model
-# list row (the full row shape: model id, display name, provider badge) or the
-# no-matching-models row, and the picker's hint row (`to select ·` ... `to set
-# as default ·` ... `to cancel`, keybinding-agnostic because Pi substitutes the
-# bound keys) within the next 12 non-blank lines. Pi mounts its own footer
-# below the picker, so the hint row is not the last line. A document that
-# merely quotes the picker's hint, Model Name, or provider-scope text does not
-# read as the picker. tests/fm-pi-model-picker-live-e2e.test.sh is the live
-# guard that fails naming the Pi version when the picker's rows change.
+# fm-crew-state.sh is its only consumer. The verdict needs a rendered block a
+# quoted excerpt cannot reproduce: two or more consecutive rendered model list
+# rows (the full row shape: model id, display name, provider badge), or the
+# picker's no-matching-models row, followed within 12 non-blank lines by the
+# picker's hint row (`to select ·` ... `to set as default ·` ... `to cancel`,
+# keybinding-agnostic because Pi substitutes the bound keys). Rows carrying
+# markdown or code styling (backticks, a leading `>` or list marker) are
+# rejected, so a document quoting a picker screen does not read as the picker.
+# Pi mounts its own footer below the picker, so the hint row is not the last
+# line. tests/fm-pi-model-picker-live-e2e.test.sh is the live guard that fails
+# naming the Pi version when the picker's rows change.
 fm_busy_pi_tail_model_picker() {
   local t
   t=$(grep -v '^[[:space:]]*$' | tail -24)
   [ -n "$t" ] || return 1
   printf '%s\n' "$t" | awk '
-    /^[[:space:]]*((→|✓|✔)[[:space:]]*)*[A-Za-z0-9._\/-]+ (\([^)]*\))? \[[A-Za-z0-9._-]+\]([[:space:]]+·[[:space:]]+default)?[[:space:]]*$/ { anchor=NR }
-    /^[[:space:]]*No matching models[[:space:]]*$/ { anchor=NR }
-    /to select · .* to set as default · .* to cancel/ { if (anchor && NR>anchor && NR<=anchor+12) found=1 }
+    /^[[:space:]]*(>|```|[-*][[:space:]])/ { styled=1; run=0; next }
+    /to select · .* to set as default · .* to cancel/ {
+      if (!styled && ((run>=2 && NR-runend<=12) || (noanchor && NR-noanchor<=12))) found=1
+      next
+    }
+    /^[[:space:]]*((→|✓|✔)[[:space:]]*)*[A-Za-z0-9._\/-]+ (\([^)]*\))? \[[A-Za-z0-9._-]+\]([[:space:]]+·[[:space:]]+default)?[[:space:]]*$/ {
+      if (index($0, "`")) { styled=1; run=0; next }
+      if (NR==prevrow+1) run++
+      else { run=1; noanchor=0 }
+      runend=NR; prevrow=NR; next
+    }
+    /^[[:space:]]*No matching models[[:space:]]*$/ { run=0; noanchor=NR; next }
     END { exit found ? 0 : 1 }
   '
 }

@@ -122,7 +122,10 @@ Note the SDK message begins with the status and carries no `Error:` prefix; Pi a
 
 Driven on a pseudo-terminal: `/model` then Enter, the picker left open, then Escape.
 While the picker was open the record was unchanged (`state=busy source=fm-spawn event=launch-brief`, the spawn seed): `ui_prompt_start` wraps only `ctx.ui.select|confirm|input|editor|custom` calls made by extensions (`core/extensions/runner.js` `wrapUIPromptContext`), and the model selector is an interactive-mode overlay (`showModelSelector`) outside that wrapper.
-The screen at that moment rendered a model list row (model id, display name, provider badge) followed by the picker's hint row, which are the two signals the reader requires: the list row anchors the block and the hint row must follow within 12 non-blank lines. Pi mounts its own footer below the picker, so the hint row is not the last line. The rows quoted below are the list row and the hint row; the Model Name and provider-scope rows are context, not load-bearing, and a document quoting them without a rendered list row does not read as the picker:
+The screen at that moment rendered consecutive model list rows (model id, display name, provider badge) followed by the picker's hint row, which are the signals the reader requires: two or more consecutive list rows anchor the block and the hint row must follow within 12 non-blank lines.
+Rows carrying markdown or code styling (backticks, a leading `>` or list marker) are rejected, so a document quoting the screen - including the single-row excerpt below - does not read as the picker.
+Pi mounts its own footer below the picker, so the hint row is not the last line.
+The rows quoted below are one list row and the hint row; the Model Name and provider-scope rows are context, not load-bearing, and quoting them does not read as the picker:
 
 ```
   → ✓claude-opus-5-5 (Claude Opus 5.5) [anthropic]

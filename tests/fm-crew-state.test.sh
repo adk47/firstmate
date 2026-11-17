@@ -1119,12 +1119,13 @@ test_pi_model_picker_on_screen_reads_blocked() {
   # not itself contain a verbatim picker screen.
   local badge='[anthropic]'
   local list_row=$'  → ✓claude-opus-5-5 (Claude Opus 5.5) '"$badge"
+  local list_row2=$'    claude-sonnet-4-5 (Claude Sonnet 4.5) '"$badge"
   local hint_row='  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel'
   local footer=$'  /home/aaron/project\n  main · 12% · 3 files'
   FM_FAKE_BUSY=1
-  FM_FAKE_BUSY_TEXT="$list_row"$'\n'"$hint_row"$'\n'"$footer"
+  FM_FAKE_BUSY_TEXT="$list_row"$'\n'"$list_row2"$'\n'"$hint_row"$'\n'"$footer"
   out=$(run_crew_state "$d" feat-pick)
-  assert_contains "$out" "state: blocked" "a picker list row, its hint row, and Pi's footer below it carry the verdict"
+  assert_contains "$out" "state: blocked" "two consecutive picker list rows, the hint row, and Pi's footer below them carry the verdict"
   assert_contains "$out" "/model picker" "the verdict names the picker"
   assert_contains "$out" "exit and respawn" "the verdict names the documented recovery"
 
@@ -1140,17 +1141,25 @@ test_pi_model_picker_on_screen_reads_blocked() {
   assert_not_contains "$out" "state: blocked" "a hint line followed by a badge-looking line is not the picker"
 
   # A document that quotes the picker's rows is not the picker: the hint row
-  # alone, the Model Name row alone, the provider-scope hint alone, and all
-  # three quoted together without a rendered list row must all stay unblocked.
+  # alone, the Model Name row alone, the provider-scope hint alone, the docs'
+  # single-row excerpt, and all of them together without two consecutive
+  # rendered list rows must all stay unblocked.
   for sig in \
     "$hint_row" \
     '  Model Name: TOKEN POOL · Claude Opus 5.5' \
     'Only showing models from configured providers. Use /login to add providers.' \
+    $'  → ✓claude-opus-5-5 (Claude Opus 5.5) [anthropic]\n  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
     $'Only showing models from configured providers. Use /login to add providers.\n  Model Name: TOKEN POOL · Claude Opus 5.5\n  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel'; do
     FM_FAKE_BUSY_TEXT="$sig"
     out=$(run_crew_state "$d" feat-pick)
-    assert_not_contains "$out" "state: blocked" "quoted picker text without a rendered list row is not the picker: $sig"
+    assert_not_contains "$out" "state: blocked" "quoted picker text without two consecutive rendered list rows is not the picker: $sig"
   done
+
+  # Markdown/code styling is not a rendered picker even with two consecutive
+  # list rows: a fenced quote of the screen must stay unblocked.
+  FM_FAKE_BUSY_TEXT=$'```\n  → ✓claude-opus-5-5 (Claude Opus 5.5) [anthropic]\n    claude-sonnet-4-5 (Claude Sonnet 4.5) [anthropic]\n  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel\n```'
+  out=$(run_crew_state "$d" feat-pick)
+  assert_not_contains "$out" "state: blocked" "a fenced picker screen quote is not the picker"
   FM_FAKE_BUSY=0
   out=$(run_crew_state "$d" feat-pick)
   assert_not_contains "$out" "state: blocked" "an ordinary idle Pi pane is not a picker"
@@ -1159,10 +1168,10 @@ test_pi_model_picker_on_screen_reads_blocked() {
   fm_write_meta "$d/state/feat-pick.meta" "window=fm:fm-feat-pick" "worktree=$d/wt" "kind=ship" "harness=claude"
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-pick idle --gen "$gen" --source claude-hook --event stop
   FM_FAKE_BUSY=1
-  FM_FAKE_BUSY_TEXT="$list_row"$'\n'"$hint_row"$'\n'"$footer"
+  FM_FAKE_BUSY_TEXT="$list_row"$'\n'"$list_row2"$'\n'"$hint_row"$'\n'"$footer"
   out=$(run_crew_state "$d" feat-pick)
   assert_not_contains "$out" "state: blocked" "the picker read is scoped to the Pi harness"
-  pass "a Pi crew showing its /model picker reads blocked from its hint row plus a list row, while quoted picker text does not, and only for Pi"
+  pass "a Pi crew showing its /model picker reads blocked from its hint row plus two consecutive list rows, while quoted picker text does not, and only for Pi"
 }
 
 # A converted adapter must NOT read working from rendered footer text: the

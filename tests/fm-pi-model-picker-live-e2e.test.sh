@@ -130,8 +130,8 @@ case "$record_open" in
   '') fail "no busy record was readable while the picker was open on Pi $PI_VERSION" ;;
 esac
 
-# 2. The real picker is recognised from its hint row plus a rendered model
-#    list row, so a vendor change to either is reported by name.
+# 2. The real picker is recognised from its hint row plus consecutive rendered
+#    model list rows, so a vendor change to either is reported by name.
 printf '%s\n' "$screen" | fm_busy_pi_tail_model_picker \
   || fail "Pi $PI_VERSION's /model picker was not recognised by fm_busy_pi_tail_model_picker; its rows changed"
 printf '%s\n' "$screen" | grep -qE 'to select · .* to set as default · .* to cancel' \
