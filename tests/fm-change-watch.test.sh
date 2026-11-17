@@ -2497,8 +2497,8 @@ run_hydra_cw "$HOME_CC" 1790000900 sample cc1-1980 900 >/dev/null || fail "sampl
   || fail "a carrier created after more than five unrelated runs was not read as a failed deploy: $(cat "$HOME_CC/state/change-watch/cc1-1980/samples.log" 2>/dev/null)"
 line=$(run_hydra_cw "$HOME_CC" 1790000900 verdict cc1-1980)
 case "$line" in
-  *"regressed at +15m on deploy_run"*) ;;
-  *) fail "a failed carrier run after six unrelated runs did not regress the release: $line" ;;
+  *"absent at +15m: the deploy run carrying the merge failed"*) ;;
+  *) fail "a failed carrier run after six unrelated runs did not read the release as absent: $line" ;;
 esac
 hydra_runs "$HOME_CC" "[$CC_RUNS,$(hydra_run 2026-09-21T15:30:00Z completed success "$OLDER")]"
 run_hydra_cw "$HOME_CC" 1790003600 sample cc1-1980 3600 >/dev/null || fail "sample failed"
@@ -2706,3 +2706,90 @@ grep -q 'sample budget spent before this metric was read' "$DIR_AT/read-failures
 awk -F'\t' '$2 == 300 && $3 == "oomkilled@muso-prod/industry-proc-catalog-v2"' "$DIR_AT/samples.log" | grep -q . \
   || fail "the target's other metrics were not read after the build gate: $(cat "$DIR_AT/samples.log")"
 pass "a stalled build read is cut at its share of the sample and later metrics are read"
+# A failed deploy run is absent, not regressed: the change never reached
+# production. The row keeps every offset's reading, so the one that decided it,
+# here +2h, is in the row; the gate refuses an absent watch.
+HOME_AB=$(hydra_world ab "$MERGED")
+run_hydra_cw "$HOME_AB" 1790000000 register ab1 'https://github.com/Muso-AI/hydra/pull/1990' >/dev/null \
+  || fail "hydra register failed"
+grep -qx 'deploy_expected=yes' "$HOME_AB/state/change-watch/ab1-1990/watch.meta" \
+  || fail "a deployable change did not record that a deploy is expected"
+hydra_runs "$HOME_AB" "[$(hydra_run 2026-09-21T15:30:00Z completed failure "$MERGED")]"
+run_hydra_cw "$HOME_AB" 1790007200 sample ab1-1990 7200 >/dev/null || fail "sample failed"
+ROW_AB="$HOME_AB/state/change-watch/rows/ab1-1990.json"
+grep -q '"terminal_state": "absent"' "$ROW_AB" \
+  || fail "a failed deploy of a deployable change did not read absent: $(cat "$ROW_AB" 2>/dev/null)"
+grep -q '"7200": {[^}]*"scored": 1' "$ROW_AB" \
+  || fail "the +2h reading that decided the watch is missing from the row: $(cat "$ROW_AB" 2>/dev/null)"
+for offset in 300 900 1800 3600 7200 10800 21600 43200; do
+  grep -q "\"$offset\": " "$ROW_AB" || fail "the row has no slot for offset $offset: $(cat "$ROW_AB")"
+done
+grep -q '"acceptance": null' "$ROW_AB" || fail "a merge row did not carry a null acceptance: $(cat "$ROW_AB")"
+grep -q '"kind": "merge"' "$ROW_AB" || fail "a merge row did not say it is a merge row"
+grep -q 'absent (deploy run failed at +120m' "$HOME_AB/state/.wake-queue" \
+  || fail "an absent watch queued no wake: $(cat "$HOME_AB/state/.wake-queue" 2>/dev/null)"
+out=$(run_hydra_cw "$HOME_AB" 1790007200 gate ab1 --terminal-gap) \
+  && fail "the gate passed an absent watch: $out"
+case "$out" in *"gate FAIL ab1-1990: absent:"*) ;; *) fail "the gate did not name the absent watch: $out" ;; esac
+pass "a failed deploy reads absent with its deciding reading in the row, and the gate refuses it"
+
+# A change that touches nothing deployable expects no deploy: it keeps no deploy
+# workflow target, so a failed deploy run can neither regress it nor make it
+# absent, and with nothing else to read it is not-applicable.
+HOME_ND=$(hydra_world nd "$MERGED")
+printf 'docs/runbook.md\n.github/workflows/ci.yml\n' > "$HOME_ND/forge/files.txt"
+hydra_runs "$HOME_ND" "[$(hydra_run 2026-09-21T15:30:00Z completed failure "$MERGED")]"
+out=$(run_hydra_cw "$HOME_ND" 1790000000 register nd1 'https://github.com/Muso-AI/hydra/pull/1991') \
+  || fail "a docs-only register failed: $out"
+ROW_ND="$HOME_ND/state/change-watch/rows/nd1-1991.json"
+grep -q '"terminal_state": "not-applicable"' "$ROW_ND" \
+  || fail "a docs and CI only change was not not-applicable: $(cat "$ROW_ND" 2>/dev/null) / $out"
+grep -q '"terminal_state": "regressed"' "$ROW_ND" && fail "a docs and CI only change read regressed"
+pass "a change that touches nothing deployable is not-applicable, never a deploy regression"
+
+# A watch that still expected no deploy (recorded before its run target was
+# dropped) reads a failed run as not-applicable rather than absent.
+HOME_NA=$(hydra_world na "$MERGED")
+run_hydra_cw "$HOME_NA" 1790000000 register na1 'https://github.com/Muso-AI/hydra/pull/1992' >/dev/null \
+  || fail "hydra register failed"
+sed -i.bak 's/^deploy_expected=yes$/deploy_expected=no/' "$HOME_NA/state/change-watch/na1-1992/watch.meta"
+hydra_runs "$HOME_NA" "[$(hydra_run 2026-09-21T15:30:00Z completed failure "$MERGED")]"
+run_hydra_cw "$HOME_NA" 1790000900 sample na1-1992 900 >/dev/null || fail "sample failed"
+grep -q '"terminal_state": "not-applicable"' "$HOME_NA/state/change-watch/rows/na1-1992.json" \
+  || fail "a failed run on a watch expecting no deploy was not not-applicable: $(cat "$HOME_NA/state/change-watch/rows/na1-1992.json")"
+pass "a failed deploy run on a watch that expects no deploy is not-applicable"
+
+# A claim row is registered at claim time with no PR: null pr_url, its
+# acceptance probe bound by sha256, open until the probe is run. It is proven
+# the first time the probe exits 0 and absent when it still fails at +6h.
+HOME_CL=$(hydra_world cl)
+probe="$HOME_CL/probe.sh"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$probe"
+chmod 0700 "$probe"
+run_cw "$HOME_CL" 1790000000 claim cl1 "$probe" >/dev/null || fail "claim failed"
+ROW_CL="$HOME_CL/state/change-watch/rows/cl1-claim.json"
+grep -q '"pr_url": null' "$ROW_CL" || fail "a claim row did not carry a null pr_url: $(cat "$ROW_CL")"
+grep -q '"kind": "claim"' "$ROW_CL" || fail "a claim row did not say it is a claim row"
+grep -q "\"acceptance\": {\"probe_path\": \"$probe\", \"sha256\": \"[0-9a-f]\{64\}\", \"last_exit\": null" "$ROW_CL" \
+  || fail "a claim row did not bind its acceptance probe: $(cat "$ROW_CL")"
+grep -q '"terminal_state": "open"' "$ROW_CL" || fail "a new claim was not open"
+[ "$(run_cw "$HOME_CL" 1790000000 claims | cut -f1,2,6)" = "cl1-claim	cl1	0" ] \
+  || fail "a new claim was not due at claim time: $(run_cw "$HOME_CL" 1790000000 claims)"
+run_cw "$HOME_CL" 1790000000 acceptance cl1-claim 0 1 >/dev/null || fail "acceptance failed"
+[ "$(run_cw "$HOME_CL" 1790000500 claims | cut -f6,7)" = "-	1" ] \
+  || fail "a claim between offsets was due: $(run_cw "$HOME_CL" 1790000500 claims)"
+[ "$(run_cw "$HOME_CL" 1790030000 claims | cut -f6)" = 21600 ] \
+  || fail "a claim that missed offsets was not due once at the latest: $(run_cw "$HOME_CL" 1790030000 claims)"
+run_cw "$HOME_CL" 1790030000 acceptance cl1-claim 21600 1 >/dev/null || fail "acceptance failed"
+grep -q '"terminal_state": "absent"' "$ROW_CL" || fail "a probe failing at +6h did not read absent: $(cat "$ROW_CL")"
+grep -q '"last_exit": 1, "last_epoch": 1790030000' "$ROW_CL" || fail "the last probe result was not recorded: $(cat "$ROW_CL")"
+grep -q 'change-watch cl1 claim absent' "$HOME_CL/state/.wake-queue" || fail "an absent claim queued no wake"
+run_cw "$HOME_CL" 1790030000 gate cl1 >/dev/null && fail "the gate passed an absent claim"
+[ -z "$(run_cw "$HOME_CL" 1790030000 claims)" ] || fail "an absent claim is still listed as open"
+run_cw "$HOME_CL" 1790031000 claim cl1 "$probe" 'https://github.com/Muso-AI/hydra/pull/1993' >/dev/null || fail "re-claim failed"
+run_cw "$HOME_CL" 1790031000 acceptance cl1-claim 0 0 >/dev/null || fail "acceptance failed"
+grep -q '"terminal_state": "proven"' "$ROW_CL" || fail "a probe exiting 0 did not prove the claim: $(cat "$ROW_CL")"
+grep -q '"pr_url": "https://github.com/Muso-AI/hydra/pull/1993"' "$ROW_CL" || fail "a re-claim lost its PR url"
+run_cw "$HOME_CL" 1790031000 gate cl1 >/dev/null || fail "the gate refused a proven claim"
+run_cw "$HOME_CL" 1790031000 claim cl1 relative/probe.sh >/dev/null 2>&1 && fail "a relative probe path was accepted"
+pass "a claim row registers with no PR, binds its probe, and reads proven or absent from its probe alone"
