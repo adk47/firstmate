@@ -98,7 +98,11 @@ R1_CAP="$(cfg CVO_R1_CAP 250)"
 # per TICK across paid + free together (SHARED_TICK_CAP below), paid first; R14_ENTRIES is the page it walks per
 # segment (its list is already cut to the people the ledger says are due, so a short page fills the cap).
 # The cap rises only by PR, on evidence (three clean ticks): constants, never env or a state file.
-R14_CAP="$(cfg CVO_R14_CAP 50)"
+# 50 -> 150 (reach-every-request-r1, firstmate 2026-11-16 03:10Z): 782 users are due a reminder and 50 a tick
+# walked them at ~600 a day. The three ticks before the raise read 0.0 % (50 contacts), 0.0 % (5) and 1.82 %
+# (1 of 55) hard bounces - one bounce in 110 contacts, 0 complaints, 0 unsubscribes - and the route's own
+# auto-kill still stops the family above 2 %. 150 a tick clears the list in about six ticks, inside one day.
+R14_CAP="$(cfg CVO_R14_CAP 100)"
 R14_ENTRIES="$(cfg CVO_R14_ENTRIES 100)"
 # uvn-new-rows (ask-never-asked-r1, firstmate 2026-11-14 22:48Z): the follow-up ask to a user we already asked, about
 # owed requests no ask named (the owing builder's uvn_new_rows class). NR_CAP is the family's cap per TICK across paid
@@ -1588,8 +1592,12 @@ import datetime as _dt
 # printed, so a typo arms NOTHING and pages instead of being read as "policy mode, family dry".
 # "uvn-status:c2" is a SUB-class of uvn-status, not a family ([key=class-c-is-a-row]): its row arms the /c2 corrected
 # ask and nothing else, and the uvn-status row still decides whether the family applies at all
+# wait-apology is in KNOWN since reach-every-request-r1 (2026-11-16): it sat in the credit group with daily caps of its
+# own and NO row anyone could write, so the family that can never be armed was also the one family an operator could
+# not even switch off in review. Its row arms the wiring only - the family stays SIGNED-only because its row sets no
+# unsigned_from (UNSIGNED_FROM[wait-apology] is "" in code), so arming it still applies nobody.
 KNOWN = {"r1", "status-doc-received", "uvn-status", "claim-status", "claim-proof-ask", "proof-need-ask", "reply-due",
-         "uvn-status:c2", "uvn-reminder-14", "uvn-new-rows", "proof-refusal"}
+         "uvn-status:c2", "uvn-reminder-14", "uvn-new-rows", "proof-refusal", "wait-apology"}
 def _instant(v):
     for fmt in ("%Y-%m-%dT%H:%MZ", "%Y-%m-%dT%H:%M:%SZ"):
         try:
@@ -1642,8 +1650,8 @@ if [ "$ARMING" = "policy" ]; then
     _key="$_fam"; _datekey="$_fam"
     case "$_fam" in
       r1|status-doc-received) _key="r1"; _datekey="status-doc-received" ;;
-      uvn-status|claim-status|claim-proof-ask|proof-need-ask|reply-due|uvn-status:c2|uvn-reminder-14|uvn-new-rows|proof-refusal) ;;
-      *) log "ARMING ROW IGNORED: '$_fam' is not a family this tick runs (r1|status-doc-received, uvn-status, claim-status, claim-proof-ask, proof-need-ask, uvn-reminder-14, uvn-new-rows, proof-refusal); it arms nothing"
+      uvn-status|claim-status|claim-proof-ask|proof-need-ask|reply-due|uvn-status:c2|uvn-reminder-14|uvn-new-rows|proof-refusal|wait-apology) ;;
+      *) log "ARMING ROW IGNORED: '$_fam' is not a family this tick runs (r1|status-doc-received, uvn-status, claim-status, claim-proof-ask, proof-need-ask, uvn-reminder-14, uvn-new-rows, proof-refusal, wait-apology); it arms nothing"
          continue ;;   # read_arming() already fails such a row closed; this is the belt to its braces
     esac
     ARMED_LIVE["$_key"]="$_live"; ARMED_PAID["$_key"]="$_paid"

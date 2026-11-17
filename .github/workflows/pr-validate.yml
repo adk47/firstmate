@@ -2657,6 +2657,11 @@ jobs:
           # fails the run and leaves the live list untouched. Every read is faked. Stdlib only.
           python3 scripts/tests/test_claim_list.py
           python3 scripts/tests/test_claim_audience.py
+          # The reach-every-request report (data/reach-every-request-r1/report.md): all five un-contacted
+          # groups have a row, the two with no family say so and are reported as unreached, the cap change
+          # carries its before/after/group/day, and the shipped policy holds the raised claim ceiling and
+          # wait-apology's armed-but-SIGNED-only row. Reads the report, the policy and the tick. Stdlib only.
+          python3 scripts/tests/test_reach_every_request.py
           # Merge-outcome notifier (scripts/merge-outcome-notify.py): fixed in-thread copy per
           # (kind, outcome), 7-day outcome age, first-run seed, at most one per ticket ever.
           # Network faked. Stdlib only.

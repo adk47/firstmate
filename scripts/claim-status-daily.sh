@@ -92,7 +92,11 @@ case "$MODE" in
      _page 2 "MODE='$MODE': the cron will not run the wave until this is corrected"
      exit 2 ;;
 esac
-# The Intercom token and the warm-up settings live in main.env on node-8 (secrets; not in the repo).
+# The Intercom token lives in main.env on node-8 (secrets; not in the repo). The warm-up settings do NOT: main.env
+# carries no warm/ceiling/cap/limit key (83 keys, read 2026-11-16). The ceiling is WARMUP_CEILINGS in H-DevOps
+# k8s/prod/messaging/78-send-gateway.yaml (notify 3,000, allocated credit 2,500 / claim 500), enforced by the gateway's
+# route_ceiling gate - which defers a send to the next UTC midnight when it fires, so the ceiling a run actually meets is
+# read from its `route_ceiling` answer, never inferred from a file.
 set -a
 # shellcheck source=/dev/null
 . "$MAIN_ENV" || { echo "$(date -u +%FT%TZ) $MAIN_ENV unreadable: nothing sent (fail closed)"; _page 1 "$MAIN_ENV unreadable: nothing was built and nothing was sent"; exit 1; }
