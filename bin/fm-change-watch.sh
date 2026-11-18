@@ -2214,6 +2214,11 @@ cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch> [<merge-sha>]
     # daily schedule and a manual dispatch, never a push, so the earliest run
     # created after a merge can belong to an older tip - reading that one as 0
     # reported six healthy releases as regressions.
+    # Newest first, so the carrier this walk settles on is the LATEST run of that
+    # head. A deploy that failed and was re-run on the same head is decided by the
+    # retry: reading the oldest carrier kept scoring the failure a later run
+    # replaced, which manufactured regressions from superseded verdicts - the same
+    # order-versus-history defect the merge gate had.
     out=$(cw_forge_run "$gh_cmd" run list -R "$repo" --workflow "$workflow" --limit 20 \
       --json conclusion,status,createdAt,databaseId,url,headSha) || rc=$?
     if [ "${rc:-0}" -ne 0 ]; then
@@ -2241,7 +2246,7 @@ for run in runs:
         continue
     if int(t.replace(tzinfo=datetime.timezone.utc).timestamp()) >= since:
         candidates.append(run)
-candidates.sort(key=lambda r: r.get("createdAt") or "")
+candidates.sort(key=lambda r: r.get("createdAt") or "", reverse=True)
 for run in candidates:
     print("\t".join([
         run.get("createdAt") or "-",
