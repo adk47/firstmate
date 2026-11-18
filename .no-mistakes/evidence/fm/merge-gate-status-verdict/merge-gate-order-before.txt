@@ -1,0 +1,33 @@
+==================================================================
+SCENARIO: failure then success 2s later, one workflow (adk47/firstmate#105 shape)
+  rollup: [{"kind":"CheckRun","name":"unit-tests","conclusion":"FAILURE","startedAt":"2026-11-15T15:56:34Z","workflowName":"ci"},{"kind":"CheckRun","name":"unit-tests","conclusion":"SUCCESS","startedAt":"2026-11-15T15:56:36Z","workflowName":"ci"},{"kind":"CheckRun","name":"qa-review","conclusion":"SUCCESS","startedAt":"2026-11-15T15:00:00Z","workflowName":"review"}]
+  gate exit: 0 (expected 0)
+  | merge gate: Muso-AI/core-backend#9 authorized at head aa99efc21111111111111111111111111111111111 (qa-review=SUCCESS, allowed reds=)
+  RESULT: MATCH
+==================================================================
+SCENARIO: success then failure 2s later, one workflow
+  rollup: [{"kind":"CheckRun","name":"unit-tests","conclusion":"SUCCESS","startedAt":"2026-11-15T15:56:34Z","workflowName":"ci"},{"kind":"CheckRun","name":"unit-tests","conclusion":"FAILURE","startedAt":"2026-11-15T15:56:36Z","workflowName":"ci"},{"kind":"CheckRun","name":"qa-review","conclusion":"SUCCESS","startedAt":"2026-11-15T15:00:00Z","workflowName":"review"}]
+  gate exit: 1 (expected 1)
+  | error: refusing to merge Muso-AI/core-backend#9
+  |   - the check unit-tests is FAILURE on head aa99efc21111111111111111111111111111111111
+  RESULT: MATCH
+==================================================================
+SCENARIO: newer success from a DIFFERENT workflow supersedes an older failure
+  rollup: [{"kind":"CheckRun","name":"verify","conclusion":"FAILURE","startedAt":"2026-11-15T07:43:00Z","workflowName":"wfA"},{"kind":"CheckRun","name":"verify","conclusion":"SUCCESS","startedAt":"2026-11-15T12:06:00Z","workflowName":"wfB"},{"kind":"CheckRun","name":"qa-review","conclusion":"SUCCESS","startedAt":"2026-11-15T15:00:00Z","workflowName":"review"}]
+  gate exit: 1 (expected 0)
+  | error: refusing to merge Muso-AI/core-backend#9
+  |   - the check verify is FAILURE on head aa99efc21111111111111111111111111111111111
+  RESULT: MISMATCH
+==================================================================
+SCENARIO: newer failure from a DIFFERENT workflow stays red
+  rollup: [{"kind":"CheckRun","name":"verify","conclusion":"SUCCESS","startedAt":"2026-11-15T07:43:00Z","workflowName":"wfA"},{"kind":"CheckRun","name":"verify","conclusion":"FAILURE","startedAt":"2026-11-15T12:06:00Z","workflowName":"wfB"},{"kind":"CheckRun","name":"qa-review","conclusion":"SUCCESS","startedAt":"2026-11-15T15:00:00Z","workflowName":"review"}]
+  gate exit: 1 (expected 1)
+  | error: refusing to merge Muso-AI/core-backend#9
+  |   - the check verify is FAILURE on head aa99efc21111111111111111111111111111111111
+  RESULT: MATCH
+==================================================================
+SCENARIO: qa-review GO published as a commit status only (no qa-review check-run)
+  rollup: [{"kind":"StatusContext","name":"qa-review","conclusion":"SUCCESS","startedAt":null,"workflowName":null},{"kind":"StatusContext","name":"qa/verdict","conclusion":"SUCCESS","startedAt":null,"workflowName":null},{"kind":"CheckRun","name":"unit-tests","conclusion":"SUCCESS","startedAt":"2026-11-15T15:00:00Z","workflowName":"ci"}]
+  gate exit: 0 (expected 0)
+  | merge gate: Muso-AI/core-backend#9 authorized at head aa99efc21111111111111111111111111111111111 (qa-review=SUCCESS, allowed reds=)
+  RESULT: MATCH

@@ -1,0 +1,45 @@
+ok - a qa-review NO-GO on the current head refuses
+ok - an absent qa-review verdict refuses
+ok - a verdict recorded against an older head refuses
+ok - a red check refuses
+ok - adk47's own credit-approval-guard red is allowed
+ok - the credit-approval-guard red refuses for any other author
+ok - a master twin with an unmerged develop counterpart refuses
+ok - a master twin whose develop counterpart is merged passes
+ok - the twin rule is skipped outside the declared twin repositories
+ok - a head that moved off the expected commit refuses
+ok - an unreadable verdict refuses
+ok - a green head with a qa-review GO passes and reports what it verified
+ok - an unrecorded red-check allow is rejected
+ok - --check-only audits an already-merged pull request instead of short-circuiting
+ok - an unreadable twin list refuses
+ok - an unreadable body-referenced twin refuses
+ok - a repeated qa-review check reports its worst conclusion
+ok - an unrelated issue reference is not read as a twin
+ok - a null pending qa-review conclusion is not overwritten by a success
+ok - a cancelled duplicate check is superseded by its later run
+ok - a check with only a cancelled run still refuses
+ok - a later run within one workflow supersedes its earlier failure
+ok - a newer success in another workflow supersedes an older failure
+ok - a newer failure in another workflow still refuses
+ok - prose around develop/beta is not read as a twin reference
+ok - a skipped or neutral duplicate cannot outrank an earlier success
+ok - a Muso-AI repository without a qa-review check still refuses
+ok - a qa-review GO published as a commit status authorizes the merge
+ok - a qa-review FAILURE published as a commit status refuses
+ok - a near-miss commit status cannot stand in for the qa-review verdict
+ok - the newest run of a check name wins over an older failure
+ok - an older success never outranks a newer failure
+ok - a Muso-AI repository with a current qa-review GO passes
+ok - a declared no-QA repository with a green attestation passes
+ok - a declared no-QA repository without the attestation refuses
+ok - a declared no-QA repository with a red attestation refuses
+ok - an undeclared repository refuses with QA coverage unknown
+ok - an undeclared repository merges only through a recorded override
+ok - a red check whose name contains the old delimiter still refuses
+ok - fm-pr-merge.sh refuses before the merge call and records nothing
+ok - --override-gate records the reason, the operator, and the time, then merges
+ok - the queue merges only through the gate, and a refused row is skipped
+ok - the queue runner accepts a queue file after --
+ok - declared no-QA coverage applies on GitLab instead of a forge refusal
+ok - a QA-covered repository refuses on a forge with no verdict source
