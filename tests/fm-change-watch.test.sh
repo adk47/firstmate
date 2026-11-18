@@ -2842,3 +2842,137 @@ grep -q '"0": {"at": 1790031100, "exit": 0}' "$row3" \
   || fail "a repeated offset did not keep its last reading: $(cat "$row3")"
 grep -q '"last_exit": 0' "$row3" || fail "a repeated offset left a stale last exit: $(cat "$row3")"
 pass "a claim row registers with no PR, binds its probe, and reads proven or absent from its probe alone"
+
+# --- (i) a later reading rescues an earlier reading that read nothing --------
+
+# The rows this bug was found on (credit-apply-path-fix-a1-1957 and its
+# siblings): the +15m read failed outright - no access-log status line, no
+# usable series - and the +1h and +6h readings then measured the release. One
+# early read that failed is not a terminal verdict about the merge.
+HOME_J=$(new_world j)
+seed_pr "$HOME_J" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_J" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_J" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J" 1790000000 register j1 "$PR_URL" >/dev/null || fail "register failed"
+rm -f "$HOME_J/cluster/restarts.muso-prod_feed-service.sample"
+run_cw "$HOME_J" 1790000900 sample j1-3317 900 >/dev/null || fail "the +15m sample failed"
+seed_series "$HOME_J" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J" 1790044000 drive j1-3317 >/dev/null || fail "the drive after the failed +15m read failed"
+ROW_J="$HOME_J/state/change-watch/rows/j1-3317.json"
+[ "$(run_cw "$HOME_J" 1790044000 verdict j1-3317)" = "change-watch clean" ] \
+  || fail "a watch whose +1h and +6h readings measured ended $(run_cw "$HOME_J" 1790044000 verdict j1-3317)"
+grep -q '"terminal_state": "proven"' "$ROW_J" \
+  || fail "a watch with one failed early reading and two measured later ones was not proven: $(cat "$ROW_J")"
+grep -qF 'the +15m reading measured nothing' "$ROW_J" \
+  || fail "the proof does not disclose the +15m reading that measured nothing: $(cat "$ROW_J")"
+run_cw "$HOME_J" 1790044000 gate j1 >/dev/null \
+  || fail "the done-claim gate refused a proven watch whose +15m read failed"
+run_cw "$HOME_J" 1790044000 gate j1 --terminal-gap >/dev/null \
+  || fail "teardown was refused for a watch whose later readings measured the release"
+pass "a failed early reading is superseded by the later readings that measured"
+
+# The other direction, on the same machinery: when only the +15m reading
+# measured and every later reading failed, the release is not proven.
+HOME_J2=$(new_world j2)
+seed_pr "$HOME_J2" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J2" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_J2" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_J2" restarts muso-prod_feed-service sample 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J2" 1790000000 register j2 "$PR_URL" >/dev/null || fail "register failed"
+rm -f "$HOME_J2"/cluster/*
+run_cw "$HOME_J2" 1790044000 drive j2-3317 >/dev/null || fail "the drive with unreadable later readings failed"
+ROW_J2="$HOME_J2/state/change-watch/rows/j2-3317.json"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_J2" \
+  || fail "a watch whose +1h and +6h readings both failed was proven: $(cat "$ROW_J2")"
+run_cw "$HOME_J2" 1790044000 gate j2 >/dev/null \
+  && fail "the done-claim gate passed a watch whose long-horizon readings all failed"
+pass "a watch whose later readings all failed is still unmeasurable"
+
+# --- (j) a coverage gap is not the same thing as a failed read ----------------
+
+# search-service answers no pool, so its pool metric never scores. The release
+# itself was measured on every target, so the row is proven; the gap stays named
+# in the row rather than silently dropped or promoted to a failure.
+HOME_J3=$(new_world j3)
+seed_pr "$HOME_J3" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J3" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_J3" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_J3" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J3" 1790000000 register j3 "$PR_URL" >/dev/null || fail "register failed"
+run_cw "$HOME_J3" 1790044000 drive j3-3317 >/dev/null || fail "drive failed"
+ROW_J3="$HOME_J3/state/change-watch/rows/j3-3317.json"
+grep -q '"terminal_state": "proven"' "$ROW_J3" \
+  || fail "a watch whose every Deployment target was measured was not proven: $(cat "$ROW_J3")"
+grep -q 'pgbouncer_cl_waiting@muso-prod/feed-service' "$ROW_J3" \
+  || fail "the proven row stopped naming the metric it never measured: $(cat "$ROW_J3")"
+pass "an unmeasured metric key is named in a proven row, not promoted to a failure"
+
+# --- the re-derive one-shot re-reads the readings a row already holds ---------
+
+# The row as the pre-fix code wrote it for the same readings: a +15m read that
+# failed before the rollout landed was recorded as terminal. The one-shot must
+# re-derive that verdict from the readings the watch still holds, without
+# inventing a measurement, and must not move the completion time the audit
+# window is measured from.
+sed -i 's/"terminal_state": "proven"/"terminal_state": "unmeasurable-with-reason"/; s/"reason": "the +6h reading/"reason": "nothing measured at +15m; the +6h reading/' "$ROW_J"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_J" \
+  || fail "the pre-fix row fixture was not written: $(cat "$ROW_J")"
+completed_before=$(sed -n 's/.*"completed_epoch": \([^,]*\),.*/\1/p' "$ROW_J")
+cp "$ROW_J" "$TMP_ROOT/row-before-rederive.json"
+out=$(run_cw "$HOME_J" 1790050000 rederive) || fail "the re-derive dry run failed: $out"
+printf '%s\n' "$out" | grep -q 'dry run' || fail "the re-derive did not say it was a dry run: $out"
+printf '%s\n' "$out" | grep -q 'j1-3317' || fail "the re-derive did not name the row it would change: $out"
+printf '%s\n' "$out" | grep -q '1 row(s) would change' \
+  || fail "the re-derive did not count the rows it would change: $out"
+cmp -s "$ROW_J" "$TMP_ROOT/row-before-rederive.json" \
+  || fail "the dry run rewrote a row before --apply"
+pass "the re-derive dry run reports its changes and writes nothing"
+
+out=$(run_cw "$HOME_J" 1790050000 rederive --apply) || fail "the re-derive apply failed: $out"
+printf '%s\n' "$out" | grep -q '1 row(s) rewritten' \
+  || fail "the re-derive did not report the rewrite: $out"
+grep -q '"terminal_state": "proven"' "$ROW_J" \
+  || fail "the re-derive did not prove a row whose later readings measured: $(cat "$ROW_J")"
+[ "$(sed -n 's/.*"completed_epoch": \([^,]*\),.*/\1/p' "$ROW_J")" = "$completed_before" ] \
+  || fail "the re-derive moved the completion epoch the audit window is measured from"
+out=$(run_cw "$HOME_J" 1790050000 rederive) || fail "the second dry run failed: $out"
+printf '%s\n' "$out" | grep -q '0 row(s) would change' \
+  || fail "the re-derive keeps changing an already re-derived row: $out"
+run_cw "$HOME_J" 1790050000 audit 7 >/dev/null \
+  || fail "the audit failed after the re-derive proved the row"
+pass "the re-derive rewrites a stale row from its own readings and is idempotent"
+
+# An interrupted drive that had already taken every reading the verdict needs is
+# proven, not unmeasurable: the drive stopping is a fact about the schedule, and
+# the +15m, +1h and +6h readings it did take are still the evidence.
+HOME_J4=$(new_world j4)
+seed_pr "$HOME_J4" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J4" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_J4" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_J4" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J4" 1790000000 register j4 "$PR_URL" >/dev/null || fail "register failed"
+for off in 300 900 1800 3600 7200 10800 14400 18000 21600; do
+  run_cw "$HOME_J4" $((1790000000 + off)) sample j4-3317 "$off" >/dev/null \
+    || fail "the +${off}s sample failed"
+done
+printf '%s\n' 999999 > "$HOME_J4/state/change-watch/j4-3317/drive.pid"
+printf '%s\n' 1790021600 > "$HOME_J4/state/change-watch/j4-3317/drive.alive"
+[ "$(run_cw "$HOME_J4" 1790040000 verdict j4-3317)" = "change-watch clean" ] \
+  || fail "a drive that stopped after its +6h reading was not proven: $(run_cw "$HOME_J4" 1790040000 verdict j4-3317)"
+ROW_J4="$HOME_J4/state/change-watch/rows/j4-3317.json"
+grep -q '"terminal_state": "proven"' "$ROW_J4" \
+  || fail "an interrupted drive with every reading measured was not proven: $(cat "$ROW_J4")"
+grep -qF 'interrupted at +360m' "$ROW_J4" \
+  || fail "the proven row stopped naming the interruption that stopped the schedule: $(cat "$ROW_J4")"
+run_cw "$HOME_J4" 1790040000 gate j4 --terminal-gap >/dev/null \
+  || fail "teardown was refused for an interrupted drive whose readings all measured"
+[ -e "$HOME_J4/state/.wake-queue" ] && [ -s "$HOME_J4/state/.wake-queue" ] \
+  && fail "an interruption that left every reading measured still queued a wake"
+pass "an interrupted drive that took every reading is proven and queues nothing"
+
+# INTERRUPTED_TAIL
