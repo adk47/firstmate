@@ -363,13 +363,14 @@ def one_line(text):
 class Reading:
     """One number: its value, where it came from, and when. value None = unmeasured."""
 
-    def __init__(self, name, value=None, source="", at=None, note="", why=""):
+    def __init__(self, name, value=None, source="", at=None, note="", why="", partial=False):
         self.name = name
         self.value = value
         self.source = source
         self.at = at
         self.note = note
         self.why = why
+        self.partial = partial
 
     def text(self):
         if self.value is None:
@@ -638,7 +639,8 @@ def read_merges():
     # Newest first: a head that just passed the window is the one a lane is waiting on.
     urls.sort(reverse=True)
     return [Reading("open", total, src, NOW, note),
-            Reading("green_unmerged_2h", counted, src, NOW, "; ".join(bits))], [u for _, u in urls[:5]]
+            Reading("green_unmerged_2h", counted, src, NOW, "; ".join(bits),
+                    partial=bool(more or unknown or stale_heads))], [u for _, u in urls[:5]]
 
 
 PASS_RE = re.compile(r"sentinel: pass (\d+) (\S+)->(\S+) on \S+: (.*)")
@@ -1086,9 +1088,10 @@ for c in crossings:
     save_record(record)
 
 measured = {"%s.%s" % (d, r.name): r.value for d in DOMAINS for r in readings[d]}
+partial = {"%s.%s" % (d, r.name) for d in DOMAINS for r in readings[d] if r.partial}
 for key in sorted(set(episodes) - open_now):
     reads = episodes[key].get("reads") or []
-    if any(measured.get(name) is None for name in reads):
+    if any(measured.get(name) is None or name in partial for name in reads):
         continue
     append_status("resolved [key=%s]: %s no longer holds at %s (interjected at %s)" % (
         key, episodes[key].get("threshold", "the threshold"), iso(NOW), episodes[key].get("number", "?")))

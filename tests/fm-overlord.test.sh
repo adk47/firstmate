@@ -391,6 +391,42 @@ test_green_unmerged_rises_goes_to_fable_and_an_unchanged_count_is_silent() {
   pass "a rising green-unmerged count goes to Fable for review, and an unchanged count is silent"
 }
 
+test_a_partial_merges_read_holds_the_crossing_instead_of_resolving_it() {
+  local home status
+  home=$(make_home partial)
+  configure "$home"
+  healthy "$home" "$T0"
+  green_prs "$home" 3 10800 "$T0"
+  run "$home" "$T0" check >/dev/null
+  assert_contains "$(cat "$home/state/overlord.status")" "blocked [key=overlord-merges-green-unmerged]" \
+    "a standing green backlog was not interjected"
+
+  # The next read answers page 1 with no green node and another page, then fails
+  # on page 2: a lower bound that must not be read as the backlog clearing.
+  healthy "$home" $((T0 + 600))
+  python3 - "$home/gh.json" <<'PY'
+import json, sys
+json.dump({"data": {"total": {"issueCount": 40},
+                    "green": {"issueCount": 0, "pageInfo": {"hasNextPage": True, "endCursor": "c1"}, "nodes": []}}},
+          open(sys.argv[1], "w"))
+PY
+  cat > "$home/fakebin/fake-gh" <<SH
+#!/usr/bin/env bash
+case "\$*" in *organization*) exit 1 ;; esac
+if [ -f "$home/page1-served" ]; then exit 1; fi
+: > "$home/page1-served"
+cat "$home/gh.json"
+SH
+  chmod +x "$home/fakebin/fake-gh"
+  run "$home" $((T0 + 600)) check >/dev/null
+  status=$(cat "$home/state/overlord.status")
+  assert_not_contains "$status" "resolved [key=overlord-merges-green-unmerged]" \
+    "a partially read forge answer resolved the crossing"
+  assert_contains "$status" "blocked [key=overlord-merges-green-unmerged]: OVERLORD merges: green_unmerged_2h rises; green_unmerged_2h=3" \
+    "the open crossing was not left standing"
+  pass "a partially read forge answer holds the crossing instead of resolving it"
+}
+
 test_absent_and_stale_sources_are_unmeasured_and_two_ticks_interject() {
   local home out
   home=$(make_home unmeasured)
@@ -537,6 +573,7 @@ test_an_unconfigured_home_is_not_reported_as_inside_thresholds
 test_a_malformed_pr_scope_reads_unmeasured_instead_of_crashing
 test_users_told_flat_for_four_hours_is_wrong_but_a_shorter_flat_is_not
 test_green_unmerged_rises_goes_to_fable_and_an_unchanged_count_is_silent
+test_a_partial_merges_read_holds_the_crossing_instead_of_resolving_it
 test_absent_and_stale_sources_are_unmeasured_and_two_ticks_interject
 test_support_thresholds_and_a_late_tick
 test_a_refused_steer_is_recorded_on_the_same_key
