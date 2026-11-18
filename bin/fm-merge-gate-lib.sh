@@ -136,16 +136,17 @@ fm_merge_gate_read_pr() {
   else
     command -v gh >/dev/null 2>&1 || return 1
     # One read, so the head and the checks that authorize it come from the same
-    # snapshot. A check name that ran more than once on this head keeps its
-    # worst-wins reading (a pending re-run still outranks an older success), but
-    # a CANCELLED run is dropped once any non-cancelled run of the same name
-    # exists: a concurrency group cancelling the older of two runs, or a re-run,
-    # supersedes it, as the forge's own merge box reads it. Within ONE workflow
-    # (same workflowName) only the newest dated run of a check counts, so a
-    # re-run or a label-retriggered run that passed supersedes that workflow's
-    # own earlier failure; two different workflows that share a check name, or
-    # runs with no date, keep worst-wins. The body is folded onto one line because the payload is parsed as
-    # key=value lines.
+    # snapshot. A check name that ran more than once on this head is decided by
+    # ORDER, not by history: when every run of that name carries a date, only the
+    # newest run counts, so a retry or a label retrigger that passed supersedes
+    # the earlier failure it replaced. That is how the forge's own merge box reads
+    # a name, and reading it any other way kept pull requests red on a verdict
+    # superseded two seconds later (adk47/firstmate#105 carried failure@15:56:34Z
+    # and success@15:56:36Z on one head). Worst-wins is kept only where order is
+    # unknowable - a run with no date at all - and a CANCELLED run is still
+    # dropped once any non-cancelled run of the same name exists, because a
+    # concurrency group cancelling the older of two runs supersedes it. The body
+    # is folded onto one line because the payload is parsed as key=value lines.
     if ! fields=$(gh pr view "$number" --repo "$repo" \
       --json headRefOid,author,baseRefName,headRefName,state,mergedAt,body,statusCheckRollup \
       --jq '(
@@ -160,10 +161,10 @@ fm_merge_gate_read_pr() {
             | group_by((.name // .context) // "")
             | map(if any(.[]; ((.conclusion // .state) // "") != "CANCELLED")
                   then map(select(((.conclusion // .state) // "") != "CANCELLED")) else . end)
-            | map(map(. + {__wf: (.workflowName // ""), __at: ((.startedAt // .completedAt // "") | tostring)})
-                  | (map(select(.__wf == "" or .__at == ""))
-                     + (map(select(.__wf != "" and .__at != "")) | group_by(.__wf)
-                        | map(sort_by(.__at) | last))))
+            | map(map(. + {__at: ((.startedAt // .completedAt // "") | tostring)})
+                  | if all(.[]; .__at != "")
+                    then sort_by(.__at) | [last]
+                    else . end)
             | add // [])[]
             | ("check=" + ((.name // .context) // "") + "\u001f" + ((.conclusion // .state) // "")))
         )' 2>/dev/null) || [ -z "$fields" ]; then

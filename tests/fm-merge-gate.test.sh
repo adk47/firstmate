@@ -42,6 +42,10 @@
 #   (aa) a red check whose name contains the old field delimiter still refuses
 #   (ab) declared no-QA coverage applies on GitLab instead of a forge refusal,
 #        and the GitHub-only twin rule notes its skip instead of refusing
+#   (ac) a qa-review verdict published as a commit status is read as the verdict
+#   (ad) the newest run of a check name decides the name: a success two seconds
+#        after a failure authorizes, the reverse refuses, and the same order rule
+#        holds when the two runs came from different workflows
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -151,10 +155,20 @@ write_pr_view() {
     local extra='' run='' started=''
     name=${pair%%:*}
     conclusion=${pair#*:}
+    # conclusion = CONCLUSION[@wf][#started]. The date is stripped first so a run
+    # can be dated without also being keyed to a workflow, which is the shape a
+    # duplicate of one check name takes when the workflow name is not reported.
+    case "$conclusion" in *#*) started=${conclusion#*#}; conclusion=${conclusion%%#*} ;; esac
     case "$conclusion" in *@*) run=${conclusion#*@}; conclusion=${conclusion%%@*} ;; esac
-    case "$run" in *#*) started=${run#*#}; run=${run%%#*} ;; esac
     [ -n "$run" ] && extra="$extra,\"workflowName\":\"wf-$run\",\"detailsUrl\":\"https://github.com/o/r/actions/runs/$run/job/1\""
-    [ -n "$started" ] && extra="$extra,\"startedAt\":\"2026-11-15T$started:00Z\""
+    # started is HH:MM, or HH:MM:SS when a fixture needs sub-minute ordering (a
+    # retry landing two seconds after the run it supersedes).
+    if [ -n "$started" ]; then
+      case "$started" in
+        *:*:*) extra="$extra,\"startedAt\":\"2026-11-15T${started}Z\"" ;;
+        *) extra="$extra,\"startedAt\":\"2026-11-15T${started}:00Z\"" ;;
+      esac
+    fi
     [ -n "$rollup" ] && rollup="$rollup,"
     rollup="$rollup{\"__typename\":\"CheckRun\",\"name\":\"$name\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"$extra}"
   done
@@ -631,9 +645,15 @@ test_gate_rerun_in_same_run_supersedes_failure() {
   pass "a later run within one workflow supersedes its earlier failure"
 }
 
-test_gate_failure_in_other_run_still_refuses() {
+# A same-named check produced by two different workflows is ONE context to the
+# forge, so it obeys the same order rule: the newest run decides. An older
+# failure from workflow A cannot veto a newer success from workflow B, and an
+# older success from A cannot rescue a newer failure from B. Worst-wins across
+# workflows kept pull requests red forever on a check name that had already
+# concluded, so the cross-workflow pair is pinned in both directions.
+test_gate_newer_success_in_another_workflow_supersedes() {
   local case_dir rc
-  case_dir=$(make_case other-run-failure)
+  case_dir=$(make_case other-run-newer-success)
   write_pr_view "$case_dir" base=master headref=feature/x \
     body='Closes #7.' checks='qa-review:SUCCESS,verify:FAILURE@11#07:43,verify:SUCCESS@12#12:06,unit-tests:SUCCESS'
   printf '[]\n' > "$case_dir/fixtures/pr-list.json"
@@ -642,8 +662,23 @@ test_gate_failure_in_other_run_still_refuses() {
   run_gate "$case_dir" "$REPO" 9 "$HEAD"
   rc=$?
   set -e
-  expect_code 1 "$rc" "a failure in a different workflow sharing the check name is still red"
-  pass "a same-named failure in another workflow still refuses"
+  expect_code 0 "$rc" "the newest run of a shared check name must decide, whichever workflow produced it"
+  pass "a newer success in another workflow supersedes an older failure"
+}
+
+test_gate_newer_failure_in_another_workflow_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case other-run-newer-failure)
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    body='Closes #7.' checks='qa-review:SUCCESS,verify:SUCCESS@11#07:43,verify:FAILURE@12#12:06,unit-tests:SUCCESS'
+  printf '[]\n' > "$case_dir/fixtures/pr-list.json"
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a newer failure must stay red even when another workflow passed earlier"
+  pass "a newer failure in another workflow still refuses"
 }
 
 # --- (v) prose around develop/beta is not a twin reference -----------------
@@ -759,6 +794,42 @@ test_gate_refuses_a_status_context_that_is_not_the_verdict() {
   assert_contains "$(cat "$case_dir/err")" "no qa-review verdict exists on head $HEAD" \
     "the refusal must say the verdict is absent, not that another context passed"
   pass "a near-miss commit status cannot stand in for the qa-review verdict"
+}
+
+# --- (ad) the newest run of a check name decides --------------------------
+# A proven case from adk47/firstmate#105, head ad99efc2: that ONE head carried
+# three runs of `PR must be raised via no-mistakes` - failure at 15:56:34Z, its
+# own retry succeeding at 15:56:36Z, and a label retrigger succeeding at
+# 18:24:57Z the next day. The newest run was a success twice over, the merge box
+# read the pull request CLEAN, and 17 other checks were green, yet the rendered
+# status stayed red on a duplicate from 30 hours earlier. The predicate is
+# order, not history: same name on the same head, newest wins. These two
+# fixtures are the whole rule.
+test_gate_newest_run_wins_over_an_older_failure() {
+  local case_dir rc
+  case_dir=$(make_case newest-run-success-after-failure)
+  write_pr_view "$case_dir" checks='unit-tests:FAILURE#15:56:34,unit-tests:SUCCESS#15:56:36,qa-review:SUCCESS'
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a success two seconds after the failure supersedes it"
+  pass "the newest run of a check name wins over an older failure"
+}
+
+test_gate_older_success_does_not_outrank_a_newer_failure() {
+  local case_dir rc
+  case_dir=$(make_case newest-run-failure-after-success)
+  write_pr_view "$case_dir" checks='unit-tests:SUCCESS#15:56:34,unit-tests:FAILURE#15:56:36,qa-review:SUCCESS'
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a failure two seconds after the success is still a failure"
+  assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
+  pass "an older success never outranks a newer failure"
 }
 
 test_gate_muso_ai_with_qa_go_passes_without_workflow_fixture() {
@@ -1177,13 +1248,16 @@ test_gate_null_pending_qa_before_success_refuses
 test_gate_cancelled_duplicate_is_superseded
 test_gate_only_cancelled_run_still_refuses
 test_gate_rerun_in_same_run_supersedes_failure
-test_gate_failure_in_other_run_still_refuses
+test_gate_newer_success_in_another_workflow_supersedes
+test_gate_newer_failure_in_another_workflow_still_refuses
 test_gate_ignores_develop_beta_prose
 test_gate_skipped_or_neutral_qa_outranks_success
 test_gate_muso_ai_without_qa_check_refuses
 test_gate_reads_a_commit_status_verdict
 test_gate_refuses_a_failing_commit_status_verdict
 test_gate_refuses_a_status_context_that_is_not_the_verdict
+test_gate_newest_run_wins_over_an_older_failure
+test_gate_older_success_does_not_outrank_a_newer_failure
 test_gate_muso_ai_with_qa_go_passes_without_workflow_fixture
 test_gate_declared_no_qa_attestation_green_passes
 test_gate_declared_no_qa_attestation_absent_refuses
