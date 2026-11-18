@@ -64,6 +64,14 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
+# The machine-checkable pause declaration (predicate=/expires=). A pause that
+# carries its own evidence is the third declared-wait admission below, and its
+# field shape is owned there, so this library sources it rather than re-deriving
+# a field syntax of its own.
+# shellcheck source=bin/fm-pause-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_CLASSIFY_LIB_DIR/fm-pause-lib.sh"
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
@@ -90,10 +98,15 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# A pause is a declared wait only when it names when it ends: its note must carry
-# `until HH:MMZ` (or `until YYYY-MM-DDTHH:MMZ`, `until YYYY-MM-DD HH:MMZ`, with
-# UTC accepted for Z), the time the lane will look again or has armed a wake for.
-# A `paused:` line without one waits for a wake nobody set, so the open-decision
+# A pause is a declared wait when it names when it ends. Two shapes qualify on
+# their own. The first is `until HH:MMZ` (`until YYYY-MM-DDTHH:MMZ`,
+# `until YYYY-MM-DD HH:MMZ`, with UTC accepted for Z), the time the lane will
+# look again or has armed a wake for. The second is the machine-checkable
+# declaration `predicate=<shell command> expires=<ISO8601 UTC>`
+# (bin/fm-pause-lib.sh owns that field shape and its predicates): a pause with
+# its own evidence and its own expiry needs no separate wake, because a reader
+# can settle it.
+# A `paused:` line with neither waits for a wake nobody set, so the open-decision
 # fold treats it as `blocked:` (guard G15): it opens a red OPEN DECISIONS entry
 # under its key that every wake drain prints, noted "paused without a wake
 # time", until the lane's next line for that key that is not itself a
@@ -108,7 +121,7 @@ FM_CLASSIFY_TIMELESS_PAUSE_PREFIX='paused without a wake time (needs until HH:MM
 # no wake time, because the wait ends when the account pool recovers and the
 # ladder's own `resolved [key=gateway-503]` closes it. docs/gateway-keepalive.md
 # owns that shape, so that exact key stays a declared wait; every other
-# time-less pause still folds as blocked.
+# time-less pause that carries no predicate=/expires= pair still folds as blocked.
 FM_CLASSIFY_PAUSED_DECLARED_WAIT_KEY='gateway-503'
 
 # Bounded re-surface cadence for a declared pause or a verified captain hold.
@@ -687,12 +700,14 @@ _fm_fold_line_state() {  # <open-set> <status-line> <resolve-verb> <held-verb>
   note=$_FM_STATUS_NOTE
   _fm_decision_key_transition_allowed "$key" "$note" || { _FM_FOLD_OPEN=$open; return 0; }
   _FM_FOLD_KEY=$key
-  # A time-less pause opens like blocked: (FM_CLASSIFY_PAUSE_UNTIL_RE), and the
-  # entry it opened closes on the key's next line that is not itself one. The one
-  # exception is the documented gateway keep-alive declaration, which names no
-  # wake time by design (docs/gateway-keepalive.md).
+  # A pause is a declared wait when its note names a wake time
+  # (FM_CLASSIFY_PAUSE_UNTIL_RE) or carries the machine-checkable
+  # predicate=/expires= pair. A time-less, evidence-less pause opens like
+  # blocked:, and the entry it opened closes on the key's next line that is not
+  # itself one. The exception is the documented gateway keep-alive declaration,
+  # which names no wake time by design (docs/gateway-keepalive.md).
   if [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]; then
-    if status_pause_has_wake_time "$note" || [ "$key" = "$FM_CLASSIFY_PAUSED_DECLARED_WAIT_KEY" ]; then
+    if status_pause_has_wake_time "$note" || [ "$key" = "$FM_CLASSIFY_PAUSED_DECLARED_WAIT_KEY" ] || fm_pause_has_predicate_and_expires "$note"; then
       verb=working
     else
       # A time-less pause is a weaker statement than the blocked: or
