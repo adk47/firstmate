@@ -11,6 +11,11 @@
 # every backend so the decision cannot drift.
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
+# The process-table read that licenses replacing a terminal this adapter cannot
+# judge. Resolved from this file's own location so the adapter still sources
+# standalone, as the adapter unit tests do.
+# shellcheck source=bin/fm-agent-proc-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/../fm-agent-proc-lib.sh"
 
 fm_backend_orca_tool_check() {
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }
@@ -511,4 +516,42 @@ fm_backend_orca_agent_state() {  # <terminal-id>
   else
     printf 'unreadable'
   fi
+}
+
+# fm_backend_orca_replaceable <terminal-id> <worktree> [state]: whether this
+# terminal may be replaced with a NEW terminal in the task's recorded worktree.
+# Returns 0 when it may, 1 when it may not. A caller that has already classified
+# the terminal passes that reading as <state> so one decision costs one read.
+#
+# This is the ONE owner of that question, because it is a statement about what
+# an Orca terminal's state licenses, which is this adapter's business: the fleet
+# watchdog routes a lane here and bin/fm-spawn.sh --relaunch asks before it
+# launches, so neither of them can drift into a reading of its own.
+#
+# `missing` and `dead` already prove no agent is there. `unreadable` proves
+# nothing on its own, so it is licensed only by the other independent fact: the
+# live process table (bin/fm-agent-proc-lib.sh) positively shows no agent
+# working in the task's recorded worktree. Measured 2026-11-17: three lanes
+# whose Orca terminal read `unreadable` had held no agent process since 04:10Z
+# and sat unreplaced and unreported for 19 hours, because every consumer treated
+# the unreadable handle as the only evidence there was. A live agent, an
+# unclassifiable process, or a table that cannot be read still refuses.
+#
+# The state vocabulary itself is untouched: `unreadable` keeps meaning what it
+# says, and only the replacement decision widens.
+fm_backend_orca_replaceable() {  # <terminal-id> <worktree> [state]
+  local terminal=$1 worktree=${2-} state=${3-}
+  [ -n "$state" ] || state=$(fm_backend_orca_agent_state "$terminal")
+  case "$state" in
+    missing|dead) return 0 ;;
+    unreadable) ;;
+    *) return 1 ;;
+  esac
+  [ -n "$worktree" ] || return 1
+  local verdict=0
+  fm_agent_proc_worktree_verdict "$worktree" || verdict=$?
+  # 1 is the verdict that matters here - provably no agent - and it arrives as a
+  # nonzero exit, so the three answers are told apart by value, not by success.
+  [ "$verdict" -eq 1 ] || return 1
+  return 0
 }

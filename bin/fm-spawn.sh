@@ -1253,20 +1253,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
   if [ "$BACKEND" = orca ]; then
     # Orca's in-place relaunch is unproven, but a terminal that provably hosts
     # no agent is replaceable through the proven transaction: a NEW terminal in
-    # the task's own recorded worktree. Two read states prove that. `missing`
-    # means the handle is stale, as after an Orca or host restart. `dead` means
-    # Orca still lists the terminal but a scan of the live process tree below
-    # its pty found no agent, only shells - measured 2026-11-15 on six stopped
-    # lanes whose panes held an empty prompt. A live agent, an unexplained
-    # process, or a pty whose owner cannot be read still refuses.
+    # the task's own recorded worktree. bin/backends/orca.sh owns which states
+    # prove that (fm_backend_orca_replaceable), so this gate only reports its
+    # answer: `missing` (a stale handle, as after an Orca or host restart),
+    # `dead` (Orca still lists the terminal but a scan of the live process tree
+    # below its pty found no agent, only shells - measured 2026-11-15 on six
+    # stopped lanes whose panes held an empty prompt), and `unreadable` when the
+    # live process table shows no agent working in the recorded worktree
+    # (measured 2026-11-17 on three lanes that sat unreplaced for 19 hours). A
+    # live agent, an unexplained process, or a pty whose owner cannot be read
+    # still refuses.
     RELAUNCH_STATE=$(fm_backend_agent_state orca "$RELAUNCH_TARGET")
-    case "$RELAUNCH_STATE" in
-      missing|dead) ;;
-      *)
-        echo "error: task $ID's Orca terminal $RELAUNCH_TARGET reads '$RELAUNCH_STATE'; Orca relaunch replaces only a terminal that provably hosts no agent (missing, or dead below an agent-free pty), into a new terminal" >&2
-        exit 2
-        ;;
-    esac
+    if ! fm_backend_orca_replaceable "$RELAUNCH_TARGET" "$(fm_meta_get "$RELAUNCH_META" worktree)" "$RELAUNCH_STATE"; then
+      echo "error: task $ID's Orca terminal $RELAUNCH_TARGET reads '$RELAUNCH_STATE'; Orca relaunch replaces only a terminal that provably hosts no agent (missing, dead below an agent-free pty, or unreadable with no agent process in the task's recorded worktree), into a new terminal" >&2
+      exit 2
+    fi
     ORCA_WORKTREE_ID=$(fm_meta_get "$RELAUNCH_META" orca_worktree_id)
     [ -n "$ORCA_WORKTREE_ID" ] || {
       echo "error: task $ID has no recorded orca_worktree_id; refusing to relaunch" >&2

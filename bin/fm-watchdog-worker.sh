@@ -630,6 +630,7 @@ relaunch_refusal() {  # <contract> <rc> <output>
 # a failure that may be retried.
 task_relaunch() {  # <id> <reason> <note> [model]
   local id=$1 reason=$2 note=$3 model=${4-} backend state out rc refusal send_rc contract=control
+  local orca_stopped=0
   RELAUNCH_REFUSAL=''
   if [ "$DRY_RUN" = 1 ]; then
     printf 'watchdog: would relaunch %s after %s%s\n' "$id" "$reason" \
@@ -640,6 +641,40 @@ task_relaunch() {  # <id> <reason> <note> [model]
   [ -z "$model" ] || model_args=(--model "$model")
   backend=$(fm_backend_of_meta "$STATE/$id.meta" 2>/dev/null || true)
   state=$(task_agent_state "$id" "$STATE/$id.meta")
+  # Orca's in-place relaunch is not proven (bin/fm-control-lib.sh keeps orca out
+  # of its relaunch-verified table), but Orca's STOP is: fm-control proves the
+  # agent is gone before it reports `stopped`. An alive Orca lane is therefore
+  # stopped first and then replaced through the same gone-endpoint transaction
+  # the dead/missing branch uses, which is the only sequence that cannot put two
+  # agents on one task. A stop that cannot be proven launches nothing and
+  # records the refusal the endpoint earned, exactly as an in-place relaunch
+  # refusal did before.
+  if [ "$backend" = orca ] && [ "$state" = alive ]; then
+    out=$(fm_run_timed "$RELAUNCH_TIMEOUT_SECS" "$CONTROL_BIN" "$id" exit 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^stopped$'; then
+      state=$(task_agent_state "$id" "$STATE/$id.meta")
+      case "$state" in
+        dead|missing|unreadable)
+          printf 'watchdog: stopped %s before replacing its endpoint (now %s)\n' "$id" "$state"
+          orca_stopped=1
+          ;;
+      esac
+    fi
+    if [ "$orca_stopped" -ne 1 ]; then
+      if [ "$rc" -eq 0 ]; then
+        rc=1
+        out="error: task $id reads $state after an exit was reported stopped; refusing to replace a terminal that may still host the agent"
+      fi
+      if refusal=$(relaunch_refusal control "$rc" "$out"); then
+        RELAUNCH_REFUSAL=$refusal
+        printf 'watchdog: could not stop %s before replacing it: %s\n' "$id" "$refusal"
+        return 2
+      fi
+      printf 'watchdog: could not stop %s before replacing it: %s\n' "$id" "$(first_line "$out")"
+      return 1
+    fi
+  fi
   # A `missing` endpoint cannot be relaunched through fm-control, whose stop
   # step dies before touching anything in that state, so the backends that can
   # recreate a gone endpoint relaunch through bin/fm-spawn.sh --relaunch: a tmux
@@ -650,8 +685,16 @@ task_relaunch() {  # <id> <reason> <note> [model]
   # stopped lanes sitting at an empty prompt. Every other read, and every other
   # backend, still goes through fm-control, whose refusal is then recorded and
   # escalated instead of retried.
+  #
+  # An Orca terminal the watchdog cannot judge is handed to the same spawn
+  # transaction rather than dropped: bin/backends/orca.sh owns whether a
+  # terminal in that state may be replaced, and a refusal from that gate is
+  # recorded and escalated once per episode. Measured 2026-11-17: three lanes
+  # whose terminal read `unreadable` sat unreplaced and unreported for 19 hours.
+  # `unverified` keeps the old path, because with no endpoint recorded at all
+  # there is no terminal to replace.
   if { [ "$backend" = tmux ] && [ "$state" = missing ]; } \
-    || { [ "$backend" = orca ] && { [ "$state" = missing ] || [ "$state" = dead ]; }; }; then
+    || { [ "$backend" = orca ] && [ "$state" != alive ] && [ "$state" != unverified ]; }; then
     out=$(fm_run_timed "$RELAUNCH_TIMEOUT_SECS" "$SPAWN_BIN" "$id" --relaunch \
       ${model_args[@]+"${model_args[@]}"} 2>&1)
     rc=$?
@@ -1168,7 +1211,18 @@ task_pass() {
     task_refusal_drop_stale "$state"
     case "$state" in
       alive) ;;
-      dead|missing)
+      dead|missing|unreadable|ambiguous)
+        # An unclassifiable read licenses nothing on its own, so only an Orca
+        # lane reaches the relaunch transaction from here:
+        # bin/backends/orca.sh owns whether a terminal in that state may be
+        # replaced, and a refusal from that gate is recorded and escalated once
+        # per episode instead of vanishing. Measured 2026-11-17: three Orca
+        # lanes whose terminal read `unreadable` sat unreplaced and unreported
+        # for 19 hours.
+        if [ "$backend" != orca ] && [ "$state" != dead ] && [ "$state" != missing ]; then
+          task_store "$id"
+          continue
+        fi
         if [ "$DRY_RUN" = 1 ]; then
           if task_refusal_active "$state"; then
             printf '%s\t%s\tn/a\t-\t%d\t%d\twould escalate (relaunch refused; retried after %sh)\n' \
@@ -1209,7 +1263,7 @@ task_pass() {
         continue
         ;;
       *)
-        # An unclassifiable endpoint licenses nothing and proves no progress.
+        # An endpoint nothing recorded licenses nothing and proves no progress.
         task_store "$id"
         continue
         ;;

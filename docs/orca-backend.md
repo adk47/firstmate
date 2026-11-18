@@ -64,7 +64,10 @@ A terminal Orca itself reports gone is also `missing`: one whose record carries 
 That is the shape a closed Orca tab leaves behind, and reading it as `unreadable` left the endpoint permanently unreplaceable.
 A stop Orca could not verify, whether an `unknown` cause or its negative sentinel exit code, stays `unreadable` unless the record also reports itself neither connected nor writable, and a pty the sweep still names keeps the process-tree verdict, because a living process outranks a record.
 In-place `relaunch` stays refused on Orca until a replacement launch into the same terminal is proven.
-When a task's terminal provably hosts no agent - `missing` (Orca no longer has the handle, as after an Orca or host restart) or `dead` (Orca still lists it, and the scan below its pty found only shells) - `bin/fm-spawn.sh <id> --relaunch` launches the replacement in a new terminal in the task's recorded Orca worktree and republishes the record with it; a live, ambiguous, or unreadable terminal still refuses.
+When a task's terminal provably hosts no agent - `missing` (Orca no longer has the handle, as after an Orca or host restart), `dead` (Orca still lists it, and the scan below its pty found only shells), or `unreadable` while the live process table positively shows no agent working in the task's recorded worktree - `bin/fm-spawn.sh <id> --relaunch` launches the replacement in a new terminal in the task's recorded Orca worktree and republishes the record with it; a live, ambiguous, or unprovable terminal still refuses.
+`bin/backends/orca.sh`'s `fm_backend_orca_replaceable` is the one owner of that question, so the watchdog and the spawn gate cannot drift into readings of their own.
+The `unreadable` case exists because a terminal handle Orca cannot judge is not evidence that the agent is gone: measured 2026-11-17, three lanes whose terminal read `unreadable` had held no agent process since 04:10Z and sat unreplaced and unreported for 19 hours, because every consumer treated the unreadable handle as the only evidence there was.
+The state vocabulary is unchanged - `unreadable` still means what it says - and only the replacement decision widens.
 
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
@@ -90,7 +93,8 @@ Neither path relaxes the dirty, unlanded, or force gates.
 - Secondmate spawns are unsupported.
 - Escape is unsupported.
 - `fm-control.sh relaunch` is unsupported; exit the worker and respawn the task instead, or use `fm-spawn.sh <id> --relaunch` once the terminal provably hosts no agent.
-  A closed terminal reads `missing` and a terminal still listed with only a shell below it reads `dead`, so that respawn is the path the fleet watchdog takes on its own for both, and any other Orca endpoint still refuses with the concrete reason.
+  A closed terminal reads `missing`, a terminal still listed with only a shell below it reads `dead`, and a terminal Orca cannot judge reads `unreadable` and is replaceable only when the live process table proves no agent is in the recorded worktree, so that respawn is the path the fleet watchdog takes on its own for all three, and any other Orca endpoint still refuses with the concrete reason.
+  The watchdog stops an alive Orca lane through `fm-control.sh <id> exit` first, because Orca's stop is proven even though its in-place relaunch is not, and it launches nothing when that stop cannot be proven.
 - Firstmate does not gate on the version or capability list Orca reports, so readiness is the compatibility gate rather than a version floor.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.
 - Orca's worktree shape is unverified against the spawn-time Claude workspace-trust check in `bin/fm-claude-trust.sh`, which refuses any path that is not a linked git worktree sharing the project's git common dir, so a claude spawn on Orca fails loudly at that check rather than launching if Orca clones instead of linking.
@@ -103,6 +107,7 @@ tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 tests/fm-teardown-endpoint-safety.test.sh
 tests/fm-teardown.test.sh
+tests/fm-watchdog-orca-restart.test.sh
 ```
 
 [`verification/runtime-backends.md`](verification/runtime-backends.md#orca) records the real readiness and response-shape smoke.
