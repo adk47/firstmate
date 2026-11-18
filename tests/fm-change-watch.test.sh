@@ -2951,6 +2951,8 @@ grep -q '"terminal_state": "proven"' "$ROW_J" \
   || fail "the re-derive did not prove a row whose later readings measured: $(cat "$ROW_J")"
 [ "$(sed -n 's/.*"completed_epoch": \([^,]*\),.*/\1/p' "$ROW_J")" = "$completed_before" ] \
   || fail "the re-derive moved the completion epoch the audit window is measured from"
+grep -q '"derived_epoch": 1790050000' "$ROW_J" \
+  || fail "the re-derived row does not record that it was derived: $(cat "$ROW_J")"
 [ "$(run_cw "$HOME_J" 1790050000 verdict j1-3317)" = "change-watch clean" ] \
   || fail "the re-derive left the old failure in the verdict file: $(run_cw "$HOME_J" 1790050000 verdict j1-3317)"
 out=$(run_cw "$HOME_J" 1790050000 rederive) || fail "the second dry run failed: $out"
