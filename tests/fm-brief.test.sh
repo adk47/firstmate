@@ -661,7 +661,9 @@ test_secondmate_marked_request_reporting_contract() {
   # landed merge is the trigger a charter without this line silently omits.
   assert_grep 'a merge you performed yourself under standing merge authority and one the captain merged on the forge' "$brief" \
     "secondmate charter did not name a landed merge as a reporting trigger"
-  assert_grep 'States: working, needs-decision, blocked, paused, done, failed.' "$brief" \
+  # The verbs live on the example line itself: a scaffold that put them on a
+  # following line left workers copying a placeholder command instead.
+  assert_grep 'choosing its verb from working, needs-decision, blocked, paused, done, failed' "$brief" \
     "secondmate charter changed the preserved status vocabulary"
   pass "fm-brief.sh: marked requests avoid generic acknowledgements and preserve material reporting"
 }
@@ -795,7 +797,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
-    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
+    assert_grep "choosing its verb from working, needs-decision, blocked, awaiting, done, failed" "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'Use `awaiting: {why} until HH:MMZ`' "$brief" \
@@ -915,9 +917,41 @@ test_house_wiki_stanza_is_on_workers_not_secondmates() {
   pass "fm-brief.sh: house-wiki stanza is on ship/scout workers, not secondmate charters"
 }
 
+# A command a worker copies verbatim must never carry a placeholder. A scaffold
+# that shows `echo "{state}: ..."` gets that literal brace text appended by
+# workers who copy it, and such a line classifies as nothing, so the status log
+# goes quiet while the worker believes it reported. Every scaffold therefore
+# shows two concrete invocations and names the legal verbs on the same line.
+test_status_commands_carry_no_placeholder() {
+  local home id brief
+  home="$TMP_ROOT/status-command-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-stat-ship some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "ship scaffold for the status-command check exited non-zero"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-stat-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "scout scaffold for the status-command check exited non-zero"
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-stat-sm --secondmate alpha >/dev/null 2>&1 \
+    || fail "secondmate scaffold for the status-command check exited non-zero"
+
+  for id in brief-stat-ship brief-stat-scout brief-stat-sm; do
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_no_grep '{state}' "$brief" "$id: brief hands the worker a copyable command containing a {state} placeholder"
+    assert_no_grep '{one short line}' "$brief" "$id: brief hands the worker a copyable command containing a {one short line} placeholder"
+    assert_grep 'choosing its verb from working, needs-decision, blocked,' "$brief" \
+      "$id: brief no longer names the legal verbs on the example line itself"
+    # Two concrete appends, one per reportable phase, both copyable as shown.
+    [ "$(grep -o '>> ' "$brief" | wc -l)" -ge 2 ] \
+      || fail "$id: brief shows fewer than two concrete append examples"
+  done
+  pass "fm-brief.sh: status examples carry no placeholder in ship, scout, or secondmate briefs"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
+test_status_commands_carry_no_placeholder
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
