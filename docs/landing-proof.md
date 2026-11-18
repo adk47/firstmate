@@ -34,5 +34,6 @@ A probe for work not yet done fails now; that is the point.
 
 The same row store also holds merge watches.
 A merge whose deploy run carrying the merge commit failed reads `absent`, not `regressed`, because the change never reached production.
-A merge whose diff touches nothing deployable records `deploy_expected=no` and reads `not-applicable` when its deploy run fails or never runs.
+A merge whose diff touches nothing deployable records `deploy_expected=no` and keeps no deploy-workflow target, so a failed or missing run says nothing about it.
+A merge with no measurable surface at all is the one whose row ends `not-applicable`.
 `.agents/skills/change-watch/SKILL.md` owns how firstmate handles each wake.
