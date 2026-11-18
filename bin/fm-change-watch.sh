@@ -2218,6 +2218,7 @@ print(count)
 cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch> [<merge-sha>]
   local repo=$1 workflow=$2 since=$3 sha=${4:-}
   local gh_cmd=${FM_CW_GH:-gh} out rc=0 cands created runsha status conclusion carried=''
+  local carried_status='' carried_conclusion=''
   if [ -n "${FM_CW_GH_DIR:-}" ]; then
     local safe=${workflow//[\/ ]/_}
     [ -f "$FM_CW_GH_DIR/runs-$repo-$safe.json" ] || {
@@ -2231,7 +2232,12 @@ cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch> [<merge-sha>]
     # is the one whose tree carries the merged commit. hydra deploys from its own
     # daily schedule and a manual dispatch, never a push, so the earliest run
     # created after a merge can belong to an older tip - reading that one as 0
-    # reported six healthy releases as regressions.
+    # reported six healthy releases as regressions. Several runs can also carry the
+    # merge itself, and then the latest one decides: a deploy that failed and was
+    # retried successfully has landed, so stopping at the first carrier it found
+    # called a retry that had already succeeded a regression forever (hydra#2233,
+    # failed 14:12:47Z and succeeded 14:34:56Z on the same sha, still scored 0 by a
+    # reading taken at 14:42:09Z).
     out=$(cw_forge_run "$gh_cmd" run list -R "$repo" --workflow "$workflow" --limit 20 \
       --json conclusion,status,createdAt,databaseId,url,headSha) || rc=$?
     if [ "${rc:-0}" -ne 0 ]; then
@@ -2286,8 +2292,12 @@ for run in candidates:
     if [ "$runsha" != "$sha" ]; then
       cw_forge_run_carries "$repo" "$sha" "$runsha" || continue
     fi
+    # Cands are sorted oldest first, so the last carrier seen is the latest one and
+    # it is the one that decides; an earlier failure stays visible in the history
+    # without becoming the verdict.
     carried=1
-    break
+    carried_status=$status
+    carried_conclusion=$conclusion
   done <<CANDIDATES
 $cands
 CANDIDATES
@@ -2298,11 +2308,11 @@ CANDIDATES
   # A run still going is a deploy that has not landed yet, not a measurement gap:
   # hydra's deploy takes 17-20 minutes, so the +15m reading of every merge only
   # ever sees it in flight.
-  if [ "$status" != completed ] || [ -z "$conclusion" ]; then
-    printf 'awaiting the deploy: the %s run is %s\n' "$workflow" "${status:-unknown}"
+  if [ "$carried_status" != completed ] || [ -z "$carried_conclusion" ]; then
+    printf 'awaiting the deploy: the %s run is %s\n' "$workflow" "${carried_status:-unknown}"
     return 1
   fi
-  if [ "$conclusion" = success ]; then
+  if [ "$carried_conclusion" = success ]; then
     printf '1\n'
     return 0
   fi

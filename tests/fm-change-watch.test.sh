@@ -3118,3 +3118,31 @@ out=$(run_cw "$HOME_J9" 1790044000 rederive --apply) || fail "the untargeted app
 printf '%s\n' "$out" | grep -q 'no-row watches: 0 proven, 0 regressed, 1 unmeasurable with reason, 1 total' \
   || fail "a watch with no recorded target was counted proven: $out"
 pass "a row-less watch that recorded no target is never proven"
+
+# The run that decides a deploy is the latest one carrying the merge, not the
+# earliest. A deploy that failed and was then retried successfully has landed, and
+# reading the first carrier it finds calls that a regression forever.
+# ask-pass-durable-f1-2233 latched regressed exactly this way: hydra#2233 merged at
+# 14:12:08Z, run 44321779660 on its merge sha b877000b failed at 14:12:47Z, run
+# 44325826504 on the same sha succeeded at 14:34:56Z, and the +30m sample was taken
+# at 14:42:09Z - after the retry - yet the watch still scored deploy_run 0.
+HOME_RT=$(hydra_world rt "$MERGED")
+out=$(run_hydra_cw "$HOME_RT" 1790000000 register rt1 'https://github.com/Muso-AI/hydra/pull/1961') \
+  || fail "hydra register failed: $out"
+hydra_runs "$HOME_RT" "[$(hydra_run 2026-09-21T15:00:00Z completed failure "$MERGED"),$(hydra_run 2026-09-21T15:30:00Z completed success "$MERGED")]"
+run_hydra_cw "$HOME_RT" 1790003600 sample rt1-1961 900 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_RT" rt1-1961 900)" = 1 ] \
+  || fail "a deploy that failed and was then retried successfully was not read as deployed: $(cat "$HOME_RT/state/change-watch/rt1-1961/samples.log" 2>/dev/null)"
+line=$(run_hydra_cw "$HOME_RT" 1790003600 verdict rt1-1961)
+case "$line" in
+  *regressed*) fail "a successful retry of the same merge was still read as a regression: $line" ;;
+esac
+pass "a successful retry of the merge is the deploy that landed"
+
+# The converse still holds, or the fix would be a way to launder a failed deploy:
+# when the latest run carrying the merge failed, the deploy failed.
+hydra_runs "$HOME_RT" "[$(hydra_run 2026-09-21T15:00:00Z completed success "$MERGED"),$(hydra_run 2026-09-21T15:30:00Z completed failure "$MERGED")]"
+run_hydra_cw "$HOME_RT" 1790007200 sample rt1-1961 3600 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_RT" rt1-1961 3600)" = 0 ] \
+  || fail "a retry that failed after an earlier success was not read as a failed deploy: $(cat "$HOME_RT/state/change-watch/rt1-1961/samples.log" 2>/dev/null)"
+pass "a failed retry is still a failed deploy"
