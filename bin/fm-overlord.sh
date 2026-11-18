@@ -506,10 +506,9 @@ def start_remote():
     try:
         proc = subprocess.Popen(prefix + ["sh", "-s"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL)
-        proc.stdin.write(script.encode())
-        proc.stdin.close()
     except OSError:
         return None
+    proc._script = script.encode()
     return proc
 
 
@@ -520,9 +519,12 @@ def finish_remote(proc):
         return files, complete, remote_now
     out = b""
     try:
-        out = proc.stdout.read() if left() > 0 else b""
-        proc.wait(timeout=max(0.5, left()))
-    except (subprocess.TimeoutExpired, OSError):
+        out, _ = proc.communicate(input=proc._script, timeout=max(0.5, left()))
+    except subprocess.TimeoutExpired as error:
+        out = error.output or b""
+        proc.kill()
+        proc.communicate()
+    except OSError:
         proc.kill()
     current, body = None, []
     for line in out.decode("utf-8", "replace").splitlines():
@@ -566,7 +568,7 @@ def gh(query, fields):
         data = json.loads(done.stdout.decode("utf-8", "replace"))
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
-    if done.returncode != 0 or not isinstance(data, dict) or data.get("errors") or not data.get("data"):
+    if done.returncode != 0 or not isinstance(data, dict) or data.get("errors") or not isinstance(data.get("data"), dict):
         return None
     return data["data"]
 
@@ -576,6 +578,9 @@ def read_merges():
     src = "forge search %s" % scope
     if not scope:
         return [Reading("open", why="not configured"), Reading("green_unmerged_2h", why="not configured")], []
+    if scope.startswith("org:") and not scope[4:].strip():
+        why = "FM_OVERLORD_PR_SCOPE names an org with no login"
+        return [Reading("open", why=why), Reading("green_unmerged_2h", why=why)], []
     green_age = cfg_int("GREEN_AGE", 7200)
     total, counted, stale_heads, unknown, urls, after, more = None, 0, 0, 0, [], None, False
     pages = 0
@@ -586,8 +591,8 @@ def read_merges():
             more = pages > 0
             break
         pages += 1
-        total = data["total"]["issueCount"]
-        green = data["green"]
+        total = (data.get("total") or {}).get("issueCount")
+        green = data.get("green") or {}
         for node in green.get("nodes") or []:
             commits = ((node.get("commits") or {}).get("nodes") or [])
             commit = (commits[0].get("commit") if commits else None) or {}
@@ -603,19 +608,25 @@ def read_merges():
             if node.get("mergeable") == "MERGEABLE" and state == "SUCCESS" and pushed and NOW - pushed > green_age:
                 counted += 1
                 urls.append((pushed, node.get("url") or ""))
-        more = bool(green["pageInfo"]["hasNextPage"])
-        after = green["pageInfo"]["endCursor"]
+        page_info = green.get("pageInfo") or {}
+        more = bool(page_info.get("hasNextPage"))
+        after = page_info.get("endCursor")
         if not more:
             break
     if pages == 0:
         why = "the forge did not answer inside the read budget"
         return [Reading("open", why=why), Reading("green_unmerged_2h", why=why)], []
+    if total is None:
+        why = "the forge answer carried no open count"
+        return [Reading("open", why=why), Reading("green_unmerged_2h", why=why)], []
     note = ""
     if scope.startswith("org:") and left() > 2:
-        repos = gh(GH_REPOS, {"org": scope[4:].split()[0]})
-        if repos and repos.get("organization"):
-            rows = sorted(((r["pullRequests"]["totalCount"], r["name"])
-                           for r in repos["organization"]["repositories"]["nodes"]), reverse=True)
+        login = scope[4:].split()[0] if scope[4:].split() else ""
+        repos = gh(GH_REPOS, {"org": login}) if login else None
+        org = (repos or {}).get("organization") or {}
+        nodes = ((org.get("repositories") or {}).get("nodes") or [])
+        if nodes:
+            rows = sorted(((r.get("pullRequests", {}).get("totalCount", 0), r.get("name", "")) for r in nodes), reverse=True)
             note = "busiest " + ", ".join("%s %d" % (name, count) for count, name in rows[:4] if count)
     bits = ["green and mergeable on the current head, head older than %s" % age(green_age)]
     if more:
@@ -753,7 +764,6 @@ new_values = {}
 
 
 episodes = record.get("episodes") or {}
-held_open = set()
 
 
 def rises(key, domain, reading):
@@ -766,8 +776,6 @@ def rises(key, domain, reading):
         # Unmeasured is not evidence either way: keep the last reading and any open rise.
         if before is not None:
             new_values[name] = before
-        if episode is not None:
-            held_open.add("overlord-" + key)
         return False, before or 0
     new_values[name] = reading.value
     if episode is not None:
@@ -776,11 +784,13 @@ def rises(key, domain, reading):
     return reading.value > (before or 0), (before or 0)
 
 
-def cross(key, domain, threshold, reading, correction, fable=False, baseline=None):
+def cross(key, domain, threshold, reading, correction, fable=False, baseline=None, value=None):
+    if value is None and baseline is not None:
+        value = reading.value
     crossings.append({"key": key, "domain": domain, "threshold": threshold, "number": "%s=%s" % (reading.name, reading.value),
                       "source": reading.source, "at": reading.at, "correction": correction, "fable": fable,
                       "owner": cfg("OWNER_" + domain.upper()), "baseline": baseline,
-                      "value": reading.value if baseline is not None else None})
+                      "value": value, "reads": ["%s.%s" % (domain, reading.name)]})
 
 
 # credit: users_told_today
@@ -801,6 +811,7 @@ if passes:
         crossings.append({"key": "disagree-users-told", "domain": "credit", "threshold": "two readings of one number disagree",
                           "number": "users_told_today=unmeasured", "source": sentinel_src, "at": newest["end"],
                           "owner": cfg("OWNER_CREDIT"), "fable": True, "adjudicate": True,
+                          "reads": ["credit.users_told_today"],
                           "correction": "Adjudicate: %s. Name the authoritative reading and why, or confirm it is unmeasured." % why})
     elif number is None:
         told.why = "pass %d carries no users-told count" % newest["n"]
@@ -816,7 +827,7 @@ if passes:
             cross("credit-users-told", "credit", "users_told_today has not risen in %s" % age(cfg_int("FLAT", 14400)), told,
                   "users_told_today has stood at %d since at least %s. Find which send family stopped telling users, "
                   "and either restore it and report the tick line showing sent above 0, or report the measured reason "
-                  "nobody is owed a message." % (number, iso(ref["end"])))
+                  "nobody is owed a message." % (number, iso(ref["end"])), baseline=0)
     sentinel_unmeasured = field_int(newest["fields"], "unmeasured")
     earlier_pass = [p for p in passes if p["n"] != newest["n"]]
     if sentinel_unmeasured and earlier_pass and (field_int(earlier_pass[-1]["fields"], "unmeasured") or 0) > 0:
@@ -830,7 +841,10 @@ would = Reading("would_send", why="not configured")
 tick = Reading("tick", why="not configured")
 if tick_log:
     if "ticklog" not in files:
-        would.why = tick.why = "%s was not read inside the budget" % tick_src
+        would.why = tick.why = ("%s was not read inside the budget" % tick_src if not remote_complete
+                                else "%s was not read" % tick_src)
+    elif not remote_complete:
+        would.why = tick.why = "%s was cut short before the read finished" % tick_src
     elif not files["ticklog"][0]:
         would.why = tick.why = "%s does not exist" % tick_src
     else:
@@ -865,11 +879,12 @@ if tick_log:
                 cross("meter-tick", "meter", "the tick exceeds its cadence", tick,
                       "The outbound tick last started %s (%s ago) against a cadence of %s. Find why the scheduled tick did not "
                       "start - the schedule entry, a held lock, a failed unit - restore one on-cadence tick, and report its "
-                      "start and done lines." % (iso(last["start"]), age(since), age(cadence)))
+                      "start and done lines." % (iso(last["start"]), age(since), age(cadence)), baseline=0, value=since)
             elif ran > cadence:
                 cross("meter-tick", "meter", "the tick exceeds its cadence", tick,
                       "The outbound tick that started %s has run %s against a cadence of %s. Find what it is waiting on, "
-                      "and report the done line of a tick that finishes inside the cadence." % (iso(last["start"]), age(ran), age(cadence)))
+                      "and report the done line of a tick that finishes inside the cadence." % (iso(last["start"]), age(ran), age(cadence)),
+                      baseline=0, value=ran)
 readings["credit"].append(would)
 
 # claims
@@ -897,7 +912,7 @@ if rose:
 if support[3].value:
     cross("support-overdue", "support", "a commitment passed its due time with no sent message", support[3],
           "%d commitments are past their due time with no sent message. For each, send the promised message or tell the "
-          "customer the new time, then report commitments_overdue=0." % support[3].value)
+          "customer the new time, then report commitments_overdue=0." % support[3].value, baseline=0)
 
 # merges
 readings["merges"] = merge_readings
@@ -931,6 +946,8 @@ for domain, items in sorted(unmeasured.items()):
                           "threshold": "%s unmeasured on two consecutive ticks" % domain,
                           "number": "unmeasured=%d" % len(items), "source": holder.source, "at": NOW, "fable": False,
                           "owner": cfg("OWNER_" + domain.upper()) or cfg("OWNER_METER"),
+                          "reads": ["%s.%s" % (domain, r.name) for r in readings[domain]
+                                    if r.value is None and r.why != "not configured"],
                           "correction": "These %s numbers have been unmeasured for two ticks: %s. Make each one readable - write "
                                         "the missing source, fix the failing read - or report that it cannot be measured and why."
                                         % (domain, "; ".join(items))})
@@ -948,8 +965,16 @@ except (OSError, ValueError):
 lines = []
 for domain in DOMAINS:
     wrong = [c["threshold"] for c in crossings if c["domain"] == domain]
-    missing = [r.name for r in readings[domain] if r.value is None and r.why != "not configured"]
-    verdict = "WRONG: " + "; ".join(wrong) if wrong else ("unmeasured: " + ", ".join(missing) if missing else "inside thresholds")
+    missing = [r.name for r in readings[domain] if r.value is None and r.why != "not configured" and r.name != "stopped_lanes"]
+    unconfigured = [r.name for r in readings[domain] if r.value is None and r.why == "not configured" and r.name != "stopped_lanes"]
+    if wrong:
+        verdict = "WRONG: " + "; ".join(wrong)
+    elif missing:
+        verdict = "unmeasured: " + ", ".join(missing)
+    elif unconfigured:
+        verdict = "unmeasured (not configured): " + ", ".join(unconfigured)
+    else:
+        verdict = "inside thresholds"
     # Numbers that are unmeasured for one shared reason are named together, once.
     shown, grouped = [], {}
     for r in readings[domain]:
@@ -1017,7 +1042,7 @@ remind = cfg_int("REMIND", 14400)
 # Worst case for one interjection is a 5s page and a 6s steer; one always goes out.
 last_start = CHECK_TIMEOUT - 4 - 11
 interjected = 0
-open_now = set(held_open)
+open_now = set()
 for c in crossings:
     key = "overlord-" + c["key"]
     open_now.add(key)
@@ -1050,11 +1075,16 @@ for c in crossings:
     if failure:
         append_status("blocked [key=%s]: the correction was not delivered to a lane: %s. Route it by hand." % (key, failure))
     episodes[key] = {"opened_at": (episode or {}).get("opened_at", NOW), "last_at": NOW, "number": c["number"],
-                     "threshold": c["threshold"], "baseline": c.get("baseline"), "high": c.get("value")}
+                     "threshold": c["threshold"], "baseline": c.get("baseline"), "high": c.get("value"),
+                     "reads": c.get("reads") or []}
     record["episodes"] = episodes
     save_record(record)
 
+measured = {"%s.%s" % (d, r.name): r.value for d in DOMAINS for r in readings[d]}
 for key in sorted(set(episodes) - open_now):
+    reads = episodes[key].get("reads") or []
+    if any(measured.get(name) is None for name in reads):
+        continue
     append_status("resolved [key=%s]: %s no longer holds at %s (interjected at %s)" % (
         key, episodes[key].get("threshold", "the threshold"), iso(NOW), episodes[key].get("number", "?")))
     del episodes[key]

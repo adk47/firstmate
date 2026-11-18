@@ -122,6 +122,125 @@ healthy() {  # <home> <now>: every source present and inside its threshold
   green_prs "$home" 0 0 "$now"
 }
 
+test_an_unreadable_source_holds_an_open_crossing_instead_of_resolving_it() {
+  local home
+  home=$(make_home hold)
+  configure "$home"
+  healthy "$home" "$T0"
+  : > "$home/remote/tick.log"
+  tick "$home" $((T0 - 9000)) 0
+  tick "$home" $((T0 - 1800)) 0
+  run "$home" "$T0" check >/dev/null
+  assert_contains "$(cat "$home/state/overlord.status")" "blocked [key=overlord-credit-would-send]" "the zero would_send did not interject"
+
+  # The tick log becomes unreadable: the crossing is merely unmeasured, not cleared.
+  healthy "$home" $((T0 + 600))
+  rm -f "$home/remote/tick.log"
+  run "$home" $((T0 + 600)) check >/dev/null
+  assert_not_contains "$(cat "$home/state/overlord.status")" "resolved [key=overlord-credit-would-send]" \
+    "an unreadable source resolved the crossing"
+
+  # Readable again and clear: it resolves.
+  : > "$home/remote/tick.log"
+  tick "$home" $((T0 + 1200)) 6
+  tick "$home" $((T0 + 1800)) 6
+  fresh_backlogs "$home" $((T0 + 2400))
+  run "$home" $((T0 + 2400)) check >/dev/null
+  assert_contains "$(tail -1 "$home/state/overlord.status")" "resolved [key=overlord-credit-would-send]" \
+    "a readable clear source did not resolve the crossing"
+  pass "an unreadable source holds an open crossing, and a readable clear one resolves it"
+}
+
+test_a_worsening_level_threshold_interjects_again_after_the_reminder_window() {
+  local home
+  home=$(make_home level)
+  configure "$home"
+  healthy "$home" "$T0"
+  run "$home" "$T0" check >/dev/null
+  backlog "$home/remote/support.json" $((T0 + 540)) \
+    '"waiting_on_us": 0, "promised_a_person_24h": 7, "promises_broken_24h": 0, "commitments_overdue": 2'
+  run "$home" $((T0 + 600)) check >/dev/null
+  assert_contains "$(cat "$home/state/overlord.status")" "commitments_overdue=2" "the overdue commitment did not interject"
+
+  backlog "$home/remote/support.json" $((T0 + 1140)) \
+    '"waiting_on_us": 0, "promised_a_person_24h": 7, "promises_broken_24h": 0, "commitments_overdue": 2'
+  run "$home" $((T0 + 1200)) check >/dev/null
+  [ "$(wc -l < "$home/state/overlord.status" | tr -d ' ')" = 1 ] || fail "an unchanged overdue count interjected again"
+
+  backlog "$home/remote/support.json" $((T0 + 15000)) \
+    '"waiting_on_us": 0, "promised_a_person_24h": 7, "promises_broken_24h": 0, "commitments_overdue": 10'
+  run "$home" $((T0 + 15000)) check >/dev/null
+  assert_contains "$(tail -1 "$home/state/overlord.status")" "commitments_overdue=10" \
+    "a worsening overdue count did not interject again"
+  pass "a worsening level threshold interjects again after the reminder window"
+}
+
+test_a_cut_short_remote_read_is_unmeasured_not_a_false_tick() {
+  local home out
+  home=$(make_home truncated)
+  configure "$home"
+  healthy "$home" "$T0"
+  cat > "$home/fakebin/fake-remote" <<SH
+#!/usr/bin/env bash
+cat "$home/partial-stream"
+SH
+  chmod +x "$home/fakebin/fake-remote"
+  {
+    printf '@@now %s\n' "$T0"
+    printf '@@file ticklog present %s\n' "$T0"
+    printf '%s tick start: live=1 paid_live=1 cap=250 out=/x deployed=abc\n' "$(stamp $((T0 - 20000)))"
+    printf '%s ask-free check (rc=0): {"candidates": 5, "would_send": 0, "sent": 0}\n' "$(stamp $((T0 - 19900)))"
+    printf '@@file claims present %s\n' "$T0"
+    printf '{"written_at": "%s", "stuck_over_7d_no_step": 0, "reason_loss": 0}\n' "$(stamp $((T0 - 60)))"
+  } > "$home/partial-stream"
+  out=$(run "$home" "$T0" digest FM_OVERLORD_REMOTE="$home/fakebin/fake-remote")
+  assert_contains "$out" "would_send=unmeasured (remote:$home/remote/tick.log was cut short before the read finished)" \
+    "a cut-short tick log was read as a tick"
+  assert_contains "$out" "tick=unmeasured (remote:$home/remote/tick.log was cut short before the read finished)" \
+    "a cut-short tick log produced a tick reading"
+  pass "a cut-short remote read is unmeasured, not a false tick"
+}
+
+test_a_hanging_remote_read_is_bounded_and_reads_unmeasured() {
+  local home out start elapsed
+  home=$(make_home hang)
+  configure "$home"
+  healthy "$home" "$T0"
+  cat > "$home/fakebin/fake-remote" <<'SH'
+#!/usr/bin/env bash
+exec sleep 30
+SH
+  chmod +x "$home/fakebin/fake-remote"
+  start=$(date +%s)
+  out=$(run "$home" "$T0" digest FM_CHECK_TIMEOUT=4 FM_OVERLORD_PR_SCOPE= FM_OVERLORD_REMOTE="$home/fakebin/fake-remote")
+  elapsed=$(( $(date +%s) - start ))
+  [ "$elapsed" -lt 10 ] || fail "a hanging remote read blocked for ${elapsed}s"
+  assert_contains "$out" "would_send=unmeasured" "a hanging remote read did not read unmeasured"
+  pass "a hanging remote read is bounded and reads unmeasured"
+}
+
+test_an_unconfigured_home_is_not_reported_as_inside_thresholds() {
+  local home out
+  home=$(make_home unconfigured)
+  out=$(run "$home" "$T0" digest)
+  assert_not_contains "$out" "inside thresholds" "an unconfigured home read as inside thresholds"
+  assert_contains "$out" "| unmeasured (not configured): users_told_today, would_send" \
+    "the credit line did not report its unconfigured readings"
+  pass "an unconfigured home is not reported as inside thresholds"
+}
+
+test_a_malformed_pr_scope_reads_unmeasured_instead_of_crashing() {
+  local home out
+  home=$(make_home scope)
+  configure "$home" 'FM_OVERLORD_PR_SCOPE=org:'
+  healthy "$home" "$T0"
+  out=$(run "$home" "$T0" digest)
+  assert_contains "$out" "merges | open,green_unmerged_2h=unmeasured (FM_OVERLORD_PR_SCOPE names an org with no login)" \
+    "a malformed scope did not read unmeasured"
+  assert_contains "$out" "| unmeasured: open, green_unmerged_2h" "a malformed scope was reported as inside thresholds"
+  pass "a malformed PR scope reads unmeasured instead of crashing the check"
+}
+
 test_digest_prints_one_line_per_domain_with_number_source_and_age() {
   local home out
   home=$(make_home digest)
@@ -387,6 +506,12 @@ test_status_arm_and_disarm() {
 
 test_digest_prints_one_line_per_domain_with_number_source_and_age
 test_zero_would_send_on_two_ticks_interjects_once_then_resolves
+test_an_unreadable_source_holds_an_open_crossing_instead_of_resolving_it
+test_a_worsening_level_threshold_interjects_again_after_the_reminder_window
+test_a_cut_short_remote_read_is_unmeasured_not_a_false_tick
+test_a_hanging_remote_read_is_bounded_and_reads_unmeasured
+test_an_unconfigured_home_is_not_reported_as_inside_thresholds
+test_a_malformed_pr_scope_reads_unmeasured_instead_of_crashing
 test_users_told_flat_for_four_hours_is_wrong_but_a_shorter_flat_is_not
 test_green_unmerged_rises_goes_to_fable_and_an_unchanged_count_is_silent
 test_absent_and_stale_sources_are_unmeasured_and_two_ticks_interject
