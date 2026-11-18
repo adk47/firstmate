@@ -2512,6 +2512,29 @@ grep -q 'carrying aaaa1111 yet' "$HOME_CC/state/change-watch/cc1-1980/read-failu
   || fail "a window of unrelated runs was not stated as awaiting a carrier: $(cat "$HOME_CC/state/change-watch/cc1-1980/read-failures" 2>/dev/null)"
 pass "the carrier scan finds the run carrying the merge past many unrelated runs"
 
+# A deploy that failed and was re-run on the SAME head is decided by the retry:
+# the release deployed. Reading the oldest carrier instead kept scoring the
+# failure that a later run replaced, which is the same newest-run-wins defect the
+# merge gate had - a superseded verdict manufacturing a regression.
+HOME_DR=$(hydra_world dr "$MERGED")
+run_hydra_cw "$HOME_DR" 1790000000 register dr1 'https://github.com/Muso-AI/hydra/pull/1999' >/dev/null \
+  || fail "hydra register failed"
+hydra_runs "$HOME_DR" "[$(hydra_run 2026-09-21T15:00:00Z completed failure "$MERGED"),$(hydra_run 2026-09-21T15:30:00Z completed success "$MERGED")]"
+run_hydra_cw "$HOME_DR" 1790000900 sample dr1-1999 900 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_DR" dr1-1999 900)" = 1 ] \
+  || fail "a re-run that succeeded on the same head was scored as the failure it replaced: $(cat "$HOME_DR/state/change-watch/dr1-1999/samples.log" 2>/dev/null)"
+line=$(run_hydra_cw "$HOME_DR" 1790000900 verdict dr1-1999)
+case "$line" in
+  *regressed*) fail "a retried deploy that succeeded regressed the release: $line" ;;
+esac
+# The reverse order is still a failed deploy: the newest run decides, and here the
+# newest run is the failure.
+hydra_runs "$HOME_DR" "[$(hydra_run 2026-09-21T15:00:00Z completed success "$MERGED"),$(hydra_run 2026-09-21T15:30:00Z completed failure "$MERGED")]"
+run_hydra_cw "$HOME_DR" 1790003600 sample dr1-1999 3600 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_DR" dr1-1999 3600)" = 0 ] \
+  || fail "a newer failed deploy was outranked by the older success it followed: $(deploy_run_value "$HOME_DR" dr1-1999 3600)"
+pass "a re-run on the same head decides the deploy, whichever way the order runs"
+
 # A run still in flight is the deploy not having landed yet: the reading waits,
 # it is not a gap, and the watch still reaches proven once the deploy succeeds.
 HOME_IF=$(hydra_world if "$MERGED")
