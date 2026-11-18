@@ -2975,4 +2975,16 @@ run_cw "$HOME_J4" 1790040000 gate j4 --terminal-gap >/dev/null \
   && fail "an interruption that left every reading measured still queued a wake"
 pass "an interrupted drive that took every reading is proven and queues nothing"
 
+# A regressed row is proof that the change was bad, so the re-derive never
+# re-reads it away: only a row the old rule called unmeasurable is repaired.
+sed -i 's/"terminal_state": "proven"/"terminal_state": "regressed"/' "$ROW_J4"
+cp "$ROW_J4" "$TMP_ROOT/row-before-regressed-rederive.json"
+out=$(run_cw "$HOME_J4" 1790050000 rederive --apply) \
+  || fail "the re-derive over a regressed row failed: $out"
+printf '%s\n' "$out" | grep -q '0 row(s) rewritten' \
+  || fail "the re-derive rewrote a regressed row: $out"
+cmp -s "$ROW_J4" "$TMP_ROOT/row-before-regressed-rederive.json" \
+  || fail "the re-derive changed a regressed row: $(cat "$ROW_J4")"
+pass "the re-derive never rewrites a regressed row"
+
 # INTERRUPTED_TAIL

@@ -4372,8 +4372,12 @@ cmd_rederive() {
     [ -f "$(cw_row_path "$id")" ] || { printf 'rederive: %s: no durable row\n' "$id"; continue; }
     total=$((total + 1))
     state=$(cw_row_state "$id")
-    if [ "$state" = open ]; then continue; fi
-    if ! cw_watch_exists "$id"; then continue; fi
+    # Only a row the old rule called unmeasurable is re-derived. A regressed row
+    # is proof of a bad change and a proven or not-applicable row is already a
+    # verdict, so re-reading a later reading's absence would be throwing evidence
+    # away; an open row belongs to a drive that has not finished.
+    [ "$state" = unmeasurable-with-reason ] || continue
+    cw_watch_exists "$id" || continue
     note=$(cw_row_interruption "$id")
     derived=$(cw_terminal_state "$id" "$note")
     new=$(printf '%s' "$derived" | cut -f1)
