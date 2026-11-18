@@ -3455,7 +3455,26 @@ cw_scored_any() {  # <watch-id>
 # carried into the reason so a proof taken by a stopped drive says so.
 cw_terminal_state() {  # <watch-id> [<note>]
   local id=$1 note=${2:-} r json final='' empty='' empties=0 missing=''
-  local unread gaps known why='' superseded='' plural='s' recorded=0
+  local unread gaps known why='' superseded='' plural='s' recorded=0 seen=''
+  # A regression a reading actually recorded is proof of a bad change, and it
+  # outranks every later consideration: a watch that saw one is never clean, and
+  # reporting it as a measurement gap would state the opposite of what the
+  # readings found. The flag is the samples' regressed column, so a directory
+  # whose drive detected a regression but wrote no row still carries the verdict
+  # it earned instead of losing it to the row it never got.
+  seen=$(awk -F'\t' '
+    $6 == 1 {
+      printf "regressed at +%dm on %s", $2 / 60, $3
+      if ($4 != "") printf " (%s", $4
+      if ($5 != "") printf "%sbaseline %s", ($4 != "" ? " vs " : " ("), $5
+      if ($4 != "" || $5 != "") printf ")"
+      print ""
+      exit
+    }' "$(cw_samples_path "$id")" 2>/dev/null)
+  if [ -n "$seen" ]; then
+    printf 'regressed\t%s\n' "$seen"
+    return 0
+  fi
   for r in 900 3600 21600; do
     json=$(cw_reading_json "$id" "$r")
     if [ "$json" = null ]; then
@@ -3724,6 +3743,11 @@ cw_record_completion() {  # <watch-id>
   state=${state%%$'\t'*}
   case "$state" in
     proven) cw_record_clean "$id" "$reason" ;;
+    regressed)
+      # Recorded as the bad change it is; the reason already names the reading
+      # that caught it, so nothing here re-derives what the drive found.
+      printf 'regressed\n' | cw_write "$(cw_verdict_path "$id")"
+      cw_row_write "$id" regressed "$reason" ;;
     *) cw_record_unmeasured "$id" "$reason" ;;
   esac
 }
@@ -3751,6 +3775,9 @@ cw_record_interrupted() {  # <watch-id> <epoch>
   if [ "$state" = proven ]; then
     printf 'clean\n' | cw_write "$(cw_verdict_path "$id")"
     cw_row_write "$id" proven "$reason"
+  elif [ "$state" = regressed ]; then
+    printf 'regressed\n' | cw_write "$(cw_verdict_path "$id")"
+    cw_row_write "$id" regressed "$reason"
   else
     printf '%s\n' "$note" | cw_write "$(cw_verdict_path "$id")"
     cw_row_write "$id" unmeasurable-with-reason "$reason"
