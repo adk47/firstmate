@@ -166,11 +166,13 @@
 #           drive that has not finished, and a regressed, proven or
 #           not-applicable row is already a verdict. A watch registered before
 #           rows existed has no row to rewrite, so the readings it still holds
-#           get one written, stamped with derived_epoch and completed at its last
-#           sample; a live row that appeared while the sweep ran wins, and a
-#           directory whose drive has not finished is left alone. Dry run unless
-#           --apply: it prints the rule, a census of the no-row watches, how many
-#           rows would change, and the first ten of them, and rewrites nothing.
+#           get one written and completed at its last sample. Every row it writes
+#           or rewrites carries derived_epoch, so a reconstructed row is never
+#           mistaken for one a live drive wrote; a live row that appeared while
+#           the sweep ran wins, and a directory whose drive has not finished is
+#           left alone. Dry run unless --apply: it prints the rule, a census of
+#           the no-row watches, how many rows would change, and the first ten of
+#           them, and rewrites nothing.
 # doctor    Live self-test of the read path. It prints the kubeconfig in use,
 #           proves the cluster answers, and with a watch id reads every target
 #           live: a Deployment target must return its pods and its pod images, a
@@ -3198,11 +3200,13 @@ cw_progress_label() {  # <watch-id>
 # --- durable row --------------------------------------------------------------
 #
 # One row per merge, at state/change-watch/rows/<watch-id>.json. It is written
-# when the watch is registered (terminal_state "open") and rewritten once, at
-# the terminal verdict, so a merge always has exactly one durable record of what
-# was measured. A watch registered before the row was written at registration gets
-# one from `rederive`, stamped with derived_epoch so a reconstructed row is never
-# mistaken for one a live drive wrote.
+# when the watch is registered (terminal_state "open") and rewritten at the
+# terminal verdict, so a merge always has exactly one durable record of what
+# was measured; `rederive` may rewrite that terminal state once more, and a watch
+# registered before the row was written at registration gets one from it too.
+# Every row `rederive` writes OR rewrites carries
+# derived_epoch, so a reconstructed row is never mistaken for one a live drive
+# wrote.
 # state/change-watch/ is not a task record: bin/fm-teardown.sh removes
 # state/<task>.* and never this tree, so the row outlives the task.
 #
@@ -3218,7 +3222,8 @@ cw_progress_label() {  # <watch-id>
 #   merge_epoch        the rollout epoch the schedule is measured from, or null
 #   registered_epoch   when the watch was registered, or null
 #   deadline_epoch     claim rows only: when an open claim becomes overdue
-#   completed_epoch    when the terminal state was written, or null while open
+#   completed_epoch    when the terminal state was first written, or null while
+#                      open; preserved when rederive rewrites the row
 #   derived_epoch      when rederive reconstructed the row, absent for a live row
 #   readings           one key per scheduled offset (SCHEDULE_OFFSETS for a
 #                      merge, CLAIM_OFFSETS for a claim): <reading>|null
