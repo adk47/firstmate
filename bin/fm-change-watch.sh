@@ -2232,7 +2232,8 @@ print(count)
 # landed, while one that succeeded and was then retried into a failure has not.
 # With no merge sha to check carriers against, no run
 # can be attributed to this release, so none is scored: an unrelated run is
-# neither this release's success nor its regression.
+# neither this release's success nor its regression, and scoring it either way
+# would invent a verdict from a run whose tree never carried the commit.
 cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch> [<merge-sha>]
   local repo=$1 workflow=$2 since=$3 sha=${4:-}
   local gh_cmd=${FM_CW_GH:-gh} out rc=0 cands created runsha status conclusion carried=''
