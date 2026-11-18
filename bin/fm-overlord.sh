@@ -58,7 +58,7 @@
 #            unmeasured        readings above that could not be read, plus the
 #                              sentinel's own `unmeasured=` count.
 #                              WRONG when a domain is unmeasured on two
-#                              consecutive ticks.
+#                              consecutive checks.
 #            stopped_lanes     workers the fleet watchdog holds on its stall
 #                              ladder (state/.watchdog-worker.json). Shown, not
 #                              a threshold: the watchdog owns those workers.
@@ -943,12 +943,12 @@ for domain, items in sorted(unmeasured.items()):
     if twice:
         holder = Reading("unmeasured", len(items), "this check's own reads", NOW)
         crossings.append({"key": "meter-unmeasured-%s" % domain, "domain": "meter",
-                          "threshold": "%s unmeasured on two consecutive ticks" % domain,
+                          "threshold": "%s unmeasured on two consecutive checks" % domain,
                           "number": "unmeasured=%d" % len(items), "source": holder.source, "at": NOW, "fable": False,
                           "owner": cfg("OWNER_" + domain.upper()) or cfg("OWNER_METER"),
                           "reads": ["%s.%s" % (domain, r.name) for r in readings[domain]
                                     if r.value is None and r.why != "not configured"],
-                          "correction": "These %s numbers have been unmeasured for two ticks: %s. Make each one readable - write "
+                          "correction": "These %s numbers have been unmeasured for two checks: %s. Make each one readable - write "
                                         "the missing source, fix the failing read - or report that it cannot be measured and why."
                                         % (domain, "; ".join(items))})
 try:
@@ -1056,6 +1056,11 @@ for c in crossings:
         deferred = True
         if episode is None:
             open_now.discard(key)
+            for name in c.get("reads") or []:
+                if previous.get(name) is None:
+                    new_values.pop(name, None)
+                else:
+                    new_values[name] = previous[name]
         continue
     interjected += 1
     finding = "OVERLORD %s: %s; %s; source %s; age %s" % (

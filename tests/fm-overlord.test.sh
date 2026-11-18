@@ -175,6 +175,28 @@ test_a_worsening_level_threshold_interjects_again_after_the_reminder_window() {
   pass "a worsening level threshold interjects again after the reminder window"
 }
 
+test_a_deferred_rise_is_still_seen_on_the_next_check() {
+  local home
+  home=$(make_home deferred)
+  configure "$home"
+  healthy "$home" "$T0"
+  run "$home" "$T0" check >/dev/null
+
+  backlog "$home/remote/claims.json" $((T0 + 540)) '"stuck_over_7d_no_step": 3, "reason_loss": 0'
+  backlog "$home/remote/support.json" $((T0 + 540)) \
+    '"waiting_on_us": 10, "promised_a_person_24h": 7, "promises_broken_24h": 0, "commitments_overdue": 0'
+  run "$home" $((T0 + 600)) check FM_CHECK_TIMEOUT=4 >/dev/null
+  assert_contains "$(cat "$home/state/overlord.status")" "blocked [key=overlord-claims-stuck]" \
+    "the first rise did not interject"
+  assert_not_contains "$(cat "$home/state/overlord.status")" "blocked [key=overlord-support-waiting]" \
+    "the deferred rise interjected in the same check"
+
+  run "$home" $((T0 + 1200)) check FM_CHECK_TIMEOUT=4 >/dev/null
+  assert_contains "$(cat "$home/state/overlord.status")" "blocked [key=overlord-support-waiting]" \
+    "a deferred rise was lost instead of interjecting on the next check"
+  pass "a deferred rise is still seen on the next check"
+}
+
 test_a_cut_short_remote_read_is_unmeasured_not_a_false_tick() {
   local home out
   home=$(make_home truncated)
@@ -386,8 +408,8 @@ test_absent_and_stale_sources_are_unmeasured_and_two_ticks_interject() {
   healthy "$home" $((T0 + 600))
   rm -f "$home/remote/support.json" "$home/remote/claims.json"
   run "$home" $((T0 + 600)) check >/dev/null
-  assert_contains "$(cat "$home/state/overlord.status")" "blocked [key=overlord-meter-unmeasured-support]: OVERLORD meter: support unmeasured on two consecutive ticks" \
-    "two unmeasured ticks did not interject"
+  assert_contains "$(cat "$home/state/overlord.status")" "blocked [key=overlord-meter-unmeasured-support]: OVERLORD meter: support unmeasured on two consecutive checks" \
+    "two unmeasured checks did not interject"
   assert_contains "$(cat "$home/sent")" "support-lane --fire-and-forget" "the unmeasured numbers were not steered to the lane that owns them"
   pass "absent and stale sources read unmeasured, and two unmeasured ticks interject to the owning lane"
 }
@@ -508,6 +530,7 @@ test_digest_prints_one_line_per_domain_with_number_source_and_age
 test_zero_would_send_on_two_ticks_interjects_once_then_resolves
 test_an_unreadable_source_holds_an_open_crossing_instead_of_resolving_it
 test_a_worsening_level_threshold_interjects_again_after_the_reminder_window
+test_a_deferred_rise_is_still_seen_on_the_next_check
 test_a_cut_short_remote_read_is_unmeasured_not_a_false_tick
 test_a_hanging_remote_read_is_bounded_and_reads_unmeasured
 test_an_unconfigured_home_is_not_reported_as_inside_thresholds
