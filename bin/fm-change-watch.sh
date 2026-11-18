@@ -3425,7 +3425,7 @@ cw_scored_any() {  # <watch-id>
 # plus the Deployments themselves: proven needs that reading to have measured
 # something, some sample of the watch to have scored, and every Deployment
 # target measured at least once. Anything less is unmeasurable-with-reason naming
-# what is missing. A missing reading is never a pass.
+# what is missing. A missing +6h reading is never a pass.
 #
 # An EARLIER reading that measured nothing is not terminal. The +15m read can fail
 # for a reason that has nothing to do with the change - a log format that lands
