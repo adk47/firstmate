@@ -1,0 +1,43 @@
+
+=== register the merged PR ===
+change-watch: registered d1-3317 for https://github.com/Muso-AI/H-DevOps/pull/3317 (1 target(s)); beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)
+
+=== the +15m reading fails outright (no usable series at the rollout) ===
+sample exit=0 (a failed read, not a verdict)
+
+=== the +1h/+6h drive reads the release that has now rolled out ===
+notice: change-watch: completion note skipped for https://github.com/Muso-AI/H-DevOps/pull/3317 (task d1 has no status record)
+notice: change-watch: clean for https://github.com/Muso-AI/H-DevOps/pull/3317 on every metric it could read, but these metrics were never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; the rollout could not be proven for: muso-prod/feed-service
+verdict: change-watch clean
+row: {"version": "fm-change-watch-row-v1", "watch_id": "d1-3317", "task": "d1", "pr_url": "https://github.com/Muso-AI/H-DevOps/pull/3317", "merge_epoch": 1790000000, "registered_epoch": 1790000000, "completed_epoch": 1790044000, "readings": {"900": {"at": 1790000900, "scored": 0, "unmeasured": 6, "awaiting": 0, "regressed": 0, "measured": false, "values": {}}, "3600": {"at": 1790044000, "scored": 1, "unmeasured": 5, "awaiting": 0, "regressed": 0, "measured": true, "values": {"restarts@muso-prod/feed-service": "2"}}, "21600": {"at": 1790044000, "scored": 1, "unmeasured": 5, "awaiting": 0, "regressed": 0, "measured": true, "values": {"restarts@muso-prod/feed-service": "2"}}}, "real_user_check": "not-observed", "real_user_reason": "http_5xx_per_min was never scored, so no real user request was observed", "unmeasured_metrics": "http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service", "unproven_targets": "muso-prod/feed-service", "terminal_state": "proven", "reason": "the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)"}
+
+=== gate for the done claim on the proven watch ===
+gate exit=0
+teardown gate (--terminal-gap) exit=0
+
+=== rewrite the row/verdict into the shape the pre-fix code wrote (stale unmeasurable) ===
+verdict: change-watch unmeasurable-with-reason: nothing measured at +15m
+row: {"version": "fm-change-watch-row-v1", "watch_id": "d1-3317", "task": "d1", "pr_url": "https://github.com/Muso-AI/H-DevOps/pull/3317", "merge_epoch": 1790000000, "registered_epoch": 1790000000, "completed_epoch": 1790044000, "readings": {"900": {"at": 1790000900, "scored": 0, "unmeasured": 6, "awaiting": 0, "regressed": 0, "measured": false, "values": {}}, "3600": {"at": 1790044000, "scored": 1, "unmeasured": 5, "awaiting": 0, "regressed": 0, "measured": true, "values": {"restarts@muso-prod/feed-service": "2"}}, "21600": {"at": 1790044000, "scored": 1, "unmeasured": 5, "awaiting": 0, "regressed": 0, "measured": true, "values": {"restarts@muso-prod/feed-service": "2"}}}, "real_user_check": "not-observed", "real_user_reason": "http_5xx_per_min was never scored, so no real user request was observed", "unmeasured_metrics": "http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service", "unproven_targets": "muso-prod/feed-service", "terminal_state": "unmeasurable-with-reason", "reason": "nothing measured at +15m; the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)"}
+teardown gate (--terminal-gap) exit=1 (refused, task stuck)
+
+=== rederive dry run: what would change, and why ===
+change-watch rederive: dry run, nothing is rewritten (pass --apply to rewrite the rows)
+change-watch rederive: a row is proven when its +6h reading measured, some sample scored, and every Deployment target was measured at least once
+rederive: d1-3317: unmeasurable-with-reason -> proven (the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service)
+change-watch rederive: 1 row(s) would change of 1 row(s) read
+
+=== rederive --apply: repair the row from its own readings ===
+change-watch rederive: applying
+change-watch rederive: a row is proven when its +6h reading measured, some sample scored, and every Deployment target was measured at least once
+rederive: d1-3317: unmeasurable-with-reason -> proven (the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service)
+change-watch rederive: 1 row(s) rewritten of 1 row(s) read
+row after apply: {"version": "fm-change-watch-row-v1", "watch_id": "d1-3317", "task": "d1", "pr_url": "https://github.com/Muso-AI/H-DevOps/pull/3317", "merge_epoch": 1790000000, "registered_epoch": 1790000000, "completed_epoch": 1790044000, "readings": {"900": {"at": 1790000900, "scored": 0, "unmeasured": 6, "awaiting": 0, "regressed": 0, "measured": false, "values": {}}, "3600": {"at": 1790044000, "scored": 1, "unmeasured": 5, "awaiting": 0, "regressed": 0, "measured": true, "values": {"restarts@muso-prod/feed-service": "2"}}, "21600": {"at": 1790044000, "scored": 1, "unmeasured": 5, "awaiting": 0, "regressed": 0, "measured": true, "values": {"restarts@muso-prod/feed-service": "2"}}}, "real_user_check": "not-observed", "real_user_reason": "http_5xx_per_min was never scored, so no real user request was observed", "unmeasured_metrics": "http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service", "unproven_targets": "muso-prod/feed-service", "terminal_state": "proven", "derived_epoch": 1790050000, "reason": "the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)"}
+verdict: change-watch clean
+
+=== teardown gate after repair ===
+teardown gate (--terminal-gap) exit=0
+
+=== rederive is idempotent ===
+change-watch rederive: dry run, nothing is rewritten (pass --apply to rewrite the rows)
+change-watch rederive: a row is proven when its +6h reading measured, some sample scored, and every Deployment target was measured at least once
+change-watch rederive: 0 row(s) would change of 1 row(s) read

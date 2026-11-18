@@ -1,0 +1,6 @@
+ok - a pre-merge image still awaits its deploy, and its build answer is remembered
+ok - an unreadable build answer names the failed read, never the awaiting deploy
+ok - one sample asks the build answer once per target
+ok - a stalled build read is cut at its share of the sample and later metrics are read
+not ok - a watch whose +1h and +6h readings measured ended change-watch unmeasurable-with-reason: nothing measured at +15m; last read reason: read exited 1 with no value
+not ok - a watch whose +1h and +6h readings measured ended change-watch unmeasurable-with-reason: nothing measured at +15m; last read reason: read exited 1 with no value
