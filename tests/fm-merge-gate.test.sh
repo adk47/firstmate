@@ -124,7 +124,7 @@ make_case() {
 write_pr_view() {
   local case_dir=$1 kv key value
   local head=$HEAD author=someone base=develop headref=feature/x state=OPEN
-  local merged_at=null body='Closes nothing.' checks='qa-review:SUCCESS,unit-tests:SUCCESS'
+  local merged_at=null body='Closes nothing.' checks='qa-review:SUCCESS,unit-tests:SUCCESS' statuses=''
   shift
   for kv in "$@"; do
     key=${kv%%=*}
@@ -138,6 +138,7 @@ write_pr_view() {
       merged_at) merged_at=$value ;;
       body) body=$value ;;
       checks) checks=$value ;;
+      statuses) statuses=$value ;;
       *) fail "write_pr_view: unknown field '$key'" ;;
     esac
   done
@@ -158,6 +159,23 @@ write_pr_view() {
     rollup="$rollup{\"__typename\":\"CheckRun\",\"name\":\"$name\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"$extra}"
   done
   unset IFS
+  # statuses= emits the commit-status shape: a StatusContext carrying a context
+  # and a state, with no conclusion, no workflowName, and no name. This forge's
+  # QA bot publishes its verdict that way as well as as a review, so a
+  # check-run-only view of the same head sees no qa-review at all. The gate has
+  # to read the verdict out of the one rollup it already consumes.
+  if [ -n "$statuses" ]; then
+    local spair sctx sstate
+    local IFS=,
+    for spair in $statuses; do
+      [ -n "$spair" ] || continue
+      sctx=${spair%%:*}
+      sstate=${spair#*:}
+      [ -n "$rollup" ] && rollup="$rollup,"
+      rollup="$rollup{\"__typename\":\"StatusContext\",\"context\":\"$sctx\",\"state\":\"$sstate\"}"
+    done
+    unset IFS
+  fi
   cat > "$case_dir/fixtures/pr-view.json" <<JSON
 {
   "headRefOid": "$head",
@@ -684,6 +702,65 @@ test_gate_muso_ai_without_qa_check_refuses() {
   pass "a Muso-AI repository without a qa-review check still refuses"
 }
 
+# --- (ac) a QA verdict published as a commit status -------------------------
+# The QA bot publishes each verdict twice: a review carrying the prose, and a
+# commit status named qa-review carrying the machine-readable state. On a real
+# head the check-runs endpoint therefore returns no qa-review at all while a GO
+# demonstrably exists. The gate reads the verdict out of statusCheckRollup,
+# which carries both shapes, so this case pins that reading: a StatusContext
+# named qa-review with state SUCCESS is a GO, and its FAILURE is not. Without
+# this case every fixture in the file emits __typename CheckRun and the shape
+# that authorized a real merge on 2026-11-18 would stay untested.
+test_gate_reads_a_commit_status_verdict() {
+  local case_dir rc
+  case_dir=$(make_case muso-ai-status-verdict)
+  write_pr_view "$case_dir" checks='unit-tests:SUCCESS' \
+    statuses='qa-review:SUCCESS,qa/verdict:SUCCESS,verify:SUCCESS'
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a commit-status qa-review GO must authorize the merge"
+  assert_contains "$(cat "$case_dir/out")" "qa-review=SUCCESS" \
+    "the gate must report the commit-status verdict it read"
+  pass "a qa-review GO published as a commit status authorizes the merge"
+}
+
+test_gate_refuses_a_failing_commit_status_verdict() {
+  local case_dir rc
+  case_dir=$(make_case muso-ai-status-verdict-bad)
+  write_pr_view "$case_dir" checks='unit-tests:SUCCESS' \
+    statuses='qa-review:FAILURE,verify:SUCCESS'
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a commit-status qa-review FAILURE must refuse"
+  assert_contains "$(cat "$case_dir/err")" "the qa-review verdict on head $HEAD is FAILURE, not SUCCESS" \
+    "the refusal must name the commit-status verdict it read"
+  pass "a qa-review FAILURE published as a commit status refuses"
+}
+
+test_gate_refuses_a_status_context_that_is_not_the_verdict() {
+  local case_dir rc
+  case_dir=$(make_case muso-ai-status-verdict-other-context)
+  # A context that merely looks like the verdict is not the verdict: the name
+  # must match exactly, so qa/verdict alone cannot authorize a merge.
+  write_pr_view "$case_dir" checks='unit-tests:SUCCESS' \
+    statuses='qa/verdict:SUCCESS,verify:SUCCESS'
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a near-miss commit-status context must not authorize a merge"
+  assert_contains "$(cat "$case_dir/err")" "no qa-review verdict exists on head $HEAD" \
+    "the refusal must say the verdict is absent, not that another context passed"
+  pass "a near-miss commit status cannot stand in for the qa-review verdict"
+}
+
 test_gate_muso_ai_with_qa_go_passes_without_workflow_fixture() {
   local case_dir rc
   case_dir=$(make_case muso-ai-qa-go)
@@ -1104,6 +1181,9 @@ test_gate_failure_in_other_run_still_refuses
 test_gate_ignores_develop_beta_prose
 test_gate_skipped_or_neutral_qa_outranks_success
 test_gate_muso_ai_without_qa_check_refuses
+test_gate_reads_a_commit_status_verdict
+test_gate_refuses_a_failing_commit_status_verdict
+test_gate_refuses_a_status_context_that_is_not_the_verdict
 test_gate_muso_ai_with_qa_go_passes_without_workflow_fixture
 test_gate_declared_no_qa_attestation_green_passes
 test_gate_declared_no_qa_attestation_absent_refuses
