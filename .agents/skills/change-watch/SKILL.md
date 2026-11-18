@@ -72,7 +72,7 @@ The ordering is the contract, not an accident of layout: a test asserts it from 
 
 `check: change-watch <task-id> <pr-url> interrupted at +Nm`
 
-The drive stopped before the end of its schedule (a stale runner group stopped, a host reboot, an action timeout) and the verdict is `change-watch interrupted at +Nm`, never clean.
+The drive stopped before the end of its schedule (a stale runner group stopped, a host reboot, an action timeout) and it is judged by the readings it took: when those already proved the change the verdict is `change-watch clean` and no interruption wake is queued, and otherwise the verdict is `change-watch interrupted at +Nm` and this wake carries it.
 1. Read `bin/fm-change-watch.sh verdict <watch-id>` and the samples it did take; a regression it had already recorded is the check wake above, not this one.
 2. Run the generic acknowledgement for the `procevent` outcome and `bin/fm-procevent-when.sh retire <name>` as `process-event-sources` requires.
 3. Re-register with `bin/fm-change-watch.sh register <task-id> <pr-url>`: on an interrupted watch it retires the stopped source itself, re-arms exactly the remaining samples, prints how many are left, and rewrites the watch's durable row back to `open` so the re-armed watch never leaves a stale terminal row behind.

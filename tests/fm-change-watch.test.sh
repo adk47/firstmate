@@ -11,8 +11,8 @@
 # that never read a target ends unmeasurable-with-reason, queues a check wake,
 # and blocks the done claim instead of completing quietly; a row missing a
 # reading is never proven; the audit fails on an unmeasurable row and on a
-# completed-unmeasured status line; an interrupted drive is never clean and can
-# be re-armed; a re-registered completed watch re-measures from scratch and a
+# completed-unmeasured status line; an interrupted drive is judged by the readings
+# it took and can be re-armed; a re-registered completed watch re-measures from scratch and a
 # deleted verdict cannot hide its durable row; the pool metric is scoped to the
 # Deployment's own pool; the pool
 # console is read as ubuntu through the admin unix socket with stdin closed and
@@ -573,7 +573,7 @@ run_cw "$HOME_Q" 1790000900 verdict q1-3317 | grep -q "clean so far" \
   || fail "an unresolvable pool was scored from a series it does not own"
 pass "an unresolvable pool leaves the pool metric unmeasured"
 
-# --- an interrupted drive is never clean and can be re-armed ------------------
+# --- an interrupted drive is judged by its readings and can be re-armed -------
 
 HOME_I=$(new_world i)
 seed_pr "$HOME_I" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
@@ -2921,6 +2921,9 @@ pass "an unmeasured metric key is named in a proven row, not promoted to a failu
 sed -i 's/"terminal_state": "proven"/"terminal_state": "unmeasurable-with-reason"/; s/"reason": "the +6h reading/"reason": "nothing measured at +15m; the +6h reading/' "$ROW_J"
 grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_J" \
   || fail "the pre-fix row fixture was not written: $(cat "$ROW_J")"
+printf 'unmeasurable-with-reason: nothing measured at +15m\n' > "$HOME_J/state/change-watch/j1-3317/verdict"
+[ "$(run_cw "$HOME_J" 1790050000 verdict j1-3317)" = "change-watch unmeasurable-with-reason: nothing measured at +15m" ] \
+  || fail "the pre-fix verdict fixture was not written: $(run_cw "$HOME_J" 1790050000 verdict j1-3317)"
 completed_before=$(sed -n 's/.*"completed_epoch": \([^,]*\),.*/\1/p' "$ROW_J")
 cp "$ROW_J" "$TMP_ROOT/row-before-rederive.json"
 out=$(run_cw "$HOME_J" 1790050000 rederive) || fail "the re-derive dry run failed: $out"
@@ -2939,6 +2942,8 @@ grep -q '"terminal_state": "proven"' "$ROW_J" \
   || fail "the re-derive did not prove a row whose later readings measured: $(cat "$ROW_J")"
 [ "$(sed -n 's/.*"completed_epoch": \([^,]*\),.*/\1/p' "$ROW_J")" = "$completed_before" ] \
   || fail "the re-derive moved the completion epoch the audit window is measured from"
+[ "$(run_cw "$HOME_J" 1790050000 verdict j1-3317)" = "change-watch clean" ] \
+  || fail "the re-derive left the old failure in the verdict file: $(run_cw "$HOME_J" 1790050000 verdict j1-3317)"
 out=$(run_cw "$HOME_J" 1790050000 rederive) || fail "the second dry run failed: $out"
 printf '%s\n' "$out" | grep -q '0 row(s) would change' \
   || fail "the re-derive keeps changing an already re-derived row: $out"
@@ -2986,5 +2991,3 @@ printf '%s\n' "$out" | grep -q '0 row(s) rewritten' \
 cmp -s "$ROW_J4" "$TMP_ROOT/row-before-regressed-rederive.json" \
   || fail "the re-derive changed a regressed row: $(cat "$ROW_J4")"
 pass "the re-derive never rewrites a regressed row"
-
-# INTERRUPTED_TAIL

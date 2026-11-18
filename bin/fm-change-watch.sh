@@ -4391,6 +4391,9 @@ cmd_rederive() {
     completed=$(sed -n 's/.*"completed_epoch": \([0-9]*\).*/\1/p' "$(cw_row_path "$id")" | tail -1)
     cw_row_write "$id" "$new" "$reason" "$(cw_row_task "$id")" \
       "$(cw_row_url "$id")" "" "" "$completed"
+    case "$new" in
+      proven) printf 'clean\n' | cw_write "$(cw_verdict_path "$id")" ;;
+    esac
   done
   if [ "$apply" -eq 1 ]; then
     printf 'change-watch rederive: %s row(s) rewritten of %s row(s) read\n' "$changed" "$total"
