@@ -1,0 +1,34 @@
+notice: change-watch: unmeasurable for https://github.com/Muso-AI/H-DevOps/pull/3317: nothing measured at +15m; last read reason: read exited 1 with no value
+=== BEFORE THE FIX (base commit script) ===
+verdict: change-watch unmeasurable-with-reason: nothing measured at +15m; last read reason: read exited 1 with no value
+durable row terminal_state: unmeasurable-with-reason
+change-watch: gate FAIL o1-3317: unmeasurable-with-reason: nothing measured at +15m; last read reason: read exited 1 with no value; beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)
+teardown gate: REFUSED (the task can never be cleaned up)
+notice: change-watch: completion note skipped for https://github.com/Muso-AI/H-DevOps/pull/3317 (task n1 has no status record)
+notice: change-watch: clean for https://github.com/Muso-AI/H-DevOps/pull/3317 on every metric it could read, but these metrics were never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; the rollout could not be proven for: muso-prod/feed-service
+
+=== AFTER THE FIX (this branch) ===
+verdict: change-watch clean
+durable row terminal_state: proven
+durable row reason: the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)
+change-watch: gate ok for n1
+teardown gate: PASS (the task can be cleaned up)
+
+=== REDERIVE: repairing the stale row the old code left behind ===
+stale row before rederive: unmeasurable-with-reason
+--- rederive (dry run) ---
+change-watch rederive: dry run, nothing is rewritten (pass --apply to rewrite the rows)
+change-watch rederive: a row is proven when its +6h reading measured, some sample scored, and every Deployment target was measured at least once
+rederive: o1-3317: unmeasurable-with-reason -> proven (the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service)
+change-watch rederive: 1 row(s) would change of 1 row(s) read
+--- rederive --apply ---
+change-watch rederive: applying
+change-watch rederive: a row is proven when its +6h reading measured, some sample scored, and every Deployment target was measured at least once
+rederive: o1-3317: unmeasurable-with-reason -> proven (the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service)
+change-watch rederive: 1 row(s) rewritten of 1 row(s) read
+row after rederive: proven
+verdict after rederive: change-watch clean
+change-watch: gate ok for o1
+teardown gate after rederive: PASS
+
+temp fixtures: /tmp/fm-cw-evidence.AVLVNt
