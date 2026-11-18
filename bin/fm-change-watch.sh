@@ -131,8 +131,8 @@
 #           read that failed and makes the row unmeasurable-with-reason; a
 #           metric key or a sentry/ and run/ target that never scored is a
 #           coverage gap, named in the reason and in the row's
-#           unmeasured_metrics, never a verdict on its own. A missing reading is
-#           never a pass. A beta regression exits 1 as well,
+#           unmeasured_metrics, never a verdict on its own. A missing +6h reading
+#           is never a pass. A beta regression exits 1 as well,
 #           so a beta failure is never read as a pass. The exit status is the
 #           done-claim block: 0 for clean or regressed, 1 for
 #           unmeasurable-with-reason, absent, interrupted, or a beta regression.
