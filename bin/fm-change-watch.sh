@@ -3326,8 +3326,8 @@ cw_real_user_check() {  # <watch-id> -> "<state>\t<reason>"
 # which is the not-applicable case: a merge that touched no deployable surface
 # still gets its row, because "every merge writes one durable row" is the
 # contract and a row saying why nothing was measurable is the honest record.
-cw_row_write() {  # <watch-id> <terminal-state> <reason> [<task>] [<url>] [<merge-epoch>] [<registered-epoch>] [<completed-epoch>] [<deploy-expected>]
-  local id=$1 state=$2 reason=$3 task=${4:-} url=${5:-} t0=${6:-} created=${7:-} completed_at=${8:-} deploy=${9:-}
+cw_row_write() {  # <watch-id> <terminal-state> <reason> [<task>] [<url>] [<merge-epoch>] [<registered-epoch>] [<completed-epoch>] [<derived-epoch>] [<deploy-expected>]
+  local id=$1 state=$2 reason=$3 task=${4:-} url=${5:-} t0=${6:-} created=${7:-} completed_at=${8:-} derived=${9:-} deploy=${10:-}
   local completed readings offset ru ru_reason gaps unproven beta carried
   if cw_watch_exists "$id"; then
     task=$(cw_meta_get "$id" task || true)
@@ -3398,6 +3398,10 @@ cw_row_write() {  # <watch-id> <terminal-state> <reason> [<task>] [<url>] [<merg
     printf ', "unmeasured_metrics": %s' "$(cw_json_string "$gaps")"
     printf ', "unproven_targets": %s' "$(cw_json_string "$unproven")"
     printf ', "terminal_state": %s' "$(cw_json_string "$state")"
+    # Provenance, not a waiver: a row reconstructed from readings a watch already
+    # held says so, with the epoch it was reconstructed at, so a later reader can
+    # tell a live row from a derived one without consulting anything else.
+    [ -n "$derived" ] && printf ', "derived_epoch": %s' "$derived"
     printf ', "reason": %s}\n' "$(cw_json_string "$reason")"
   } | cw_write "$(cw_row_path "$id")" \
     || notice "change-watch: could not write the durable row for $id"
@@ -3451,7 +3455,7 @@ cw_scored_any() {  # <watch-id>
 # carried into the reason so a proof taken by a stopped drive says so.
 cw_terminal_state() {  # <watch-id> [<note>]
   local id=$1 note=${2:-} r json final='' empty='' empties=0 missing=''
-  local unread gaps known why='' superseded='' plural='s'
+  local unread gaps known why='' superseded='' plural='s' recorded=0
   for r in 900 3600 21600; do
     json=$(cw_reading_json "$id" "$r")
     if [ "$json" = null ]; then
@@ -3465,6 +3469,13 @@ cw_terminal_state() {  # <watch-id> [<note>]
     [ "$r" -ne 21600 ] || final=$json
   done
   unread=$(cw_unread_deployments "$id" | paste -sd ',' - | sed 's/,/, /g')
+  # "Every Deployment target was measured" is vacuously true for a watch that
+  # recorded no target of any kind, which would let readings alone stand as proof
+  # of a merge nothing was watched for. The bar was never applied there, so that is
+  # a measurement gap and not a clean verdict. A Sentry-only or deploy-workflow
+  # watch is a different case and does complete clean: it records targets, they are
+  # simply not Deployments, and its note names only what it measured.
+  recorded=$(cw_target_ids "$id" | grep -c .)
   known=$(cw_metric_keys "$id")
   gaps=$(cw_measured_gaps "$id")
   [ "$empties" -ne 1 ] || plural=''
@@ -3473,6 +3484,7 @@ cw_terminal_state() {  # <watch-id> [<note>]
   if [ "$final" != null ] \
     && printf '%s' "$final" | grep -q '"measured": true' \
     && cw_scored_any "$id" \
+    && [ "${recorded:-0}" -gt 0 ] \
     && [ -z "$unread" ]; then
     printf 'proven\t%s\n' \
       "${note:+$note; }the +6h reading measured and every Deployment target was measured at least once""${superseded:+; $superseded}${gaps:+; never measured: $gaps}"
@@ -3664,6 +3676,14 @@ cw_unmeasured_targets() {  # <watch-id>
   [ -f "$samples" ] || : > "$samples"
   want=$(mktemp "${TMPDIR:-/tmp}/fm-cw-want.XXXXXX" 2>/dev/null) || { printf 'no temp file\n'; return 0; }
   cw_target_ids "$id" | sort -u > "$want"
+  # With no target on record the want file is empty, and awk answers NR == FNR for
+  # the first record of the second file too when the first file holds no lines, so
+  # every sample would be read as a target and its epoch named as unmeasured. No
+  # target means no unmeasured target.
+  if [ ! -s "$want" ]; then
+    rm -f -- "$want" 2>/dev/null || true
+    return 0
+  fi
   awk -F'\t' '
     NR == FNR { want[$1] = 1; next }
     $7 == 1 { key = $3; sub(/^[^@]*@/, "", key); delete want[key] }
@@ -3993,7 +4013,7 @@ cmd_register() {
     # row, so the reason is durable rather than only printed.
     row_reason="$row_reason; beta: $beta_verdict"
     cw_row_write "$id" "$row_state" "$row_reason" \
-      "$task" "$url" "$t0" "$now" "" "$deploy_expected"
+      "$task" "$url" "$t0" "$now" "" "" "$deploy_expected"
     [ "$row_state" != unmeasurable-with-reason ] \
       || cw_queue_unmeasured_wake "$id" "$task" "$url" "$row_reason"
     return 0
@@ -4151,7 +4171,7 @@ cmd_drive() {
 # is a failure too, so it exits 1. A watch still running is not terminal and
 # exits 0, because it has not claimed anything yet.
 cmd_verdict() {
-  local id=$1 line state
+  local id=$1 line state derived dstate dreason
   if ! cw_watch_exists "$id"; then
     cw_claim_exists "$id" || die "unknown watch: $id"
     state=$(cw_claim_state "$id")
@@ -4164,6 +4184,15 @@ cmd_verdict() {
   cw_reconcile_drive "$id"
   if [ -f "$(cw_verdict_path "$id")" ]; then
     line=$(cat "$(cw_verdict_path "$id")")
+    derived=$(cw_rowless_state "$id")
+    if [ -n "$derived" ]; then
+      dstate=$(printf '%s' "$derived" | cut -f1)
+      dreason=$(printf '%s' "$derived" | cut -f2-)
+      case "$dstate" in
+        proven) line=clean ;;
+        *) line="$dstate: $dreason" ;;
+      esac
+    fi
     printf 'change-watch %s\n' "$line"
     case "$line" in
       unmeasurable-with-reason*|interrupted*|beta\ regressed*|absent*) return 1 ;;
@@ -4189,6 +4218,37 @@ cmd_verdict() {
 # running outlives the task's records in state/change-watch/ and keeps sampling
 # on its own, so refusing teardown for it would block every merge for 12 hours.
 
+# One watch's terminal state derived from the readings on disk, for a watch that
+# has no durable row at all. Watches registered before cw_row_write was called at
+# registration kept only a samples.log and their own verdict literal, so the
+# literal is the sole record of a decision nothing re-derives. Answers nothing
+# when the drive has not finished or the directory kept no readings, so every
+# caller keeps its own "still running" behaviour instead of inventing a verdict.
+cw_rowless_state() {  # <watch-id>
+  local id=$1 note derived dstate dreason
+  [ -f "$(cw_row_path "$id")" ] && return 0
+  cw_watch_exists "$id" || return 0
+  [ -f "$(cw_verdict_path "$id")" ] || return 0
+  note=$(sed -n 's/^\(interrupted at +[0-9]*m\).*/\1/p' "$(cw_verdict_path "$id")" | head -1)
+  derived=$(cw_terminal_state "$id" "$note")
+  [ -n "$derived" ] || return 0
+  dstate=$(printf '%s' "$derived" | cut -f1)
+  dreason=$(printf '%s' "$derived" | cut -f2-)
+  # A directory recorded before its targets were written has no Deployment target
+  # on record, so "every Deployment target was measured" holds vacuously and the
+  # readings alone look like proof. That is the one pass this must never
+  # manufacture: with no recorded Deployment target the bar was never applied, so
+  # the honest answer is a measurement gap, not a clean verdict.
+  if [ "$dstate" = proven ]; then
+    deps=$(cw_target_ids "$id" | grep -c . )
+    if [ "${deps:-0}" -eq 0 ]; then
+      printf 'unmeasurable-with-reason\tno Deployment target was ever recorded for this watch, so the Deployment bar was never applied and its readings alone cannot prove the merge\n'
+      return 0
+    fi
+  fi
+  printf '%s\t%s\n' "$dstate" "$dreason"
+}
+
 # One watch's gate decision: 0 passes, 1 fails.
 cw_gate_row() {  # <watch-id> <mode>
   local id=$1 mode=${2:-} state line
@@ -4196,6 +4256,22 @@ cw_gate_row() {  # <watch-id> <mode>
   if [ -z "$state" ]; then
     line=''
     [ -f "$(cw_verdict_path "$id")" ] && line=$(cat "$(cw_verdict_path "$id")")
+    # A watch registered before rows existed kept no row, so its verdict file is
+    # the only record of a decision the readings may no longer support. Judge it
+    # by the readings it still holds before trusting that literal: directories
+    # holding readings that prove their merge sat behind a stale "completed
+    # unmeasured" line, which is not a verdict this case can read, so it fell to
+    # the catch-all below and failed the gate forever.
+    derived=$(cw_rowless_state "$id")
+    if [ -n "$derived" ]; then
+      case "$derived" in
+        proven*) return 0 ;;
+        unmeasurable-with-reason*)
+          printf 'change-watch: gate FAIL %s: %s\n' "$id" \
+            "$(printf '%s' "$derived" | cut -f2-)"
+          return 1 ;;
+      esac
+    fi
     case "$line" in
       clean|regressed*|not-applicable*) return 0 ;;
       unmeasurable-with-reason*|interrupted*|absent*)
@@ -4350,6 +4426,7 @@ cw_row_interruption() {  # <watch-id>
 # so it is printed and read before it is written.
 cmd_rederive() {
   local apply=0 id row state derived new reason note completed total=0 changed=0 arg
+  local rl_total=0 rl_proven=0 rl_regressed=0 rl_unmeasurable=0 run_epoch
   local -a ids=()
   for arg in "$@"; do
     case "$arg" in
@@ -4366,37 +4443,93 @@ cmd_rederive() {
         ids+=("$(basename "$row" .json)")
       done
     fi
+    # A watch registered before rows were written at registration has no row to
+    # enumerate, so the directory itself is the only record of it. Without this
+    # the sweep that repairs those watches would never reach one.
+    if [ -d "$WATCH_ROOT" ]; then
+      for wdir in "$WATCH_ROOT"/*/; do
+        [ -d "$wdir" ] || continue
+        wid=$(basename "$wdir")
+        [ "$wid" = rows ] && continue
+        [ -f "$(cw_row_path "$wid")" ] && continue
+        ids+=("$wid")
+      done
+    fi
   }
   printf 'change-watch rederive: %s\n' \
     "$( [ "$apply" -eq 1 ] && printf 'applying' || printf 'dry run, nothing is rewritten (pass --apply to rewrite the rows)' )"
+  run_epoch=$(cw_now)
   printf 'change-watch rederive: a row is proven when its +6h reading measured, some sample scored, and every Deployment target was measured at least once\n'
   for id in ${ids[@]+"${ids[@]}"}; do
-    [ -f "$(cw_row_path "$id")" ] || { printf 'rederive: %s: no durable row\n' "$id"; continue; }
+    if [ -f "$(cw_row_path "$id")" ]; then
+      total=$((total + 1))
+      state=$(cw_row_state "$id")
+      # Only a row the old rule called unmeasurable is re-derived. A regressed row
+      # is proof of a bad change and a proven or not-applicable row is already a
+      # verdict, so re-reading a later reading's absence would be throwing evidence
+      # away; an open row belongs to a drive that has not finished.
+      [ "$state" = unmeasurable-with-reason ] || continue
+      cw_watch_exists "$id" || continue
+      note=$(cw_row_interruption "$id")
+      derived=$(cw_terminal_state "$id" "$note")
+      new=$(printf '%s' "$derived" | cut -f1)
+      reason=$(printf '%s' "$derived" | cut -f2-)
+      [ "$new" != "$state" ] || continue
+      changed=$((changed + 1))
+      if [ "$changed" -le 10 ]; then
+        printf 'rederive: %s: %s -> %s (%s)\n' "$id" "$state" "$new" "$reason"
+      fi
+      [ "$apply" -eq 1 ] || continue
+      completed=$(sed -n 's/.*"completed_epoch": \([0-9]*\).*/\1/p' "$(cw_row_path "$id")" | tail -1)
+      cw_row_write "$id" "$new" "$reason" "$(cw_row_task "$id")" \
+        "$(cw_row_url "$id")" "" "" "$completed"
+      case "$new" in
+        proven) printf 'clean\n' | cw_write "$(cw_verdict_path "$id")" ;;
+      esac
+      continue
+    fi
+    # No durable row at all. A watch registered before the row was written at
+    # registration holds its readings and nothing else, and the gate refuses it on
+    # a verdict literal nothing re-derives, so write the row those readings
+    # support. The same bar decides: a directory whose readings do not prove the
+    # merge gets a row saying so with its reason, which is the honest outcome and
+    # still a refusal, never a manufactured pass. A directory with no verdict file
+    # belongs to a drive that has not finished and is left alone like an open row.
+    cw_watch_exists "$id" || { printf 'rederive: %s: no durable row\n' "$id"; continue; }
+    # A row written live wins over a derived one: the derivation runs twice
+    # against the same readings, and the second run must leave the first run's
+    # bytes exactly as they are rather than restating them with a newer stamp.
+    [ -f "$(cw_row_path "$id")" ] && continue
+    derived=$(cw_rowless_state "$id")
+    [ -n "$derived" ] || { printf 'rederive: %s: no durable row and no readings to judge\n' "$id"; continue; }
+    rl_total=$((rl_total + 1))
     total=$((total + 1))
-    state=$(cw_row_state "$id")
-    # Only a row the old rule called unmeasurable is re-derived. A regressed row
-    # is proof of a bad change and a proven or not-applicable row is already a
-    # verdict, so re-reading a later reading's absence would be throwing evidence
-    # away; an open row belongs to a drive that has not finished.
-    [ "$state" = unmeasurable-with-reason ] || continue
-    cw_watch_exists "$id" || continue
-    note=$(cw_row_interruption "$id")
-    derived=$(cw_terminal_state "$id" "$note")
     new=$(printf '%s' "$derived" | cut -f1)
     reason=$(printf '%s' "$derived" | cut -f2-)
-    [ "$new" != "$state" ] || continue
+    case "$new" in
+      proven) rl_proven=$((rl_proven + 1)) ;;
+      regressed*) rl_regressed=$((rl_regressed + 1)) ;;
+      *) rl_unmeasurable=$((rl_unmeasurable + 1)) ;;
+    esac
     changed=$((changed + 1))
     if [ "$changed" -le 10 ]; then
-      printf 'rederive: %s: %s -> %s (%s)\n' "$id" "$state" "$new" "$reason"
+      printf 'rederive: %s: no row -> %s (%s)\n' "$id" "$new" "$reason"
     fi
     [ "$apply" -eq 1 ] || continue
-    completed=$(sed -n 's/.*"completed_epoch": \([0-9]*\).*/\1/p' "$(cw_row_path "$id")" | tail -1)
-    cw_row_write "$id" "$new" "$reason" "$(cw_row_task "$id")" \
-      "$(cw_row_url "$id")" "" "" "$completed"
+    # The completion epoch is the last reading the directory recorded, so a
+    # derived row is measured from when the merge was actually read rather than
+    # from when somebody reconstructed the row.
+    completed=$(awk -F'\t' '$1 ~ /^[0-9]+$/ && $1 + 0 > m { m = $1 + 0 } END { if (m) print m }' \
+      "$(cw_samples_path "$id")" 2>/dev/null)
+    cw_row_write "$id" "$new" "$reason" "" "" "" "" "$completed" "$run_epoch"
     case "$new" in
       proven) printf 'clean\n' | cw_write "$(cw_verdict_path "$id")" ;;
     esac
   done
+  if [ "$rl_total" -gt 0 ]; then
+    printf 'change-watch rederive: no-row watches: %s proven, %s regressed, %s unmeasurable with reason, %s total\n' \
+      "$rl_proven" "$rl_regressed" "$rl_unmeasurable" "$rl_total"
+  fi
   if [ "$apply" -eq 1 ]; then
     printf 'change-watch rederive: %s row(s) rewritten of %s row(s) read\n' "$changed" "$total"
   else

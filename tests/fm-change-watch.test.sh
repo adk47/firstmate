@@ -3000,3 +3000,121 @@ printf '%s\n' "$out" | grep -q '0 row(s) rewritten' \
 cmp -s "$ROW_J4" "$TMP_ROOT/row-before-regressed-rederive.json" \
   || fail "the re-derive changed a regressed row: $(cat "$ROW_J4")"
 pass "the re-derive never rewrites a regressed row"
+
+# --- a watch with no durable row is judged by the readings it still holds -----
+
+# Watches registered before the row was written at registration kept only their
+# samples and the verdict literal they wrote themselves. That literal is not a
+# state the gate can read, so a row-less watch whose readings prove its merge
+# failed every teardown forever. The readings are the evidence, so they decide.
+HOME_J7=$(new_world j7)
+seed_pr "$HOME_J7" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J7" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_J7" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_J7" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J7" 1790000000 register j7 "$PR_URL" >/dev/null || fail "register failed"
+run_cw "$HOME_J7" 1790044000 drive j7-3317 >/dev/null || fail "the row-less fixture drive failed"
+WATCH_J7="$HOME_J7/state/change-watch/j7-3317"
+ROW_J7="$HOME_J7/state/change-watch/rows/j7-3317.json"
+if [ ! -f "$ROW_J7" ]; then fail "the row-less fixture wrote no row to remove"; fi
+rm -f "$ROW_J7"
+printf 'completed unmeasured\n' > "$WATCH_J7/verdict"
+if [ -f "$ROW_J7" ]; then fail "the row-less fixture kept its row"; fi
+[ "$(run_cw "$HOME_J7" 1790044000 verdict j7-3317)" = "change-watch clean" ] \
+  || fail "a row-less watch was judged by its stale literal, not its readings: $(run_cw "$HOME_J7" 1790044000 verdict j7-3317)"
+run_cw "$HOME_J7" 1790044000 gate j7 --terminal-gap >/dev/null \
+  || fail "a row-less watch whose readings prove the merge failed the gate"
+pass "a row-less watch is judged by its readings, not its stale verdict literal"
+
+out=$(run_cw "$HOME_J7" 1790044000 rederive) || fail "the row-less dry run failed: $out"
+printf '%s\n' "$out" | grep -q 'j7-3317: no row -> proven' \
+  || fail "the re-derive did not offer to write the missing row: $out"
+if [ -f "$ROW_J7" ]; then fail "the dry run wrote the missing row"; fi
+printf '%s\n' "$out" | grep -q 'no-row watches: 1 proven, 0 regressed, 0 unmeasurable with reason, 1 total' \
+  || fail "the dry run did not break down the row-less watches by verdict: $out"
+out=$(run_cw "$HOME_J7" 1790044000 rederive --apply) || fail "the row-less apply failed: $out"
+printf '%s\n' "$out" | grep -q '1 row(s) rewritten' \
+  || fail "the re-derive did not write the missing row: $out"
+grep -q '"terminal_state": "proven"' "$ROW_J7" \
+  || fail "the re-derive wrote a row its readings do not support: $(cat "$ROW_J7")"
+# Provenance, not a waiver: the row says it was reconstructed, and when.
+grep -q '"derived_epoch": 1790044000' "$ROW_J7" \
+  || fail "the derived row does not record that it was derived: $(cat "$ROW_J7")"
+cp "$ROW_J7" "$TMP_ROOT/row-derived-once.json"
+out=$(run_cw "$HOME_J7" 1790059000 rederive --apply) || fail "the second row-less apply failed: $out"
+printf '%s\n' "$out" | grep -q '0 row(s) rewritten' \
+  || fail "the row-less re-derive is not idempotent: $out"
+cmp -s "$ROW_J7" "$TMP_ROOT/row-derived-once.json" \
+  || fail "a second derivation restated the row it had already written: $(cat "$ROW_J7")"
+pass "the re-derive writes the row a row-less watch should have had, once"
+
+# A derived row never displaces a row written live: the live row is the record of
+# a decision the drive reached, and the reconstruction only fills a hole.
+printf '{"version": "fm-change-watch-row-v1", "watch_id": "j7-3317", "task": "j7", "pr_url": "%s", "merge_epoch": null, "registered_epoch": null, "completed_epoch": 1790044000, "readings": {"900": null, "3600": null, "21600": null}, "real_user_check": "", "real_user_reason": "", "unmeasured_metrics": "", "unproven_targets": "", "terminal_state": "regressed", "reason": "a live row the derivation must not touch"}\n' \
+  "$PR_URL" > "$ROW_J7"
+cp "$ROW_J7" "$TMP_ROOT/row-live.json"
+run_cw "$HOME_J7" 1790059000 rederive --apply >/dev/null \
+  || fail "the re-derive over a live row failed"
+cmp -s "$ROW_J7" "$TMP_ROOT/row-live.json" \
+  || fail "a derivation overwrote a row written live: $(cat "$ROW_J7")"
+pass "a derived row never overwrites a row written live"
+
+# The other direction: a row-less watch whose readings prove nothing keeps no
+# row. Writing one would turn a measurement gap into a pass, which is the whole
+# reason the gate exists.
+HOME_J8=$(new_world j8)
+seed_pr "$HOME_J8" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J8" "$MANIFEST" "$FEED_LINE"
+run_cw "$HOME_J8" 1790000000 register j8 "$PR_URL" >/dev/null || fail "register failed"
+WATCH_J8="$HOME_J8/state/change-watch/j8-3317"
+ROW_J8="$HOME_J8/state/change-watch/rows/j8-3317.json"
+rm -f "$ROW_J8"
+: > "$WATCH_J8/samples.log"
+printf 'completed unmeasured\n' > "$WATCH_J8/verdict"
+out=$(run_cw "$HOME_J8" 1790044000 rederive --apply) || fail "the empty-readings apply failed: $out"
+printf '%s\n' "$out" | grep -q 'no-row watches: 0 proven, 0 regressed, 1 unmeasurable with reason, 1 total' \
+  || fail "the breakdown did not count the row-less watch that proved nothing: $out"
+if [ ! -f "$ROW_J8" ]; then fail "the re-derive wrote no row for a row-less watch it counted"; fi
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_J8" \
+  || fail "a row-less watch that measured nothing was not recorded as unmeasurable: $(cat "$ROW_J8")"
+# The honest outcome is still a refusal: recording the reason is not a pass.
+if run_cw "$HOME_J8" 1790044000 gate j8 --terminal-gap >/dev/null 2>&1; then
+  fail "a derived unmeasurable row was accepted by the teardown gate"
+fi
+out=$(run_cw "$HOME_J8" 1790044000 rederive --apply) || fail "the second empty-readings apply failed: $out"
+printf '%s\n' "$out" | grep -q '0 row(s) rewritten' \
+  || fail "the empty-readings derivation is not idempotent: $out"
+pass "a row-less watch whose readings prove nothing is recorded as such and still refused"
+
+# A directory that recorded no target of any kind makes "every Deployment target
+# was measured" vacuous, so its readings alone look like proof. Deriving a clean
+# verdict there would be the one pass this must never manufacture; it stays a
+# measurement gap that names why. A Sentry-only or deploy-workflow watch is a
+# different case and does complete clean, because it records targets - they are
+# just not Deployments.
+HOME_J9=$(new_world j9)
+seed_pr "$HOME_J9" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J9" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_J9" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_J9" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J9" 1790000000 register j9 "$PR_URL" >/dev/null || fail "register failed"
+run_cw "$HOME_J9" 1790044000 drive j9-3317 >/dev/null || fail "the untargeted fixture drive failed"
+WATCH_J9="$HOME_J9/state/change-watch/j9-3317"
+ROW_J9="$HOME_J9/state/change-watch/rows/j9-3317.json"
+rm -f "$ROW_J9"
+rm -f "$WATCH_J9/targets"
+printf 'completed unmeasured\n' > "$WATCH_J9/verdict"
+out=$(run_cw "$HOME_J9" 1790044000 verdict j9-3317)
+[ "$out" != "change-watch clean" ] \
+  || fail "a watch with no recorded target was judged proven by its readings alone: $out"
+printf '%s\n' "$out" | grep -q 'unmeasurable-with-reason' \
+  || fail "a watch with no recorded target was not recorded as a measurement gap: $out"
+if run_cw "$HOME_J9" 1790044000 gate j9 --terminal-gap >/dev/null 2>&1; then
+  fail "a watch with no recorded Deployment target passed the teardown gate"
+fi
+out=$(run_cw "$HOME_J9" 1790044000 rederive --apply) || fail "the untargeted apply failed: $out"
+printf '%s\n' "$out" | grep -q 'no-row watches: 0 proven, 0 regressed, 1 unmeasurable with reason, 1 total' \
+  || fail "a watch with no recorded target was counted proven: $out"
+pass "a row-less watch that recorded no target is never proven"
