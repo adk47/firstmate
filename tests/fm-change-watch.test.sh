@@ -2913,6 +2913,15 @@ pass "an unmeasured metric key is named in a proven row, not promoted to a failu
 
 # --- the re-derive one-shot re-reads the readings a row already holds ---------
 
+# A home with no durable rows is the normal state before a first merge, and the
+# one-shot must report that rather than crash on its empty watch-id list.
+HOME_EMPTY=$(new_world rederive-empty)
+out=$(run_cw "$HOME_EMPTY" 1790050000 rederive --apply) \
+  || fail "the re-derive over no rows failed: $out"
+printf '%s\n' "$out" | grep -q '0 row(s) rewritten of 0 row(s) read' \
+  || fail "the re-derive over no rows did not report an empty run: $out"
+pass "the re-derive over no rows reports an empty run"
+
 # The row as the pre-fix code wrote it for the same readings: a +15m read that
 # failed before the rollout landed was recorded as terminal. The one-shot must
 # re-derive that verdict from the readings the watch still holds, without
@@ -2933,7 +2942,7 @@ printf '%s\n' "$out" | grep -q '1 row(s) would change' \
   || fail "the re-derive did not count the rows it would change: $out"
 cmp -s "$ROW_J" "$TMP_ROOT/row-before-rederive.json" \
   || fail "the dry run rewrote a row before --apply"
-pass "the re-derive dry run reports its changes and writes nothing"
+pass "the re-derive dry run reports its changes and rewrites nothing"
 
 out=$(run_cw "$HOME_J" 1790050000 rederive --apply) || fail "the re-derive apply failed: $out"
 printf '%s\n' "$out" | grep -q '1 row(s) rewritten' \

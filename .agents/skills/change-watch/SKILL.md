@@ -131,7 +131,6 @@ A reading that measured nothing earlier in the schedule is not a terminal verdic
 A Deployment target that never scored is a read that failed and keeps the row unmeasurable; a metric key, or a `sentry/` or `run/` target, that never scored is a coverage gap named in the reason and in the row's `unmeasured_metrics`, never a verdict on its own.
 `bin/fm-change-watch.sh rederive [--apply] [<watch-id>...]` re-derives existing rows from the readings they still hold under that same rule - the only repair for a row an earlier derivation got wrong, since hand-editing a row would be writing a verdict nobody measured. Dry run unless `--apply`, and it leaves an `open` row and a row with no watch directory untouched.
 A reading counts as measured when it scored something, or when everything it could not score was only waiting for the rollout to land - a sample taken before the deploy landed has nothing to read yet, so it is recorded as awaiting rather than as a failed read.
-A watch whose rollout never landed at all still ends unmeasurable, because no target ever scored.
 The real-user check is `observed` when `http_5xx_per_min` - the only metric read from the pods' own access logs - was scored, `not-observed` when it was never scored, and `not-applicable` when the watch has no such target; it is recorded, never a gate on `proven`.
 
 `bin/fm-change-watch.sh gate <task-id>` is the done-claim gate: it exits 0 only when every watch and claim row that task registered is terminal and not a measurement gap, so a task cannot claim done while its merge has no evidence.

@@ -159,7 +159,7 @@
 #           a verdict nobody measured. A row still open, or one whose merge never
 #           created a watch directory, kept nothing to re-read and is left as it
 #           is. Dry run unless --apply: it prints the rule, how many rows would
-#           change, and the first ten of them, and writes nothing.
+#           change, and the first ten of them, and rewrites nothing.
 # doctor    Live self-test of the read path. It prints the kubeconfig in use,
 #           proves the cluster answers, and with a watch id reads every target
 #           live: a Deployment target must return its pods and its pod images, a
@@ -302,8 +302,8 @@
 # Awaiting the deploy is not a measurement gap. A sample taken before the
 # watched rollout landed has nothing to read yet, so it is recorded as awaiting
 # rather than as a failed read, and it never counts against a proven verdict.
-# A watch whose rollout never landed at all still ends unmeasurable, because no
-# target ever scored and the verdict names it.
+# A watch whose rollout never landed at all still ends unmeasurable, because its
+# Deployments never scored and the verdict names them.
 #
 # Durable row: every merge writes exactly one row at
 # state/change-watch/rows/<watch-id>.json, holding a reading for every
@@ -3610,7 +3610,7 @@ cw_record_clean() {  # <watch-id> [<reason>]
   local id=$1 reason=${2:-} task url gaps unproven carried
   task=$(cw_meta_get "$id" task || true)
   url=$(cw_meta_get "$id" pr_url || true)
-  [ -n "$reason" ] || reason='all three readings scored and every target was measured at least once'
+  [ -n "$reason" ] || reason='the +6h reading measured and every Deployment target was measured at least once'
   printf 'clean\n' | cw_write "$(cw_verdict_path "$id")"
   cw_row_write "$id" proven "$reason"
   cw_mark_once "$(cw_watch_dir "$id")/noted" || return 0
@@ -3694,8 +3694,9 @@ cw_measured_gaps() {  # <watch-id>
   '
 }
 
-# The schedule ended: proven only when all three readings scored and every
-# target was measured at least once; anything less is unmeasurable-with-reason.
+# The schedule ended: proven only when the +6h reading measured, some sample
+# scored, and every Deployment target was measured at least once; anything less
+# is unmeasurable-with-reason.
 cw_record_completion() {  # <watch-id>
   local id=$1 state reason
   state=$(cw_terminal_state "$id")
@@ -3707,8 +3708,9 @@ cw_record_completion() {  # <watch-id>
   esac
 }
 
-# A drive that stopped before the end of its schedule: the verdict names the
-# point it reached, and one check wake carries it. Never clean.
+# A drive that stopped before the end of its schedule is judged by the readings
+# it took: when those already proved the change it records a clean verdict, and
+# otherwise the reason names the point it reached and one check wake carries it.
 cw_record_interrupted() {  # <watch-id> <epoch>
   local id=$1 at=$2 t0 latest offset tick task url line state reason note
   cw_watch_done "$id" && return 0
@@ -4366,9 +4368,9 @@ cmd_rederive() {
     fi
   }
   printf 'change-watch rederive: %s\n' \
-    "$( [ "$apply" -eq 1 ] && printf 'applying' || printf 'dry run, nothing is written (pass --apply to rewrite the rows)' )"
+    "$( [ "$apply" -eq 1 ] && printf 'applying' || printf 'dry run, nothing is rewritten (pass --apply to rewrite the rows)' )"
   printf 'change-watch rederive: a row is proven when its +6h reading measured, some sample scored, and every Deployment target was measured at least once\n'
-  for id in "${ids[@]}"; do
+  for id in ${ids[@]+"${ids[@]}"}; do
     [ -f "$(cw_row_path "$id")" ] || { printf 'rederive: %s: no durable row\n' "$id"; continue; }
     total=$((total + 1))
     state=$(cw_row_state "$id")
