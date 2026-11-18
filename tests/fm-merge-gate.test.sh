@@ -823,12 +823,16 @@ test_gate_older_success_does_not_outrank_a_newer_failure() {
   case_dir=$(make_case newest-run-failure-after-success)
   write_pr_view "$case_dir" checks='unit-tests:SUCCESS#15:56:34,unit-tests:FAILURE#15:56:36,qa-review:SUCCESS'
 
+  # Driven through the real merge entry point, so "the merge call must never be
+  # made" is asserted against a log the case actually produces.
   set +e
-  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  run_refusal_via_merge "$case_dir" -- --squash
   rc=$?
   set -e
   expect_code 1 "$rc" "a failure two seconds after the success is still a failure"
   assert_no_grep "pr merge" "$case_dir/gh-axi.log" "the merge call must never be made"
+  assert_contains "$(cat "$case_dir/err")" "the check unit-tests is FAILURE" \
+    "the refusal must name the newer failure it read"
   pass "an older success never outranks a newer failure"
 }
 
