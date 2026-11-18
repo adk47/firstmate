@@ -17,10 +17,12 @@
 #   - the repository is in neither declared class, so QA coverage is unknown;
 #   - any check on the current head is red, except credit-approval-guard when
 #     the pull request author is adk47 (the by-design self-authorship check).
-#     A check name that ran more than once is read worst-wins, except that a
-#     CANCELLED run is dropped once any non-cancelled run of that name exists,
-#     and within one workflowName only the newest dated run counts; runs with
-#     no workflow name or no date keep worst-wins;
+#     A check name that ran more than once on one head is decided by order, not
+#     by history: when every run of that name carries a date, only its newest
+#     run counts, whether the runs came from one workflow or several, so a retry
+#     that passed supersedes the failure it replaced. A CANCELLED run is dropped
+#     once any non-cancelled run of that name exists, and a name with a run
+#     carrying no date keeps worst-wins, because order is then unknowable;
 #   - the pull request is a master/main twin in a declared twin repository whose
 #     develop/beta counterpart is not merged. The twin rule is GitHub-only and
 #     applies to core-backend and web-credits-next by default; elsewhere it is
@@ -212,7 +214,10 @@ FIELDS
 }
 
 # Rank a conclusion so the worst of a repeated check wins: red is worse than
-# pending or unknown, which is worse than green.
+# pending or unknown, which is worse than green. This only breaks a tie for a
+# name whose runs still reach the comparison, which after the rollup read means
+# the name carries a run with no date; a fully dated name was already collapsed
+# to its newest run.
 fm_merge_gate_conclusion_rank() {
   if fm_merge_gate_is_red "$1"; then
     printf '3'
@@ -225,9 +230,9 @@ fm_merge_gate_conclusion_rank() {
 }
 
 # The conclusion of the named check on the current head, or empty when the head
-# carries no such check. A check that appears more than once is reported as the
-# worst of its conclusions, so a stale success cannot outvote a later pending or
-# failed verdict.
+# carries no such check. A name that still appears more than once - which after
+# the rollup read means it carries a run with no date - is reported as the worst
+# of its conclusions, because its order is unknowable.
 fm_merge_gate_check_conclusion() {
   local want=$1 line name conclusion found='' found_set=false
   while IFS= read -r line; do
