@@ -1,0 +1,38 @@
+$ fm-change-watch.sh register demo https://github.com/Muso-AI/H-DevOps/pull/3317
+change-watch: registered demo-3317 for https://github.com/Muso-AI/H-DevOps/pull/3317 (1 target(s)); beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)
+
+$ # rollout still landing at +15m: the sample reads nothing
+  recorded: change-watch clean so far (+15m of +720m)
+
+$ # rollout landed: +1h and +6h readings measure the release
+notice: change-watch: completion note skipped for https://github.com/Muso-AI/H-DevOps/pull/3317 (task demo has no status record)
+notice: change-watch: clean for https://github.com/Muso-AI/H-DevOps/pull/3317 on every metric it could read, but these metrics were never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; the rollout could not be proven for: muso-prod/feed-service
+  verdict: change-watch clean
+  durable row: {"version": "fm-change-watch-row-v1", "watch_id": "demo-3317", "task": "demo", "pr_url": "https://github.com/Muso-AI/H-DevOps/pull/3317", "merge_epoch": 1790000000, "registered_epoch": 1790000000, "completed_epoch": 1790044000, "readings": {"900": {"at": 1790000900, "scored": 0, "unmeasured": 6, "awaiting": 0, "regressed": 0, "measured": false, "values": {}}, "3600": {"at": 1790044000, "scored": 1, "unmeasured": 5, "awaiting": 0, "regressed": 0, "measured": true, "values": {"restarts@muso-prod/feed-service": "2"}}, "21600": {"at": 1790044000, "scored": 1, "unmeasured": 5, "awaiting": 0, "regressed": 0, "measured": true, "values": {"restarts@muso-prod/feed-service": "2"}}}, "real_user_check": "not-observed", "real_user_reason": "http_5xx_per_min was never scored, so no real user request was observed", "unmeasured_metrics": "http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service", "unproven_targets": "muso-prod/feed-service", "terminal_state": "proven", "reason": "the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)"}
+
+$ fm-change-watch.sh gate demo --terminal-gap   # teardown gate
+change-watch: gate ok for demo
+  gate: accepted (teardown is no longer refused)
+
+$ # simulate a row the old rule latched to unmeasurable despite later readings
+  verdict: change-watch unmeasurable-with-reason: nothing measured at +15m
+
+$ fm-change-watch.sh rederive            # dry run
+change-watch rederive: dry run, nothing is rewritten (pass --apply to rewrite the rows)
+change-watch rederive: a row is proven when its +6h reading measured, some sample scored, and every Deployment target was measured at least once
+rederive: demo-3317: unmeasurable-with-reason -> proven (the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service)
+change-watch rederive: 1 row(s) would change of 1 row(s) read
+
+$ fm-change-watch.sh rederive --apply
+change-watch rederive: applying
+change-watch rederive: a row is proven when its +6h reading measured, some sample scored, and every Deployment target was measured at least once
+rederive: demo-3317: unmeasurable-with-reason -> proven (the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service)
+change-watch rederive: 1 row(s) rewritten of 1 row(s) read
+
+  verdict after repair: change-watch clean
+  durable row after repair: {"version": "fm-change-watch-row-v1", "watch_id": "demo-3317", "task": "demo", "pr_url": "https://github.com/Muso-AI/H-DevOps/pull/3317", "merge_epoch": 1790000000, "registered_epoch": 1790000000, "completed_epoch": 1790044000, "readings": {"900": {"at": 1790000900, "scored": 0, "unmeasured": 6, "awaiting": 0, "regressed": 0, "measured": false, "values": {}}, "3600": {"at": 1790044000, "scored": 1, "unmeasured": 5, "awaiting": 0, "regressed": 0, "measured": true, "values": {"restarts@muso-prod/feed-service": "2"}}, "21600": {"at": 1790044000, "scored": 1, "unmeasured": 5, "awaiting": 0, "regressed": 0, "measured": true, "values": {"restarts@muso-prod/feed-service": "2"}}}, "real_user_check": "not-observed", "real_user_reason": "http_5xx_per_min was never scored, so no real user request was observed", "unmeasured_metrics": "http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service", "unproven_targets": "muso-prod/feed-service", "terminal_state": "proven", "reason": "the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)"}
+
+$ fm-change-watch.sh rederive --apply    # idempotent second run
+change-watch rederive: applying
+change-watch rederive: a row is proven when its +6h reading measured, some sample scored, and every Deployment target was measured at least once
+change-watch rederive: 0 row(s) rewritten of 1 row(s) read
