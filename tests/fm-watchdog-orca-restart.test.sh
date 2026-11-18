@@ -153,7 +153,7 @@ counter() {  # <home> <pattern>
 gate() {  # <state> <worktree> [table]
   local state=$1 wt=$2 table=${3-}
   env FM_AGENT_PROC_TABLE="${table:-/nonexistent/fm-agent-proc-table}" \
-    bash -c '. "$1/bin/fm-backend.sh"; . "$1/bin/backends/orca.sh"; fm_backend_orca_replaceable "$2" "$3" "$4"' \
+    bash -c ". \"\$1/bin/fm-backend.sh\"; . \"\$1/bin/backends/orca.sh\"; fm_backend_orca_replaceable \"\$2\" \"\$3\" \"\$4\"" \
     _ "$ROOT" term-x "$wt" "$state"
 }
 
