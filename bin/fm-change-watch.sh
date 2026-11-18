@@ -124,7 +124,9 @@
 #           "change-watch regressed at +Nm on <metric> (<value> vs baseline <value>)".
 #           Clean means every Deployment target had at least one scored reading
 #           across the schedule AND the +6h reading scored something, with some
-#           sample of the watch scoring at all. A reading that measured nothing
+#           sample of the watch scoring at all AND at least one target recorded
+#           at registration, because the Deployment bar holds vacuously for a
+#           watch that recorded no target to apply it to. A reading that measured nothing
 #           earlier in the schedule is disclosed in the reason and superseded by
 #           the later evidence, because an early read can fail for a reason the
 #           later ones do not share. A Deployment target that never scored is a
@@ -132,7 +134,10 @@
 #           metric key or a sentry/ and run/ target that never scored is a
 #           coverage gap, named in the reason and in the row's
 #           unmeasured_metrics, never a verdict on its own. A missing +6h reading
-#           is never a pass. A beta regression exits 1 as well,
+#           is never a pass. A regression any sample recorded is the verdict and
+#           outranks every later reading, including a later one that scored
+#           clean, because a bad deploy stays bad until it is reverted. A beta
+#           regression exits 1 as well,
 #           so a beta failure is never read as a pass. The exit status is the
 #           done-claim block: 0 for clean or regressed, 1 for
 #           unmeasurable-with-reason, absent, interrupted, or a beta regression.
@@ -156,10 +161,16 @@
 #           readings those rows and their watch directories still hold, under
 #           the same rule verdict applies. It is the repair for rows written by
 #           an earlier, stricter derivation: hand-editing a row would be writing
-#           a verdict nobody measured. A row still open, or one whose merge never
-#           created a watch directory, kept nothing to re-read and is left as it
-#           is. Dry run unless --apply: it prints the rule, how many rows would
-#           change, and the first ten of them, and rewrites nothing.
+#           a verdict nobody measured. Only a row the old rule called
+#           unmeasurable-with-reason is re-derived: an open row belongs to a
+#           drive that has not finished, and a regressed, proven or
+#           not-applicable row is already a verdict. A watch registered before
+#           rows existed has no row to rewrite, so the readings it still holds
+#           get one written, stamped with derived_epoch and completed at its last
+#           sample; a live row that appeared while the sweep ran wins, and a
+#           directory whose drive has not finished is left alone. Dry run unless
+#           --apply: it prints the rule, a census of the no-row watches, how many
+#           rows would change, and the first ten of them, and rewrites nothing.
 # doctor    Live self-test of the read path. It prints the kubeconfig in use,
 #           proves the cluster answers, and with a watch id reads every target
 #           live: a Deployment target must return its pods and its pod images, a
@@ -267,17 +278,20 @@
 #                        unmeasured for the whole watch, with the reason
 #                        recorded.
 #   deploy_run           the repository's own deploy workflow as 1 when the
-#                        next scheduled or dispatched run whose tree carries the
-#                        merged commit completed successfully, and 0 when that
-#                        run failed, was cancelled, or timed out; regressed when
-#                        value is 0, because a failed deploy is definite whether
-#                        or not any run existed at registration (so its baseline
-#                        reads "unmeasured"). Its target is
-#                        run/<owner>/<repo>#<workflow-path>. No run yet, one
-#                        still in flight, or a merge sha the forge cannot name
-#                        is awaiting the deploy and unmeasured: a run that does
-#                        not carry the merge is never scored as this release's
-#                        success or regression.
+#                        latest scheduled or dispatched run whose tree carries
+#                        the merged commit completed successfully, and 0 when
+#                        that run failed, was cancelled, or timed out; regressed
+#                        when value is 0, because a failed deploy is definite
+#                        whether or not any run existed at registration (so its
+#                        baseline reads "unmeasured"). Its target is
+#                        run/<owner>/<repo>#<workflow-path>. The latest carrier
+#                        decides rather than the first: a deploy that failed and
+#                        was retried successfully has landed, while one that
+#                        succeeded and was then retried into a failure has not.
+#                        No run yet, one still in flight, or a merge sha the
+#                        forge cannot name is awaiting the deploy and unmeasured:
+#                        a run that does not carry the merge is never scored as
+#                        this release's success or regression.
 # The baseline window is the 60 minutes before the change's rollout start, read
 # as a level for counters (restarts, oomkilled, rss_ratio) and as a rate for the
 # others. An unmeasured metric is skipped, never scored as a pass, and a metric
@@ -323,7 +337,8 @@
 # Reporting: the first regression appends one
 #   check: change-watch <task-id> <pr-url> <metric> regressed
 # wake to the durable wake queue and steers the owning task through
-# bin/fm-send.sh with the numbers; an interrupted drive appends one
+# bin/fm-send.sh with the numbers; an interrupted drive whose readings did not
+# prove the change appends one
 #   check: change-watch <task-id> <pr-url> interrupted at +Nm
 # wake; and a schedule that ends unmeasurable appends one
 #   check: change-watch <task-id> <pr-url> unmeasurable (<reason>)
@@ -2210,9 +2225,12 @@ print(count)
 }
 
 # LIVE QUERY (forge) - the mapped deploy workflow's run created at or after the
-# merge: 1 when the earliest such run completed successfully, 0 when it failed,
-# and nothing while no run exists or one is still in flight (both are awaiting
-# the deploy, never health). With no merge sha to check carriers against, no run
+# merge: 1 when the latest run whose tree carries the merge completed
+# successfully, 0 when that run failed, and nothing while no run exists or one is
+# still in flight (both are awaiting the deploy, never health). The latest carrier
+# decides, not the first: a deploy that failed and was retried successfully has
+# landed, while one that succeeded and was then retried into a failure has not.
+# With no merge sha to check carriers against, no run
 # can be attributed to this release, so none is scored: an unrelated run is
 # neither this release's success nor its regression.
 cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch> [<merge-sha>]
@@ -3181,8 +3199,11 @@ cw_progress_label() {  # <watch-id>
 # One row per merge, at state/change-watch/rows/<watch-id>.json. It is written
 # when the watch is registered (terminal_state "open") and rewritten once, at
 # the terminal verdict, so a merge always has exactly one durable record of what
-# was measured. state/change-watch/ is not a task record: bin/fm-teardown.sh
-# removes state/<task>.* and never this tree, so the row outlives the task.
+# was measured. A watch registered before the row was written at registration gets
+# one from `rederive`, stamped with derived_epoch so a reconstructed row is never
+# mistaken for one a live drive wrote.
+# state/change-watch/ is not a task record: bin/fm-teardown.sh removes
+# state/<task>.* and never this tree, so the row outlives the task.
 #
 # Schema (one JSON object, one line):
 #   version            "fm-change-watch-row-v1"
@@ -3197,6 +3218,7 @@ cw_progress_label() {  # <watch-id>
 #   registered_epoch   when the watch was registered, or null
 #   deadline_epoch     claim rows only: when an open claim becomes overdue
 #   completed_epoch    when the terminal state was written, or null while open
+#   derived_epoch      when rederive reconstructed the row, absent for a live row
 #   readings           one key per scheduled offset (SCHEDULE_OFFSETS for a
 #                      merge, CLAIM_OFFSETS for a claim): <reading>|null
 #   acceptance         null for a merge row; for a claim row {"probe_path",
@@ -3223,7 +3245,8 @@ cw_row_path() { printf '%s/%s.json\n' "$(cw_rows_dir)" "$1"; }
 # The terminal state a watch's durable row records, or nothing when the watch
 # never wrote a row. The row, not the verdict file, is the authority the gates
 # read: deleting a verdict can remove the wake's detail but never the record that
-# a merge ended without a measurement.
+# a merge ended without a measurement. A watch that never wrote one is derived
+# from the readings it still holds by cw_rowless_state, below.
 cw_row_state() {  # <watch-id>
   local row
   row=$(cw_row_path "$1")
@@ -3437,9 +3460,13 @@ cw_scored_any() {  # <watch-id>
 #
 # The verdict rests on the +6h reading, the last of the three the row records,
 # plus the Deployments themselves: proven needs that reading to have measured
-# something, some sample of the watch to have scored, and every Deployment
-# target measured at least once. Anything less is unmeasurable-with-reason naming
-# what is missing. A missing +6h reading is never a pass.
+# something, some sample of the watch to have scored, at least one target of any
+# kind to have been recorded, and every Deployment target measured at least once.
+# The recorded-target clause is what keeps the Deployment bar from holding
+# vacuously: with nothing on record there was nothing to apply it to, so the
+# readings alone cannot prove the merge. Anything less is
+# unmeasurable-with-reason naming what is missing. A missing +6h reading is never
+# a pass.
 #
 # An EARLIER reading that measured nothing is not terminal. The +15m read can fail
 # for a reason that has nothing to do with the change - a log format that lands
@@ -4247,8 +4274,11 @@ cmd_verdict() {
 #
 # Both modes decide from the watch's durable row, which the verdict file cannot
 # mask: deleting a verdict leaves the row's terminal state intact, so a watch
-# that ended unmeasurable keeps failing. Only a watch registered before rows
-# existed, which has no row, is judged by its verdict file.
+# that ended unmeasurable keeps failing. A watch registered before rows existed,
+# which has no row, is judged by the readings it still holds rather than by its
+# verdict file, and a derivation that would prove it is downgraded to
+# unmeasurable-with-reason when it recorded no Deployment target, so readings
+# alone never manufacture that pass.
 #
 # --terminal-gap is the same gate for the teardown boundary bin/fm-teardown.sh
 # consults: only a terminal measurement gap fails there, because a watch still
