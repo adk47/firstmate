@@ -478,6 +478,10 @@ retire_note_wake() {  # <id>
   case "$removed" in ''|*[!0-9]*) return 0 ;; esac
   if [ "$removed" -gt 0 ]; then
     printf 'retired %s wake(s) for %s\n' "$removed" "$id"
+  else
+    # A note whose wake was already acknowledged is the state that hid for 23h
+    # behind a queue that read as clean, so name it instead of falling silent.
+    printf 'acked %s: no wake was still queued for it (its wake was acknowledged before the note)\n' "$id"
   fi
 }
 

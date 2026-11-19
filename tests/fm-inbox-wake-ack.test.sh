@@ -14,8 +14,8 @@
 #      a captain note at or below its cutoff is still unacknowledged, and writes
 #      nothing - no row consumed, no receipt recorded.
 #   3. After the note is acked, the same acknowledgement succeeds.
-#   4. --allow-unacked-notes is the one explicit override, and it leaves the note
-#      pending rather than silently acking it.
+#   4. There is no override: an extra acknowledgement argument is rejected, because
+#      an override on a fail-safe is a fail-open.
 #   5. state/inbox-auto is NOT coupled: it is a bounded log of machine records the
 #      captain never wrote, so refusing there would block routine acknowledgement.
 set -u
@@ -102,23 +102,25 @@ set -e
 [ "$(pending_rows)" = 0 ] || fail "the acknowledgement should find nothing left to consume"
 pass "drain --ack retires the note and the wake that announced it, so one command clears both"
 
-# --- 1b. acking a note whose wake is already gone stays quiet --------------
+# --- 1b. a note whose wake is already gone is reported, not silent --------
 
 setup wake-already-gone
 inbox note "its wake was acknowledged before the note" > /dev/null \
   || fail "the captain note should queue"
 id=$(note_ids "$STATE/inbox")
-read -r seq gen <<EOF
-$(requirement)
-EOF
-drain --ack-through "$seq" --recovery-generation "$gen" --allow-unacked-notes > /dev/null 2> "$ERR" \
-  || fail "the override should acknowledge the wake: $(cat "$ERR")"
-[ "$(pending_rows)" = 0 ] || fail "the override should consume the wake row"
+# The wake went away first (an older acknowledgement, or an operator clearing the
+# queue by hand). The note is then the only surviving record, which is exactly the
+# state that hid for 23h, so acking it says so instead of printing a zero count.
+awk -F '\t' 'NF < 5 || $4 != "inbox:'"$id"'" { print }' "$STATE/.wake-queue" > "$STATE/.wake-queue.trim" \
+  && mv "$STATE/.wake-queue.trim" "$STATE/.wake-queue"
+[ "$(pending_rows)" = 0 ] || fail "the fixture should start with no queued wake"
 out=$(inbox drain --ack "$id") || fail "acking the note failed: $out"
 assert_contains "$out" "acked $id" "acking should still report the note it retired"
 assert_not_contains "$out" "retired 0 wake(s)" \
   "acking a note whose wake is already gone must not report a zero retirement"
-pass "acking a note whose wake is already gone reports no zero retirement"
+assert_contains "$out" "no wake was still queued" \
+  "acking an orphaned note should say its wake was already gone, so the state is visible"
+pass "acking a note whose wake is already gone reports the surviving note instead of a zero count"
 
 # --- 2. an unacked note blocks the acknowledgement, and writes nothing -----
 
@@ -150,8 +152,6 @@ assert_contains "$(cat "$ERR")" "NOT acknowledged through $seq" \
 assert_contains "$(cat "$ERR")" "$id" "the refusal should name the note it is waiting on"
 assert_contains "$(cat "$ERR")" "bin/fm-inbox.sh drain --ack" \
   "the refusal should name the one command that clears both"
-assert_contains "$(cat "$ERR")" "--allow-unacked-notes" \
-  "the refusal should name its own override"
 
 [ "$(pending_rows)" = 2 ] \
   || fail "a refused acknowledgement must consume no row: $(cat "$STATE/.wake-queue")"
@@ -173,10 +173,10 @@ set -e
   || fail "the acknowledgement should consume every row through $seq: $(cat "$STATE/.wake-queue")"
 pass "acknowledging the note unblocks the wake acknowledgement that named it"
 
-# --- 4. the override acknowledges the wake and leaves the note pending ----
+# --- 4. the refusal has no override: an override is a fail-open -----------
 
-setup override
-inbox note "left pending on purpose" > /dev/null || fail "the captain note should queue"
+setup no-override
+inbox note "there is no way round this on purpose" > /dev/null || fail "the captain note should queue"
 id=$(note_ids "$STATE/inbox")
 read -r seq gen <<EOF
 $(requirement)
@@ -187,17 +187,19 @@ drain --ack-through "$seq" --recovery-generation "$gen" --allow-unacked-notes \
   > /dev/null 2> "$ERR"
 code=$?
 set -e
-[ "$code" -eq 0 ] || fail "--allow-unacked-notes should acknowledge the wake: $(cat "$ERR")"
-[ "$(pending_rows)" = 0 ] || fail "the override should consume the wake row"
-assert_present "$STATE/inbox/$id.note" \
-  "the override acknowledges the wake only, never the note itself"
+[ "$code" -eq 2 ] \
+  || fail "an override argument must be refused outright, got exit $code: $(cat "$ERR")"
+assert_contains "$(cat "$ERR")" "unexpected acknowledgement arguments" \
+  "the refusal should name the rejected argument path"
+[ "$(pending_rows)" = 1 ] || fail "a rejected argument must consume nothing"
+assert_present "$STATE/inbox/$id.note" "a rejected argument must leave the note waiting"
 
 set +e
 drain --ack-through 0 --recovery-generation "$gen" --allow-bogus > /dev/null 2> "$ERR"
 code=$?
 set -e
 [ "$code" -eq 2 ] || fail "an unknown acknowledgement argument should refuse, got exit $code"
-pass "--allow-unacked-notes is the explicit override and never acks the note itself"
+pass "the refusal has no override: an extra acknowledgement argument is rejected, not honoured"
 
 # --- 5. the automated queue is a log, not the captain's queue --------------
 

@@ -647,7 +647,7 @@ tests/fm-herdr-submit-confirm-live-e2e.test.sh 23
 tests/fm-herdr-version-floor-live-e2e.test.sh 23
 tests/fm-home-summary-refresh.test.sh 50699
 tests/fm-inactive-reconcile.test.sh 54465
-tests/fm-inbox-wake-ack.test.sh 2000
+tests/fm-inbox-wake-ack.test.sh 6700
 tests/fm-instrument-sweep.test.sh 13200
 tests/fm-kimi-harness.test.sh 18015
 tests/fm-lane-model-switch.test.sh 25902
