@@ -444,8 +444,11 @@ home=$(make_home laning-noeol)
 inbox "$home" note "a body with no trailing newline" >/dev/null || fail "captain note should queue"
 noeol_id=$(only_note "$home/state/inbox")
 noeol_note="$home/state/inbox/$noeol_id.note"
-size=$(wc -c <"$noeol_note")
-truncate -s $((size - 1)) "$noeol_note"
+# Build the fixture portably: a `truncate` that is missing or fails would leave
+# the newline in place and let this case pass without exercising the branch.
+printf '%s' "$(cat "$noeol_note")" >"$noeol_note.strip"
+mv "$noeol_note.strip" "$noeol_note"
+[ -n "$(tail -c 1 "$noeol_note")" ] || fail "fixture should end without a newline"
 run_inbox "$home" drain --filed abc123 --ack "$noeol_id"
 [ "$RUN_CODE" -eq 0 ] || fail "a record with no trailing newline should still ack: $RUN_OUT"
 [ "$(last_line "$home/state/inbox/handled/$noeol_id.note")" = 'filed=abc123' ] \

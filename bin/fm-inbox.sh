@@ -494,7 +494,9 @@ stamp_record() {
   local src=$1 stamp=$2 dest=$3 staged
   staged="$dest.staging.$$"
   # Private from its first byte: a record can carry the captain's own words.
-  ( umask 077; cat "$src" >"$staged" ) || { rm -f "$staged"; die "cannot stage $src"; }
+  # A leftover staging file from a killed run could carry an old, looser mode:
+  # umask only shapes a file being created, so remove it before writing.
+  ( umask 077; rm -f "$staged"; cat "$src" >"$staged" ) || { rm -f "$staged"; die "cannot stage $src"; }
   # A file whose last byte is not a newline would glue the stamp onto its final
   # body line, so the stamp would answer nothing and read as body text.
   if [ -s "$src" ] && [ -n "$(tail -c 1 "$src")" ]; then
