@@ -291,6 +291,16 @@ function readEpochFile(path: string): number {
   }
 }
 
+function branchSessionLoaded(): boolean {
+  try {
+    const markerPid = readFileSync(`${state}/.pi-branch-extension-loaded`, "utf8").trim().split("\n")[0] ?? "";
+    const lockPid = readFileSync(`${state}/.lock`, "utf8").trim().split("\n")[0] ?? "";
+    return Boolean(markerPid) && markerPid === lockPid;
+  } catch {
+    return false;
+  }
+}
+
 // A wake is the moment to ask whether the branch is still working, and the
 // answer has to come from disk because a silent branch is never asked anything
 // again: once it declines, main handles the wake and nothing downstream learns
@@ -305,36 +315,30 @@ function branchSilenceReport(declined: boolean, now = Date.now()): string {
   const liveAt = readEpochFile(`${state}/.branch-live`);
   const idleMs = liveAt ? now - liveAt * 1000 : Number.POSITIVE_INFINITY;
   if (idleMs < branchSilenceWindowMs) return "";
+  const loaded = branchSessionLoaded();
   let latch = "no branch latch recorded";
   let latchReason = "";
-  try {
-    const [at, ...reason] = readFileSync(`${state}/.branch-latch`, "utf8").trim().split("\t");
-    if (reason.join(" ").trim()) {
-      latchReason = reason.join(" ").trim();
-      const since = Number(at);
-      const age = Number.isFinite(since)
-        ? `, ${Math.max(0, Math.round((now / 1000 - since) / 60))} min`
-        : "";
-      latch = `branch latch: ${latchReason}${age}`;
+  if (loaded) {
+    try {
+      const [at, ...reason] = readFileSync(`${state}/.branch-latch`, "utf8").trim().split("\t");
+      if (reason.join(" ").trim()) {
+        latchReason = reason.join(" ").trim();
+        const since = Number(at);
+        const age = Number.isFinite(since)
+          ? `, ${Math.max(0, Math.round((now / 1000 - since) / 60))} min`
+          : "";
+        latch = `branch latch: ${latchReason}${age}`;
+      }
+    } catch {
+      // No latch file: the branch never said why, and a guess is worse than silence.
     }
-  } catch {
-    // No latch file: the branch never said why, and a guess is worse than silence.
   }
   const idle = liveAt ? `${Math.round(idleMs / 60_000)} min ago` : "never recorded";
   // A branch that was never loaded at all never latches either, so the marker
   // the extension writes when it activates is the only way to tell "never
   // started" apart from "stopped": project trust not approved is the ordinary
   // cause and the digest's own PI_WATCH_EXTENSION line cannot see the branch.
-  let unloaded = "";
-  try {
-    const markerPid = readFileSync(`${state}/.pi-branch-extension-loaded`, "utf8").trim().split("\n")[0] ?? "";
-    const lockPid = readFileSync(`${state}/.lock`, "utf8").trim().split("\n")[0] ?? "";
-    if (!markerPid || markerPid !== lockPid) {
-      unloaded = "; the branch extension never marked this session loaded";
-    }
-  } catch {
-    unloaded = "; the branch extension never marked this session loaded";
-  }
+  const unloaded = loaded ? "" : "; the branch extension never marked this session loaded";
   const leave = declined
     ? "an eligible wake went to main"
     : "main took this wake while the branch stayed silent";
@@ -358,7 +362,7 @@ async function reportBranchSilence(declined: boolean, now = Date.now()): Promise
   // the branch itself recorded that it stopped working, so require one of the
   // two concrete faults rather than alarming on a quiet fleet.
   if (silenceNoteInFlight) return;
-  if (!declined && !existsSync(`${state}/.branch-latch`)) return;
+  if (!declined && !(branchSessionLoaded() && existsSync(`${state}/.branch-latch`))) return;
   const report = branchSilenceReport(declined, now);
   if (!report) return;
   silenceNoteInFlight = true;

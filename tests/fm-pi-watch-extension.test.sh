@@ -1427,6 +1427,106 @@ CASES
   pass "a dead branch files exactly one throttled silence note and stays quiet when a decline is ordinary"
 }
 
+# A latch file outlives the session that wrote it. A restarted watcher must not
+# read a dead session's latch as this session's fault, or a main-only wake files
+# a wrong SILENT note and the throttle then mutes a genuine alarm.
+test_pi_stale_latch_from_dead_session_does_not_alarm() {
+  local repo home plugin log stop out status label expect marker notes
+  repo="$TMP_ROOT/pi-branch-stale-latch-root"
+  home="$TMP_ROOT/pi-branch-stale-latch-home"
+  log="$TMP_ROOT/pi-branch-stale-latch.log"
+  stop="$TMP_ROOT/pi-branch-stale-latch.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  install_pi_watch_extension_fixture "$repo"
+  cp "$ROOT/bin/fm-inbox.sh" "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/"
+  chmod +x "$repo/bin/fm-inbox.sh" "$repo/bin/fm-wake-lib.sh"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'check: task-a.status done\n'
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  while IFS='|' read -r label expect marker; do
+    [ -n "$label" ] || continue
+    rm -rf "$home/state/inbox-auto" "$home/state/.branch-silence-alarm" "$home/state/.branch-live" \
+      "$home/state/.branch-latch" "$home/state/.pi-branch-extension-loaded" "$home/state/.afk" "$log" "$stop"
+    printf '1\n' > "$home/state/.branch-live"
+    printf '1\tprovider error\n' > "$home/state/.branch-latch"
+    if [ "$marker" = dead ]; then
+      printf '999999\n' > "$home/state/.pi-branch-extension-loaded"
+    fi
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+      FM_TEST_MARKER="$marker" FM_TEST_EXPECT_NOTE="$expect" \
+      node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let prompt = "";
+let tool = null;
+const bus = { on() { return () => {}; }, emit() {} };
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+if (process.env.FM_TEST_MARKER === "self") {
+  writeFileSync(`${process.env.FM_HOME}/state/.pi-branch-extension-loaded`, `${process.pid}\n`);
+}
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  `1\t1\tcheck\ttask-a.status\tcheck: task-a.status done\n`,
+);
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-stale-latch", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!prompt.includes("FIRSTMATE WATCHER WAKE: check: task-a.status done")) {
+  throw new Error(`a main-only wake did not reach main: ${prompt}`);
+}
+if (process.env.FM_TEST_EXPECT_NOTE === "1") {
+  for (let i = 0; i < 500 && !existsSync(`${process.env.FM_HOME}/state/.branch-silence-alarm`); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+} else {
+  await new Promise((resolve) => setTimeout(resolve, 300));
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "a main-only wake must still reach main ($label): $out"
+    notes=0
+    if [ -d "$home/state/inbox-auto" ]; then
+      notes=$(find "$home/state/inbox-auto" -maxdepth 1 -name '*.note' | wc -l | tr -d ' ')
+    fi
+    [ "$notes" = "$expect" ] || fail "$label filed $notes silence notes, not $expect"
+    if [ "$expect" = 1 ]; then
+      grep -q 'supervision branch SILENT' "$home/state/inbox-auto"/*.note \
+        || fail "$label note does not name the branch silence"
+      grep -q 'branch latch: provider error' "$home/state/inbox-auto"/*.note \
+        || fail "$label note does not name this session's latch"
+    fi
+  done <<'CASES'
+stale-latch-from-dead-session|0|dead
+current-session-latch|1|self
+CASES
+  pass "a dead session's latch is not this session's fault, but a current latch still alarms"
+}
+
 # The silence note takes the wake-queue lock, which a live but wedged process can
 # hold forever. A note that never returns must not leave the in-flight guard set
 # for the rest of the process, because that would silence every later alarm in
@@ -5549,6 +5649,7 @@ test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
 test_pi_main_only_check_classes_stay_on_main
 test_pi_dead_branch_files_one_throttled_silence_note
+test_pi_stale_latch_from_dead_session_does_not_alarm
 test_pi_hung_silence_note_does_not_silence_later_alarms
 test_pi_captain_held_signal_stays_on_main
 test_pi_unread_pending_reply_forces_later_stale_alias_to_main
