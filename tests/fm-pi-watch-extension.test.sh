@@ -1336,8 +1336,9 @@ SH
       "$home/state/.branch-latch" "$home/state/.afk" "$log" "$stop"
     eval "$seed"
     out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
-      FM_TEST_REASON="signal: task-a.status done" FM_TEST_BRANCH_MODE="$mode" node --input-type=module 2>&1 <<'EOF'
-import { writeFileSync } from "node:fs";
+      FM_TEST_REASON="signal: task-a.status done" FM_TEST_BRANCH_MODE="$mode" FM_TEST_EXPECT_NOTE="$expect" \
+      node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const offers = [];
@@ -1390,6 +1391,15 @@ if (offers.length !== 1 || offers[0].eligible !== true) {
 }
 if (!prompt.includes(`FIRSTMATE WATCHER WAKE: ${process.env.FM_TEST_REASON}`)) {
   throw new Error(`a declined branch wake did not reach main: ${prompt}`);
+}
+// The alarm note is filed after main's wake, so wait for the throttle it writes
+// rather than racing the watcher's bash child.
+if (process.env.FM_TEST_EXPECT_NOTE === "1") {
+  for (let i = 0; i < 500 && !existsSync(`${process.env.FM_HOME}/state/.branch-silence-alarm`); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+} else {
+  await new Promise((resolve) => setTimeout(resolve, 300));
 }
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);

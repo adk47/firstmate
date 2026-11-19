@@ -839,6 +839,7 @@ export default function (pi: ExtensionAPI) {
         return await sendWake(owner, `${message}\n\n${confirmed.detail}`, pending);
       }
     }
+    let branchEligible: boolean | null = null;
     if (!repairFailed) {
       const branchOffer = offerWakeToBranch(message);
       if (branchOffer.settlement) {
@@ -847,12 +848,18 @@ export default function (pi: ExtensionAPI) {
           return true;
         } catch {}
       }
+      branchEligible = branchOffer.eligible;
+    }
+    const delivered = await sendWake(owner, message, pending);
+    if (branchEligible !== null) {
       // Either the branch declined work it should have taken, or it declared
       // itself latched: both mean main is absorbing a branch's job, which is
-      // the one thing nothing else reports.
-      await reportBranchSilence(branchOffer.eligible);
+      // the one thing nothing else reports. The note waits on the wake-queue
+      // lock, so it must never stand between the branch's outcome and main's
+      // wake.
+      await reportBranchSilence(branchEligible);
     }
-    return await sendWake(owner, message, pending);
+    return delivered;
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
