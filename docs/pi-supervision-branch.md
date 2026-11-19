@@ -87,6 +87,28 @@ Two reads stay synchronous because Pi's own API is synchronous there, not as an 
 Pi types its bash spawn hook as a plain function, so the guard on the branch's own shell commands cannot await; and the watcher reads `offer.accepted` the moment its dispatch event returns, so a session that does not own the fleet lock must still refuse a wake without waiting.
 Both read the same uncached ownership authority: the lock's process ancestry is walked in full every time it is asked, never cached, because reparenting and pid reuse can invalidate a remembered chain and this answer decides ownership rather than hinting at it.
 
+## Branch liveness and silence
+
+The branch's failure mode is silence, and the fallback hides it: when the branch declines a wake, the watcher hands that wake to main, main drains the queue itself, and nothing downstream learns the branch was skipped, so a branch can take no work for a day while main absorbs every event by brute force.
+The two records below are how a branch that is no longer working states so.
+
+`state/.branch-live` holds the epoch second of the branch's last durable report or session start, so a reader can measure silence without asking the branch anything.
+`state/.branch-latch` holds the epoch second and the one-line reason the branch stopped taking work, written every time a latch is set and removed when a durable report clears it.
+A latch is set by repeated provider errors, by a branch that could not be constructed, by a reconcile that could not deliver stored outcomes into main, and by a branch that still owns the fleet lock but no longer owns the current session's generation, so the reason names the actual fault rather than a generic timeout.
+That last one is the shape that stays dead the longest: a main session that shut down without a replacement leaves the branch unable to act, and before the latch existed it declined every wake in silence for as long as the session stayed down.
+
+Every latch is re-probeable: a latch with no provider-retry schedule of its own inherits the same cooldown and single-probe ladder, which is what stops a non-provider failure from leaving a branch that can never be offered another wake for the rest of the main session.
+A durable report clears the latch and refreshes `state/.branch-live` in one step, because a report is proof the branch worked.
+
+Failure is reported where a declined wake is actually visible.
+`.pi/extensions/fm-primary-pi-watch.ts` owns that path, and every actionable wake it delivers to main also checks the branch's liveness record: when the branch declined work it should have taken, or when a latch file says the branch stopped working, the watcher files one automated note naming how long the branch has been silent and the persisted reason, through `bin/fm-inbox.sh note --source watch` into the automated queue the next drain presents.
+A wake main was always going to handle says nothing about the branch on its own, so a quiet fleet with no latch stays quiet rather than reporting a branch that simply had no work.
+The window is `FM_BRANCH_SILENCE_WINDOW_MS` (default ten minutes) and it throttles repeats rather than only gating the first report, so a dead branch keeps saying so on the drain cadence instead of on every wake.
+A declined offer is ordinary in two states and stays quiet in both: before this session owns the fleet lock, and while away mode's daemon owns supervision.
+
+The alarm is deliberately not a main wake.
+Real wakes carry work for main to do, and folding an alarm into one would either compete with that work or be absorbed by the watcher's own doorbell folding; a note in the automated queue is durable, presentable, and acknowledged like any other.
+
 ## Lost-wake outcome backstop
 
 Every main-actor wake drain checks each task's newest non-blank status event against the latest supervision-branch outcome that causally covers that task's status log.

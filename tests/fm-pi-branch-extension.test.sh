@@ -2115,6 +2115,83 @@ EOF
   pass "provider-error latches cool down, re-probe once with backoff, and recover through a durable report"
 }
 
+# A latch is the branch's own statement that it stopped working, and once it is
+# latched nothing asks it anything again, so the reason has to survive on disk
+# for the watcher to read. The same latch must also stay re-probeable: a
+# non-provider failure used to leave a branch that could never be offered
+# another wake for the rest of the main session.
+test_non_provider_latch_persists_reprobes_and_clears() {
+  local repo home out status
+  repo="$TMP_ROOT/latch-root"
+  home="$TMP_ROOT/latch-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, dispatch, fire, settle, home, defaultSessionCtx }; })()`);
+const { pi, dispatch, fire, settle, home, defaultSessionCtx } = globalThis.__t;
+import { existsSync, readFileSync } from "node:fs";
+
+let now = 1_000_000;
+Date.now = () => now;
+await fire("session_start", {}, defaultSessionCtx);
+if (!existsSync(`${home}/state/.branch-live`)) {
+  throw new Error("session start did not record the branch's liveness floor");
+}
+
+// A branch that cannot be constructed latches with a durable reason, and the
+// wake still reaches main through the watcher's own fallback.
+globalThis.__fmCreateSessionError = "branch construction failed: no credentials";
+const failed = dispatch("signal: branch-driver needs supervision");
+if (!failed.accepted) throw new Error("the first wake was not offered to the branch");
+const failure = await failed.settlement.then(() => null, (error) => error);
+if (!(failure instanceof Error) || !failure.message.includes("no credentials")) {
+  throw new Error(`construction failure did not reject the settlement: ${String(failure)}`);
+}
+const latch = readFileSync(`${home}/state/.branch-latch`, "utf8").trim().split("\t");
+if (latch.length !== 2 || !latch[1].includes("no credentials")) {
+  throw new Error(`the latch reason was not persisted: ${JSON.stringify(latch)}`);
+}
+
+// Inside the cooldown every wake stays on main; the first wake after it is
+// offered again, and a durable report clears the latch and refreshes liveness.
+now += (5 * 60 * 1000) - 1;
+if (dispatch("signal: inside the latch cooldown").accepted) {
+  throw new Error("a latched branch re-probed before its cooldown elapsed");
+}
+now += 1;
+globalThis.__fmCreateSessionError = undefined;
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+  const recorded = await report.execute(
+    "probe",
+    { task: "branch-driver", verdict: "routine", summary: "probe recovered the branch" },
+    undefined,
+    undefined,
+    {},
+  );
+  if (recorded.isError) throw new Error(`probe report failed: ${JSON.stringify(recorded)}`);
+  session.messages.push({ role: "assistant", content: [], stopReason: "stop" });
+};
+const probe = dispatch("signal: latch cooldown probe");
+if (!probe.accepted) throw new Error("the branch was never re-probed after its latch cooldown");
+await probe.settlement;
+if (existsSync(`${home}/state/.branch-latch`)) {
+  throw new Error("a durable report did not clear the persisted latch");
+}
+const live = Number(readFileSync(`${home}/state/.branch-live`, "utf8").trim());
+if (!(live * 1000 >= now - 1000)) {
+  throw new Error(`the durable report did not refresh the liveness record: ${live}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a non-provider latch must persist its reason, re-probe after its cooldown, and clear on a durable report: $out"
+  pass "a non-provider latch persists its reason, re-probes after its cooldown, and clears on a durable report"
+}
+
 test_selection_change_does_not_corrupt_inflight_provider_state() {
   local repo home out status
   repo="$TMP_ROOT/provider-selection-race-root"
@@ -3525,6 +3602,53 @@ EOF
   pass "queued wakes and mirrors stop mutating branch state after lock ownership is lost"
 }
 
+test_shutdown_without_restart_latches_the_branch() {
+  local repo home out status
+  repo="$TMP_ROOT/shutdown-latch-root"
+  home="$TMP_ROOT/shutdown-latch-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home }; })()`);
+const { fire, dispatch, settle, home } = globalThis.__t;
+import { existsSync, readFileSync } from "node:fs";
+
+if (!dispatch("signal: establish branch").accepted) throw new Error("first wake was not accepted");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch prompt");
+
+// A main session that shut down without a replacement leaves the branch owning
+// the lock but not this generation: dead, and previously silent forever.
+await fire("session_shutdown", {});
+if (dispatch("signal: offered after shutdown").accepted) {
+  throw new Error("a shut-down generation accepted a wake");
+}
+if (!existsSync(`${home}/state/.branch-latch`)) {
+  throw new Error("a silent generation refusal recorded no latch");
+}
+const latch = readFileSync(`${home}/state/.branch-latch`, "utf8");
+if (!latch.includes("replaced or lost lock ownership")) {
+  throw new Error(`latch did not name the refusal: ${latch}`);
+}
+
+// The replacement session is the recovery: the latch clears and work resumes.
+await fire("session_start", {});
+if (existsSync(`${home}/state/.branch-latch`)) {
+  throw new Error("a new session left the latch in place");
+}
+if (!dispatch("signal: offered after restart").accepted) {
+  throw new Error("the replacement generation refused its wake");
+}
+await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "replacement branch prompt");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a shut-down generation must latch and a new session must recover it: $out"
+  pass "a shut-down generation latches the branch and a new session clears it"
+}
+
 test_stale_generation_boundaries_are_side_effect_free() {
   local repo home out status
   repo="$TMP_ROOT/stale-boundaries-root"
@@ -4870,6 +4994,7 @@ test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligi
 test_branch_predrain_needs_decision_keeps_routine_row_branch_eligible
 test_settled_branch_prompt_releases_unacknowledged_grant
 test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldown
+test_non_provider_latch_persists_reprobes_and_clears
 test_selection_change_does_not_corrupt_inflight_provider_state
 test_main_owned_grant_result_falls_back_to_main
 test_branch_predrain_recheck_noops_already_drained_wake
@@ -4888,6 +5013,7 @@ test_unusable_model_pin_falls_back_to_main
 test_replacement_activation_cleans_leases_and_retries_failure
 test_cold_start_activates_after_lock_acquisition
 test_queued_actions_recheck_lock_ownership
+test_shutdown_without_restart_latches_the_branch
 test_stale_generation_boundaries_are_side_effect_free
 test_secondary_session_stays_inert
 test_rebind_remirrors_undelivered_dialog_from_durable_cursor

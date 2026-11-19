@@ -46,7 +46,7 @@
 // reason. Backoff still damps a child that keeps dying, so no arm loop appears.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -261,6 +261,108 @@ function lockOwnership(): LockOwnership {
     if (!pid || pid === "1") break;
   }
   return pidAlive(lockPid) ? "other" : "missing";
+}
+
+// An eligible wake that main handles is the supervision branch failing at its
+// one job, and that fallback is silent by design: the close is simply delivered
+// to main, which drains the queue itself and never learns the branch was
+// skipped. Nothing else observes the skip, so a branch can take no work for a
+// day while main absorbs every wake and no durable record says so. This is the
+// one place that knows an eligible batch was declined, so the report rides the
+// wake main is already receiving - it cannot be lost in delivery - and it names
+// the reason the branch persisted instead of guessing at one.
+//
+// A declined offer is also ordinary in two states that are not faults: before
+// this session owns the fleet lock (cold start, or a read-only secondary
+// session) and while away mode's daemon owns supervision. Both stay quiet.
+const branchSilenceWindowMs = positiveInteger("FM_BRANCH_SILENCE_WINDOW_MS", 600_000);
+
+function readEpochFile(path: string): number {
+  try {
+    const value = Number(readFileSync(path, "utf8").trim());
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// A wake is the moment to ask whether the branch is still working, and the
+// answer has to come from disk because a silent branch is never asked anything
+// again: once it declines, main handles the wake and nothing downstream learns
+// the branch was skipped. So every actionable wake main receives also checks
+// the branch's own liveness record and files a durable note when that record
+// has gone stale.
+function branchSilenceReport(declined: boolean, now = Date.now()): string {
+  if (existsSync(`${state}/.afk`)) return "";
+  if (lockOwnership() !== "owned") return "";
+  const alarmedAt = readEpochFile(`${state}/.branch-silence-alarm`);
+  if (alarmedAt && now - alarmedAt * 1000 < branchSilenceWindowMs) return "";
+  const liveAt = readEpochFile(`${state}/.branch-live`);
+  const idleMs = liveAt ? now - liveAt * 1000 : Number.POSITIVE_INFINITY;
+  if (idleMs < branchSilenceWindowMs) return "";
+  let latch = "no branch latch recorded";
+  try {
+    const [at, ...reason] = readFileSync(`${state}/.branch-latch`, "utf8").trim().split("\t");
+    if (reason.join(" ").trim()) {
+      const since = Number(at);
+      const age = Number.isFinite(since)
+        ? `, ${Math.max(0, Math.round((now / 1000 - since) / 60))} min`
+        : "";
+      latch = `branch latch: ${reason.join(" ").trim()}${age}`;
+    }
+  } catch {
+    // No latch file: the branch never said why, and a guess is worse than silence.
+  }
+  const idle = liveAt ? `${Math.round(idleMs / 60_000)} min ago` : "never recorded";
+  // A branch that was never loaded at all never latches either, so the marker
+  // the extension writes when it activates is the only way to tell "never
+  // started" apart from "stopped": project trust not approved is the ordinary
+  // cause and the digest's own PI_WATCH_EXTENSION line cannot see the branch.
+  let unloaded = "";
+  try {
+    const markerPid = readFileSync(`${state}/.pi-branch-extension-loaded`, "utf8").trim().split("\n")[0] ?? "";
+    const lockPid = readFileSync(`${state}/.lock`, "utf8").trim().split("\n")[0] ?? "";
+    if (!markerPid || markerPid !== lockPid) {
+      unloaded = "; the branch extension never marked this session loaded";
+    }
+  } catch {
+    unloaded = "; the branch extension never marked this session loaded";
+  }
+  const leave = declined
+    ? "an eligible wake went to main"
+    : "main took this wake while the branch stayed silent";
+  return `supervision branch SILENT - ${leave}; last branch work ${idle}; ${latch}${unloaded}. Nothing else reports this: state/.branch-latch names the reason, and the branch is re-armed by restarting this Pi session or changing the supervision model.`;
+}
+
+// A doorbell is a doorbell: the watcher's own follow-up folds under an
+// unconsumed one and only carries the drain instruction, so extension text
+// appended there can be swallowed. The alarm is filed as an automated note
+// instead, which appends its own durable `check` wake that the next drain
+// presents like any other, and the throttle is written only once that record
+// exists.
+function reportBranchSilence(declined: boolean, now = Date.now()): void {
+  // A wake main was always going to handle says nothing about the branch unless
+  // the branch itself recorded that it stopped working, so require one of the
+  // two concrete faults rather than alarming on a quiet fleet.
+  if (!declined && !existsSync(`${state}/.branch-latch`)) return;
+  const report = branchSilenceReport(declined, now);
+  if (!report) return;
+  try {
+    const result = spawnSync("bash", [`${fmRoot}/bin/fm-inbox.sh`, "note", "--source", "watch", "-"], {
+      cwd: fmRoot,
+      encoding: "utf8",
+      input: `${report}\n`,
+      env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
+    });
+    if (result.status !== 0) return;
+  } catch {
+    return;
+  }
+  try {
+    writeFileSync(`${state}/.branch-silence-alarm`, `${Math.floor(now / 1000)}\n`);
+  } catch {
+    // Throttle is best effort; a repeated report beats a lost one.
+  }
 }
 
 function markLoaded(): void {
@@ -678,7 +780,10 @@ export default function (pi: ExtensionAPI) {
     return confirmHandlingDelivery(snapshot());
   }
 
-  function offerWakeToBranch(message: string): Promise<void> | null {
+  // Returns whether the batch was the branch's to take, so a declined ELIGIBLE
+  // batch can be reported instead of vanishing into main's silent fallback.
+  // `settlement` is non-null only when an acceptor took the wake.
+  function offerWakeToBranch(message: string): { settlement: Promise<void> | null; eligible: boolean } {
     const heartbeat = /^heartbeat($|:)/.test(message);
     // A check-kind close (merge-confirmation polls, Relay mentions,
     // credential/auth failures, and every other legitimately main-only
@@ -713,7 +818,7 @@ export default function (pi: ExtensionAPI) {
     const eligible = !isCheckTrigger && !isNeedsDecisionTrigger && scope.eligible;
     const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
-    return offer.accepted ? offer.settlement : null;
+    return { settlement: offer.accepted ? offer.settlement : null, eligible };
   }
 
   async function deliverActionableWake(
@@ -735,13 +840,17 @@ export default function (pi: ExtensionAPI) {
       }
     }
     if (!repairFailed) {
-      const branchDelivery = offerWakeToBranch(message);
-      if (branchDelivery) {
+      const branchOffer = offerWakeToBranch(message);
+      if (branchOffer.settlement) {
         try {
-          await branchDelivery;
+          await branchOffer.settlement;
           return true;
         } catch {}
       }
+      // Either the branch declined work it should have taken, or it declared
+      // itself latched: both mean main is absorbing a branch's job, which is
+      // the one thing nothing else reports.
+      reportBranchSilence(branchOffer.eligible);
     }
     return await sendWake(owner, message, pending);
   }

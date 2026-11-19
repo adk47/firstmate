@@ -1298,6 +1298,119 @@ CLASSES
   pass "every main-only check class still reaches main, never the supervision branch"
 }
 
+# An eligible wake the branch does not answer is the branch silently failing at
+# its one job: main drains it either way, so nothing else ever reports the
+# skip. The watcher files exactly one throttled automated note naming the
+# reason the branch itself persisted, and stays quiet in the two states where a
+# declined offer is ordinary.
+test_pi_dead_branch_files_one_throttled_silence_note() {
+  local repo home plugin log stop out status label expect seed notes
+  repo="$TMP_ROOT/pi-branch-silence-root"
+  home="$TMP_ROOT/pi-branch-silence-home"
+  log="$TMP_ROOT/pi-branch-silence.log"
+  stop="$TMP_ROOT/pi-branch-silence.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  install_pi_watch_extension_fixture "$repo"
+  cp "$ROOT/bin/fm-inbox.sh" "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/"
+  chmod +x "$repo/bin/fm-inbox.sh" "$repo/bin/fm-wake-lib.sh"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf '%s\n' "${FM_TEST_REASON:?}"
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  while IFS='|' read -r label expect seed; do
+    [ -n "$label" ] || continue
+    rm -rf "$home/state/inbox-auto" "$home/state/.branch-silence-alarm" "$home/state/.branch-live" \
+      "$home/state/.branch-latch" "$home/state/.afk" "$log" "$stop"
+    eval "$seed"
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+      FM_TEST_REASON="signal: task-a.status done" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+// A branch that answers nothing at all: no accept, no rejection. This is the
+// silent-death shape the alarm exists for.
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message, eligible: offer.eligible });
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  `1\t1\tsignal\ttask-a.status\t${process.env.FM_TEST_REASON}\n`,
+);
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-branch-silence", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (offers.length !== 1 || offers[0].eligible !== true) {
+  throw new Error(`an answerable wake was not offered to the branch: ${JSON.stringify(offers)}`);
+}
+if (!prompt.includes(`FIRSTMATE WATCHER WAKE: ${process.env.FM_TEST_REASON}`)) {
+  throw new Error(`a declined branch wake did not reach main: ${prompt}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "a declined branch wake must still reach main ($label): $out"
+    notes=0
+    if [ -d "$home/state/inbox-auto" ]; then
+      notes=$(find "$home/state/inbox-auto" -maxdepth 1 -name '*.note' | wc -l | tr -d ' ')
+    fi
+    [ "$notes" = "$expect" ] || fail "$label filed $notes silence notes, not $expect"
+    if [ "$expect" = 1 ]; then
+      grep -q 'supervision branch SILENT' "$home/state/inbox-auto"/*.note \
+        || fail "$label note does not name the branch silence"
+      grep -q 'never recorded' "$home/state/inbox-auto"/*.note \
+        || fail "$label note does not name how long the branch has been silent"
+    fi
+  done <<'CASES'
+dead-branch|1|true
+recent-branch-work|0|printf '%s\n' "$(( $(date +%s) ))" > "$home/state/.branch-live"
+away-mode|0|: > "$home/state/.afk"
+CASES
+  pass "a dead branch files exactly one throttled silence note and stays quiet when a decline is ordinary"
+}
+
 # A surfaced captain-held signal uses the existing decision-owned payload, so a
 # co-present routine row cannot take the signal close away from main.
 test_pi_captain_held_signal_stays_on_main() {
@@ -5320,6 +5433,7 @@ test_pi_unverified_successor_during_held_delivery_retries
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
 test_pi_main_only_check_classes_stay_on_main
+test_pi_dead_branch_files_one_throttled_silence_note
 test_pi_captain_held_signal_stays_on_main
 test_pi_unread_pending_reply_forces_later_stale_alias_to_main
 test_pi_distinct_files_mixed_batch_routes_whole_batch_to_main
