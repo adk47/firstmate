@@ -7,7 +7,7 @@
 #   note    Queue an idea for firstmate while firstmate is mid-turn and cannot
 #           answer. Writes a durable record and appends ONE `check` wake, so the
 #           note survives a crash and is presented at firstmate's next drain.
-#           This is the only subcommand that touches firstmate's wake queue.
+#           This is the only subcommand that appends to firstmate's wake queue.
 #   say     Same as `note`, but the body comes from spoken audio on stdin.
 #           Speech is an INPUT METHOD here, not an architecture: it transcribes
 #           and then takes exactly the `note` path.
@@ -46,6 +46,15 @@
 # never buried by machine output. Both queues append one wake - a page that never
 # wakes is a page nobody reads - and an automated wake names its class, so it is
 # recognizable as automated without opening the record.
+#
+# A note and the wake that announced it are TWO records of ONE obligation, so
+# they are settled together: `drain --ack <id>` moves the record into handled/ and
+# retires its `check: inbox:<id>` wake in the same command. In the other
+# direction bin/fm-wake-drain.sh refuses to acknowledge a wake whose captain note
+# is still unacknowledged, naming the ids, so the two records cannot drift apart
+# in either order. That pair is the whole fix for the 2026-11 measurement of
+# three captain notes sitting 23h+ while newer ones were handled in the same
+# minute: the wake queue could be acknowledged without ever touching the note.
 #
 # Configuration. A region, a model id and an AWS profile name somebody's account
 # and somebody's choices, so this file carries no default for any of them. Each is
@@ -456,6 +465,19 @@ cmd_list() {
   print_auto_notes "$show_all"
 }
 
+# Retire the wake that announced a note, so one command clears both records of
+# the one obligation. A failure here is reported and never rolls the ack back:
+# the note is already out of the queue, and a wake whose note is gone no longer
+# blocks the drain's own acknowledgement.
+retire_note_wake() {  # <id>
+  local id=$1 lib="$FM_ROOT/bin/fm-wake-lib.sh" removed
+  [ -r "$lib" ] || return 0
+  # shellcheck source=/dev/null
+  FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" STATE="$STATE" . "$lib"
+  removed=$(fm_wake_retire_key_rows "inbox:$id") || return 1
+  [ -z "$removed" ] || printf 'retired %s wake(s) for %s\n' "$removed" "$id"
+}
+
 cmd_drain() {
   local show_all=0
   if [ "${1:-}" = "--all" ]; then
@@ -478,6 +500,8 @@ cmd_drain() {
         mkdir -p "$dir/handled"
         mv "$dir/$id.note" "$dir/handled/$id.note"
         printf 'acked %s\n' "$id"
+        retire_note_wake "$id" \
+          || printf 'fm-inbox: acked %s but its wake could not be retired; the next drain will acknowledge it\n' "$id" >&2
         acked=1
         break
       done
@@ -487,6 +511,7 @@ cmd_drain() {
   fi
   if [ "$show_all" -eq 1 ]; then cmd_list --all; else cmd_list; fi
   printf '\nAck with: fm-inbox.sh drain --ack <id>...\n'
+  printf 'Acking a note retires the wake that announced it, so one command clears both.\n'
 }
 
 # ---------------------------------------------------------------- dispatch

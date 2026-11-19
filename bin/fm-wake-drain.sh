@@ -7,6 +7,16 @@
 # binding, or beat, then assert liveness. A main drain on a home that keeps a
 # board also prints its one agenda line (bin/fm-board.sh wake-line) first.
 #
+# Acknowledging a wake also has to settle the captain note that wake announced.
+# A `check: inbox:<id>` row and its state/inbox/<id>.note are two records of one
+# obligation, so `--ack-through` refuses (exit 3, naming the note ids) while a
+# note at or below the cutoff is still unacknowledged; bin/fm-inbox.sh's
+# `drain --ack` retires the note and its wake together, and
+# --allow-unacked-notes is the one explicit override for a note knowingly left
+# pending. Measured 2026-11: three captain notes sat 23h+ while newer ones were
+# handled in the same minute, because the queue could be acknowledged without
+# ever touching the note.
+#
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
@@ -39,6 +49,9 @@ ACK_REMOVED=0
 PRESENTED_MAX=0
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
+ALLOW_UNACKED_NOTES=false
+ACK_ROWS_FILE=
+UNACKED_NOTES=
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
 
@@ -71,6 +84,27 @@ MAIN_ROWS_FILE="$STATE/.main-eligible-rows"
 
 rows_file_valid() {
   [ -s "$1" ] && awk 'BEGIN { ok=1 } !/^[0-9]+$/ || seen[$0]++ { ok=0 } END { exit !ok }' "$1"
+}
+
+# Captain notes announced by the rows this acknowledgement is about to consume
+# and still waiting in state/inbox/, one note id per line. Only the captain's
+# queue couples: state/inbox-auto/ is a bounded log of machine records the
+# captain never wrote, so refusing there would block routine acknowledgements
+# until an operator learned to pass the override.
+unacked_captain_notes_in_ack_rows() {  # <rows-file> <cutoff>
+  local rows_file=$1 cutoff=$2 id
+  [ -s "$rows_file" ] || return 0
+  [ -s "$FM_WAKE_QUEUE" ] || return 0
+  awk -F '\t' -v cutoff="$cutoff" -v seqs="$rows_file" '
+    BEGIN { while ((getline line < seqs) > 0) owned[line] = 1 }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff && ($2 in owned) \
+      && $3 == "check" && $4 ~ /^inbox:/ { print substr($4, 7) }
+  ' "$FM_WAKE_QUEUE" | sort -u | while IFS= read -r id; do
+    case "$id" in ''|*/*|*..*) continue ;; esac
+    if [ -f "$STATE/inbox/$id.note" ] && [ ! -L "$STATE/inbox/$id.note" ]; then
+      printf '%s\n' "$id"
+    fi
+  done
 }
 
 branch_grant_live_locked() {
@@ -170,9 +204,16 @@ case "${1:-}" in
       || { echo "wake drain: acknowledgement requires its recovery generation" >&2; exit 2; }
     ACK_GENERATION=${4:-}
     case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
-    [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
+    case "${5:-}" in
+      '') [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; } ;;
+      --allow-unacked-notes)
+        ALLOW_UNACKED_NOTES=true
+        [ "$#" -eq 5 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
+        ;;
+      *) echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2 ;;
+    esac
     ;;
-  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION [--allow-unacked-notes]]" >&2; exit 2 ;;
 esac
 
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
@@ -695,8 +736,10 @@ reclaim_stale_branch_grant_locked || exit 1
 if [ -n "$ACK_THROUGH" ]; then
   if [ "$ACTOR" = branch ]; then
     PRESENTED_MAX=$(presented_max_row "$ELIGIBLE_ROWS_FILE") || exit 1
+    ACK_ROWS_FILE=$ELIGIBLE_ROWS_FILE
   else
     PRESENTED_MAX=$(presented_max_row "$MAIN_ROWS_FILE") || exit 1
+    ACK_ROWS_FILE=$MAIN_ROWS_FILE
   fi
   if [ "$ACTOR" = main ]; then
     # Preserve main's original whole-cutoff acknowledgement contract: rows may
@@ -722,6 +765,24 @@ if [ -n "$ACK_THROUGH" ]; then
     fi
     ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:' "$MAIN_ROWS_FILE") || exit 1
     ACK_NOTICE_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-reconcile:' "$MAIN_ROWS_FILE") || exit 1
+  fi
+  # Refuse BEFORE the first durable write of this acknowledgement: a receipt
+  # recorded for a wake that stays queued is the same half-done state this check
+  # exists to prevent. Refusing rather than re-queueing the note is deliberate -
+  # a re-queue can be acknowledged again in the same loop, which turns a hard
+  # stop into a race.
+  UNACKED_NOTES=$(unacked_captain_notes_in_ack_rows "$ACK_ROWS_FILE" "$ACK_THROUGH") || exit 1
+  if [ -n "$UNACKED_NOTES" ] && [ "$ALLOW_UNACKED_NOTES" != true ]; then
+    {
+      printf 'wake drain: NOT acknowledged through %s - these captain notes are still unacknowledged, so the wakes that announced them stay pending too:\n' "$ACK_THROUGH"
+      while IFS= read -r note_id; do
+        [ -n "$note_id" ] || continue
+        printf '  %s\n' "$note_id"
+      done <<< "$UNACKED_NOTES"
+      printf 'Read and handle each note, then run bin/fm-inbox.sh drain --ack <id>... (it retires the note and the wake that announced it together), and re-run this acknowledgement.\n'
+      printf 'To acknowledge the wakes anyway and leave those notes pending, add --allow-unacked-notes.\n'
+    } >&2
+    exit 3
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
