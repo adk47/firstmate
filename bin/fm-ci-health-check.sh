@@ -131,8 +131,20 @@ conf() {
         "$key="*)
           value=${line#*=}
           case "$value" in
-            \"*\") value=${value#\"}; value=${value%\"} ;;
-            \'*\') value=${value#\'}; value=${value%\'} ;;
+            \"*)
+              value=${value#\"}
+              value=${value%%\"*}
+              ;;
+            \'*)
+              value=${value#\'}
+              value=${value%%\'*}
+              ;;
+            *)
+              case "$value" in
+                *[[:space:]]#*) value=${value%%[[:space:]]#*} ;;
+              esac
+              value=${value%"${value##*[![:space:]]}"}
+              ;;
           esac
           found=1
           ;;
@@ -166,6 +178,11 @@ load_token_env() {
   local f
   f=$(conf FM_CI_HEALTH_TOKEN_ENV "$HOME/.config/muso/gh-app-token.env")
   [ "$f" != none ] || return 0
+  if [ "${f:0:1}" = '~' ]; then
+    case "${f:1}" in
+      ''|/*) f="$HOME${f:1}" ;;
+    esac
+  fi
   [ -f "$f" ] && [ ! -L "$f" ] && [ -r "$f" ] || return 0
   # shellcheck disable=SC1090
   . "$f"

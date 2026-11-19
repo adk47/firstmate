@@ -196,6 +196,61 @@ test_an_unreadable_answer_is_silent_not_red() {
   pass "an unreadable or failed runs read is silent, never red"
 }
 
+# A config file is the operator interface the docs describe: a quoted
+# multi-value line with a trailing comment, and numeric lines with one too.
+test_a_config_file_written_as_documented_is_parsed() {  # <home>
+  local home=$1
+  cat > "$home/config/ci-health.env" <<'ENV'
+FM_CI_HEALTH_REPOS='acme/widgets:main:10 acme/gadgets:main:10'   # owner/repo:branch:queued-bar
+FM_CI_HEALTH_SCHEDULED=' '   # owner/repo:workflow-file:max-age-secs
+FM_CI_HEALTH_INTERVAL_SECS=900      # polls closer together than this are skipped
+ENV
+}
+
+test_the_documented_config_file_shape_drives_the_poll() {
+  local home out
+  home=$(make_home config)
+  test_a_config_file_written_as_documented_is_parsed "$home"
+  queued_fixture "$home" acme/widgets 0
+  queued_fixture "$home" acme/gadgets 0
+  runs_fixture "$home" acme/widgets main 60 'verify|1|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  runs_fixture "$home" acme/gadgets main 60 'lint|2|completed|failure|2026-11-19T22:53:30Z|b1ba56fdf0000'
+  out=$(env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_CI_HEALTH_NOW=100000 FM_CI_HEALTH_TOKEN_ENV=none \
+    "$CHECK" check 2>&1)
+  assert_contains "$out" "acme/widgets main red:" "the first configured repository was not polled"
+  assert_contains "$out" "acme/gadgets main red:" "the second configured repository was not polled"
+  out=$(env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_CI_HEALTH_NOW=100500 FM_CI_HEALTH_TOKEN_ENV=none \
+    "$CHECK" check 2>&1)
+  [ -z "$out" ] || fail "the configured interval was not read: $out"
+  pass "a config file with quoted values and trailing comments is parsed and drives the poll"
+}
+
+test_a_tilde_token_env_path_is_expanded() {
+  local home out
+  home=$(make_home tilde)
+  cat > "$home/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\${GH_TOKEN:-none}" >> "$home/token.seen"
+[ "\$1" = api ] || exit 1
+f="$home/api/\$(printf '%s' "\$2" | tr '/?&=' '____')"
+[ -f "\$f" ] || exit 1
+cat "\$f"
+SH
+  chmod +x "$home/fakebin/gh"
+  printf 'export GH_TOKEN=tok-from-file\n' > "$home/app-token.env"
+  printf 'FM_CI_HEALTH_TOKEN_ENV=~/app-token.env\n' > "$home/config/ci-health.env"
+  queued_fixture "$home" acme/widgets 0
+  runs_fixture "$home" acme/widgets main 60 'verify|1|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  out=$(env PATH="$home/fakebin:$PATH" HOME="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_CI_HEALTH_NOW=100000 FM_CI_HEALTH_REPOS='acme/widgets:main:10' \
+    FM_CI_HEALTH_SCHEDULED=' ' "$CHECK" check 2>&1)
+  [ -z "$out" ] || fail "the poll printed: $out"
+  assert_contains "$(cat "$home/token.seen")" "tok-from-file" "a ~/ token env path was not expanded and sourced"
+  pass "a configured ~/ token env path is expanded and sourced"
+}
+
 test_a_scheduled_workflow_is_judged_only_when_it_declares_a_schedule() {
   local home out wf_plain wf_sched
   home=$(make_home cadence)
@@ -263,5 +318,7 @@ test_queued_backlog_over_the_bar_pages_with_the_count
 test_poll_is_throttled_and_stands_down_on_a_thin_rate_budget
 test_an_unreadable_answer_is_silent_not_red
 test_a_scheduled_workflow_is_judged_only_when_it_declares_a_schedule
+test_the_documented_config_file_shape_drives_the_poll
+test_a_tilde_token_env_path_is_expanded
 test_classify_run_reads_one_run_live_with_its_evidence
 test_status_and_arm
