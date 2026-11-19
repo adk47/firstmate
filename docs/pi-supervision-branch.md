@@ -94,6 +94,7 @@ The two records below are how a branch that is no longer working states so.
 
 `state/.branch-live` holds the epoch second of the branch's last durable report or session start, so a reader can measure silence without asking the branch anything.
 `state/.branch-latch` holds the epoch second and the one-line reason the branch stopped taking work; a repeated latch reason keeps the original epoch, and the record is removed when a durable report clears it or a new generation takes the lock.
+Both records are written only while the writing session owns the fleet lock, so a latch a replaced or exited session left behind describes that session rather than the current one.
 A latch is set by repeated provider errors, by a branch that could not be constructed, by a reconcile that could not deliver stored outcomes into main, and by a branch that still owns the fleet lock but no longer owns the current session's generation, so the reason names the actual fault rather than a generic timeout.
 That last one is the shape that stays dead the longest: a main session that shut down without a replacement leaves the branch unable to act, and before the latch existed it declined every wake in silence for as long as the session stayed down.
 
@@ -103,8 +104,11 @@ A durable report clears the latch and refreshes `state/.branch-live` in one step
 
 Failure is reported where a declined wake is actually visible.
 `.pi/extensions/fm-primary-pi-watch.ts` owns that path, and every actionable wake it delivers to main also checks the branch's liveness record: when the branch declined work it should have taken, or when a latch file says the branch stopped working, the watcher files one automated note naming how long the branch has been silent and the persisted reason, through `bin/fm-inbox.sh note --source watch` into the automated queue the next drain presents.
+A latch is only evidence about the session that wrote it, so the watcher reads one only while the branch extension's loaded marker names the pid holding the fleet lock, and a latch a dead session left behind is not treated as a fault of the current one.
 A wake main was always going to handle says nothing about the branch on its own, so a quiet fleet with no latch stays quiet rather than reporting a branch that simply had no work.
-The window is `FM_BRANCH_SILENCE_WINDOW_MS` (default ten minutes) and it throttles repeats rather than only gating the first report, so a dead branch keeps saying so on the drain cadence instead of on every wake.
+`state/.branch-silence-alarm` records the epoch second of the last filed note, and the stamp is written only after that note landed, so a dropped note delays the alarm instead of silencing it.
+The window is `FM_BRANCH_SILENCE_WINDOW_MS`, and it throttles repeats rather than only gating the first report, so a dead branch keeps saying so on the drain cadence instead of on every wake.
+Filing the note means taking the wake-queue lock, which a live but wedged process can hold indefinitely, so the note child is time-bounded by `FM_BRANCH_SILENCE_NOTE_TIMEOUT_MS` and starts only after main's own wake: a stuck lock costs one dropped note rather than that wake or every later alarm.
 A declined offer is ordinary in two states and stays quiet in both: before this session owns the fleet lock, and while away mode's daemon owns supervision.
 
 The alarm is deliberately not a main wake.
