@@ -101,7 +101,15 @@
 #           re-registration, and its durable row goes back to open, so no
 #           evidence from before the re-registration can score. The durable row
 #           decides this as well as the verdict, so a deleted verdict cannot
-#           hide a gap. Any other existing watch is left alone. Registration is read-only against the cluster; it
+#           hide a gap. A watch whose row ended `regressed` re-arms the same
+#           way, keeping the verdict it replaced in
+#           state/change-watch/<watch-id>/rearm-history and clearing any
+#           recorded follow-up, because the regression was handed to follow-up
+#           work and the shipped fix is what gets re-measured. A BETA regression
+#           is not re-armed: it has no production targets to re-measure, so its
+#           terminal row, beta reason and beta evidence stay in place and the
+#           operator is told that re-measuring beta needs a new watch with its
+#           own targets. Any other existing watch is left alone. Registration is read-only against the cluster; it
 #           writes only under this home's state/ directory. Its forge reads
 #           share one budget (default 60s) and its baseline capture the sample
 #           budget below, so a merge or watcher cycle is never stalled by it.
@@ -3293,8 +3301,8 @@ cw_row_path() { printf '%s/%s.json\n' "$(cw_rows_dir)" "$1"; }
 # The terminal state a watch's durable row records, or nothing when the watch
 # never wrote a row. The row, not the verdict file, is the authority the gates
 # read: deleting a verdict can remove the wake's detail but never the record that
-# a merge ended without a measurement. A watch that never wrote one is derived
-# from the readings it still holds by cw_rowless_state, below.
+# a merge ended without a measurement or regressed. A watch that never wrote one
+# is derived from the readings it still holds by cw_rowless_state, below.
 cw_row_state() {  # <watch-id>
   local row
   row=$(cw_row_path "$1")
@@ -3965,7 +3973,7 @@ cw_arm() {  # <watch-id> <when-name> <url>
   fi
 }
 
-# Re-arm a watch that ended interrupted, unmeasurable, or absent.
+# Re-arm a watch that ended interrupted, unmeasurable, absent, or regressed.
 cw_rearm() {  # <watch-id> <url>
   local id=$1 url=$2 remaining old attempt when_name arm_cmd state old_verdict
   state=$(cw_row_state "$id")
