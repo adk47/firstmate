@@ -47,6 +47,54 @@ assert_no_remote_ref() {
   ! git -C "$LANE_REMOTE" rev-parse --verify --quiet "$1" >/dev/null || fail "$2"
 }
 
+test_leading_zero_budget_is_rejected() {
+  local r
+  case_lane octal
+  printf 'still uncommitted\n' > "$LANE_WT/only-copy.txt"
+
+  # 010 must not be read by the shell as octal 8; it is an invalid request.
+  r=$(guard "$LANE_WT" HEAD 010)
+  expect_code 2 "$(rc_of "$r")" "a budget with a leading zero must be rejected"
+  assert_no_remote_ref refs/wip/octal "a rejected budget still published a wip ref"
+  pass "a leading-zero budget is rejected instead of parsed as octal"
+}
+
+test_unchanged_dirty_tree_is_not_repushed() {
+  local r first second
+  case_lane idle
+  printf 'the only copy of the work\n' > "$LANE_WT/only-copy.txt"
+
+  r=$(guard "$LANE_WT" HEAD 30)
+  expect_code 0 "$(rc_of "$r")" "the first snapshot of a dirty tree must be silent"
+  first=$(git -C "$LANE_REMOTE" rev-parse refs/wip/idle)
+
+  # The worker wrote nothing new, so the already-published snapshot is still the
+  # current one and the guard must not build and force-push it again.
+  r=$(guard "$LANE_WT" HEAD 30)
+  expect_code 0 "$(rc_of "$r")" "a repeat run on an unchanged dirty tree must be silent"
+  second=$(git -C "$LANE_REMOTE" rev-parse refs/wip/idle)
+  [ "$first" = "$second" ] ||
+    fail "an unchanged dirty tree was snapshotted and pushed again ($first -> $second)"
+  [ "$(remote_file refs/wip/idle only-copy.txt)" = "the only copy of the work" ] ||
+    fail "the unchanged snapshot no longer carries the work"
+  pass "an unchanged dirty tree is not re-snapshotted or re-pushed"
+}
+
+test_failed_push_still_reports_the_trip() {
+  local r
+  case_lane unpushable
+  printf 'the only copy of the work\n' > "$LANE_WT/only-copy.txt"
+  git -C "$LANE_WT" remote set-url origin "$LANE_ROOT/missing.git"
+
+  r=$(guard "$LANE_WT" HEAD 0)
+  expect_code 1 "$(rc_of "$r")" "a failed push must surface as its own nonzero status"
+  assert_contains "$(out_of "$r")" "TRIP unpushable: 0 commits in" \
+    "a failed push suppressed the zero-commit trip report"
+  assert_contains "$(out_of "$r")" "work NOT saved" \
+    "a failed push was reported as saved work"
+  pass "a failed push still reports the trip and never claims the work is saved"
+}
+
 test_no_remote_refuses() {
   local r
   mkdir -p "$TMP_ROOT/no-remote"
@@ -180,5 +228,8 @@ test_zero_commit_budget_trips
 test_budget_elapsed_trips_after_the_first_sighting
 test_fresh_first_sighting_does_not_trip
 test_commits_ahead_never_trip
+test_leading_zero_budget_is_rejected
+test_unchanged_dirty_tree_is_not_repushed
+test_failed_push_still_reports_the_trip
 
 echo "all fm-lane-guard tests passed"

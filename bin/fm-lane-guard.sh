@@ -16,11 +16,12 @@
 #   2. Snapshot the ENTIRE worktree, untracked files included, without touching
 #      the worker's branch, index, or HEAD: build a tree through a temporary
 #      index (GIT_INDEX_FILE inside a mktemp directory), commit it with
-#      commit-tree -p HEAD, point refs/wip/<lane> at that commit, and push the
-#      ref with push -qf. The snapshot stages the worktree the way git sees it,
-#      so it carries untracked files but not paths .gitignore excludes.
-#   3. If the snapshot tree equals HEAD's tree there is nothing to save, so no
-#      snapshot and no push happens.
+#      commit-tree -p HEAD, push the commit with push -qf, and only then point
+#      refs/wip/<lane> at it. The snapshot stages the worktree the way git sees
+#      it, so it carries untracked files but not paths .gitignore excludes.
+#   3. If the snapshot tree equals HEAD's tree there is nothing to save, and if
+#      it equals what refs/wip/<lane> already holds it is already saved, so no
+#      new commit and no push happens.
 #   4. Record the lane's first-seen time in git config (lane.<lane>.seen). Trip
 #      when commits ahead of <base-sha> are zero and <budget-minutes> have
 #      elapsed since that first sighting: print the TRIP line and exit 3.
@@ -32,9 +33,10 @@
 # directory, which it created. The only forced operation is the explicit
 # push -qf of the wip ref.
 #
-# Exit: 0 healthy, 2 refused or invalid request, 3 tripped. A push that fails is
-# a real error and surfaces as its own nonzero status rather than a false claim
-# that the work is saved.
+# Exit: 0 healthy, 1 a snapshot could not be published, 2 refused or invalid
+# request, 3 tripped. A push that fails is a real error and surfaces as its own
+# nonzero status rather than a false claim that the work is saved; the trip
+# report is still printed when both happen.
 set -eu
 
 usage() {
@@ -51,8 +53,8 @@ base=$2
 budget=$3
 
 case $budget in
-  '' | *[!0-9]*)
-    printf 'error: budget-minutes must be a non-negative integer\n' >&2
+  '' | *[!0-9]* | 0?*)
+    printf 'error: budget-minutes must be a decimal integer with no leading zeros\n' >&2
     exit 2
     ;;
 esac
@@ -97,19 +99,33 @@ idx_file=$idx_dir/index
 GIT_INDEX_FILE=$idx_file git -C "$wt" add -A
 tree=$(GIT_INDEX_FILE=$idx_file git -C "$wt" write-tree)
 
-# Permission 3: an unchanged tree is not a snapshot.
-saved=0
-if [ "$tree" != "$(git -C "$wt" rev-parse 'HEAD^{tree}')" ]; then
-  commit=$(printf 'lane-guard: wip snapshot of %s\n' "$lane" |
-    git -C "$wt" \
-      -c user.name='fm-lane-guard' \
-      -c user.email='fm-lane-guard@localhost' \
-      commit-tree "$tree" -p HEAD)
-  git -C "$wt" update-ref "refs/wip/$lane" "$commit"
-  # The one forced operation: this ref is a rolling snapshot, never a
-  # fast-forwardable history, so a diverged remote copy is replaced by design.
-  git -C "$wt" push -qf origin "refs/wip/$lane:refs/wip/$lane"
-  saved=1
+# Permission 3: an unchanged tree is not a snapshot, and a tree already held by
+# refs/wip/<lane> is already saved. Refusing to rebuild the same tree keeps a
+# dirty-but-idle lane from forcing an identical ref update on every run.
+save_state=none
+head_tree=$(git -C "$wt" rev-parse 'HEAD^{tree}')
+if [ "$tree" != "$head_tree" ]; then
+  saved_tree=$(git -C "$wt" rev-parse --verify --quiet "refs/wip/$lane^{tree}" || true)
+  if [ "${saved_tree:-}" = "$tree" ]; then
+    save_state=saved
+  else
+    commit=$(printf 'lane-guard: wip snapshot of %s\n' "$lane" |
+      git -C "$wt" \
+        -c user.name='fm-lane-guard' \
+        -c user.email='fm-lane-guard@localhost' \
+        commit-tree "$tree" -p HEAD)
+    # The one forced operation: this ref is a rolling snapshot, never a
+    # fast-forwardable history, so a diverged remote copy is replaced by design.
+    # The local ref only moves once the remote actually has the commit, so a
+    # failed push is retried instead of being mistaken for saved work.
+    if git -C "$wt" push -qf origin "$commit:refs/wip/$lane"; then
+      git -C "$wt" update-ref "refs/wip/$lane" "$commit"
+      save_state=saved
+    else
+      printf 'error: could not publish refs/wip/%s for %s\n' "$lane" "$lane" >&2
+      save_state=failed
+    fi
+  fi
 fi
 
 # Permission 4: first sighting, then the zero-commit budget.
@@ -130,14 +146,21 @@ if [ "$elapsed" -lt 0 ]; then
 fi
 
 if [ "$ahead" -eq 0 ] && [ "$elapsed" -ge $((budget * 60)) ]; then
-  if [ "$saved" -eq 1 ]; then
-    where="work saved at refs/wip/$lane"
-  else
-    where="nothing to save, the worktree matches HEAD"
-  fi
+  case $save_state in
+    saved) where="work saved at refs/wip/$lane" ;;
+    failed) where="work NOT saved: push of refs/wip/$lane failed" ;;
+    *) where="nothing to save, the worktree matches HEAD" ;;
+  esac
   printf 'TRIP %s: 0 commits in %sm; %s; kill and re-brief as one commit\n' \
     "$lane" "$((elapsed / 60))" "$where"
+  if [ "$save_state" = failed ]; then
+    exit 1
+  fi
   exit 3
+fi
+
+if [ "$save_state" = failed ]; then
+  exit 1
 fi
 
 # Permission 5: silence.
