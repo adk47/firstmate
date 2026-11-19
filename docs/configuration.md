@@ -822,6 +822,12 @@ Third, it walks each live lane's oldest unacknowledged steering message up an ag
 That relaunch is charged to the same hourly budget and stopped with the same one wake as the connection ladder below, and a transient relaunch failure keeps the message's place in the ladder for the next pass.
 The record it re-rings is the same durable one [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) writes, and the watcher's per-attempt ladder keeps running underneath, which is free because a duplicated doorbell is a no-op.
 Fourth, it relaunches every task it finds neither held nor left stopped whose endpoint reads `dead` or `missing` through `bin/fm-backend.sh`'s recovery-grade classifier; an `ambiguous`, `unreadable`, or `unverified` endpoint is recorded and left alone, because a duplicate agent in one worktree is worse than waiting another minute.
+A lane whose own current state reads `done` or `failed` through [`bin/fm-crew-state.sh`](../bin/fm-crew-state.sh) is left alone: its endpoint is gone because its work is over, so relaunching it buys a model run over work firstmate has already been told is complete and then a wake to say so.
+One shared predicate decides that, and both this per-lane liveness sweep and the boot pass's reboot recovery ask it, so a reboot cannot resurrect the finished lanes the per-lane sweep would have skipped.
+A terminal claim that is really a pipeline still watching an open PR - `checks green: PR ready for review`, the same with `(still monitoring for merge/close)`, or `run still monitoring PR` - is not finished: that lane still has work left, so it is recovered like any other unfinished one while `run passed: PR merged/closed` stays finished.
+The predicate reads the detail together with its source, because the same words mean different things from each: a `run-step` claim of `checks green` is a pipeline mid-flight and is recovered, while a worker's own status-log report - the documented `done: PR {url} checks green` line, `done: PR #41 merged; monitoring the deploy`, or any other status-log terminal claim that is not crew-state's own `run still monitoring PR` suffix - is the lane's own finishing word and is left alone.
+Every other state - parked, blocked, paused, unknown - is still recovered, because those are unfinished lanes with nobody at the controls, and a finished lane firstmate wants resumed is firstmate's to relaunch by hand.
+The 2026-11-16 evidence: 79 of 190 lanes had already finished and were being relaunched twice an hour.
 A task the captain left stopped (`state/<id>.stopped`, written by `bin/fm-leave-stopped.sh`) is skipped by every pass exactly like a held one, because stopping its agent was the captain's own order and its dead endpoint is the expected state rather than a fault to repair.
 A relaunch is a transaction that some endpoints provably cannot perform, and a refusal is not a retry: the first refusal is recorded with the backend's own reason, escalated to firstmate once, and spends no relaunch budget, because asking again cannot launch anything.
 That record suppresses the rung only while the endpoint still gives the same liveness answer that earned it: a different `alive` or `dead` read - a hand relaunch brought it back, or it died - drops the record at once, while an `unreadable`, `ambiguous`, or `unverified` read is not an answer and keeps it.
@@ -867,6 +873,7 @@ FM_WATCHDOG_CAPTURE_LINES=24           # pane lines that make up a pane's shape
 FM_WATCHDOG_READ_TIMEOUT_SECS=10
 FM_WATCHDOG_RELAUNCH_TIMEOUT_SECS=240
 FM_WATCHDOG_REFUSAL_RETRY_SECS=21600    # a recorded relaunch refusal waits this long
+FM_WATCHDOG_PASS_BUDGET_SECS=1200      # a pass stops taking new lanes past this
 FM_WATCHDOG_BOOT_BUDGET_SECS=1500      # a boot pass stops taking new tasks past this
 FM_WATCHDOG_INBOX_RING_SECS=1200       # an unread steer this old is re-rung
 FM_WATCHDOG_INBOX_INTERRUPT_SECS=2700  # ... interrupted and continued this old
@@ -885,6 +892,10 @@ FM_WATCHDOG_BACKLOG_LIST_MAX=25        # ids named in one report
 The pass records what it did in `state/.watchdog-worker.json`: the boot identity, each task's last pane shape with when it last changed, its stall and inbox ladder stages, its connection strikes, its pending relaunch refusal and the endpoint state that earned it, its capped action history, each unit's restart history, and the identity of the last backlog difference it reported.
 `bin/fm-watchdog-worker.sh status` prints that record without acting, and a record carrying a different schema stamp is treated as no record at all.
 A pass holds `state/.watchdog-worker.lock`, so a slow pass never overlaps the next tick.
+It also carries one wall-clock deadline, `FM_WATCHDOG_PASS_BUDGET_SECS`: the unit that runs it has a start timeout, and a pass that is killed by that timeout never writes the record, so every budget charge it just spent is lost and the hourly caps go back to capping nothing.
+Once the deadline is spent the pass stops taking new lanes, leaves the unvisited lanes' recorded history intact, and writes what it did; the 2026-11-16 evidence is a pass that ran thirty minutes over 250 lanes, was terminated, and left the record frozen at the previous pass.
+A truncated pass never resumes from the alphabetical front: `state/.watchdog-worker.cursor` carries one `pass=id` line per sweep (`task`, `boot`, `inbox`), and each sweep starts at the lane after the one it last reached, wraps at the end, and advances that line only for a lane it actually reached, so every lane is swept within a bounded number of passes instead of the tail lanes being skipped forever.
+Every sweep that stops on a spent deadline keeps the lanes it never reached in that pass's record - the boot pass included, since it shares the clamped deadline - so a truncated pass never drops a lane's relaunch and strike history, and it names in one journal line the lane it stopped at.
 
 Install it once per home, as the user that owns the fleet:
 

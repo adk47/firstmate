@@ -106,6 +106,7 @@ exit 0
 SH
   cat > "$home/fakebin/fake-crew-state" <<SH
 #!/usr/bin/env bash
+printf 'crew-state %s\n' "\$1" >> "$home/calls"
 if [ -f "$home/crew/\$1" ]; then cat "$home/crew/\$1"; else printf 'state: unknown · source: none · no record\n'; fi
 SH
   cat > "$home/fakebin/systemctl" <<SH
@@ -243,6 +244,30 @@ held_backlog_bin() {  # <home> <id...>: a tasks-axi stand-in that reports held i
 }
 
 start_clock() { date +%s; }
+
+# fake_clock <home> <base> <step>: a `date +%s` stand-in whose every call moves
+# the clock on by <step> seconds. A pass can then be given a budget it will
+# actually spend, which a frozen FM_WATCHDOG_NOW can never do. Any other date
+# invocation falls through to the real command.
+
+fake_clock() {  # <home> <base> <step>
+  local home=$1
+  cat > "$home/fakebin/date" <<SH
+#!/usr/bin/env bash
+case "\$1" in
+  +%s)
+    n=\$(cat "$home/clock" 2>/dev/null || printf 0)
+    n=\$((n + 1))
+    printf '%s\n' "\$n" > "$home/clock"
+    printf '%s\n' "\$(( $2 + n * $3 ))"
+    exit 0
+    ;;
+esac
+if [ -x /bin/date ]; then exec /bin/date "\$@"; fi
+exec /usr/bin/date "\$@"
+SH
+  chmod +x "$home/fakebin/date"
+}
 
 test_a_structural_refusal_outside_the_old_phrase_list_spends_no_budget() {
   local home now out
@@ -981,6 +1006,285 @@ test_a_dry_run_reports_every_lane_and_changes_nothing() {
   pass "a dry run reports every lane's plan and touches nothing"
 }
 
+# The watchdog resolves FM_HOME from its own path when the environment does not
+# carry one, and every command it runs refuses to act without it: bin/fm-control.sh
+# and bin/fm-send.sh both fail closed on an unset FM_HOME. A pass that keeps its
+# resolution local therefore runs, reports, and heals nothing - which is exactly
+# what the first live timer pass did (2026-11-07: 24 relaunches and 1 interrupt,
+# all refused with "FM_HOME is not set").
+test_the_watchdog_exports_its_home_to_every_command_it_runs() {
+  local home now out recorded
+  home=$(make_home export-home); fake_tools "$home"
+  worker "$home" w1 dead
+  cat > "$home/fakebin/fake-control" <<SH
+#!/usr/bin/env bash
+printf 'control-home %s\n' "\${FM_HOME:-UNSET}" >> "$home/calls"
+printf 'relaunched %s\n' "\$1"
+SH
+  chmod +x "$home/fakebin/fake-control"
+  now=$(start_clock)
+  # FM_HOME is deliberately absent from the environment, so the script has to
+  # resolve it and pass that resolution on.
+  out=$(env -u FM_HOME PATH="$home/fakebin:$PATH" \
+    FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_WATCHDOG_NOW="$now" FM_WATCHDOG_BOOT_ID=off \
+    FM_WATCHDOG_CONTROL_BIN="$home/fakebin/fake-control" \
+    FM_WATCHDOG_SEND_BIN="$home/fakebin/fake-send" \
+    FM_WATCHDOG_CREW_STATE_BIN="$home/fakebin/fake-crew-state" \
+    FM_WATCHDOG_SYSTEMCTL_BIN="$home/fakebin/systemctl" \
+    FM_WATCHDOG_AGENT_STATE_DIR="$home/fix" \
+    FM_WATCHDOG_CAPTURE_DIR="$home/fix" \
+    FM_WATCHDOG_CHAIR_TARGET=firstmate:chair \
+    FM_WATCHDOG_BACKLOG=off \
+    "$CHECK" 2>&1)
+  recorded=$(grep '^control-home ' "$home/calls" 2>/dev/null | head -1 | cut -d' ' -f2)
+  [ -n "$recorded" ] || fail "the watchdog never ran the control binary: $out"
+  [ "$recorded" != UNSET ] || fail "the watchdog did not export FM_HOME to the command it ran, so bin/fm-control.sh and bin/fm-send.sh refuse every action"
+  pass "the watchdog exports its resolved FM_HOME to every command it runs"
+}
+
+# Measured 2026-11-16 19:57Z: 79 of 190 lanes had already finished and were being
+# relaunched twice an hour, each relaunch buying a model run of work firstmate had
+# already been told was complete. A finished lane's endpoint is gone because its
+# work is done, so the liveness rung must leave it to firstmate - while an
+# unfinished lane with nobody at the controls is still recovered.
+test_a_finished_lane_is_left_alone_and_an_unfinished_one_is_recovered() {
+  local home now out
+  home=$(make_home finished); fake_tools "$home"
+  worker "$home" w1 dead
+  worker "$home" w2 dead
+  worker "$home" w3 dead
+  printf 'state: done · source: status-log · shipped and merged\n' > "$home/crew/w1"
+  printf 'state: failed · source: process · the agent exited without a claim\n' > "$home/crew/w3"
+  printf 'state: blocked · source: status-log · waiting on a credential\n' > "$home/crew/w2"
+  now=$(start_clock)
+  out=$(tick "$home" "$now")
+  assert_eq "$(counter "$home" '^control w1 ')" "0" \
+    "a finished lane was relaunched, so a done task was resurrected at model cost: $out"
+  assert_eq "$(counter "$home" '^control w3 ')" "0" \
+    "a failed lane was relaunched, so a task firstmate already knows about was resurrected"
+  assert_eq "$(counter "$home" '^control w2 ')" "1" \
+    "an unfinished lane with nobody at the controls was not recovered: $out"
+  [ "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" = 0 ] \
+    || fail "a finished lane was charged a relaunch"
+  pass "a finished lane is left alone and an unfinished one is still recovered"
+}
+
+# A worker without an attributed run finishes by appending the documented
+# `done: PR {url} checks green` line, so its crew-state detail is the same word
+# the pipeline uses while it is still watching. That is the lane's own terminal
+# report: it shipped, and neither the liveness rung nor the reboot path may
+# resurrect it.
+test_a_status_log_checks_green_lane_is_never_resurrected() {
+  local home now out
+  home=$(make_home status-log-green); fake_tools "$home"
+  worker "$home" w1 dead
+  worker "$home" w2 dead
+  printf 'state: done · source: status-log · PR https://github.com/x/y/pull/1 checks green\n' \
+    > "$home/crew/w1"
+  printf 'state: working · source: status-log · mid-task\n' > "$home/crew/w2"
+  printf 'dead\n' > "$home/fix/chair.state"
+  now=$(start_clock)
+  out=$(tick "$home" "$now" FM_WATCHDOG_BOOT_ID=boot-a)
+  assert_contains "$out" "watchdog: boot recovery: relaunched 1 of 2 task(s)" \
+    "a reboot did not skip the shipped lane and recover the unfinished one: $out"
+  assert_eq "$(counter "$home" '^control w1 ')" "0" \
+    "the reboot path relaunched a lane whose own status log declared its PR green"
+  assert_eq "$(counter "$home" '^control w2 ')" "1" \
+    "the reboot path did not recover an unfinished lane: $out"
+  out=$(tick "$home" "$((now + 60))")
+  assert_eq "$(counter "$home" '^control w1 ')" "0" \
+    "the liveness rung relaunched a lane whose own status log declared its PR green: $out"
+  pass "a status-log checks-green claim stays finished through the liveness rung and a reboot"
+}
+
+# The same finished lane must be left alone by the reboot path as well: the boot
+# pass runs before the task pass, so a guard that lived only in the task pass
+# would relaunch every already-shipped lane after a power loss and spend a model
+# run on each before the task pass ever looked at it.
+test_a_reboot_leaves_a_shipped_lane_alone_and_recovers_an_unfinished_one() {
+  local home now out
+  home=$(make_home boot-finished); fake_tools "$home"
+  worker "$home" w1 dead
+  worker "$home" w2 dead
+  printf 'state: done · source: run-step · run passed: PR merged/closed\n' > "$home/crew/w1"
+  printf 'state: working · source: status-log · mid-task\n' > "$home/crew/w2"
+  printf 'dead\n' > "$home/fix/chair.state"
+  now=$(start_clock)
+  out=$(tick "$home" "$now" FM_WATCHDOG_BOOT_ID=boot-a)
+  assert_contains "$out" "watchdog: boot recovery: relaunched 1 of 2 task(s)" \
+    "a reboot relaunched a shipped lane, so finished work was resurrected at model cost: $out"
+  assert_eq "$(counter "$home" '^control w1 ')" "0" \
+    "the reboot path relaunched a lane whose work had already shipped"
+  assert_eq "$(counter "$home" '^control w2 ')" "1" \
+    "the reboot path did not recover an unfinished lane: $out"
+  assert_eq "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" "0" \
+    "a shipped lane was charged a reboot relaunch"
+  assert_eq "$(counter "$home" '^crew-state w1$')" "1" \
+    "the task pass re-read a lane the boot pass had already judged finished in the same run"
+  out=$(tick "$home" "$((now + 60))")
+  assert_eq "$(counter "$home" '^control w1 ')" "0" \
+    "the liveness rung relaunched a lane whose work had already shipped: $out"
+  pass "a reboot leaves a shipped lane alone and recovers an unfinished one"
+}
+
+# `done` also covers a run whose pipeline is still watching an open PR, which is
+# work firstmate has not been told has shipped: killing that lane's agent on a
+# "Connection error" must still bring it back, through both the liveness rung and
+# the reboot path.
+test_a_lane_still_monitoring_its_pr_is_recovered() {
+  local home now out
+  home=$(make_home monitoring); fake_tools "$home"
+  worker "$home" w1 dead
+  printf 'state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)\n' \
+    > "$home/crew/w1"
+  now=$(start_clock)
+  out=$(tick "$home" "$now")
+  assert_eq "$(counter "$home" '^control w1 ')" "1" \
+    "a lane done only because its PR was still being monitored was never recovered: $out"
+
+  home=$(make_home monitoring-boot); fake_tools "$home"
+  worker "$home" w2 dead
+  printf 'state: done · source: status-log · pushed and opened the PR · run still monitoring PR\n' \
+    > "$home/crew/w2"
+  printf 'dead\n' > "$home/fix/chair.state"
+  out=$(tick "$home" "$now" FM_WATCHDOG_BOOT_ID=boot-a)
+  assert_eq "$(counter "$home" '^control w2 ')" "1" \
+    "a reboot did not recover a lane whose PR was still being monitored: $out"
+  assert_contains "$out" "boot recovery: relaunched 1 of 1 task(s)" \
+    "the reboot reported no relaunch for a lane still watching its PR: $out"
+
+  home=$(make_home monitoring-status-log); fake_tools "$home"
+  worker "$home" w3 dead
+  printf 'state: done · source: status-log · pushed the fix · run still monitoring PR\n' \
+    > "$home/crew/w3"
+  out=$(tick "$home" "$now")
+  assert_eq "$(counter "$home" '^control w3 ')" "1" \
+    "the liveness rung left a lane whose own state says it is still monitoring its PR: $out"
+  pass "a lane still monitoring its PR is recovered by both the liveness rung and the reboot path"
+}
+
+# A worker's own note is its finishing word even when it happens to mention
+# monitoring, so that lane must not be resurrected by either sweep. Only
+# crew-state's own `run still monitoring PR` suffix says the work is unfinished.
+test_a_status_log_note_that_mentions_monitoring_is_still_finished() {
+  local home now out
+  home=$(make_home logged-monitoring); fake_tools "$home"
+  worker "$home" w1 dead
+  worker "$home" w2 dead
+  printf 'state: done · source: status-log · done: PR #41 merged; monitoring the deploy\n' \
+    > "$home/crew/w1"
+  printf 'state: working · source: status-log · mid-task\n' > "$home/crew/w2"
+  printf 'dead\n' > "$home/fix/chair.state"
+  now=$(start_clock)
+  out=$(tick "$home" "$now" FM_WATCHDOG_BOOT_ID=boot-a)
+  assert_contains "$out" "boot recovery: relaunched 1 of 2 task(s)" \
+    "a reboot did not skip the shipped lane and recover the unfinished one: $out"
+  assert_eq "$(counter "$home" '^control w1 ')" "0" \
+    "a reboot relaunched a lane whose own status note reported its PR merged"
+  assert_eq "$(counter "$home" '^control w2 ')" "1" \
+    "the reboot path did not recover an unfinished lane: $out"
+  out=$(tick "$home" "$((now + 60))")
+  assert_eq "$(counter "$home" '^control w1 ')" "0" \
+    "the liveness rung relaunched a lane whose own status note reported its PR merged: $out"
+  pass "a status note that merely mentions monitoring still counts as a finished lane"
+}
+
+# Measured 2026-11-16 19:57Z: a pass ran thirty minutes over 250 lanes and was
+# terminated by its unit, so the record was never written and every budget charge
+# it had just spent was lost. The pass now carries a wall-clock deadline, and a
+# lane it never reached keeps the history the pass before it recorded.
+test_a_pass_that_runs_out_of_budget_still_records_its_history() {
+  local home now out
+  home=$(make_home budget); fake_tools "$home"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  assert_eq "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" "1" \
+    "the first pass did not record its relaunch, so the budget test proves nothing"
+  out=$(tick "$home" "$now" FM_WATCHDOG_PASS_BUDGET_SECS=0)
+  assert_contains "$out" "pass used its 0s budget at w1" \
+    "a spent pass did not report the lane it stopped at: $out"
+  assert_eq "$(counter "$home" '^control w1 ')" "1" \
+    "a spent pass still acted on a lane"
+  [ -e "$home/state/.watchdog-worker.json" ] \
+    || fail "a spent pass wrote no record, so every budget charge it made was lost"
+  assert_eq "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" "1" \
+    "a lane the pass never reached lost its recorded relaunch history"
+  pass "a pass that runs out of budget still records its history"
+}
+
+# A budgeted pass stops before the alphabet ends, so a pass that always
+# restarted at the first lane would leave the same tail lanes unwatched forever.
+# Each sweep resumes after the last lane it reached, so every lane is swept
+# within a bounded number of passes - including one recorded behind the cursor.
+test_a_truncated_pass_rotates_until_every_lane_is_swept() {
+  local home id out pass missed
+  home=$(make_home rotation); fake_tools "$home"
+  fake_clock "$home" 1700000000 300
+  for id in w1 w2 w3 w4; do worker "$home" "$id" dead; done
+  pass=0
+  missed=' '
+  while [ "$pass" -lt 15 ] && [ -n "$missed" ]; do
+    pass=$((pass + 1))
+    out=$(tick "$home" "" FM_WATCHDOG_PASS_BUDGET_SECS=3000)
+    if [ "$pass" -eq 1 ]; then
+      assert_contains "$out" "pass used its 3000s budget at" \
+        "a pass that spent its budget did not name the lane it stopped at: $out"
+    fi
+    if [ "$pass" -eq 2 ]; then worker "$home" a1 dead; fi
+    missed=''
+    for id in w1 w2 w3 w4 a1; do
+      grep -q "^control $id " "$home/calls" 2>/dev/null || missed="$missed $id"
+    done
+  done
+  [ -z "$missed" ] \
+    || fail "a budgeted pass never swept every lane (missed:$missed after $pass passes)"
+  [ "$pass" -gt 1 ] \
+    || fail "the whole fleet fit in one budgeted pass, so rotation is not proven"
+  [ "$pass" -lt 15 ] \
+    || fail "rotation left lanes unswept after $pass passes"
+  pass "a budgeted pass rotates so every lane, including one added behind the cursor, is swept"
+}
+
+test_a_boot_pass_that_runs_out_of_budget_keeps_every_lane_history() {
+  local home out id
+  home=$(make_home boot-budget); fake_tools "$home"
+  fake_clock "$home" 1700000000 300
+  worker "$home" w1 dead
+  worker "$home" w2 dead
+  worker "$home" w3 dead
+  jq -n --argjson now 1700000000 \
+    '{schema: 1, boot_identity: "boot-old", units: {}, backlog: {},
+      tasks: {
+        w1: { sig: "abc", since: $now, stage: 0, stage_at: $now,
+          rings: [], relaunches: [$now], steers: [], woke: false,
+          istage: 0, istage_at: $now, ibase: "", strikes: [],
+          refusal: "", refusal_at: 0 },
+        w2: { sig: "abc", since: $now, stage: 0, stage_at: $now,
+          rings: [], relaunches: [$now], steers: [], woke: false,
+          istage: 0, istage_at: $now, ibase: "", strikes: [],
+          refusal: "", refusal_at: 0 },
+        w3: { sig: "abc", since: $now, stage: 0, stage_at: $now,
+          rings: [], relaunches: [$now], steers: [], woke: false,
+          istage: 0, istage_at: $now, ibase: "", strikes: [],
+          refusal: "", refusal_at: 0 } }}' \
+    > "$home/state/.watchdog-worker.json"
+  out=$(tick "$home" "" FM_WATCHDOG_BOOT_ID=boot-new \
+    FM_WATCHDOG_PASS_BUDGET_SECS=1000 FM_WATCHDOG_BOOT_BUDGET_SECS=600)
+  assert_contains "$out" "boot pass used its 600s budget at w2" \
+    "a boot pass that spent its budget did not say which lane it stopped at: $out"
+  assert_eq "$(counter "$home" '^control w1 ')" "1" \
+    "the boot pass never reached a lane, so the budget test proves nothing: $out"
+  assert_eq "$(counter "$home" '^control w2 ')" "0" \
+    "the deadline did not stop the boot pass at w2: $out"
+  for id in w2 w3; do
+    assert_eq "1" "$(jq -r ".tasks.$id.relaunches | length" "$home/state/.watchdog-worker.json")" \
+      "a boot pass that ran out of budget dropped lane $id's recorded relaunch history"
+  done
+  pass "a boot pass that runs out of budget keeps every un-reached lane's recorded history"
+}
+
 test_a_held_task_is_never_relaunched_or_paged() {
   local home now out
   home=$(make_home held); fake_tools "$home"
@@ -1270,6 +1574,15 @@ test_a_pi_lane_is_never_asked_to_move_to_a_model_it_cannot_reach
 test_a_review_seat_keeps_its_model_and_a_permanent_error_is_never_retried
 test_in_flight_backlog_items_without_a_record_are_reported_once
 test_a_dry_run_reports_every_lane_and_changes_nothing
+test_the_watchdog_exports_its_home_to_every_command_it_runs
+test_a_finished_lane_is_left_alone_and_an_unfinished_one_is_recovered
+test_a_reboot_leaves_a_shipped_lane_alone_and_recovers_an_unfinished_one
+test_a_status_log_checks_green_lane_is_never_resurrected
+test_a_status_log_note_that_mentions_monitoring_is_still_finished
+test_a_lane_still_monitoring_its_pr_is_recovered
+test_a_pass_that_runs_out_of_budget_still_records_its_history
+test_a_boot_pass_that_runs_out_of_budget_keeps_every_lane_history
+test_a_truncated_pass_rotates_until_every_lane_is_swept
 test_a_held_task_is_never_relaunched_or_paged
 test_a_dry_run_plan_matches_the_connection_relaunch_model
 test_a_reboot_rebuilds_the_fleet_and_starts_the_chair_last

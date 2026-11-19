@@ -85,6 +85,23 @@
 # dead and its hourly relaunch budget is spent" every hour, filling the wake
 # queue to 45.
 #
+# A FINISHED LANE IS NOT A CASUALTY. Before relaunching a gone endpoint this
+# pass asks bin/fm-crew-state.sh what the lane actually is, and a lane reading
+# `done` or `failed` is left alone: its worker is gone because its work is
+# over, and resurrecting it buys a whole model run of work firstmate has
+# already been told is complete, then wakes firstmate to say so. Measured
+# 2026-11-16 19:57Z: 79 of 190 lanes had already finished and were being
+# relaunched twice an hour. The terminal claim is read together with its
+# crew-state source, because a worker's own status-log note is its finishing
+# word while this pipeline's `run-step` sentences (`checks green`, `PR ready
+# for review`, `monitoring`) and crew-state's `run still monitoring PR` suffix
+# mean an open PR with work left, which is recovered like any unfinished lane.
+# Every other state - parked, blocked, paused, unknown - is still recovered,
+# because those are unfinished lanes with nobody at the controls, and a
+# finished lane that firstmate wants resumed is firstmate's to relaunch through
+# bin/fm-control.sh. Both the liveness rung and the boot pass ask the same
+# predicate, so a reboot cannot resurrect what the per-lane sweep would skip.
+#
 # THE STALL LADDER. A live worker whose pane keeps one SHAPE for
 # no_progress_secs while it reads busy is stalled. Shape means printable ASCII
 # with digits folded and non-ASCII dropped, so a ticking timer, a spinner glyph,
@@ -151,6 +168,21 @@
 # record: a wrong endpoint binding is worse than a lane that is visibly
 # unowned.
 #
+# A PASS ALWAYS FITS ITS UNIT. The whole pass is one systemd unit with a start
+# timeout, so an overrun is not a slow pass: the unit is killed, the record is
+# never written, and every budget charge the pass just spent is lost, which
+# hands the hourly caps back to the crash loop they exist to stop. Measured
+# 2026-11-16 19:57Z: a pass ran thirty minutes over 250 lanes, was terminated
+# by systemd, and left the record frozen at the previous pass. The pass
+# therefore carries one wall-clock deadline (FM_WATCHDOG_PASS_BUDGET_SECS, 20
+# minutes), checked before each lane; once it is spent the remaining lanes keep
+# their recorded history untouched and the record is written with what the
+# pass actually did. A truncated pass never starts again at the alphabetical
+# front: each sweep stores the last lane it reached in
+# state/.watchdog-worker.cursor and resumes after it, wrapping at the end, so
+# every lane is reached within a bounded number of passes instead of the same
+# tail lanes being starved forever.
+#
 # CAPS. Relaunches, unit restarts, rings, and idle steers are each counted per
 # object per rolling hour and capped (3, 3, 2, and 1 by default), so a crash
 # loop or a genuinely broken object cannot burn the fleet; spending a relaunch,
@@ -185,7 +217,9 @@
 # history, with the epoch of the one escalation that spent a unit's budget. It
 # is written atomically at the end of a pass; a record carrying
 # another schema stamp is treated as no record at all. `status` prints it
-# without acting.
+# without acting. state/.watchdog-worker.cursor holds one `pass=id` line per
+# sweep naming the last lane that sweep reached, which is what resumes a
+# truncated pass where it stopped.
 #
 # CONFIGURATION. config/watchdog.env is gitignored and per-home; it holds
 # KEY=value lines and is parsed, never sourced. A set environment variable of
@@ -201,7 +235,7 @@
 #   FM_WATCHDOG_CAPTURE_LINES (24)         FM_WATCHDOG_READ_TIMEOUT_SECS (10)
 #   FM_WATCHDOG_RELAUNCH_TIMEOUT_SECS (240)
 #   FM_WATCHDOG_REFUSAL_RETRY_SECS (21600)
-#   FM_WATCHDOG_BOOT_BUDGET_SECS (1500)
+#   FM_WATCHDOG_PASS_BUDGET_SECS (1200)    FM_WATCHDOG_BOOT_BUDGET_SECS (1500)
 #   FM_WATCHDOG_INBOX_RING_SECS (1200)     FM_WATCHDOG_INBOX_INTERRUPT_SECS (2700)
 #   FM_WATCHDOG_INBOX_RELAUNCH_SECS (5400)
 #   FM_WATCHDOG_CONNECTION_SECS (600)      FM_WATCHDOG_CONNECTION_STRIKES (3)
@@ -250,6 +284,7 @@ ENV_FILE="$CONFIG_DIR/watchdog.env"
 
 RECORD="$STATE/.watchdog-worker.json"
 LOCK="$STATE/.watchdog-worker.lock"
+CURSOR="$STATE/.watchdog-worker.cursor"
 SCHEMA=1
 HOUR=3600
 
@@ -264,6 +299,9 @@ CONNECTION_STRIKES=3
 FALLBACK_MODEL=''
 FALLBACK_KINDS=''
 HELD_IDS=''
+PASS_BUDGET_SECS=1200
+PASS_DEADLINE=''
+PASS_SPENT_NOTED=0
 BACKLOG_ENABLED=on
 BACKLOG_BIN=''
 BACKLOG_LIST_MAX=25
@@ -958,31 +996,108 @@ chair_ensure() {
   return 0
 }
 
-# boot_pass <boot>: relaunch every ordinary task whose endpoint is gone, start
-# the chair LAST, and queue one check wake describing the result.
-boot_pass() {  # <boot>
-  local boot=$1 id meta kind state ok=0 tried=0 deadline chair result rc
-  local sig since stage stage_at rings relaunches steers strikes
-  local istage istage_at ibase refusal='' refusal_at=0 refusal_state='' woke=false
-  deadline=$(( $(now_epoch) + BOOT_BUDGET_SECS ))
+# sweep_cursor <pass>: the last lane key this pass actually reached, or empty on
+# a first run. It is durable in its own file rather than in the record because
+# the record is rebuilt at the end of a pass: a pass that is killed has still
+# swept the lanes it reached, and the next pass must continue after them instead
+# of starting at the front again.
+sweep_cursor() {  # <pass>
+  local value=''
+  [ -f "$CURSOR" ] || return 0
+  value=$(sed -n "s/^$1=//p" "$CURSOR" 2>/dev/null | head -1) || value=''
+  printf '%s' "$value"
+}
+
+# sweep_cursor_set <pass> <id>: record that this pass reached <id>. Atomic, so a
+# killed pass leaves either the previous key or this one, never a torn file, and
+# a dry run writes nothing.
+sweep_cursor_set() {  # <pass> <id>
+  local tmp
+  [ "$DRY_RUN" = 1 ] && return 0
+  tmp="$CURSOR.tmp.$$"
+  {
+    [ -f "$CURSOR" ] && grep -v "^$1=" "$CURSOR" 2>/dev/null
+    printf '%s=%s\n' "$1" "$2"
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  chmod 0600 "$tmp" 2>/dev/null
+  mv -f "$tmp" "$CURSOR" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# sweep_ids <pass>: every lane in the rotation order this pass must sweep - the
+# lanes after the pass's last reached key first, then the ones before it, so a
+# pass resumes where the previous one stopped and wraps at the end instead of
+# re-reading the same alphabetical prefix forever. A lane added since the last
+# pass sorts either side of the cursor and is still printed exactly once, and a
+# swept lane is printed again only after a wrap, which is what bounds the wait
+# for any single lane by the number of passes rather than by its position.
+sweep_ids() {  # <pass>
+  local pass=$1 cursor id meta
+  cursor=$(sweep_cursor "$pass")
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
     case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    [[ -n "$cursor" && ! "$id" > "$cursor" ]] && continue
+    printf '%s\n' "$id"
+  done
+  [ -n "$cursor" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    [[ "$id" > "$cursor" ]] && continue
+    printf '%s\n' "$id"
+  done
+  return 0
+}
+
+# boot_pass <boot>: relaunch every ordinary task whose endpoint is gone, start
+# the chair LAST, and queue one check wake describing the result.
+boot_pass() {  # <boot>
+  local boot=$1 id meta kind state ok=0 tried=0 deadline chair result rc
+  local spent=0
+  local -a ids=()
+  local sig since stage stage_at rings relaunches steers strikes
+  local istage istage_at ibase refusal='' refusal_at=0 refusal_state='' woke=false
+  deadline=$(( $(now_epoch) + BOOT_BUDGET_SECS ))
+  # The boot pass is the first thing a pass does, so it can never spend the
+  # whole pass's budget and leave the task pass and the record unwritten.
+  if [ -n "$PASS_DEADLINE" ] && [ "$PASS_DEADLINE" -lt "$deadline" ]; then
+    deadline=$PASS_DEADLINE
+  fi
+  while IFS= read -r id; do ids+=("$id"); done < <(sweep_ids boot)
+  for id in ${ids[@]+"${ids[@]}"}; do
+    meta="$STATE/$id.meta"
+    [ -f "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
     [ -n "$(fm_meta_get "$meta" window)" ] || continue
     task_is_skipped "$id" && continue
-    if [ "$(now_epoch)" -ge "$deadline" ]; then
-      printf 'watchdog: boot pass ran out of budget before it reached every task; the task pass continues from here\n'
-      break
+    if [ "$spent" = 0 ] && [ "$(now_epoch)" -ge "$deadline" ]; then
+      spent=1
+      printf 'watchdog: boot pass used its %ss budget at %s; the remaining lanes keep their records and are swept next pass\n' \
+        "$BOOT_BUDGET_SECS" "$id"
     fi
+    if [ "$spent" = 1 ]; then
+      # record_store rebuilds the task table only from this pass's entry files,
+      # so a lane the boot pass never reached would lose the relaunch and strike
+      # history it was loaded from.
+      task_store_prior "$id"
+      continue
+    fi
+    sweep_cursor_set boot "$id"
     tried=$((tried + 1))
     state=$(task_agent_state "$id" "$meta")
     case "$state" in
       dead|missing) ;;
       *) continue ;;
     esac
+    # A reboot is where resurrection hurts most, because nobody is watching: the
+    # boot pass asks the same shared predicate the task pass asks, and the skip
+    # keeps the lane's record and marks it touched so the task pass in this same
+    # run never re-decides it.
+    task_skip_finished "$id" && continue
     rc=0
     task_relaunch "$id" "host reboot (endpoint $state)" \
       "The host rebooted and every worker process and terminal session died; your worktree and commits are intact. Re-orient from your status log, your steering inbox (state/$id.inbox/), and your worktree, then resume exactly where you left off. Anything you had under /tmp is gone; re-create it if needed. Do not repeat any send, merge, or prod write your status log shows already done." \
@@ -1107,6 +1222,86 @@ crew_reads_working() {  # <id>
   return 0
 }
 
+# task_has_finished <id>: 0 when firstmate's own state read says this lane's
+# work is over, and the only callers that may skip a lane are the task pass's
+# liveness rung and the boot pass's reboot recovery, which both ask it. Only the
+# two terminal claims count, and a terminal claim that is really a pipeline still
+# watching an open PR does not, so a lane whose status log is merely old, parked,
+# or blocked is still recovered: the question here is not "is this lane working"
+# but "is there anything left to work on". The detail is read together with its
+# source, because a worker's own `checks green` report is a finished lane while
+# the pipeline's `checks green` is a PR it is still watching.
+task_has_finished() {  # <id>
+  local crew state source detail
+  [ -n "$CREW_STATE_BIN" ] || return 1
+  crew=$(fm_run_timed "$READ_TIMEOUT_SECS" "$CREW_STATE_BIN" "$1" 2>/dev/null) || return 1
+  state=$(printf '%s\n' "$crew" | sed -n 's/^state: \([a-z-]*\).*/\1/p' | head -1)
+  case "$state" in
+    done|failed) ;;
+    *) return 1 ;;
+  esac
+  source=$(printf '%s\n' "$crew" | sed -n 's/^state: [a-z-]* · source: \([a-z-]*\).*/\1/p' | head -1)
+  detail=$(printf '%s\n' "$crew" | sed -n 's/^state: [a-z-]* · source: [a-z-]* · //p' | head -1)
+  # Only this pipeline's own watching sentences mean the work is still in
+  # flight. A worker's status-log note is its own finishing word even when it
+  # happens to mention monitoring, and only crew-state's appended
+  # `run still monitoring PR` overrides it.
+  case "$source" in
+    run-step)
+      case "$detail" in
+        *monitoring*|*'PR ready for review'*|*'checks green'*) return 1 ;;
+      esac
+      ;;
+    status-log)
+      case "$detail" in
+        *'run still monitoring PR'*) return 1 ;;
+      esac
+      ;;
+  esac
+  return 0
+}
+
+# task_skip_finished <id>: the single owner of "this lane is finished, so this
+# pass leaves it alone". The boot pass and the task pass both call it, so the two
+# cannot drift apart the way two copies of the same judgement do, and the skip
+# itself keeps the lane's recorded history and marks it touched, which is what
+# stops the later pass in the same run from paying for a second state read of
+# the same finished lane.
+task_skip_finished() {  # <id>
+  task_has_finished "$1" || return 1
+  [ "$DRY_RUN" = 1 ] && return 0
+  task_store_prior "$1"
+  : > "$WORK/touched.$1"
+  return 0
+}
+
+# pass_spent: 0 once this pass has used its whole wall-clock budget.
+pass_spent() {
+  [ -n "$PASS_DEADLINE" ] || return 1
+  [ "$(now_epoch)" -ge "$PASS_DEADLINE" ]
+}
+
+# pass_budget_note <id>: one line, the first time the budget runs out, naming
+# the lane the pass stopped at so the journal explains the leftover work.
+pass_budget_note() {  # <id>
+  [ "$PASS_SPENT_NOTED" = 1 ] && return 0
+  PASS_SPENT_NOTED=1
+  printf 'watchdog: pass used its %ss budget at %s; the remaining lanes keep their records and are swept next pass\n' \
+    "$PASS_BUDGET_SECS" "$1"
+}
+
+# task_store_prior <id>: carry a lane this pass never reached into the record
+# exactly as it was loaded. record_store rebuilds the task table from the
+# entries this pass wrote, so a lane skipped without one would lose the
+# relaunches and strikes a truncated pass just spent, and the next pass would
+# read them as unspent.
+task_store_prior() {  # <id>
+  [ "$DRY_RUN" = 1 ] && return 0
+  [ -f "$WORK/entry.$1.json" ] && return 0
+  jq -c --arg id "$1" '{ key: $id, value: (.[$id] // {}) }' "$WORK/tasks.json" \
+    > "$WORK/entry.$1.json" 2>/dev/null || true
+}
+
 # conn_error_shape <text>: 0 when the rendered pane shows a connection-level
 # failure. The permanent list is consulted first and beats every match, because
 # those sentences are never fixed by re-ringing, and only the last twelve
@@ -1127,11 +1322,12 @@ task_pass() {
   local since stage stage_at rings relaunches steers woke status_mtime changed stage_age
   local sig='' istage istage_at ibase strikes refusal refusal_at refusal_state=''
   local ring_count relaunch_count steer_count minutes conn_err strike_count rc
+  local -a ids=()
   now=$(now_epoch)
-  for meta in "$STATE"/*.meta; do
+  while IFS= read -r id; do ids+=("$id"); done < <(sweep_ids task)
+  for id in ${ids[@]+"${ids[@]}"}; do
+    meta="$STATE/$id.meta"
     [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
     window=$(fm_meta_get "$meta" window)
@@ -1139,6 +1335,12 @@ task_pass() {
     # The boot pass already acted on this task in this pass.
     [ -e "$WORK/touched.$id" ] && continue
     task_is_skipped "$id" && continue
+    if pass_spent; then
+      pass_budget_note "$id"
+      task_store_prior "$id"
+      continue
+    fi
+    sweep_cursor_set task "$id"
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
@@ -1169,6 +1371,17 @@ task_pass() {
     case "$state" in
       alive) ;;
       dead|missing)
+        # A finished lane's endpoint is gone because its work is done. Recovering
+        # it would spend a model re-reading shipped work and then wake firstmate
+        # about it, so it is left to firstmate, which can validate or clean it up
+        # and can still relaunch it by hand.
+        if task_skip_finished "$id"; then
+          if [ "$DRY_RUN" = 1 ]; then
+            printf '%s\t%s\tn/a\t-\t%d\t%d\twould skip (finished)\n' \
+              "$id" "$state" "$(quiet_minutes_of "$id" "$now")" "$(inbox_minutes_of "$id")"
+          fi
+          continue
+        fi
         if [ "$DRY_RUN" = 1 ]; then
           if task_refusal_active "$state"; then
             printf '%s\t%s\tn/a\t-\t%d\t%d\twould escalate (relaunch refused; retried after %sh)\n' \
@@ -1574,15 +1787,23 @@ inbox_pass() {
   local sig since stage stage_at rings relaunches steers woke istage istage_at ibase strikes
   local refusal refusal_at refusal_state rc relaunch_count
   local mins
-  for meta in "$STATE"/*.meta; do
+  local -a ids=()
+  while IFS= read -r id; do ids+=("$id"); done < <(sweep_ids inbox)
+  for id in ${ids[@]+"${ids[@]}"}; do
+    meta="$STATE/$id.meta"
     [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
     task_is_skipped "$id" && continue
+    if pass_spent; then
+      pass_budget_note "$id"
+      task_store_prior "$id"
+      continue
+    fi
     [ -d "$STATE/$id.inbox" ] || continue
     oldest=$(inbox_oldest "$id") || continue
+    [ -n "$oldest" ] || continue
+    sweep_cursor_set inbox "$id"
     base=${oldest##*/}
     age=$(path_age_now "$oldest")
     # A dead or unclassifiable endpoint is the task pass's business: replacing
@@ -1802,6 +2023,7 @@ main() {
   # A refused relaunch is re-attempted only after this window, long enough for
   # whatever refused it (a backend capability gap, a repaired record) to change.
   REFUSAL_RETRY_SECS=$(conf_int FM_WATCHDOG_REFUSAL_RETRY_SECS 21600)
+  PASS_BUDGET_SECS=$(conf_int FM_WATCHDOG_PASS_BUDGET_SECS 1200)
   BOOT_BUDGET_SECS=$(conf_int FM_WATCHDOG_BOOT_BUDGET_SECS 1500)
   INBOX_RING_SECS=$(conf_int FM_WATCHDOG_INBOX_RING_SECS 1200)
   INBOX_INTERRUPT_SECS=$(conf_int FM_WATCHDOG_INBOX_INTERRUPT_SECS 2700)
@@ -1819,6 +2041,10 @@ main() {
   AGENT_STATE_DIR=${FM_WATCHDOG_AGENT_STATE_DIR:-}
   CAPTURE_DIR=${FM_WATCHDOG_CAPTURE_DIR:-}
 
+  # The deadline is fixed once, before any pass runs, so every pass below is
+  # racing the same clock and the record always lands inside the unit's timeout.
+  PASS_DEADLINE=""
+  [ "$DRY_RUN" = 1 ] || PASS_DEADLINE=$(( $(now_epoch) + PASS_BUDGET_SECS ))
   record_load
   printf '%s' "$PRIOR_TASKS" > "$WORK/tasks.json" 2>/dev/null || printf '{}' > "$WORK/tasks.json"
 
