@@ -475,7 +475,10 @@ retire_note_wake() {  # <id>
   # shellcheck source=/dev/null
   FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" STATE="$STATE" . "$lib"
   removed=$(fm_wake_retire_key_rows "inbox:$id") || return 1
-  [ -z "$removed" ] || printf 'retired %s wake(s) for %s\n' "$removed" "$id"
+  case "$removed" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$removed" -gt 0 ]; then
+    printf 'retired %s wake(s) for %s\n' "$removed" "$id"
+  fi
 }
 
 cmd_drain() {

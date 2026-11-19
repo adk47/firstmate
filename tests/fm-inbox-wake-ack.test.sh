@@ -102,6 +102,24 @@ set -e
 [ "$(pending_rows)" = 0 ] || fail "the acknowledgement should find nothing left to consume"
 pass "drain --ack retires the note and the wake that announced it, so one command clears both"
 
+# --- 1b. acking a note whose wake is already gone stays quiet --------------
+
+setup wake-already-gone
+inbox note "its wake was acknowledged before the note" > /dev/null \
+  || fail "the captain note should queue"
+id=$(note_ids "$STATE/inbox")
+read -r seq gen <<EOF
+$(requirement)
+EOF
+drain --ack-through "$seq" --recovery-generation "$gen" --allow-unacked-notes > /dev/null 2> "$ERR" \
+  || fail "the override should acknowledge the wake: $(cat "$ERR")"
+[ "$(pending_rows)" = 0 ] || fail "the override should consume the wake row"
+out=$(inbox drain --ack "$id") || fail "acking the note failed: $out"
+assert_contains "$out" "acked $id" "acking should still report the note it retired"
+assert_not_contains "$out" "retired 0 wake(s)" \
+  "acking a note whose wake is already gone must not report a zero retirement"
+pass "acking a note whose wake is already gone reports no zero retirement"
+
 # --- 2. an unacked note blocks the acknowledgement, and writes nothing -----
 
 setup refusal
