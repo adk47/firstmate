@@ -251,9 +251,9 @@ pass "status counts the captain and automated queues separately"
 
 last_line() { tail -n 1 "$1"; }
 
-# Drive the command through a helper: `out=$(cmd)` then `code=$?` leaves errexit
-# switched on for the rest of this file, so a later failure would exit with no
-# case name instead of a reported one.
+# Drive the command through a helper: `out=$(cmd)` then `code=$?` needs `set +e`
+# around it, and `set -e` in a file that never set it switches errexit on for
+# every case after this one, so a later failure would exit with no case name.
 run_inbox() {  # <home> <args...> -> RUN_OUT, RUN_CODE
   RUN_OUT=$(inbox "$@" 2>&1) && RUN_CODE=0 || RUN_CODE=$?
 }
@@ -429,13 +429,41 @@ assert_absent "$home/state/inbox/handled/$batch_captain.note" \
   "a refused batch must not stamp the captain note"
 pass "a refused batch files nothing at all"
 
-# 10. A flag written after --ack is read as an id, so the refusal must say where
+# 10. Naming rows and saying the note produced none are contradictory answers,
+#     so one ack cannot carry both.
+run_inbox "$home" drain --filed abc123 --no-actions --ack "$batch_captain"
+[ "$RUN_CODE" -ne 0 ] || fail "--filed with --no-actions should refuse"
+assert_contains "$RUN_OUT" 'exclusive' "the refusal should call the two answers exclusive"
+assert_present "$home/state/inbox/$batch_captain.note" \
+  "a contradictory ack must leave the captain note in the queue"
+pass "--filed and --no-actions together are refused as contradictory"
+
+# 11. A record whose last byte is not a newline must not get its stamp glued
+#     onto the body's final line, where the stamp would read as body text.
+home=$(make_home laning-noeol)
+inbox "$home" note "a body with no trailing newline" >/dev/null || fail "captain note should queue"
+noeol_id=$(only_note "$home/state/inbox")
+noeol_note="$home/state/inbox/$noeol_id.note"
+size=$(wc -c <"$noeol_note")
+truncate -s $((size - 1)) "$noeol_note"
+run_inbox "$home" drain --filed abc123 --ack "$noeol_id"
+[ "$RUN_CODE" -eq 0 ] || fail "a record with no trailing newline should still ack: $RUN_OUT"
+[ "$(last_line "$home/state/inbox/handled/$noeol_id.note")" = 'filed=abc123' ] \
+  || fail "a record with no trailing newline should still end with its filing line"
+[ "$(tail -n 2 "$home/state/inbox/handled/$noeol_id.note" | head -1)" = 'a body with no trailing newline' ] \
+  || fail "the stamp must not be glued onto the body's last line"
+pass "a record with no trailing newline keeps its body line and gains its own filing line"
+
+# 12. A flag written after --ack is read as an id, so the refusal must say where
 #     the flags belong instead of telling the caller to pass what they passed.
-run_inbox "$home" drain --ack "$batch_captain" --filed abc123
+home=$(make_home laning-order)
+inbox "$home" note "flags after ids" >/dev/null || fail "captain note should queue"
+order_id=$(only_note "$home/state/inbox")
+run_inbox "$home" drain --ack "$order_id" --filed abc123
 [ "$RUN_CODE" -ne 0 ] || fail "a flag after --ack should refuse"
 assert_contains "$RUN_OUT" 'flags go before --ack' \
   "the refusal should say the flags belong before --ack"
-assert_present "$home/state/inbox/$batch_captain.note" \
+assert_present "$home/state/inbox/$order_id.note" \
   "a flag after --ack must leave the captain note in the queue"
 pass "a flag written after --ack refuses and points at the right order"
 

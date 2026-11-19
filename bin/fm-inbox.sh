@@ -473,7 +473,9 @@ cmd_list() {
 # id can never be recorded as an empty filing and a crafted value can never
 # forge a line in the handled copy.
 validate_filed() {
-  local value=$1
+  # Pin the collation so the character class below means the same thing under
+  # every locale a home might have configured.
+  local LC_ALL=C value=$1
   case "$value" in
     ''|-*) die "--filed needs at least one backlog task id" ;;
   esac
@@ -491,15 +493,15 @@ validate_filed() {
 stamp_record() {
   local src=$1 stamp=$2 dest=$3 staged
   staged="$dest.staging.$$"
-  cat "$src" >"$staged" || die "cannot read $src"
+  # Private from its first byte: a record can carry the captain's own words.
+  ( umask 077; cat "$src" >"$staged" ) || { rm -f "$staged"; die "cannot stage $src"; }
   # A file whose last byte is not a newline would glue the stamp onto its final
   # body line, so the stamp would answer nothing and read as body text.
   if [ -s "$src" ] && [ -n "$(tail -c 1 "$src")" ]; then
-    printf '\n' >>"$staged" || die "cannot stage $src"
+    printf '\n' >>"$staged" || { rm -f "$staged"; die "cannot stage $src"; }
   fi
-  printf '%s\n' "$stamp" >>"$staged" || die "cannot stage $src"
-  chmod 600 "$staged" || die "cannot stage $src"
-  mv "$staged" "$dest" || die "cannot file $dest"
+  printf '%s\n' "$stamp" >>"$staged" || { rm -f "$staged"; die "cannot stage $src"; }
+  mv "$staged" "$dest" || { rm -f "$staged"; die "cannot file $dest"; }
   rm -f "$src" || die "cannot retire $src"
 }
 
@@ -525,6 +527,10 @@ cmd_drain() {
       *) break ;;
     esac
   done
+  # One ack cannot both name rows and say the note produced none.
+  if [ -n "$filed" ] && [ "$no_actions" -eq 1 ]; then
+    die "--filed and --no-actions are exclusive: name the rows, or say the note needed no work"
+  fi
   if [ "${1:-}" = "--ack" ]; then
     shift
     [ "$#" -gt 0 ] || die "usage: fm-inbox.sh drain [--filed <task-id>[,...] | --no-actions] --ack <id>..."
