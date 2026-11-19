@@ -129,7 +129,10 @@
 #           watch that recorded no target to apply it to. A reading that measured nothing
 #           earlier in the schedule is disclosed in the reason and superseded by
 #           the later evidence, because an early read can fail for a reason the
-#           later ones do not share. A Deployment target that never scored is a
+#           later ones do not share. A reading made entirely of samples still
+#           awaiting their rollout read nothing, so it is not a measurement and a
+#           watch whose +6h reading is one of those ends unmeasurable naming that
+#           case. A Deployment target that never scored is a
 #           read that failed and makes the row unmeasurable-with-reason; a
 #           metric key or a sentry/ and run/ target that never scored is a
 #           coverage gap, named in the reason and in the row's
@@ -3350,11 +3353,14 @@ cw_reading_json() {  # <watch-id> <offset-seconds>
     }
     END {
       if (at == "") { printf "null"; exit }
-      # A reading is measured when it scored something, or when everything it
-      # could not score was only waiting for the rollout to land. A reading
-      # whose samples all failed to read is a gap, and so is one that mixes a
-      # failed read with an awaiting one.
-      measured = (scored > 0 || (awaiting > 0 && unmeasured == 0)) ? "true" : "false"
+      # A reading is measured only when it scored something. A sample that was
+      # only waiting for its rollout to land read nothing, so a reading made
+      # entirely of those is not a measurement: counting it as one reports a
+      # watch whose whole window elapsed during a rollout as clean, and a
+      # verdict that cannot tell "we looked and it was fine" from "we never
+      # looked" is the false clean this bar exists to prevent. A reading whose
+      # samples all failed to read is a gap for the same reason.
+      measured = (scored > 0) ? "true" : "false"
       printf "{\"at\": %s, \"scored\": %d, \"unmeasured\": %d, \"awaiting\": %d, \"regressed\": %d, \"measured\": %s, \"values\": {%s}}", at, scored, unmeasured, awaiting, regressed, measured, values
     }
   ' "$samples"
@@ -3510,16 +3516,20 @@ cw_scored_any() {  # <watch-id>
 # row's unmeasured_metrics but never a verdict on its own, because what it leaves
 # unread is a slice of a surface that was otherwise measured.
 #
-# A reading that only ever waited for its rollout to land is measured, not a
-# gap: the deploy had not happened yet, so there was nothing to read. A watch
-# whose rollout never landed at all still ends unmeasurable, because its
-# Deployments never scored and cw_unread_deployments names them.
+# A reading that only ever waited for its rollout to land is not a measurement:
+# the deploy had not happened yet, so nothing was read. A watch whose whole
+# window elapsed that way ends unmeasurable and names the case, because a verdict
+# that cannot tell "we looked and it was fine" from "we never looked" is the
+# false clean this bar exists to prevent. A watch whose rollout never landed at
+# all ends unmeasurable for the same reason, and cw_unread_deployments names the
+# Deployments that never scored.
 #
 # <note> explains a schedule that was cut short (an interrupted drive). It is
 # carried into the reason so a proof taken by a stopped drive says so.
 cw_terminal_state() {  # <watch-id> [<note>]
   local id=$1 note=${2:-} r json final='' empty='' empties=0 missing=''
   local unread gaps known why='' superseded='' plural='s' recorded=0 seen=''
+  local all_awaiting=''
   # A regression a reading actually recorded is proof of a bad change, and it
   # outranks every later consideration: a watch that saw one is never clean, and
   # reporting it as a measurement gap would state the opposite of what the
@@ -3551,6 +3561,15 @@ cw_terminal_state() {  # <watch-id> [<note>]
     fi
     [ "$r" -ne 21600 ] || final=$json
   done
+  # A +6h reading made entirely of samples that were still waiting for their
+  # rollout read nothing at all, so it is not a measurement and the watch owes a
+  # re-registration. Naming the case keeps it apart from a read that failed.
+  if [ "$final" != null ] \
+    && printf '%s' "$final" | grep -q '"scored": 0,' \
+    && printf '%s' "$final" | grep -q '"unmeasured": 0,' \
+    && ! printf '%s' "$final" | grep -q '"awaiting": 0,'; then
+    all_awaiting=1
+  fi
   unread=$(cw_unread_deployments "$id" | paste -sd ',' - | sed 's/,/, /g')
   # "Every Deployment target was measured" is vacuously true for a watch that
   # recorded no target of any kind, which would let readings alone stand as proof
@@ -3573,7 +3592,11 @@ cw_terminal_state() {  # <watch-id> [<note>]
       "${note:+$note; }the +6h reading measured and every Deployment target was measured at least once""${superseded:+; $superseded}${gaps:+; never measured: $gaps}"
     return 0
   fi
-  [ -z "$empty" ] || why="nothing measured at $empty"
+  if [ -n "$all_awaiting" ]; then
+    why='unmeasured: every sample awaited a rollout'
+  else
+    [ -z "$empty" ] || why="nothing measured at $empty"
+  fi
   [ -z "$missing" ] || why="$why${why:+; }no reading at $missing"
   [ -z "$unread" ] || why="$why${why:+; }never measured: $unread"
   [ -z "$known" ] || [ -n "$missing" ] || [ -n "$empty" ] \
@@ -4347,6 +4370,13 @@ cw_gate_row() {  # <watch-id> <mode>
     if [ -n "$derived" ]; then
       case "$derived" in
         proven*) return 0 ;;
+        # A derived regression is a measured bad outcome, and it must never
+        # inherit the stale literal's pass: the same evidence cannot be a pass
+        # here and a failure when a row happens to exist.
+        regressed*)
+          printf 'change-watch: gate FAIL %s: %s\n' "$id" \
+            "$(printf '%s' "$derived" | cut -f2-)"
+          return 1 ;;
         unmeasurable-with-reason*)
           printf 'change-watch: gate FAIL %s: %s\n' "$id" \
             "$(printf '%s' "$derived" | cut -f2-)"

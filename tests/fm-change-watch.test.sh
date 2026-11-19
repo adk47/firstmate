@@ -1208,11 +1208,12 @@ awk -F'\t' '$2 == 900 && $7 == 1' "$SAMPLES_G" | grep -q "restarts@muso-prod/cor
   || fail "the landed release was not scored: $(awk -F'\t' '$2 == 900' "$SAMPLES_G")"
 pass "the new image lands and the same watch scores the release"
 
-# --- awaiting the deploy is not a measurement gap ------------------------------
+# --- awaiting the deploy is not a measurement ----------------------------------
 # A reading whose every sample was taken before the rollout landed has nothing
-# to read yet. Counting that as a failed read would end a healthy merge
-# unmeasurable and block its own done claim, which is the opposite of what the
-# watch is for.
+# to read yet, so it is not a measurement. A later reading that does measure the
+# release still proves the merge; a watch whose whole window elapsed that way
+# ends unmeasurable and says so, because a verdict that cannot tell "we looked
+# and it was fine" from "we never looked" is a false clean.
 
 HOME_AW=$(cluster_world aw)
 seed_app_pr "$HOME_AW"
@@ -1243,9 +1244,41 @@ aw_cw 1790021600 drive "aw1$CORE_ID_SUFFIX" >/dev/null || fail "drive failed"
 ROW_AW="$HOME_AW/state/change-watch/rows/aw1$CORE_ID_SUFFIX.json"
 grep -q '"terminal_state": "proven"' "$ROW_AW" \
   || fail "an awaiting-deploy reading made the row unproven: $(cat "$ROW_AW")"
-grep -q '"900": {"at": [0-9]*, "scored": 0, "unmeasured": 0, "awaiting": [1-9]' "$ROW_AW" \
-  || fail "the +15m reading did not record its awaiting samples: $(cat "$ROW_AW")"
-pass "a reading that only awaited its deploy is measured, not a gap"
+grep -q '"900": {"at": [0-9]*, "scored": 0, "unmeasured": 0, "awaiting": [1-9]*, "regressed": 0, "measured": false' "$ROW_AW" \
+  || fail "the +15m reading did not record its awaiting samples as unmeasured: $(cat "$ROW_AW")"
+pass "a reading that only awaited its deploy is not a measurement, and a later one still proves"
+
+# A watch whose whole window elapsed while its rollout was still landing read
+# nothing at all. That is not a measurement, so it ends unmeasurable and names
+# the case: reporting it clean would state that a merge was verified when no
+# sample ever read the release.
+HOME_AW2=$(cluster_world aw2)
+seed_app_pr "$HOME_AW2"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_AW2/workloads"
+printf '[]\n' > "$HOME_AW2/sentry/issues-core-backend.json"
+aw2_cw() {  # <now> <args...>
+  local now=$1
+  shift
+  CW_CLUSTER_DIR='' PATH="$HOME_AW2/bin:$PATH" FM_CW_SHIM_LOG="$HOME_AW2/shim.log" \
+    FM_CW_SHIM_WORKLOADS="$HOME_AW2/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+    FM_CW_CONFIG_DIR="$HOME_AW2/config" FM_CW_SENTRY_DIR="$HOME_AW2/sentry" \
+    run_cw "$HOME_AW2" "$now" "$@"
+}
+aw2_cw 1790000000 register aw2 "$CORE_PR" >/dev/null || fail "register failed"
+printf '900\t1790000900\n3600\t1790003600\n21600\t1790021600\n' \
+  > "$HOME_AW2/state/change-watch/aw2$CORE_ID_SUFFIX/schedule"
+aw2_cw 1790021600 drive "aw2$CORE_ID_SUFFIX" >/dev/null || fail "drive failed"
+out=$(aw2_cw 1790021600 verdict "aw2$CORE_ID_SUFFIX")
+printf '%s\n' "$out" | grep -q 'every sample awaited a rollout' \
+  || fail "a watch whose whole window awaited its rollout did not name the case: $out"
+printf '%s\n' "$out" | grep -q 'clean' \
+  && fail "a watch that never measured anything read clean: $out"
+ROW_AW2="$HOME_AW2/state/change-watch/rows/aw2$CORE_ID_SUFFIX.json"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_AW2" \
+  || fail "an all-awaiting watch was not recorded unmeasurable: $(cat "$ROW_AW2")"
+grep -q '"21600": {"at": [0-9]*, "scored": 0, "unmeasured": 0, "awaiting": [1-9]*, "regressed": 0, "measured": false' "$ROW_AW2" \
+  || fail "the +6h all-awaiting reading was recorded as measured: $(cat "$ROW_AW2")"
+pass "a watch whose whole window awaited its rollout is unmeasured, never clean"
 
 # One pod read serves the landing gate and every pod-backed metric of a sample.
 # The armed drive takes all 15 samples in one process, so a read repeated per
@@ -2538,8 +2571,8 @@ grep -q 'awaiting the deploy: the .github/workflows/deploy.yml run is in_progres
 hydra_runs "$HOME_IF" "[$(hydra_run 2026-09-21T14:30:00Z completed success "$MERGED")]"
 run_hydra_cw "$HOME_IF" 1790044000 drive if1-1970 >/dev/null || fail "resumed drive failed"
 ROW_IF="$HOME_IF/state/change-watch/rows/if1-1970.json"
-grep -q '"900": {[^}]*"measured": true' "$ROW_IF" \
-  || fail "a +15m reading that was only awaiting the deploy was not measured: $(cat "$ROW_IF" 2>/dev/null)"
+grep -q '"900": {[^}]*"measured": false' "$ROW_IF" \
+  || fail "a +15m reading that only awaited the deploy was recorded as a measurement: $(cat "$ROW_IF" 2>/dev/null)"
 grep -q '"terminal_state": "proven"' "$ROW_IF" \
   || fail "a watch whose scheduled deploy landed after +15m was not proven: $(cat "$ROW_IF" 2>/dev/null)"
 pass "a deploy still in flight at +15m waits instead of ending the watch unmeasurable"
@@ -3124,6 +3157,26 @@ out=$(run_cw "$HOME_J8" 1790044000 rederive --apply) || fail "the second empty-r
 printf '%s\n' "$out" | grep -q '0 row(s) rewritten' \
   || fail "the empty-readings derivation is not idempotent: $out"
 pass "a row-less watch whose readings prove nothing is recorded as such and still refused"
+
+# The same gate, on a derived regression. A row-less watch kept a stale
+# "completed unmeasured" literal that no longer describes its readings, and a
+# derived regression must never inherit a pass from it: the evidence is the
+# same whether a row exists or not.
+HOME_RG=$(new_world rg)
+seed_pr "$HOME_RG" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_RG" "$MANIFEST" "$FEED_LINE"
+run_cw "$HOME_RG" 1790000000 register rg "$PR_URL" >/dev/null || fail "register failed"
+WATCH_RG="$HOME_RG/state/change-watch/rg-3317"
+rm -f "$HOME_RG/state/change-watch/rows/rg-3317.json"
+printf '1790000900\t900\trestarts@muso-prod/feed-service\t5\t1\t1\t1\t0\n' \
+  > "$WATCH_RG/samples.log"
+printf 'completed unmeasured\n' > "$WATCH_RG/verdict"
+if out=$(run_cw "$HOME_RG" 1790044000 gate rg --terminal-gap 2>&1); then
+  fail "a row-less watch whose readings recorded a regression passed the teardown gate: $out"
+fi
+printf '%s\n' "$out" | grep -q 'regressed at +15m' \
+  || fail "the gate did not name the derived regression: $out"
+pass "a row-less watch whose readings recorded a regression fails the gate"
 
 # A directory that recorded no target of any kind makes "every Deployment target
 # was measured" vacuous, so its readings alone look like proof. Deriving a clean
