@@ -25,10 +25,16 @@ case_lane() {
   fm_git_worktree "$LANE_ROOT/repo" "$LANE_WT" "fm/$name"
 }
 
-# guard <worktree> <base> <budget>: run the guard, printing "<rc>\n<stdout>".
+# guard <worktree> <base> <budget> [committer-date]: run the guard, printing
+# "<rc>\n<stdout>". A committer-date forces a distinct snapshot commit when a
+# case needs to distinguish a real repush from a second-identical one.
 guard() {
   local out rc
-  out=$("$GUARD" "$1" "$2" "$3" 2>/dev/null)
+  if [ "$#" -ge 4 ]; then
+    out=$(GIT_COMMITTER_DATE=$4 "$GUARD" "$1" "$2" "$3" 2>&1)
+  else
+    out=$("$GUARD" "$1" "$2" "$3" 2>&1)
+  fi
   rc=$?
   printf '%s\n%s\n' "$rc" "$out"
 }
@@ -39,6 +45,11 @@ out_of() { printf '%s\n' "$1" | tail -n +2; }
 # remote_file <ref> <path>: the bytes of <path> in <ref> as stored on the origin.
 remote_file() {
   git -C "$LANE_REMOTE" show "$1:$2"
+}
+
+# remote_has_path <ref> <path>: whether <ref> on the origin carries <path>.
+remote_has_path() {
+  git -C "$LANE_REMOTE" cat-file -e "$1:$2" >/dev/null 2>&1
 }
 
 # assert_no_remote_ref <ref> <msg>: the origin must not carry <ref> at all, read
@@ -60,24 +71,105 @@ test_leading_zero_budget_is_rejected() {
 }
 
 test_unchanged_dirty_tree_is_not_repushed() {
-  local r first second
+  local r pushes count
   case_lane idle
+  pushes=$LANE_ROOT/pushes.log
+  : > "$pushes"
+  mkdir -p "$LANE_REMOTE/hooks"
+  printf '#!/bin/sh\nprintf "push\\n" >> "%s"\ncat >/dev/null\n' "$pushes" \
+    > "$LANE_REMOTE/hooks/pre-receive"
+  chmod +x "$LANE_REMOTE/hooks/pre-receive"
   printf 'the only copy of the work\n' > "$LANE_WT/only-copy.txt"
 
-  r=$(guard "$LANE_WT" HEAD 30)
+  r=$(guard "$LANE_WT" HEAD 30 '2020-01-01T00:00:00Z')
   expect_code 0 "$(rc_of "$r")" "the first snapshot of a dirty tree must be silent"
-  first=$(git -C "$LANE_REMOTE" rev-parse refs/wip/idle)
+  [ "$(remote_file refs/wip/idle only-copy.txt)" = "the only copy of the work" ] ||
+    fail "the first snapshot did not reach the origin"
 
   # The worker wrote nothing new, so the already-published snapshot is still the
-  # current one and the guard must not build and force-push it again.
-  r=$(guard "$LANE_WT" HEAD 30)
+  # current one and the guard must not build and force-push it again. The
+  # pre-receive hook counts pushes that actually reached the origin, and the
+  # second committer date guarantees a repush would be a visible new commit
+  # rather than a second-identical one git reports as up to date.
+  r=$(guard "$LANE_WT" HEAD 30 '2020-01-02T00:00:00Z')
   expect_code 0 "$(rc_of "$r")" "a repeat run on an unchanged dirty tree must be silent"
-  second=$(git -C "$LANE_REMOTE" rev-parse refs/wip/idle)
-  [ "$first" = "$second" ] ||
-    fail "an unchanged dirty tree was snapshotted and pushed again ($first -> $second)"
+  count=$(wc -l < "$pushes")
+  count=$(printf '%s' "$count" | tr -d '[:space:]')
+  [ "$count" = 1 ] || fail "the unchanged tree was pushed $count times, not once"
   [ "$(remote_file refs/wip/idle only-copy.txt)" = "the only copy of the work" ] ||
     fail "the unchanged snapshot no longer carries the work"
   pass "an unchanged dirty tree is not re-snapshotted or re-pushed"
+}
+
+test_credentials_are_never_published() {
+  local r path
+  case_lane creds
+  printf 'deploy key\n' > "$LANE_WT/deploy.pem"
+  printf 'private key\n' > "$LANE_WT/id_rsa"
+  printf 'TOKEN=secret\n' > "$LANE_WT/.env"
+  printf 'module.exports = 1\n' > "$LANE_WT/notes.js"
+
+  r=$(guard "$LANE_WT" HEAD 30)
+  expect_code 0 "$(rc_of "$r")" "a lane whose publishable work is ordinary source must be silent"
+  [ "$(remote_file refs/wip/creds notes.js)" = "module.exports = 1" ] ||
+    fail "the ordinary source file did not reach the pushed snapshot"
+  for path in deploy.pem id_rsa .env; do
+    ! remote_has_path refs/wip/creds "$path" ||
+      fail "credential-shaped $path was published to the origin"
+  done
+  pass "credential-shaped untracked files stay out of the pushed snapshot"
+}
+
+test_oversized_untracked_file_refuses() {
+  local r
+  case_lane huge
+  dd if=/dev/zero bs=1024 count=1200 2>/dev/null | tr '\0' 'a' > "$LANE_WT/big.py"
+
+  r=$(guard "$LANE_WT" HEAD 30)
+  expect_code 2 "$(rc_of "$r")" "an oversized publishable file must refuse"
+  assert_contains "$(out_of "$r")" "huge" "the refusal did not name the lane"
+  assert_contains "$(out_of "$r")" "1 MiB publish cap" \
+    "the refusal did not give the size-cap reason"
+  assert_no_remote_ref refs/wip/huge "an oversized lane still published a remote wip ref"
+  ! git -C "$LANE_WT" rev-parse --verify --quiet refs/wip/huge >/dev/null ||
+    fail "an oversized lane still created a local wip ref"
+  pass "an oversized publishable file refuses and publishes nothing"
+}
+
+test_oversized_trip_still_reports_without_claiming_saved() {
+  local r
+  case_lane hugetrip
+  dd if=/dev/zero bs=1024 count=1200 2>/dev/null | tr '\0' 'a' > "$LANE_WT/big.py"
+  git -C "$LANE_WT" config "lane.hugetrip.seen" "$(($(date -u +%s) - 600))"
+
+  r=$(guard "$LANE_WT" HEAD 5)
+  expect_code 3 "$(rc_of "$r")" "a refused snapshot with a spent budget must still trip"
+  assert_contains "$(out_of "$r")" "TRIP hugetrip: 0 commits in" \
+    "the refusal suppressed the zero-commit trip report"
+  assert_contains "$(out_of "$r")" "work NOT saved" \
+    "a refused snapshot claimed the work was saved"
+  assert_not_contains "$(out_of "$r")" "work saved at" \
+    "a refused snapshot still claimed work saved at the wip ref"
+  assert_no_remote_ref refs/wip/hugetrip "a refused trip still published a wip ref"
+  pass "a refused snapshot still trips and says the work was not saved"
+}
+
+test_only_credentials_publish_nothing() {
+  local r
+  case_lane secrets-only
+  mkdir -p "$LANE_WT/secrets"
+  printf 'TOKEN=secret\n' > "$LANE_WT/.env"
+  printf 'private key\n' > "$LANE_WT/id_ed25519"
+  printf 'db password\n' > "$LANE_WT/secrets/db.md"
+
+  r=$(guard "$LANE_WT" HEAD 30)
+  expect_code 0 "$(rc_of "$r")" "a lane with only credential-shaped files must be healthy"
+  [ -z "$(out_of "$r")" ] || fail "the healthy path printed: '$(out_of "$r")'"
+  assert_no_remote_ref refs/wip/secrets-only \
+    "a lane with only credential-shaped files still published a wip ref"
+  ! git -C "$LANE_WT" rev-parse --verify --quiet refs/wip/secrets-only >/dev/null ||
+    fail "a lane with only credential-shaped files still created a local wip ref"
+  pass "a lane with nothing publishable publishes nothing and is silent"
 }
 
 test_failed_push_still_reports_the_trip() {
@@ -230,6 +322,10 @@ test_fresh_first_sighting_does_not_trip
 test_commits_ahead_never_trip
 test_leading_zero_budget_is_rejected
 test_unchanged_dirty_tree_is_not_repushed
+test_credentials_are_never_published
+test_oversized_untracked_file_refuses
+test_oversized_trip_still_reports_without_claiming_saved
+test_only_credentials_publish_nothing
 test_failed_push_still_reports_the_trip
 
 echo "all fm-lane-guard tests passed"
