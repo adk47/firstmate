@@ -91,6 +91,15 @@ except (OSError, UnicodeDecodeError):
 sys.exit(1 if "\0" in text else 0)' "$1"
 }
 
+is_text_blob() {
+  git -C "$wt" cat-file blob "$1" | python3 -c 'import sys
+try:
+    text = sys.stdin.buffer.read().decode("utf-8")
+except UnicodeDecodeError:
+    sys.exit(1)
+sys.exit(1 if "\0" in text else 0)'
+}
+
 credential_path() {
   _cred_rest=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
   _cred_base=${_cred_rest##*/}
@@ -187,18 +196,79 @@ git -C "$wt" diff-index --cached --name-only -z HEAD | tr '\0' '\n' |
   awk '{printf "staged\t%s\n", $0}' > "$idx_dir/staged"
 git -C "$wt" ls-files --others --exclude-standard -z | tr '\0' '\n' |
   awk '{printf "untracked\t%s\n", $0}' > "$idx_dir/untracked"
-cat "$idx_dir/tracked" "$idx_dir/staged" "$idx_dir/untracked" > "$idx_dir/all"
+cat "$idx_dir/staged" "$idx_dir/tracked" "$idx_dir/untracked" > "$idx_dir/all"
 awk -F '\t' '!seen[$2]++' "$idx_dir/all" > "$idx_dir/candidates"
 
 publish_list=$idx_dir/publish
+staged_list=$idx_dir/staged-entries
 published=$idx_dir/published
 skipped=$idx_dir/skipped
 : > "$publish_list"
+: > "$staged_list"
 : > "$published"
 : > "$skipped"
 total=0
 while IFS='	' read -r source rel; do
   [ -n "$rel" ] || continue
+  if [ "$source" = staged ]; then
+    if credential_path "$rel"; then
+      skip_credentials=1
+      printf '%s\t%s\n' "$rel" "credential-shaped path" >> "$skipped"
+      continue
+    fi
+    entry=$(git -C "$wt" ls-files --stage -z -- "$rel" | tr '\0' '\n' | head -1)
+    mode=${entry%% *}
+    rest=${entry#* }
+    blob=${rest%% *}
+    case $mode in
+      100644 | 100755) ;;
+      *)
+        skip_allowlist=1
+        printf '%s\t%s\n' "$rel" "non-regular index entry (mode ${mode:-none})" >> "$skipped"
+        continue
+        ;;
+    esac
+    base=${rel##*/}
+    ext=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
+    ext=${ext##*.}
+    if ! publishable_extension "$ext" && [ "$mode" != 100755 ]; then
+      skip_allowlist=1
+      printf '%s\t%s\n' "$rel" "outside the publish allowlist" >> "$skipped"
+      continue
+    fi
+    size=$(git -C "$wt" cat-file -s "$blob" 2>/dev/null) || {
+      skip_allowlist=1
+      printf '%s\t%s\n' "$rel" "could not read the staged blob size" >> "$skipped"
+      continue
+    }
+    size=$(printf '%s' "$size" | tr -d '[:space:]')
+    case $size in
+      '' | *[!0-9]*)
+        skip_allowlist=1
+        printf '%s\t%s\n' "$rel" "unparseable staged blob size" >> "$skipped"
+        continue
+        ;;
+    esac
+    if [ "$size" -gt "$MAX_FILE_BYTES" ]; then
+      save_state=refused
+      save_reason="file $rel is $size bytes, over the 1 MiB publish cap"
+      break
+    fi
+    if ! is_text_blob "$blob"; then
+      skip_allowlist=1
+      printf '%s\t%s\n' "$rel" "binary or non-UTF-8 staged content" >> "$skipped"
+      continue
+    fi
+    total=$((total + size))
+    if [ "$total" -gt "$MAX_TOTAL_BYTES" ]; then
+      save_state=refused
+      save_reason="publishable files exceed the 5 MiB publish cap"
+      break
+    fi
+    printf '%s\t%s\n' "$source" "$rel" >> "$published"
+    printf '%s\t%s\t%s\n' "$mode" "$blob" "$rel" >> "$staged_list"
+    continue
+  fi
   file=$wt/$rel
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
     if GIT_INDEX_FILE=$idx_file git -C "$wt" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
@@ -279,6 +349,16 @@ else
       break
     fi
   done < "$publish_list"
+  if [ "$save_state" = none ]; then
+    while IFS='	' read -r mode blob rel; do
+      [ -n "$rel" ] || continue
+      if ! GIT_INDEX_FILE=$idx_file git -C "$wt" update-index --add --cacheinfo "$mode,$blob,$rel"; then
+        save_state=failed
+        save_reason="could not stage the index blob of $rel"
+        break
+      fi
+    done < "$staged_list"
+  fi
   if [ "$save_state" = none ]; then
     if ! tree=$(GIT_INDEX_FILE=$idx_file git -C "$wt" write-tree); then
       save_state=failed

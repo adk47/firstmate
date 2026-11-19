@@ -341,6 +341,33 @@ test_staged_uncommitted_file_is_published() {
   pass "a staged-but-uncommitted file is published, credentials excluded"
 }
 
+test_staged_blob_survives_reverted_worktree() {
+  local r local_dir expected
+  case_lane reverted
+  printf 'orig\n' > "$LANE_WT/f.txt"
+  git -C "$LANE_WT" add f.txt
+  git -C "$LANE_WT" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'the committed content'
+  printf 'staged\n' > "$LANE_WT/f.txt"
+  git -C "$LANE_WT" add f.txt
+  printf 'orig\n' > "$LANE_WT/f.txt"
+  expected=$(printf 'staged')
+  [ -z "$(git -C "$LANE_WT" diff --name-only HEAD)" ] ||
+    fail "the worktree no longer matches HEAD, the case is not set up"
+
+  r=$(guard "$LANE_WT" HEAD 30)
+  expect_code 0 "$(rc_of "$r")" "a lane with staged work must not fail"
+  local_dir=$(saved_local_dir "$(out_of "$r")")
+  [ -n "$local_dir" ] || fail "the staged snapshot was not announced as saved"
+  [ "$(cat "$local_dir/f.txt")" = "$expected" ] ||
+    fail "the local snapshot lost the staged blob"
+  [ "$(remote_file refs/wip/reverted f.txt)" = "$expected" ] ||
+    fail "the pushed snapshot lost the staged blob"
+  [ "$(git -C "$LANE_WT" show :f.txt)" = "$expected" ] ||
+    fail "the guard changed the worker's staged index"
+  pass "a staged blob survives a worktree restored to HEAD"
+}
+
 test_excluded_untracked_work_is_not_claimed_saved() {
   local r
   case_lane excluded
@@ -468,6 +495,7 @@ test_clean_tree_is_silent
 test_untracked_file_reaches_the_remote
 test_tracked_changes_and_deletions_are_saved
 test_staged_uncommitted_file_is_published
+test_staged_blob_survives_reverted_worktree
 test_excluded_untracked_work_is_not_claimed_saved
 test_vanished_candidate_is_skipped
 test_zero_commit_budget_trips
