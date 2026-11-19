@@ -107,13 +107,15 @@ test_credentials_are_never_published() {
   printf 'deploy key\n' > "$LANE_WT/deploy.pem"
   printf 'private key\n' > "$LANE_WT/id_rsa"
   printf 'TOKEN=secret\n' > "$LANE_WT/.env"
+  printf 'staged key\n' > "$LANE_WT/staged.pem"
+  printf 'staged credential\n' > "$LANE_WT/Secrets.json"
   printf 'module.exports = 1\n' > "$LANE_WT/notes.js"
 
   r=$(guard "$LANE_WT" HEAD 30)
   expect_code 0 "$(rc_of "$r")" "a lane whose publishable work is ordinary source must be silent"
   [ "$(remote_file refs/wip/creds notes.js)" = "module.exports = 1" ] ||
     fail "the ordinary source file did not reach the pushed snapshot"
-  for path in deploy.pem id_rsa .env; do
+  for path in deploy.pem id_rsa .env staged.pem Secrets.json; do
     ! remote_has_path refs/wip/creds "$path" ||
       fail "credential-shaped $path was published to the origin"
   done
@@ -238,6 +240,91 @@ test_untracked_file_reaches_the_remote() {
   pass "an untracked file reaches the remote wip ref without touching the worker"
 }
 
+test_tracked_changes_and_deletions_are_saved() {
+  local r expected
+  case_lane tracked
+  printf 'delete me\n' > "$LANE_WT/remove-me.txt"
+  git -C "$LANE_WT" add remove-me.txt
+  git -C "$LANE_WT" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'a tracked file to delete'
+  rm "$LANE_WT/remove-me.txt"
+  printf '# tracked\n\nedited in the lane\n' > "$LANE_WT/README.md"
+  expected=$(printf '# tracked\n\nedited in the lane')
+
+  r=$(guard "$LANE_WT" HEAD 30)
+  expect_code 0 "$(rc_of "$r")" "a lane changing tracked files must be silent"
+  [ "$(remote_file refs/wip/tracked README.md)" = "$expected" ] ||
+    fail "the tracked modification did not reach the pushed snapshot"
+  ! remote_has_path refs/wip/tracked remove-me.txt ||
+    fail "the tracked deletion still carries the deleted file"
+  pass "tracked modifications and deletions reach the pushed snapshot"
+}
+
+test_staged_uncommitted_file_is_published() {
+  local r
+  case_lane staged
+  printf 'staged work, never committed\n' > "$LANE_WT/staged.py"
+  printf 'staged credential\n' > "$LANE_WT/staged.pem"
+  git -C "$LANE_WT" add staged.py staged.pem
+
+  r=$(guard "$LANE_WT" HEAD 0)
+  expect_code 3 "$(rc_of "$r")" "a staged zero-commit lane at its budget must trip"
+  assert_contains "$(out_of "$r")" "TRIP staged: 0 commits in" \
+    "the staged-work lane did not trip"
+  [ "$(remote_file refs/wip/staged staged.py)" = "staged work, never committed" ] ||
+    fail "the staged-but-uncommitted file did not reach the pushed snapshot"
+  ! remote_has_path refs/wip/staged staged.pem ||
+    fail "the staged credential-shaped file was published"
+  assert_contains "$(git -C "$LANE_WT" diff --cached --name-only)" "staged.py" \
+    "the guard changed the worker's staged index"
+  pass "a staged-but-uncommitted file is published, credentials excluded"
+}
+
+test_excluded_untracked_work_is_not_claimed_saved() {
+  local r
+  case_lane excluded
+  printf 'FROM scratch\n' > "$LANE_WT/Dockerfile"
+  git -C "$LANE_WT" config "lane.excluded.seen" "$(($(date -u +%s) - 600))"
+
+  r=$(guard "$LANE_WT" HEAD 5)
+  expect_code 3 "$(rc_of "$r")" "an excluded-work lane at its budget must trip"
+  assert_contains "$(out_of "$r")" "TRIP excluded: 0 commits in" \
+    "the excluded-work lane did not trip"
+  assert_contains "$(out_of "$r")" "work NOT saved" \
+    "the trip claimed excluded untracked work was saved"
+  assert_not_contains "$(out_of "$r")" "matches HEAD" \
+    "the trip claimed the worktree matches HEAD despite excluded work"
+  assert_not_contains "$(out_of "$r")" "work saved at" \
+    "the trip claimed a snapshot it never published"
+  assert_no_remote_ref refs/wip/excluded "an excluded-work lane still published a wip ref"
+  pass "excluded untracked work trips without claiming it was saved"
+}
+
+test_vanished_candidate_is_skipped() {
+  local r real_git
+  case_lane vanished
+  real_git=$(command -v git)
+  mkdir -p "$LANE_ROOT/bin"
+  cat > "$LANE_ROOT/bin/git" <<EOF
+#!/bin/sh
+if [ "\$1" = "-C" ] && [ "\$3" = "add" ] && [ "\$4" = "--" ] && [ "\$5" = "first.py" ]; then
+  rm -f "$LANE_WT/second.py"
+fi
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$LANE_ROOT/bin/git"
+  printf 'first file\n' > "$LANE_WT/first.py"
+  printf 'second file\n' > "$LANE_WT/second.py"
+
+  r=$(PATH="$LANE_ROOT/bin:$PATH" "$GUARD" "$LANE_WT" HEAD 30 2>&1)
+  expect_code 0 "$?" "a candidate vanishing before staging must not abort the guard"
+  [ "$(remote_file refs/wip/vanished first.py)" = "first file" ] ||
+    fail "the surviving candidate did not reach the pushed snapshot"
+  ! remote_has_path refs/wip/vanished second.py ||
+    fail "the vanished candidate still reached the pushed snapshot"
+  pass "a candidate that vanishes before staging is skipped"
+}
+
 test_zero_commit_budget_trips() {
   local r
   case_lane trip
@@ -316,6 +403,10 @@ test_commits_ahead_never_trip() {
 test_no_remote_refuses
 test_clean_tree_is_silent
 test_untracked_file_reaches_the_remote
+test_tracked_changes_and_deletions_are_saved
+test_staged_uncommitted_file_is_published
+test_excluded_untracked_work_is_not_claimed_saved
+test_vanished_candidate_is_skipped
 test_zero_commit_budget_trips
 test_budget_elapsed_trips_after_the_first_sighting
 test_fresh_first_sighting_does_not_trip
