@@ -1960,6 +1960,22 @@ case "$steer" in
 esac
 pass "the lane is steered with the beta failure and that no production watch was armed"
 
+# A beta regression is not re-armed: it has no production targets to re-measure,
+# so re-registering it would arm a watch that can only ever end unmeasurable.
+ROW_B3="$HOME_B3/state/change-watch/rows/b3-78.json"
+out=$(run_beta "$HOME_B3" 1790000000 register b3 \
+  'https://github.com/Muso-AI/web-credits-next/pull/78') || fail "re-registering a beta-regressed watch failed: $out"
+case "$out" in
+  *"ended on a beta regression"*"not re-armed"*) ;;
+  *) fail "re-registering a beta regression did not state that it stays ended: $out" ;;
+esac
+grep -q '"terminal_state": "regressed"' "$ROW_B3" \
+  || fail "re-registering a beta-regressed watch rewrote its terminal row: $(cat "$ROW_B3")"
+grep -q 'beta regressed on http_5xx_per_min' "$ROW_B3" \
+  || fail "re-registering a beta-regressed watch lost the beta reason: $(cat "$ROW_B3")"
+[ -s "$HOME_B3/arm.log" ] && fail "re-registering a beta-regressed watch armed a production watch: $(cat "$HOME_B3/arm.log")"
+pass "a beta-regressed watch is not re-armed by re-registering it"
+
 # A rollout that never lands is stated, never read as a pass, and the
 # production watch still arms.
 HOME_B5=$(seed_beta_world b5)
@@ -2544,6 +2560,20 @@ grep -q 'whether the .* run carries aaaa1111 could not be read' "$HOME_DS/state/
   || fail "an unreadable carrier read was not stated as a failed read: $(cat "$HOME_DS/state/change-watch/ds1-1957/read-failures" 2>/dev/null)"
 pass "a deploy run is the one whose tree carries the merged commit"
 
+# An older run whose containment cannot be read must not hide a later run that
+# provably carries the merge: the later, provable landing is the measurement.
+HOME_UC=$(hydra_world uc "$MERGED")
+out=$(run_hydra_cw "$HOME_UC" 1790000000 register uc1 'https://github.com/Muso-AI/hydra/pull/1965') \
+  || fail "hydra register failed: $out"
+hydra_runs "$HOME_UC" "[$(hydra_run 2026-09-21T15:00:00Z completed success "$OLDER"),$(hydra_run 2026-09-21T15:30:00Z completed success "$MERGED")]"
+rm -f "$HOME_UC/gh/contains-$OLDER"
+run_hydra_cw "$HOME_UC" 1790000900 sample uc1-1965 900 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_UC" uc1-1965 900)" = 1 ] \
+  || fail "an unreadable older run hid a later run that provably carries the merge: $(cat "$HOME_UC/state/change-watch/uc1-1965/samples.log" 2>/dev/null)"
+! grep -q 'could not be read' "$HOME_UC/state/change-watch/uc1-1965/read-failures" 2>/dev/null \
+  || fail "a proven later carrier was still reported as an unreadable deploy: $(cat "$HOME_UC/state/change-watch/uc1-1965/read-failures")"
+pass "an unreadable older run does not hide a later provable carrier"
+
 # However many unrelated runs were created before the one whose tree carries the
 # merge, the carrier is still found and scored: a bounded scan of the oldest few
 # dropped it and ended the watch unmeasured instead of reporting the failure.
@@ -3116,9 +3146,14 @@ esac
 pass "the re-derive writes the regression verdict its readings recorded"
 
 # Re-registering a regressed watch re-arms it so a fix can be measured, and the
-# verdict it replaced is kept on disk rather than dropped.
+# verdict it replaced is kept on disk rather than dropped. The stale follow-up
+# marker must go with it, or the next regression would look already recorded.
+[ -s "$HOME_J4/state/change-watch/j4-3317/followup" ] \
+  || fail "the follow-up recorded before the re-arm was lost too early"
 run_cw "$HOME_J4" 1790060000 register j4 "$PR_URL" >/dev/null \
   || fail "re-registering a regressed watch failed"
+[ ! -e "$HOME_J4/state/change-watch/j4-3317/followup" ] \
+  || fail "the follow-up recorded for the replaced regression survived the re-arm"
 grep -q '"terminal_state": "open"' "$ROW_J4" \
   || fail "re-registering a regressed watch did not reopen its row: $(cat "$ROW_J4")"
 [ ! -e "$HOME_J4/state/change-watch/j4-3317/verdict" ] \
@@ -3126,6 +3161,15 @@ grep -q '"terminal_state": "open"' "$ROW_J4" \
 grep -q 'regressed at +' "$HOME_J4/state/change-watch/j4-3317/rearm-history" \
   || fail "the replaced regression verdict was not kept in rearm-history"
 pass "re-registering a regressed watch re-arms it and keeps the replaced verdict"
+
+# The cleared follow-up must not let a later regression through teardown.
+sed -i.bak 's/"terminal_state": "open"/"terminal_state": "regressed"/; s/"reason": "[^"]*"/"reason": "regressed at +30m on restarts"/' "$ROW_J4"
+rm -f "$ROW_J4.bak"
+run_cw "$HOME_J4" 1790060100 gate j4 --terminal-gap >/dev/null 2>&1 \
+  && fail "a stale pre-re-arm follow-up cleared teardown for a later regression"
+run_cw "$HOME_J4" 1790060100 gate j4 >/dev/null 2>&1 \
+  && fail "the done-claim gate passed the later regression"
+pass "a follow-up recorded before a re-arm cannot clear a later regression"
 
 # --- a watch with no durable row is judged by the readings it still holds -----
 

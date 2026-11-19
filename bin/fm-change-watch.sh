@@ -142,16 +142,17 @@
 #           clean, because a bad deploy stays bad until it is reverted. A beta
 #           regression exits 1 as well,
 #           so a beta failure is never read as a pass. The exit status is the
-#           done-claim block: 0 for clean or regressed, 1 for
+#           done-claim block: 0 for clean or a recorded regression, 1 for
 #           unmeasurable-with-reason, absent, interrupted, or a beta regression.
 # gate      The done-claim gate for one task: exit 0 only when every watch that
 #           task registered has reached a terminal state that is not a
 #           measurement gap. A watch still running is not a pass, and an
 #           unmeasurable or absent watch is a failure, so a task cannot claim done
 #           while its merge has no evidence. bin/fm-teardown.sh calls it with
-#           --terminal-gap, which fails only for a terminal measurement gap: a
-#           running watch never blocks teardown, because state/change-watch/ is
-#           not a task record and keeps sampling after the task is gone. Both
+#           --terminal-gap, which fails for a terminal measurement gap and for a
+#           regression whose follow-up work item is not yet recorded: a running
+#           watch never blocks teardown, because state/change-watch/ is not a task
+#           record and keeps sampling after the task is gone. Both
 #           modes decide from the watch's durable row, so deleting the verdict
 #           file never turns a failing row into a pass, and a row whose merge
 #           never created a watch directory is still seen. A recorded
@@ -2262,7 +2263,7 @@ print(count)
 cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch> [<merge-sha>]
   local repo=$1 workflow=$2 since=$3 sha=${4:-}
   local gh_cmd=${FM_CW_GH:-gh} out rc=0 cands created runsha status conclusion carried=''
-  local carried_status='' carried_conclusion='' deadline='' cap crc=0
+  local carried_status='' carried_conclusion='' deadline='' cap crc=0 unreadable=''
   if [ -n "$CW_BUDGET_START" ]; then
     deadline=$(( CW_BUDGET_START + SAMPLE_DEADLINE_SECONDS ))
     cap=$(( $(cw_now) + FORGE_TIMEOUT ))
@@ -2344,9 +2345,8 @@ for run in candidates:
       case "$crc" in
         0) ;;
         1) continue ;;
-        *) printf 'awaiting the deploy: whether the %s run carries %s could not be read\n' \
-             "$workflow" "${sha:0:8}"
-           return 1 ;;
+        *) unreadable=1
+           continue ;;
       esac
     fi
     # Cands are sorted oldest first, so the last carrier seen is the latest one and
@@ -2355,9 +2355,15 @@ for run in candidates:
     carried=1
     carried_status=$status
     carried_conclusion=$conclusion
+    unreadable=''
   done <<CANDIDATES
 $cands
 CANDIDATES
+  if [ -n "$unreadable" ]; then
+    printf 'awaiting the deploy: whether the %s run carries %s could not be read\n' \
+      "$workflow" "${sha:0:8}"
+    return 1
+  fi
   if [ -z "$carried" ]; then
     printf 'awaiting the deploy: no %s run carrying %s yet\n' "$workflow" "${sha:0:8}"
     return 1
@@ -3530,7 +3536,7 @@ cw_unread_deployments() {  # <watch-id>
 # carried into the reason so a proof taken by a stopped drive says so.
 cw_terminal_state() {  # <watch-id> [<note>]
   local id=$1 note=${2:-} r json final='' empty='' prior_empty='' empties=0 missing=''
-  local unread gaps known why='' superseded='' plural='s' recorded=0 seen=''
+  local unread gaps why='' superseded='' plural='s' recorded=0 seen=''
   local all_awaiting=''
   # A regression a reading actually recorded is proof of a bad change, and it
   # outranks every later consideration: a watch that saw one is never clean, and
@@ -3581,7 +3587,6 @@ cw_terminal_state() {  # <watch-id> [<note>]
   # watch is a different case and does complete clean: it records targets, they are
   # simply not Deployments, and its note names only what it measured.
   recorded=$(cw_target_ids "$id" | grep -c .)
-  known=$(cw_metric_keys "$id")
   gaps=$(cw_measured_gaps "$id")
   [ "$empties" -ne 1 ] || plural=''
   [ "$empties" -eq 0 ] \
@@ -3602,8 +3607,6 @@ cw_terminal_state() {  # <watch-id> [<note>]
   fi
   [ -z "$missing" ] || why="$why${why:+; }no reading at $missing"
   [ -z "$unread" ] || why="$why${why:+; }never measured: $unread"
-  [ -z "$known" ] || [ -n "$missing" ] || [ -n "$empty" ] \
-    || why="$why${why:+; }nothing scored in any sample"
   [ -n "$why" ] || why='the watch registered no metric'
   printf 'unmeasurable-with-reason\t%s%s\n' "${note:+$note; }" "$why"
 }
@@ -3992,7 +3995,8 @@ cw_rearm() {  # <watch-id> <url>
   case "$attempt" in ''|*[!0-9]*) attempt=1 ;; esac
   attempt=$((attempt + 1))
   rm -f -- "$(cw_verdict_path "$id")" "$(cw_watch_dir "$id")/interrupted-reported" \
-    "$(cw_watch_dir "$id")/absent-reported"
+    "$(cw_watch_dir "$id")/absent-reported" "$(cw_watch_dir "$id")/reported" \
+    "$(cw_followup_path "$id")"
   # The watch is in flight again, so its durable row must not keep the
   # interrupted terminal state it just left: a stale terminal row would make the
   # audit report a gap for a watch that is still measuring.
@@ -4028,10 +4032,18 @@ cmd_register() {
   id=$(cw_watch_id "$task" "$number")
   if cw_watch_exists "$id"; then
     cw_reconcile_drive "$id"
+    row_state=$(cw_row_state "$id")
+    if [ "$row_state" = regressed ]; then
+      case "$(cw_row_reason "$id")" in
+        beta\ regressed*)
+          printf 'change-watch: %s ended on a beta regression (%s); it is not re-armed, because re-measuring beta needs a new watch with its own targets\n' \
+            "$id" "$(cw_row_reason "$id")"
+          return 0 ;;
+      esac
+    fi
     case "$(cat "$(cw_verdict_path "$id")" 2>/dev/null || true)" in
       interrupted*|unmeasurable-with-reason*|absent*|regressed*) cw_rearm "$id" "$url"; return 0 ;;
     esac
-    row_state=$(cw_row_state "$id")
     [ -n "$row_state" ] || row_state=$(cw_rowless_state "$id" | cut -f1)
     case "$row_state" in
       unmeasurable-with-reason|absent|regressed) cw_rearm "$id" "$url"; return 0 ;;
@@ -4340,9 +4352,10 @@ cmd_verdict() {
 # verdict file.
 #
 # --terminal-gap is the same gate for the teardown boundary bin/fm-teardown.sh
-# consults: only a terminal measurement gap fails there, because a watch still
-# running outlives the task's records in state/change-watch/ and keeps sampling
-# on its own, so refusing teardown for it would block every merge for 12 hours.
+# consults: a terminal measurement gap fails there, and so does a regression
+# whose follow-up work item has not been recorded, because a watch still running
+# outlives the task's records in state/change-watch/ and keeps sampling on its
+# own, so refusing teardown for it would block every merge for 12 hours.
 
 # One watch's terminal state derived from the readings on disk, for a watch that
 # has no durable row at all. Watches registered before cw_row_write was called at
