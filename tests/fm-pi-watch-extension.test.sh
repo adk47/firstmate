@@ -1610,7 +1610,7 @@ await waitForPrompt("first");
 await new Promise((resolve) => setTimeout(resolve, 1000));
 await tool.execute("tool-call-silence-timeout-2", {}, undefined, undefined, {});
 // The second wake folds under the still-unconsumed first doorbell, so the
-// alarm's own throttle file is the observable proof that a second note ran.
+// alarm throttle file is the observable proof that a second note ran.
 for (let i = 0; i < 500 && !existsSync(`${process.env.FM_HOME}/state/.branch-silence-alarm`); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
