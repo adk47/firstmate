@@ -1050,6 +1050,7 @@ sweep_ids() {  # <pass>
 # the chair LAST, and queue one check wake describing the result.
 boot_pass() {  # <boot>
   local boot=$1 id meta kind state ok=0 tried=0 deadline chair result rc
+  local spent=0
   local -a ids=()
   local sig since stage stage_at rings relaunches steers strikes
   local istage istage_at ibase refusal='' refusal_at=0 refusal_state='' woke=false
@@ -1067,9 +1068,17 @@ boot_pass() {  # <boot>
     [ "$kind" = secondmate ] && continue
     [ -n "$(fm_meta_get "$meta" window)" ] || continue
     task_is_skipped "$id" && continue
-    if [ "$(now_epoch)" -ge "$deadline" ]; then
-      printf 'watchdog: boot pass ran out of budget before it reached every task; the task pass continues from here\n'
-      break
+    if [ "$spent" = 0 ] && [ "$(now_epoch)" -ge "$deadline" ]; then
+      spent=1
+      printf 'watchdog: boot pass used its %ss budget at %s; the remaining lanes keep their records and are swept next pass\n' \
+        "$BOOT_BUDGET_SECS" "$id"
+    fi
+    if [ "$spent" = 1 ]; then
+      # record_store rebuilds the task table only from this pass's entry files,
+      # so a lane the boot pass never reached would lose the relaunch and strike
+      # history it was loaded from.
+      task_store_prior "$id"
+      continue
     fi
     sweep_cursor_set boot "$id"
     tried=$((tried + 1))
@@ -1227,15 +1236,21 @@ task_has_finished() {  # <id>
   esac
   source=$(printf '%s\n' "$crew" | sed -n 's/^state: [a-z-]* · source: \([a-z-]*\).*/\1/p' | head -1)
   detail=$(printf '%s\n' "$crew" | sed -n 's/^state: [a-z-]* · source: [a-z-]* · //p' | head -1)
-  # A pipeline still watching an open PR reads `done`, and that lane has work
-  # left whatever source said so.
-  case "$detail" in
-    *monitoring*|*'PR ready for review'*) return 1 ;;
-  esac
-  # Only a run-step claim is the pipeline's own word that checks merely pass;
-  # the same words in a status log are the worker's terminal report.
-  case "$source:$detail" in
-    run-step:*'checks green'*) return 1 ;;
+  # Only this pipeline's own watching sentences mean the work is still in
+  # flight. A worker's status-log note is its own finishing word even when it
+  # happens to mention monitoring, and only crew-state's appended
+  # `run still monitoring PR` overrides it.
+  case "$source" in
+    run-step)
+      case "$detail" in
+        *monitoring*|*'PR ready for review'*|*'checks green'*) return 1 ;;
+      esac
+      ;;
+    status-log)
+      case "$detail" in
+        *'run still monitoring PR'*) return 1 ;;
+      esac
+      ;;
   esac
   return 0
 }
