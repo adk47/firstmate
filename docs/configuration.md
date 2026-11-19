@@ -744,6 +744,36 @@ Arm the check once per home with `bin/fm-fleet-stall-check.sh arm`, which writes
 A whole poll is budgeted at half of `FM_CHECK_TIMEOUT`, at most 15 seconds, because the watcher runs its checks one after another and a check that spends most of its timeout on every sweep holds the whole sweep back; a worker the pane captures do not reach in time is not counted that poll and keeps its history.
 `bin/fm-fleet-stall-check.sh status` prints the last recorded verdict, and `bin/fm-fleet-stall-check.sh disarm` removes the shim, its trust binding, and `state/.fleet-stall.json`.
 
+## CI health check (config/ci-health.env)
+
+[`bin/fm-ci-health-check.sh`](../bin/fm-ci-health-check.sh) is a registered watcher check that wakes firstmate when a watched repository's default branch is red, its queued backlog is deep, or a scheduled workflow has not succeeded within its allowance.
+Its header owns the exact poll, the evidence each line carries, and the record format; [`bin/fm-ci-run-lib.sh`](../bin/fm-ci-run-lib.sh) is the single owner of how a run's status and conclusion are read; this section owns the configuration and the operator contract.
+
+A run is red only when its conclusion is `failure`, `timed_out`, or `cancelled`.
+A run whose conclusion is null or empty has not answered yet, whatever its status says, and is pending; a pending run never wakes anyone.
+Any other conclusion is unknown and never wakes anyone either.
+The check exists in this shape because on 2026-11-19 its hand-written predecessor reported two workflows red naming only the workflow, and the newest run of each was in progress by the time anyone looked; a red that cannot be confirmed teaches the reader to ignore real failures.
+So every red line names the workflow, the run id, the conclusion it read, the head commit, the creation time, and the one `gh run view` command that confirms it, and `bin/fm-ci-health-check.sh classify-run <owner/repo> <run-id>` reads one run live and prints the same evidence.
+The check does not wait, retry, or grace a failure: a newest run that concluded `failure` pages on the next poll.
+An answer the check cannot read, or a call that fails, is silent for that repository rather than red.
+
+`config/ci-health.env` is optional, local, gitignored, and not inherited by secondmate homes.
+It holds `KEY=value` lines, it is parsed rather than sourced, and a set environment variable of the same name wins.
+
+```sh
+FM_CI_HEALTH_REPOS='Muso-AI/H-DevOps:main:150 Muso-AI/hydra:main:40 Muso-AI/core-backend:develop:60 Muso-AI/web-credits-next:main:40 Muso-AI/industry-data-processing:main:30'   # owner/repo:branch:queued-bar
+FM_CI_HEALTH_SCHEDULED='Muso-AI/H-DevOps:reconcile-prod-manifests.yaml:7200'   # owner/repo:workflow-file:max-seconds-since-last-success; judged only when the file declares a schedule
+FM_CI_HEALTH_INTERVAL_SECS=900      # polls closer together than this are skipped
+FM_CI_HEALTH_RATE_FLOOR=1500        # stand down when fewer core API calls remain
+FM_CI_HEALTH_PER_PAGE=60            # push runs read per repository; one page
+FM_CI_HEALTH_TOKEN_ENV=~/.config/muso/gh-app-token.env   # sourced for GH_TOKEN when present; none disables
+FM_CI_HEALTH_TRAILER='route each red to the repo lane that owns it; fix-forward, never hand-apply'
+```
+
+Arm the check once per home with `bin/fm-ci-health-check.sh arm`, which writes `state/ci-health.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
+Every API call is bounded at a third of `FM_CHECK_TIMEOUT`, between three and twenty seconds, so a slow forge cannot hold the watcher's sweep.
+`bin/fm-ci-health-check.sh status` prints the last recorded verdict, `bin/fm-ci-health-check.sh classify <status> <conclusion>` prints the class the check would assign, and `bin/fm-ci-health-check.sh disarm` removes the shim, its trust binding, the throttle stamp `state/.ci-health.last`, and the verdict record `state/.ci-health.verdict`.
+
 ## Board loop (data/board.md)
 
 The board is a home's one agenda, and the board loop is what keeps firstmate working toward it instead of answering notifications and stopping.
