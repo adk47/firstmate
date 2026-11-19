@@ -49,10 +49,12 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
-# REFUSES when this task's change watch ended in a measurement gap - a verdict of
-# `unmeasurable-with-reason`, `absent`, or `interrupted` - because cleanup removes the task
-# records that made the gap actionable, and a merge whose watch measured nothing
-# has no evidence it was safe. This is the enforcement boundary for the done
+# REFUSES when this task's change watch has not cleared its measurement gate - a
+# verdict of `unmeasurable-with-reason`, `absent`, or `interrupted`, or a
+# `regressed` watch whose follow-up work item has not been recorded - because
+# cleanup removes the task records that made the gap actionable, and a merge
+# whose watch measured nothing has no evidence it was safe. This is the
+# enforcement boundary for the done
 # claim: it consults `bin/fm-change-watch.sh gate <task-id> --terminal-gap` on
 # every teardown rather than relying on an agent to remember the gate. A watch
 # still RUNNING does not refuse teardown: state/change-watch/ is not a task
@@ -3194,9 +3196,9 @@ fi
 if [ "$FORCE" != "--force" ]; then
   if ! CHANGE_WATCH_GAP=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-change-watch.sh" gate "$ID" --terminal-gap 2>/dev/null); then
-    echo "REFUSED: task $ID has a change watch that ended without a measurement verdict." >&2
+    echo "REFUSED: task $ID has not cleared its change-watch measurement gate." >&2
     printf '%s\n' "$CHANGE_WATCH_GAP" >&2
-    echo "A merge is not safe until its watch says so. Record what the watch measured with bin/fm-change-watch.sh verdict <watch-id>, diagnose the read path with bin/fm-change-watch.sh doctor <watch-id>, and re-register the watch once the read path is fixed." >&2
+    echo "A merge is not safe until its watch says so. A measurement gap is closed by reading it with bin/fm-change-watch.sh verdict <watch-id>, diagnosing the read path with bin/fm-change-watch.sh doctor <watch-id>, and re-registering the watch once the read path is fixed. A recorded regression is closed by filing its follow-up work item with bin/fm-change-watch.sh followup <watch-id> <work-item>." >&2
     exit 1
   fi
 fi

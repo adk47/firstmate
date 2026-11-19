@@ -3972,6 +3972,42 @@ test_change_watch_gap_survives_verdict_deletion() {
   pass "deleting the verdict file does not clear a measurement gap"
 }
 
+# A recorded regression is a measurement, but it must not permanently block
+# cleanup: teardown passes once the follow-up work item is recorded, and the
+# refusal names the command that records it.
+test_change_watch_regressed_requires_recorded_followup() {
+  local case_dir rc
+  case_dir=$(make_case cw-regressed)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  seed_change_watch "$case_dir" regressed 'regressed at +30m on restarts'
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "cw-regressed: teardown should refuse a regressed watch with no follow-up"
+  grep -q 'REFUSED' "$case_dir/stderr" || fail "cw-regressed: no REFUSED line in stderr"
+  grep -q 'has not cleared its change-watch measurement gate' "$case_dir/stderr" \
+    || fail "cw-regressed: the refusal described a regression as no measurement"
+  grep -q 'fm-change-watch.sh followup task-x1-7' "$case_dir/stderr" \
+    || fail "cw-regressed: the refusal did not name the follow-up command"
+
+  run_change_watch "$case_dir" followup task-x1-7 'repo#7' \
+    > "$case_dir/followup.out" 2>&1 \
+    || fail "cw-regressed: recording the follow-up failed"
+  grep -q '^work_item=repo#7$' "$case_dir/state/change-watch/task-x1-7/followup" \
+    || fail "cw-regressed: the follow-up record did not name the work item"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "cw-regressed: teardown should proceed once the follow-up is recorded"
+  pass "a regressed change watch refuses teardown until its follow-up work item is recorded"
+}
+
 # A watch that is still running keeps sampling from state/change-watch/, which is
 # not a task record and survives teardown, so it must not block the task.
 test_running_change_watch_does_not_block_teardown() {
@@ -5361,6 +5397,7 @@ test_migrated_orca_unpushed_worktree_refuses
 test_change_watch_terminal_gap_refuses_teardown
 test_change_watch_interrupted_refuses_until_reregistered
 test_change_watch_gap_survives_verdict_deletion
+test_change_watch_regressed_requires_recorded_followup
 test_running_change_watch_does_not_block_teardown
 test_proven_change_watch_allows_teardown
 test_missing_return_tool_refuses_before_killing_the_agent

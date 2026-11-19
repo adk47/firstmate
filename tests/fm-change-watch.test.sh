@@ -11,8 +11,8 @@
 # that never read a target ends unmeasurable-with-reason, queues a check wake,
 # and blocks the done claim instead of completing quietly; a row missing a
 # reading is never proven; the audit fails on an unmeasurable row and on a
-# completed-unmeasured status line; an interrupted drive is never clean and can
-# be re-armed; a re-registered completed watch re-measures from scratch and a
+# completed-unmeasured status line; an interrupted drive is judged by the readings
+# it took and can be re-armed; a re-registered completed watch re-measures from scratch and a
 # deleted verdict cannot hide its durable row; the pool metric is scoped to the
 # Deployment's own pool; the pool
 # console is read as ubuntu through the admin unix socket with stdin closed and
@@ -573,7 +573,7 @@ run_cw "$HOME_Q" 1790000900 verdict q1-3317 | grep -q "clean so far" \
   || fail "an unresolvable pool was scored from a series it does not own"
 pass "an unresolvable pool leaves the pool metric unmeasured"
 
-# --- an interrupted drive is never clean and can be re-armed ------------------
+# --- an interrupted drive is judged by its readings and can be re-armed -------
 
 HOME_I=$(new_world i)
 seed_pr "$HOME_I" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
@@ -1208,11 +1208,12 @@ awk -F'\t' '$2 == 900 && $7 == 1' "$SAMPLES_G" | grep -q "restarts@muso-prod/cor
   || fail "the landed release was not scored: $(awk -F'\t' '$2 == 900' "$SAMPLES_G")"
 pass "the new image lands and the same watch scores the release"
 
-# --- awaiting the deploy is not a measurement gap ------------------------------
+# --- awaiting the deploy is not a measurement ----------------------------------
 # A reading whose every sample was taken before the rollout landed has nothing
-# to read yet. Counting that as a failed read would end a healthy merge
-# unmeasurable and block its own done claim, which is the opposite of what the
-# watch is for.
+# to read yet, so it is not a measurement. A later reading that does measure the
+# release still proves the merge; a watch whose whole window elapsed that way
+# ends unmeasurable and says so, because a verdict that cannot tell "we looked
+# and it was fine" from "we never looked" is a false clean.
 
 HOME_AW=$(cluster_world aw)
 seed_app_pr "$HOME_AW"
@@ -1243,9 +1244,62 @@ aw_cw 1790021600 drive "aw1$CORE_ID_SUFFIX" >/dev/null || fail "drive failed"
 ROW_AW="$HOME_AW/state/change-watch/rows/aw1$CORE_ID_SUFFIX.json"
 grep -q '"terminal_state": "proven"' "$ROW_AW" \
   || fail "an awaiting-deploy reading made the row unproven: $(cat "$ROW_AW")"
-grep -q '"900": {"at": [0-9]*, "scored": 0, "unmeasured": 0, "awaiting": [1-9]' "$ROW_AW" \
-  || fail "the +15m reading did not record its awaiting samples: $(cat "$ROW_AW")"
-pass "a reading that only awaited its deploy is measured, not a gap"
+grep -q '"900": {"at": [0-9]*, "scored": 0, "unmeasured": 0, "awaiting": [1-9]*, "regressed": 0, "measured": false' "$ROW_AW" \
+  || fail "the +15m reading did not record its awaiting samples as unmeasured: $(cat "$ROW_AW")"
+pass "a reading that only awaited its deploy is not a measurement, and a later one still proves"
+
+# A watch whose whole window elapsed while its rollout was still landing read
+# nothing at all. That is not a measurement, so it ends unmeasurable and names
+# the case: reporting it clean would state that a merge was verified when no
+# sample ever read the release.
+HOME_AW2=$(cluster_world aw2)
+seed_app_pr "$HOME_AW2"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_AW2/workloads"
+printf '[]\n' > "$HOME_AW2/sentry/issues-core-backend.json"
+aw2_cw() {  # <now> <args...>
+  local now=$1
+  shift
+  CW_CLUSTER_DIR='' PATH="$HOME_AW2/bin:$PATH" FM_CW_SHIM_LOG="$HOME_AW2/shim.log" \
+    FM_CW_SHIM_WORKLOADS="$HOME_AW2/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+    FM_CW_CONFIG_DIR="$HOME_AW2/config" FM_CW_SENTRY_DIR="$HOME_AW2/sentry" \
+    run_cw "$HOME_AW2" "$now" "$@"
+}
+aw2_cw 1790000000 register aw2 "$CORE_PR" >/dev/null || fail "register failed"
+printf '900\t1790000900\n3600\t1790003600\n21600\t1790021600\n' \
+  > "$HOME_AW2/state/change-watch/aw2$CORE_ID_SUFFIX/schedule"
+aw2_cw 1790021600 drive "aw2$CORE_ID_SUFFIX" >/dev/null || fail "drive failed"
+out=$(aw2_cw 1790021600 verdict "aw2$CORE_ID_SUFFIX")
+printf '%s\n' "$out" | grep -q 'the +6h reading awaited a rollout' \
+  || fail "a watch whose whole window awaited its rollout did not name the case: $out"
+printf '%s\n' "$out" | grep -q 'clean' \
+  && fail "a watch that never measured anything read clean: $out"
+ROW_AW2="$HOME_AW2/state/change-watch/rows/aw2$CORE_ID_SUFFIX.json"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_AW2" \
+  || fail "an all-awaiting watch was not recorded unmeasurable: $(cat "$ROW_AW2")"
+grep -q '"21600": {"at": [0-9]*, "scored": 0, "unmeasured": 0, "awaiting": [1-9]*, "regressed": 0, "measured": false' "$ROW_AW2" \
+  || fail "the +6h all-awaiting reading was recorded as measured: $(cat "$ROW_AW2")"
+pass "a watch whose whole window awaited its rollout is unmeasured, never clean"
+
+# The pre-fix rule counted an all-awaiting +6h reading as measured, so a watch
+# that read nothing could still hold a `proven` row. The repair must re-derive
+# that false clean from the readings it kept, stamp the reconstruction, and leave
+# the completion epoch the audit window is measured from untouched.
+completed_aw2=$(sed -n 's/.*"completed_epoch": \([^,]*\),.*/\1/p' "$ROW_AW2")
+sed -i.bak 's/"terminal_state": "unmeasurable-with-reason"/"terminal_state": "proven"/' "$ROW_AW2"
+rm -f "$ROW_AW2.bak"
+printf 'clean\n' > "$HOME_AW2/state/change-watch/aw2$CORE_ID_SUFFIX/verdict"
+out=$(aw2_cw 1790030000 rederive --apply) \
+  || fail "the re-derive over a false-proven all-awaiting row failed: $out"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_AW2" \
+  || fail "the re-derive left an all-awaiting +6h reading proven: $(cat "$ROW_AW2")"
+grep -q '^unmeasurable-with-reason: the +6h reading awaited a rollout' \
+  "$HOME_AW2/state/change-watch/aw2$CORE_ID_SUFFIX/verdict" \
+  || fail "the re-derive left a clean verdict beside an unmeasurable row: $(cat "$HOME_AW2/state/change-watch/aw2$CORE_ID_SUFFIX/verdict")"
+grep -q '"derived_epoch": 1790030000' "$ROW_AW2" \
+  || fail "the re-derived false clean was not stamped as derived: $(cat "$ROW_AW2")"
+[ "$(sed -n 's/.*"completed_epoch": \([^,]*\),.*/\1/p' "$ROW_AW2")" = "$completed_aw2" ] \
+  || fail "the re-derive of a false-proven row moved its completion epoch: $(cat "$ROW_AW2")"
+pass "the re-derive corrects a proven row whose +6h reading only awaited its rollout"
 
 # One pod read serves the landing gate and every pod-backed metric of a sample.
 # The armed drive takes all 15 samples in one process, so a read repeated per
@@ -1906,6 +1960,22 @@ case "$steer" in
 esac
 pass "the lane is steered with the beta failure and that no production watch was armed"
 
+# A beta regression is not re-armed: it has no production targets to re-measure,
+# so re-registering it would arm a watch that can only ever end unmeasurable.
+ROW_B3="$HOME_B3/state/change-watch/rows/b3-78.json"
+out=$(run_beta "$HOME_B3" 1790000000 register b3 \
+  'https://github.com/Muso-AI/web-credits-next/pull/78') || fail "re-registering a beta-regressed watch failed: $out"
+case "$out" in
+  *"ended on a beta regression"*"not re-armed"*) ;;
+  *) fail "re-registering a beta regression did not state that it stays ended: $out" ;;
+esac
+grep -q '"terminal_state": "regressed"' "$ROW_B3" \
+  || fail "re-registering a beta-regressed watch rewrote its terminal row: $(cat "$ROW_B3")"
+grep -q 'beta regressed on http_5xx_per_min' "$ROW_B3" \
+  || fail "re-registering a beta-regressed watch lost the beta reason: $(cat "$ROW_B3")"
+[ -s "$HOME_B3/arm.log" ] && fail "re-registering a beta-regressed watch armed a production watch: $(cat "$HOME_B3/arm.log")"
+pass "a beta-regressed watch is not re-armed by re-registering it"
+
 # A rollout that never lands is stated, never read as a pass, and the
 # production watch still arms.
 HOME_B5=$(seed_beta_world b5)
@@ -2454,6 +2524,7 @@ case "$out" in
 esac
 pass "a repository watched through its deploy workflow measures the change"
 hydra_runs "$HOME_DS" "[$(hydra_run 2026-09-21T15:00:00Z completed failure "$OLDER"),$(hydra_run 2026-09-21T15:30:00Z completed success "$MERGED")]"
+printf '%s\n' "$OLDER" > "$HOME_DS/gh/contains-$OLDER"
 run_hydra_cw "$HOME_DS" 1790000900 sample ds1-1957 900 >/dev/null || fail "sample failed"
 [ "$(deploy_run_value "$HOME_DS" ds1-1957 900)" = 1 ] \
   || fail "a deploy run carrying the merged commit was not measured: $(cat "$HOME_DS/state/change-watch/ds1-1957/samples.log" 2>/dev/null)"
@@ -2472,13 +2543,36 @@ run_hydra_cw "$HOME_DS" 1790003600 sample ds1-1957 3600 >/dev/null || fail "samp
 
 # A run of an unrelated tip with no proof it carries the merge is awaited, never
 # read as a failure.
-rm -f "$HOME_DS/gh/contains-$OLDER"
+printf '%s\n' "$OLDER" > "$HOME_DS/gh/contains-$OLDER"
 run_hydra_cw "$HOME_DS" 1790007200 sample ds1-1957 7200 >/dev/null || fail "sample failed"
 [ -z "$(deploy_run_value "$HOME_DS" ds1-1957 7200)" ] \
   || fail "an unrelated run was read as this release's deploy"
 grep -q 'carrying aaaa1111 yet' "$HOME_DS/state/change-watch/ds1-1957/read-failures" \
   || fail "an unrelated run was not stated as awaiting a run that carries the merge: $(cat "$HOME_DS/state/change-watch/ds1-1957/read-failures" 2>/dev/null)"
+
+# A carrier read that cannot be read is stated as itself, never mistaken for a run
+# whose tree provably lacks the merge.
+rm -f "$HOME_DS/gh/contains-$OLDER"
+run_hydra_cw "$HOME_DS" 1790010800 sample ds1-1957 10800 >/dev/null || fail "sample failed"
+[ -z "$(deploy_run_value "$HOME_DS" ds1-1957 10800)" ] \
+  || fail "an unreadable carrier read was scored as a deploy"
+grep -q 'whether the .* run carries aaaa1111 could not be read' "$HOME_DS/state/change-watch/ds1-1957/read-failures" \
+  || fail "an unreadable carrier read was not stated as a failed read: $(cat "$HOME_DS/state/change-watch/ds1-1957/read-failures" 2>/dev/null)"
 pass "a deploy run is the one whose tree carries the merged commit"
+
+# An older run whose containment cannot be read must not hide a later run that
+# provably carries the merge: the later, provable landing is the measurement.
+HOME_UC=$(hydra_world uc "$MERGED")
+out=$(run_hydra_cw "$HOME_UC" 1790000000 register uc1 'https://github.com/Muso-AI/hydra/pull/1965') \
+  || fail "hydra register failed: $out"
+hydra_runs "$HOME_UC" "[$(hydra_run 2026-09-21T15:00:00Z completed success "$OLDER"),$(hydra_run 2026-09-21T15:30:00Z completed success "$MERGED")]"
+rm -f "$HOME_UC/gh/contains-$OLDER"
+run_hydra_cw "$HOME_UC" 1790000900 sample uc1-1965 900 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_UC" uc1-1965 900)" = 1 ] \
+  || fail "an unreadable older run hid a later run that provably carries the merge: $(cat "$HOME_UC/state/change-watch/uc1-1965/samples.log" 2>/dev/null)"
+! grep -q 'could not be read' "$HOME_UC/state/change-watch/uc1-1965/read-failures" 2>/dev/null \
+  || fail "a proven later carrier was still reported as an unreadable deploy: $(cat "$HOME_UC/state/change-watch/uc1-1965/read-failures")"
+pass "an unreadable older run does not hide a later provable carrier"
 
 # However many unrelated runs were created before the one whose tree carries the
 # merge, the carrier is still found and scored: a bounded scan of the oldest few
@@ -2491,6 +2585,7 @@ for n in 02 03 04 05 06; do
   CC_RUNS="$CC_RUNS,$(hydra_run "2026-09-21T15:0${n#0}:00Z" completed success "oldtip$n")"
 done
 hydra_runs "$HOME_CC" "[$CC_RUNS,$(hydra_run 2026-09-21T15:30:00Z completed failure "$OLDER")]"
+for n in 01 02 03 04 05 06; do : > "$HOME_CC/gh/contains-oldtip$n"; done
 printf '%s\n' "$MERGED" > "$HOME_CC/gh/contains-$OLDER"
 run_hydra_cw "$HOME_CC" 1790000900 sample cc1-1980 900 >/dev/null || fail "sample failed"
 [ "$(deploy_run_value "$HOME_CC" cc1-1980 900)" = 0 ] \
@@ -2504,7 +2599,7 @@ hydra_runs "$HOME_CC" "[$CC_RUNS,$(hydra_run 2026-09-21T15:30:00Z completed succ
 run_hydra_cw "$HOME_CC" 1790003600 sample cc1-1980 3600 >/dev/null || fail "sample failed"
 [ "$(deploy_run_value "$HOME_CC" cc1-1980 3600)" = 1 ] \
   || fail "a successful carrier created after more than five unrelated runs was not proven: $(cat "$HOME_CC/state/change-watch/cc1-1980/samples.log" 2>/dev/null)"
-rm -f "$HOME_CC/gh/contains-$OLDER"
+printf '%s\n' "$OLDER" > "$HOME_CC/gh/contains-$OLDER"
 run_hydra_cw "$HOME_CC" 1790007200 sample cc1-1980 7200 >/dev/null || fail "sample failed"
 [ -z "$(deploy_run_value "$HOME_CC" cc1-1980 7200)" ] \
   || fail "a run whose tree carries nothing of the merge was scored"
@@ -2527,8 +2622,8 @@ grep -q 'awaiting the deploy: the .github/workflows/deploy.yml run is in_progres
 hydra_runs "$HOME_IF" "[$(hydra_run 2026-09-21T14:30:00Z completed success "$MERGED")]"
 run_hydra_cw "$HOME_IF" 1790044000 drive if1-1970 >/dev/null || fail "resumed drive failed"
 ROW_IF="$HOME_IF/state/change-watch/rows/if1-1970.json"
-grep -q '"900": {[^}]*"measured": true' "$ROW_IF" \
-  || fail "a +15m reading that was only awaiting the deploy was not measured: $(cat "$ROW_IF" 2>/dev/null)"
+grep -q '"900": {[^}]*"measured": false' "$ROW_IF" \
+  || fail "a +15m reading that only awaited the deploy was recorded as a measurement: $(cat "$ROW_IF" 2>/dev/null)"
 grep -q '"terminal_state": "proven"' "$ROW_IF" \
   || fail "a watch whose scheduled deploy landed after +15m was not proven: $(cat "$ROW_IF" 2>/dev/null)"
 pass "a deploy still in flight at +15m waits instead of ending the watch unmeasurable"
@@ -2842,3 +2937,443 @@ grep -q '"0": {"at": 1790031100, "exit": 0}' "$row3" \
   || fail "a repeated offset did not keep its last reading: $(cat "$row3")"
 grep -q '"last_exit": 0' "$row3" || fail "a repeated offset left a stale last exit: $(cat "$row3")"
 pass "a claim row registers with no PR, binds its probe, and reads proven or absent from its probe alone"
+
+# --- (i) a later reading rescues an earlier reading that read nothing --------
+
+# The rows this bug was found on (credit-apply-path-fix-a1-1957 and its
+# siblings): the +15m read failed outright - no access-log status line, no
+# usable series - and the +1h and +6h readings then measured the release. One
+# early read that failed is not a terminal verdict about the merge.
+HOME_J=$(new_world j)
+seed_pr "$HOME_J" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_J" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_J" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J" 1790000000 register j1 "$PR_URL" >/dev/null || fail "register failed"
+rm -f "$HOME_J/cluster/restarts.muso-prod_feed-service.sample"
+run_cw "$HOME_J" 1790000900 sample j1-3317 900 >/dev/null || fail "the +15m sample failed"
+seed_series "$HOME_J" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J" 1790044000 drive j1-3317 >/dev/null || fail "the drive after the failed +15m read failed"
+ROW_J="$HOME_J/state/change-watch/rows/j1-3317.json"
+[ "$(run_cw "$HOME_J" 1790044000 verdict j1-3317)" = "change-watch clean" ] \
+  || fail "a watch whose +1h and +6h readings measured ended $(run_cw "$HOME_J" 1790044000 verdict j1-3317)"
+grep -q '"terminal_state": "proven"' "$ROW_J" \
+  || fail "a watch with one failed early reading and two measured later ones was not proven: $(cat "$ROW_J")"
+grep -qF 'the +15m reading measured nothing' "$ROW_J" \
+  || fail "the proof does not disclose the +15m reading that measured nothing: $(cat "$ROW_J")"
+run_cw "$HOME_J" 1790044000 gate j1 >/dev/null \
+  || fail "the done-claim gate refused a proven watch whose +15m read failed"
+run_cw "$HOME_J" 1790044000 gate j1 --terminal-gap >/dev/null \
+  || fail "teardown was refused for a watch whose later readings measured the release"
+pass "a failed early reading is superseded by the later readings that measured"
+
+# The other direction, on the same machinery: when only the +15m reading
+# measured and every later reading failed, the release is not proven.
+HOME_J2=$(new_world j2)
+seed_pr "$HOME_J2" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J2" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_J2" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_J2" restarts muso-prod_feed-service sample 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J2" 1790000000 register j2 "$PR_URL" >/dev/null || fail "register failed"
+rm -f "$HOME_J2"/cluster/*
+run_cw "$HOME_J2" 1790044000 drive j2-3317 >/dev/null || fail "the drive with unreadable later readings failed"
+ROW_J2="$HOME_J2/state/change-watch/rows/j2-3317.json"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_J2" \
+  || fail "a watch whose +1h and +6h readings both failed was proven: $(cat "$ROW_J2")"
+run_cw "$HOME_J2" 1790044000 gate j2 >/dev/null \
+  && fail "the done-claim gate passed a watch whose long-horizon readings all failed"
+pass "a watch whose later readings all failed is still unmeasurable"
+
+# --- (j) a coverage gap is not the same thing as a failed read ----------------
+
+# search-service answers no pool, so its pool metric never scores. The release
+# itself was measured on every target, so the row is proven; the gap stays named
+# in the row rather than silently dropped or promoted to a failure.
+HOME_J3=$(new_world j3)
+seed_pr "$HOME_J3" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J3" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_J3" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_J3" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J3" 1790000000 register j3 "$PR_URL" >/dev/null || fail "register failed"
+run_cw "$HOME_J3" 1790044000 drive j3-3317 >/dev/null || fail "drive failed"
+ROW_J3="$HOME_J3/state/change-watch/rows/j3-3317.json"
+grep -q '"terminal_state": "proven"' "$ROW_J3" \
+  || fail "a watch whose every Deployment target was measured was not proven: $(cat "$ROW_J3")"
+grep -q 'pgbouncer_cl_waiting@muso-prod/feed-service' "$ROW_J3" \
+  || fail "the proven row stopped naming the metric it never measured: $(cat "$ROW_J3")"
+pass "an unmeasured metric key is named in a proven row, not promoted to a failure"
+
+# --- the re-derive one-shot re-reads the readings a row already holds ---------
+
+# A home with no durable rows is the normal state before a first merge, and the
+# one-shot must report that rather than crash on its empty watch-id list.
+HOME_EMPTY=$(new_world rederive-empty)
+out=$(run_cw "$HOME_EMPTY" 1790050000 rederive --apply) \
+  || fail "the re-derive over no rows failed: $out"
+printf '%s\n' "$out" | grep -q '0 row(s) rewritten of 0 row(s) read' \
+  || fail "the re-derive over no rows did not report an empty run: $out"
+pass "the re-derive over no rows reports an empty run"
+
+# The row as the pre-fix code wrote it for the same readings: a +15m read that
+# failed before the rollout landed was recorded as terminal. The one-shot must
+# re-derive that verdict from the readings the watch still holds, without
+# inventing a measurement, and must not move the completion time the audit
+# window is measured from.
+sed -i.bak 's/"terminal_state": "proven"/"terminal_state": "unmeasurable-with-reason"/; s/"reason": "the +6h reading/"reason": "nothing measured at +15m; the +6h reading/' "$ROW_J"
+rm -f "$ROW_J.bak"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_J" \
+  || fail "the pre-fix row fixture was not written: $(cat "$ROW_J")"
+printf 'unmeasurable-with-reason: nothing measured at +15m\n' > "$HOME_J/state/change-watch/j1-3317/verdict"
+[ "$(run_cw "$HOME_J" 1790050000 verdict j1-3317)" = "change-watch unmeasurable-with-reason: nothing measured at +15m" ] \
+  || fail "the pre-fix verdict fixture was not written: $(run_cw "$HOME_J" 1790050000 verdict j1-3317)"
+completed_before=$(sed -n 's/.*"completed_epoch": \([^,]*\),.*/\1/p' "$ROW_J")
+cp "$ROW_J" "$TMP_ROOT/row-before-rederive.json"
+out=$(run_cw "$HOME_J" 1790050000 rederive) || fail "the re-derive dry run failed: $out"
+printf '%s\n' "$out" | grep -q 'dry run' || fail "the re-derive did not say it was a dry run: $out"
+printf '%s\n' "$out" | grep -q 'j1-3317' || fail "the re-derive did not name the row it would change: $out"
+printf '%s\n' "$out" | grep -q '1 row(s) would change' \
+  || fail "the re-derive did not count the rows it would change: $out"
+cmp -s "$ROW_J" "$TMP_ROOT/row-before-rederive.json" \
+  || fail "the dry run rewrote a row before --apply"
+pass "the re-derive dry run reports its changes and rewrites nothing"
+
+out=$(run_cw "$HOME_J" 1790050000 rederive --apply) || fail "the re-derive apply failed: $out"
+printf '%s\n' "$out" | grep -q '1 row(s) rewritten' \
+  || fail "the re-derive did not report the rewrite: $out"
+grep -q '"terminal_state": "proven"' "$ROW_J" \
+  || fail "the re-derive did not prove a row whose later readings measured: $(cat "$ROW_J")"
+[ "$(sed -n 's/.*"completed_epoch": \([^,]*\),.*/\1/p' "$ROW_J")" = "$completed_before" ] \
+  || fail "the re-derive moved the completion epoch the audit window is measured from"
+grep -q '"derived_epoch": 1790050000' "$ROW_J" \
+  || fail "the re-derived row does not record that it was derived: $(cat "$ROW_J")"
+[ "$(run_cw "$HOME_J" 1790050000 verdict j1-3317)" = "change-watch clean" ] \
+  || fail "the re-derive left the old failure in the verdict file: $(run_cw "$HOME_J" 1790050000 verdict j1-3317)"
+out=$(run_cw "$HOME_J" 1790050000 rederive) || fail "the second dry run failed: $out"
+printf '%s\n' "$out" | grep -q '0 row(s) would change' \
+  || fail "the re-derive keeps changing an already re-derived row: $out"
+run_cw "$HOME_J" 1790050000 audit 7 >/dev/null \
+  || fail "the audit failed after the re-derive proved the row"
+pass "the re-derive rewrites a stale row from its own readings and is idempotent"
+
+# An interrupted drive that had already taken every reading the verdict needs is
+# proven, not unmeasurable: the drive stopping is a fact about the schedule, and
+# the +15m, +1h and +6h readings it did take are still the evidence.
+HOME_J4=$(new_world j4)
+seed_pr "$HOME_J4" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J4" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_J4" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_J4" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J4" 1790000000 register j4 "$PR_URL" >/dev/null || fail "register failed"
+for off in 300 900 1800 3600 7200 10800 14400 18000 21600; do
+  run_cw "$HOME_J4" $((1790000000 + off)) sample j4-3317 "$off" >/dev/null \
+    || fail "the +${off}s sample failed"
+done
+printf '%s\n' 999999 > "$HOME_J4/state/change-watch/j4-3317/drive.pid"
+printf '%s\n' 1790021600 > "$HOME_J4/state/change-watch/j4-3317/drive.alive"
+[ "$(run_cw "$HOME_J4" 1790040000 verdict j4-3317)" = "change-watch clean" ] \
+  || fail "a drive that stopped after its +6h reading was not proven: $(run_cw "$HOME_J4" 1790040000 verdict j4-3317)"
+ROW_J4="$HOME_J4/state/change-watch/rows/j4-3317.json"
+grep -q '"terminal_state": "proven"' "$ROW_J4" \
+  || fail "an interrupted drive with every reading measured was not proven: $(cat "$ROW_J4")"
+grep -qF 'interrupted at +360m' "$ROW_J4" \
+  || fail "the proven row stopped naming the interruption that stopped the schedule: $(cat "$ROW_J4")"
+run_cw "$HOME_J4" 1790040000 gate j4 --terminal-gap >/dev/null \
+  || fail "teardown was refused for an interrupted drive whose readings all measured"
+[ -e "$HOME_J4/state/.wake-queue" ] && [ -s "$HOME_J4/state/.wake-queue" ] \
+  && fail "an interruption that left every reading measured still queued a wake"
+pass "an interrupted drive that took every reading is proven and queues nothing"
+
+# A regressed row is proof that the change was bad, so the re-derive never
+# re-reads it away: it repairs a row the old rule called unmeasurable, or a
+# proven row its all-awaiting +6h reading no longer supports.
+sed -i.bak 's/"terminal_state": "proven"/"terminal_state": "regressed"/; s/"reason": "[^"]*"/"reason": "regressed at +30m on restarts"/' "$ROW_J4"
+rm -f "$ROW_J4.bak"
+cp "$ROW_J4" "$TMP_ROOT/row-before-regressed-rederive.json"
+out=$(run_cw "$HOME_J4" 1790050000 rederive --apply) \
+  || fail "the re-derive over a regressed row failed: $out"
+printf '%s\n' "$out" | grep -q '0 row(s) rewritten' \
+  || fail "the re-derive rewrote a regressed row: $out"
+cmp -s "$ROW_J4" "$TMP_ROOT/row-before-regressed-rederive.json" \
+  || fail "the re-derive changed a regressed row: $(cat "$ROW_J4")"
+pass "the re-derive never rewrites a regressed row"
+run_cw "$HOME_J4" 1790050000 gate j4 >/dev/null 2>&1 \
+  && fail "the done-claim gate passed a row whose terminal_state is regressed"
+run_cw "$HOME_J4" 1790050000 gate j4 --terminal-gap >/dev/null 2>&1 \
+  && fail "teardown passed a regressed row with no follow-up work item recorded"
+out=$(run_cw "$HOME_J4" 1790050000 gate j4 --terminal-gap 2>&1 || true)
+printf '%s\n' "$out" | grep -q 'gate FAIL j4-3317: regressed at +' \
+  || fail "the gate did not name the row-based regression: $out"
+printf '%s\n' "$out" | grep -q 'fm-change-watch.sh followup j4-3317' \
+  || fail "the teardown refusal did not name the follow-up command: $out"
+if run_cw "$HOME_J4" 1790050000 followup j4-3317 'bad item' >/dev/null 2>&1; then
+  fail "followup accepted a malformed work-item reference"
+fi
+run_cw "$HOME_J4" 1790050000 followup j4-3317 'repo#42' >/dev/null \
+  || fail "recorded follow-up for a regressed row was refused"
+grep -q '^work_item=repo#42$' "$HOME_J4/state/change-watch/j4-3317/followup" \
+  || fail "the follow-up record did not name the work item"
+run_cw "$HOME_J4" 1790050000 gate j4 --terminal-gap >/dev/null \
+  || fail "teardown still refused a regressed row after its follow-up was recorded"
+run_cw "$HOME_J4" 1790050000 gate j4 >/dev/null 2>&1 \
+  && fail "the done-claim gate passed a regressed row after its follow-up was recorded"
+pass "a regressed row fails the done claim and clears teardown only once its follow-up is recorded"
+
+# A row the old rule left unmeasurable can still hold a sample that recorded a
+# regression. Re-deriving it must write the regression verdict the readings earn,
+# not leave the stale measurement gap in place for `verdict` to report.
+sed -i.bak 's/"terminal_state": "regressed"/"terminal_state": "unmeasurable-with-reason"/; s/"reason": "[^"]*"/"reason": "nothing measured at +15m"/' "$ROW_J4"
+rm -f "$ROW_J4.bak"
+awk -F'\t' 'BEGIN { OFS = "\t" } !done && $1 ~ /^[0-9]+$/ { $6 = 1; done = 1 } { print }' \
+  "$HOME_J4/state/change-watch/j4-3317/samples.log" > "$TMP_ROOT/j4-regressed-samples.log"
+mv "$TMP_ROOT/j4-regressed-samples.log" "$HOME_J4/state/change-watch/j4-3317/samples.log"
+printf 'unmeasurable-with-reason: nothing measured at +15m\n' > "$HOME_J4/state/change-watch/j4-3317/verdict"
+out=$(run_cw "$HOME_J4" 1790050000 rederive --apply) \
+  || fail "the re-derive over a row holding a regression failed: $out"
+grep -q '"terminal_state": "regressed"' "$ROW_J4" \
+  || fail "the re-derive lost the regression its readings recorded: $(cat "$ROW_J4")"
+verdict=$(run_cw "$HOME_J4" 1790050000 verdict j4-3317)
+case "$verdict" in
+  "change-watch regressed at +"*) ;;
+  *) fail "the re-derive did not write the regression verdict: $verdict" ;;
+esac
+case "$verdict" in
+  *unmeasurable*) fail "the re-derive left a stale measurement gap in the verdict file: $verdict" ;;
+esac
+pass "the re-derive writes the regression verdict its readings recorded"
+
+# Re-registering a regressed watch re-arms it so a fix can be measured, and the
+# verdict it replaced is kept on disk rather than dropped. The stale follow-up
+# marker must go with it, or the next regression would look already recorded.
+[ -s "$HOME_J4/state/change-watch/j4-3317/followup" ] \
+  || fail "the follow-up recorded before the re-arm was lost too early"
+run_cw "$HOME_J4" 1790060000 register j4 "$PR_URL" >/dev/null \
+  || fail "re-registering a regressed watch failed"
+[ ! -e "$HOME_J4/state/change-watch/j4-3317/followup" ] \
+  || fail "the follow-up recorded for the replaced regression survived the re-arm"
+grep -q '"terminal_state": "open"' "$ROW_J4" \
+  || fail "re-registering a regressed watch did not reopen its row: $(cat "$ROW_J4")"
+[ ! -e "$HOME_J4/state/change-watch/j4-3317/verdict" ] \
+  || fail "re-registering a regressed watch kept the old verdict live"
+grep -q 'regressed at +' "$HOME_J4/state/change-watch/j4-3317/rearm-history" \
+  || fail "the replaced regression verdict was not kept in rearm-history"
+pass "re-registering a regressed watch re-arms it and keeps the replaced verdict"
+
+# The cleared follow-up must not let a later regression through teardown.
+sed -i.bak 's/"terminal_state": "open"/"terminal_state": "regressed"/; s/"reason": "[^"]*"/"reason": "regressed at +30m on restarts"/' "$ROW_J4"
+rm -f "$ROW_J4.bak"
+run_cw "$HOME_J4" 1790060100 gate j4 --terminal-gap >/dev/null 2>&1 \
+  && fail "a stale pre-re-arm follow-up cleared teardown for a later regression"
+run_cw "$HOME_J4" 1790060100 gate j4 >/dev/null 2>&1 \
+  && fail "the done-claim gate passed the later regression"
+pass "a follow-up recorded before a re-arm cannot clear a later regression"
+
+# --- a watch with no durable row is judged by the readings it still holds -----
+
+# Watches registered before the row was written at registration kept only their
+# samples and the verdict literal they wrote themselves. That literal is not a
+# state the gate can read, so a row-less watch whose readings prove its merge
+# failed every teardown forever. The readings are the evidence, so they decide.
+HOME_J7=$(new_world j7)
+seed_pr "$HOME_J7" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J7" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_J7" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_J7" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J7" 1790000000 register j7 "$PR_URL" >/dev/null || fail "register failed"
+run_cw "$HOME_J7" 1790044000 drive j7-3317 >/dev/null || fail "the row-less fixture drive failed"
+WATCH_J7="$HOME_J7/state/change-watch/j7-3317"
+ROW_J7="$HOME_J7/state/change-watch/rows/j7-3317.json"
+if [ ! -f "$ROW_J7" ]; then fail "the row-less fixture wrote no row to remove"; fi
+rm -f "$ROW_J7"
+printf 'completed unmeasured\n' > "$WATCH_J7/verdict"
+if [ -f "$ROW_J7" ]; then fail "the row-less fixture kept its row"; fi
+[ "$(run_cw "$HOME_J7" 1790044000 verdict j7-3317)" = "change-watch clean" ] \
+  || fail "a row-less watch was judged by its stale literal, not its readings: $(run_cw "$HOME_J7" 1790044000 verdict j7-3317)"
+run_cw "$HOME_J7" 1790044000 gate j7 --terminal-gap >/dev/null \
+  || fail "a row-less watch whose readings prove the merge failed the gate"
+pass "a row-less watch is judged by its readings, not its stale verdict literal"
+
+out=$(run_cw "$HOME_J7" 1790044000 rederive) || fail "the row-less dry run failed: $out"
+printf '%s\n' "$out" | grep -q 'j7-3317: no row -> proven' \
+  || fail "the re-derive did not offer to write the missing row: $out"
+if [ -f "$ROW_J7" ]; then fail "the dry run wrote the missing row"; fi
+printf '%s\n' "$out" | grep -q 'no-row watches: 1 proven, 0 regressed, 0 unmeasurable with reason, 1 total' \
+  || fail "the dry run did not break down the row-less watches by verdict: $out"
+out=$(run_cw "$HOME_J7" 1790044000 rederive --apply) || fail "the row-less apply failed: $out"
+printf '%s\n' "$out" | grep -q '1 row(s) rewritten' \
+  || fail "the re-derive did not write the missing row: $out"
+grep -q '"terminal_state": "proven"' "$ROW_J7" \
+  || fail "the re-derive wrote a row its readings do not support: $(cat "$ROW_J7")"
+# Provenance, not a waiver: the row says it was reconstructed, and when.
+grep -q '"derived_epoch": 1790044000' "$ROW_J7" \
+  || fail "the derived row does not record that it was derived: $(cat "$ROW_J7")"
+cp "$ROW_J7" "$TMP_ROOT/row-derived-once.json"
+out=$(run_cw "$HOME_J7" 1790059000 rederive --apply) || fail "the second row-less apply failed: $out"
+printf '%s\n' "$out" | grep -q '0 row(s) rewritten' \
+  || fail "the row-less re-derive is not idempotent: $out"
+cmp -s "$ROW_J7" "$TMP_ROOT/row-derived-once.json" \
+  || fail "a second derivation restated the row it had already written: $(cat "$ROW_J7")"
+pass "the re-derive writes the row a row-less watch should have had, once"
+
+# A derived row never displaces a row written live: the live row is the record of
+# a decision the drive reached, and the reconstruction only fills a hole.
+printf '{"version": "fm-change-watch-row-v1", "watch_id": "j7-3317", "task": "j7", "pr_url": "%s", "merge_epoch": null, "registered_epoch": null, "completed_epoch": 1790044000, "readings": {"900": null, "3600": null, "21600": null}, "real_user_check": "", "real_user_reason": "", "unmeasured_metrics": "", "unproven_targets": "", "terminal_state": "regressed", "reason": "a live row the derivation must not touch"}\n' \
+  "$PR_URL" > "$ROW_J7"
+cp "$ROW_J7" "$TMP_ROOT/row-live.json"
+run_cw "$HOME_J7" 1790059000 rederive --apply >/dev/null \
+  || fail "the re-derive over a live row failed"
+cmp -s "$ROW_J7" "$TMP_ROOT/row-live.json" \
+  || fail "a derivation overwrote a row written live: $(cat "$ROW_J7")"
+pass "a derived row never overwrites a row written live"
+
+# The other direction: a row-less watch whose readings prove nothing keeps no
+# row. Writing one would turn a measurement gap into a pass, which is the whole
+# reason the gate exists.
+HOME_J8=$(new_world j8)
+seed_pr "$HOME_J8" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J8" "$MANIFEST" "$FEED_LINE"
+run_cw "$HOME_J8" 1790000000 register j8 "$PR_URL" >/dev/null || fail "register failed"
+WATCH_J8="$HOME_J8/state/change-watch/j8-3317"
+ROW_J8="$HOME_J8/state/change-watch/rows/j8-3317.json"
+rm -f "$ROW_J8"
+: > "$WATCH_J8/samples.log"
+printf 'completed unmeasured\n' > "$WATCH_J8/verdict"
+out=$(run_cw "$HOME_J8" 1790044000 rederive --apply) || fail "the empty-readings apply failed: $out"
+printf '%s\n' "$out" | grep -q 'no-row watches: 0 proven, 0 regressed, 1 unmeasurable with reason, 1 total' \
+  || fail "the breakdown did not count the row-less watch that proved nothing: $out"
+if [ ! -f "$ROW_J8" ]; then fail "the re-derive wrote no row for a row-less watch it counted"; fi
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_J8" \
+  || fail "a row-less watch that measured nothing was not recorded as unmeasurable: $(cat "$ROW_J8")"
+# The honest outcome is still a refusal: recording the reason is not a pass.
+if run_cw "$HOME_J8" 1790044000 gate j8 --terminal-gap >/dev/null 2>&1; then
+  fail "a derived unmeasurable row was accepted by the teardown gate"
+fi
+out=$(run_cw "$HOME_J8" 1790044000 rederive --apply) || fail "the second empty-readings apply failed: $out"
+printf '%s\n' "$out" | grep -q '0 row(s) rewritten' \
+  || fail "the empty-readings derivation is not idempotent: $out"
+pass "a row-less watch whose readings prove nothing is recorded as such and still refused"
+
+# The same gate, on a derived regression. A row-less watch kept a stale
+# "completed unmeasured" literal that no longer describes its readings, and a
+# derived regression must never inherit a pass from it: the evidence is the
+# same whether a row exists or not.
+HOME_RG=$(new_world rg)
+seed_pr "$HOME_RG" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_RG" "$MANIFEST" "$FEED_LINE"
+run_cw "$HOME_RG" 1790000000 register rg "$PR_URL" >/dev/null || fail "register failed"
+WATCH_RG="$HOME_RG/state/change-watch/rg-3317"
+rm -f "$HOME_RG/state/change-watch/rows/rg-3317.json"
+printf '1790000900\t900\trestarts@muso-prod/feed-service\t5\t1\t1\t1\t0\n' \
+  > "$WATCH_RG/samples.log"
+printf 'completed unmeasured\n' > "$WATCH_RG/verdict"
+if out=$(run_cw "$HOME_RG" 1790044000 gate rg --terminal-gap 2>&1); then
+  fail "a row-less watch whose readings recorded a regression passed the teardown gate: $out"
+fi
+printf '%s\n' "$out" | grep -q 'regressed at +15m' \
+  || fail "the gate did not name the derived regression: $out"
+pass "a row-less watch whose readings recorded a regression fails the gate"
+if run_cw "$HOME_RG" 1790044000 gate rg >/dev/null 2>&1; then
+  fail "the done-claim gate passed a derived regression"
+fi
+run_cw "$HOME_RG" 1790044000 followup rg-3317 'repo#43' >/dev/null \
+  || fail "recording a follow-up for a derived regression was refused"
+run_cw "$HOME_RG" 1790044000 gate rg --terminal-gap >/dev/null \
+  || fail "teardown still refused a derived regression after its follow-up was recorded"
+if run_cw "$HOME_RG" 1790044000 gate rg >/dev/null 2>&1; then
+  fail "the done-claim gate passed a derived regression after its follow-up was recorded"
+fi
+pass "a derived regression also clears teardown only once its follow-up is recorded"
+
+# A directory that recorded no target of any kind makes "every Deployment target
+# was measured" vacuous, so its readings alone look like proof. Deriving a clean
+# verdict there would be the one pass this must never manufacture; it stays a
+# measurement gap that names why. A Sentry-only or deploy-workflow watch is a
+# different case and does complete clean, because it records targets - they are
+# just not Deployments.
+HOME_J9=$(new_world j9)
+seed_pr "$HOME_J9" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_J9" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_J9" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_J9" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_J9" 1790000000 register j9 "$PR_URL" >/dev/null || fail "register failed"
+run_cw "$HOME_J9" 1790044000 drive j9-3317 >/dev/null || fail "the untargeted fixture drive failed"
+WATCH_J9="$HOME_J9/state/change-watch/j9-3317"
+ROW_J9="$HOME_J9/state/change-watch/rows/j9-3317.json"
+rm -f "$ROW_J9"
+rm -f "$WATCH_J9/targets"
+printf 'completed unmeasured\n' > "$WATCH_J9/verdict"
+out=$(run_cw "$HOME_J9" 1790044000 verdict j9-3317)
+[ "$out" != "change-watch clean" ] \
+  || fail "a watch with no recorded target was judged proven by its readings alone: $out"
+printf '%s\n' "$out" | grep -q 'unmeasurable-with-reason' \
+  || fail "a watch with no recorded target was not recorded as a measurement gap: $out"
+if run_cw "$HOME_J9" 1790044000 gate j9 --terminal-gap >/dev/null 2>&1; then
+  fail "a watch with no recorded Deployment target passed the teardown gate"
+fi
+out=$(run_cw "$HOME_J9" 1790044000 rederive --apply) || fail "the untargeted apply failed: $out"
+printf '%s\n' "$out" | grep -q 'no-row watches: 0 proven, 0 regressed, 1 unmeasurable with reason, 1 total' \
+  || fail "a watch with no recorded target was counted proven: $out"
+pass "a row-less watch that recorded no target is never proven"
+
+# The run that decides a deploy is the latest one carrying the merge, not the
+# earliest. A deploy that failed and was then retried successfully has landed, and
+# reading the first carrier it finds calls that a regression forever.
+# ask-pass-durable-f1-2233 latched regressed exactly this way: hydra#2233 merged at
+# 14:12:08Z, run 44321779660 on its merge sha b877000b failed at 14:12:47Z, run
+# 44325826504 on the same sha succeeded at 14:34:56Z, and the +30m sample was taken
+# at 14:42:09Z - after the retry - yet the watch still scored deploy_run 0.
+HOME_RT=$(hydra_world rt "$MERGED")
+out=$(run_hydra_cw "$HOME_RT" 1790000000 register rt1 'https://github.com/Muso-AI/hydra/pull/1961') \
+  || fail "hydra register failed: $out"
+hydra_runs "$HOME_RT" "[$(hydra_run 2026-09-21T15:00:00Z completed failure "$MERGED"),$(hydra_run 2026-09-21T15:30:00Z completed success "$MERGED")]"
+run_hydra_cw "$HOME_RT" 1790003600 sample rt1-1961 900 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_RT" rt1-1961 900)" = 1 ] \
+  || fail "a deploy that failed and was then retried successfully was not read as deployed: $(cat "$HOME_RT/state/change-watch/rt1-1961/samples.log" 2>/dev/null)"
+line=$(run_hydra_cw "$HOME_RT" 1790003600 verdict rt1-1961)
+case "$line" in
+  *regressed*) fail "a successful retry of the same merge was still read as a regression: $line" ;;
+esac
+pass "a successful retry of the merge is the deploy that landed"
+
+# The converse still holds, or the fix would be a way to launder a failed deploy:
+# when the latest run carrying the merge failed, the deploy failed.
+hydra_runs "$HOME_RT" "[$(hydra_run 2026-09-21T15:00:00Z completed success "$MERGED"),$(hydra_run 2026-09-21T15:30:00Z completed failure "$MERGED")]"
+run_hydra_cw "$HOME_RT" 1790007200 sample rt1-1961 3600 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_RT" rt1-1961 3600)" = 0 ] \
+  || fail "a retry that failed after an earlier success was not read as a failed deploy: $(cat "$HOME_RT/state/change-watch/rt1-1961/samples.log" 2>/dev/null)"
+pass "a failed retry is still a failed deploy"
+
+# A truncated containment read is not proof that a candidate lacks the merge: it
+# must leave the deploy unmeasured instead of settling on the last carrier that
+# happened to be readable.
+HOME_TB=$(hydra_world tb "$MERGED")
+mkdir -p "$HOME_TB/bin"
+cat > "$HOME_TB/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+if [ "$1" = run ] && [ "$2" = list ]; then
+  printf '%s\n' '[{"conclusion":"failure","status":"completed","createdAt":"2026-09-21T15:00:00Z","databaseId":1,"headSha":"oldcarrier","url":"https://example.invalid/1"},{"conclusion":"success","status":"completed","createdAt":"2026-09-21T15:30:00Z","databaseId":2,"headSha":"newcarrier","url":"https://example.invalid/2"}]'
+  exit 0
+fi
+if [ "$1" = api ]; then
+  case "$2" in
+    *oldcarrier*) printf 'ahead\n'; exit 0 ;;
+  esac
+fi
+exit 1
+STUB
+chmod +x "$HOME_TB/bin/gh"
+out=$(CW_CLUSTER_DIR='' FM_CW_GH="$HOME_TB/bin/gh" run_cw "$HOME_TB" 1790000000 register tb1 \
+  'https://github.com/Muso-AI/hydra/pull/1990') || fail "hydra register failed: $out"
+CW_CLUSTER_DIR='' FM_CW_GH="$HOME_TB/bin/gh" run_cw "$HOME_TB" 1790000900 sample tb1-1990 900 >/dev/null \
+  || fail "sample failed"
+[ -z "$(deploy_run_value "$HOME_TB" tb1-1990 900)" ] \
+  || fail "a truncated carrier read scored the earlier failed run: $(cat "$HOME_TB/state/change-watch/tb1-1990/samples.log" 2>/dev/null)"
+grep -q 'whether the .* run carries aaaa1111 could not be read' \
+  "$HOME_TB/state/change-watch/tb1-1990/read-failures" \
+  || fail "a truncated carrier read was not stated as unreadable: $(cat "$HOME_TB/state/change-watch/tb1-1990/read-failures" 2>/dev/null)"
+pass "a truncated carrier read cannot decide a deploy failure"
