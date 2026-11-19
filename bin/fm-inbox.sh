@@ -52,9 +52,14 @@
 # retires its `check: inbox:<id>` wake in the same command. In the other
 # direction bin/fm-wake-drain.sh refuses to acknowledge a wake whose captain note
 # is still unacknowledged, naming the ids, so the two records cannot drift apart
-# in either order. That pair is the whole fix for the 2026-11 measurement of
+# in either order. That pair is the core of the fix for the 2026-11 measurement of
 # three captain notes sitting 23h+ while newer ones were handled in the same
 # minute: the wake queue could be acknowledged without ever touching the note.
+# A wake that was already acknowledged before the coupling existed is the third
+# direction, so `list`, and `drain` when it is listing rather than acking, first
+# re-announce any pending captain note whose wake is no longer queued. That
+# self-heal is by key, so it never doubles a pending wake, and it stays out of
+# inbox-auto/: an orphaned machine record is not an obligation the captain owes.
 #
 # Configuration. A region, a model id and an AWS profile name somebody's account
 # and somebody's choices, so this file carries no default for any of them. Each is
