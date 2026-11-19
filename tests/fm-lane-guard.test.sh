@@ -113,6 +113,10 @@ test_zero_commit_budget_trips() {
     "the trip did not carry the instruction"
   [ "$(remote_file refs/wip/trip only-copy.txt)" = "the only copy of the work" ] ||
     fail "the trip reported saved work that is not on the origin"
+  # Recoverable, not merely present: the snapshot hangs off the lane's HEAD, so a
+  # re-brief can diff it, and the origin carries no branch of that name.
+  [ "$(git -C "$LANE_REMOTE" rev-parse 'refs/wip/trip^')" = "$(git -C "$LANE_WT" rev-parse HEAD)" ] ||
+    fail "the trip's wip snapshot is not parented on the lane's HEAD"
   pass "a zero-commit lane at its budget trips with exit 3 and real saved work"
 }
 
