@@ -1,0 +1,5 @@
+id=1795069678-qmUIdy
+at=2026-11-19T06:27:58Z
+source=watch
+--
+supervision branch SILENT - main took this wake while the branch stayed silent; last branch work 29917828 min ago; branch latch: provider error, 29917828 min. Nothing else reports this: state/.branch-latch names the reason, and the branch re-probes on its own cooldown.

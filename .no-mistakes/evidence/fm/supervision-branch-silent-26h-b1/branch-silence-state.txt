@@ -1,0 +1,10 @@
+== state/.branch-latch
+1	provider error
+
+== state/.branch-live (epoch sec)
+1
+== state/.branch-silence-alarm (throttle, epoch sec)
+1795069678
+== state/.wake-queue (durable check wake created by the alarm note)
+1	1	check	task-a.status	check: task-a.status done
+1795069678	1	check	inbox:1795069678-qmUIdy	check: automated inbox note 1795069678-qmUIdy (watch) - supervision branch SILENT - main took this wake while the branch stayed silent; last branch work 299

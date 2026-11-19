@@ -1,0 +1,15 @@
+=== tests/fm-pi-watch-extension.test.sh (exit 0)
+ok - a dead branch files exactly one throttled silence note and stays quiet when a decline is ordinary
+ok - a dead session's latch is not this session's fault, but a current latch still alarms
+ok - a hung silence note is bounded and a later wake still files the alarm
+
+=== tests/fm-pi-branch-extension.test.sh (exit 0)
+ok - provider-error latches cool down, re-probe once with backoff, and recover through a durable report
+ok - a non-provider latch persists its reason, re-probes after its cooldown, and clears on a durable report
+ok - branch activates on a cold start once the lock is acquired, never before
+ok - a shut-down generation latches the branch and a new session clears it
+
+=== tests/fm-session-lock-ancestry.test.sh (exit 0)
+ok - session-lock e2e: a version-named session claims the home and arms supervision
+ok - session-lock e2e: a session parented by a harness-named daemon claims the home and arms supervision
+ok - session-lock e2e: a version-named session under a harness-named daemon keeps its own lock
