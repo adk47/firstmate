@@ -302,14 +302,16 @@ function branchSilenceReport(declined: boolean, now = Date.now()): string {
   const idleMs = liveAt ? now - liveAt * 1000 : Number.POSITIVE_INFINITY;
   if (idleMs < branchSilenceWindowMs) return "";
   let latch = "no branch latch recorded";
+  let latchReason = "";
   try {
     const [at, ...reason] = readFileSync(`${state}/.branch-latch`, "utf8").trim().split("\t");
     if (reason.join(" ").trim()) {
+      latchReason = reason.join(" ").trim();
       const since = Number(at);
       const age = Number.isFinite(since)
         ? `, ${Math.max(0, Math.round((now / 1000 - since) / 60))} min`
         : "";
-      latch = `branch latch: ${reason.join(" ").trim()}${age}`;
+      latch = `branch latch: ${latchReason}${age}`;
     }
   } catch {
     // No latch file: the branch never said why, and a guess is worse than silence.
@@ -332,7 +334,11 @@ function branchSilenceReport(declined: boolean, now = Date.now()): string {
   const leave = declined
     ? "an eligible wake went to main"
     : "main took this wake while the branch stayed silent";
-  return `supervision branch SILENT - ${leave}; last branch work ${idle}; ${latch}${unloaded}. Nothing else reports this: state/.branch-latch names the reason, and the branch is re-armed by restarting this Pi session or changing the supervision model.`;
+  const remedy =
+    !latchReason || latchReason === "supervision session was replaced or lost lock ownership"
+      ? "the branch is re-armed by restarting this Pi session or changing the supervision model"
+      : "the branch re-probes on its own cooldown";
+  return `supervision branch SILENT - ${leave}; last branch work ${idle}; ${latch}${unloaded}. Nothing else reports this: state/.branch-latch names the reason, and ${remedy}.`;
 }
 
 // A doorbell is a doorbell: the watcher's own follow-up folds under an
@@ -341,13 +347,17 @@ function branchSilenceReport(declined: boolean, now = Date.now()): string {
 // instead, which appends its own durable `check` wake that the next drain
 // presents like any other, and the throttle is written only once that record
 // exists.
+let silenceNoteInFlight = false;
+
 async function reportBranchSilence(declined: boolean, now = Date.now()): Promise<void> {
   // A wake main was always going to handle says nothing about the branch unless
   // the branch itself recorded that it stopped working, so require one of the
   // two concrete faults rather than alarming on a quiet fleet.
+  if (silenceNoteInFlight) return;
   if (!declined && !existsSync(`${state}/.branch-latch`)) return;
   const report = branchSilenceReport(declined, now);
   if (!report) return;
+  silenceNoteInFlight = true;
   try {
     const result = await runCommandAsync("bash", [`${fmRoot}/bin/fm-inbox.sh`, "note", "--source", "watch", "-"], {
       cwd: fmRoot,
@@ -357,6 +367,8 @@ async function reportBranchSilence(declined: boolean, now = Date.now()): Promise
     if (result.status !== 0) return;
   } catch {
     return;
+  } finally {
+    silenceNoteInFlight = false;
   }
   try {
     writeFileSync(`${state}/.branch-silence-alarm`, `${Math.floor(now / 1000)}\n`);
@@ -856,8 +868,8 @@ export default function (pi: ExtensionAPI) {
       // itself latched: both mean main is absorbing a branch's job, which is
       // the one thing nothing else reports. The note waits on the wake-queue
       // lock, so it must never stand between the branch's outcome and main's
-      // wake.
-      await reportBranchSilence(branchEligible);
+      // wake, nor hold up the next pending actionable.
+      void reportBranchSilence(branchEligible).catch(() => {});
     }
     return delivered;
   }

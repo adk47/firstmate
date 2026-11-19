@@ -680,6 +680,7 @@ export default function (pi: ExtensionAPI) {
   // afterwards, and the watcher's silence report names it.
   function recordBranchLatch(reason: string): void {
     branchBroken = reason;
+    if (lockOwnershipSync() !== "owned") return;
     const normalized = reason.replace(/\s+/g, " ");
     try {
       const [at, ...existing] = readFileSync(branchLatchFile, "utf8").trim().split("\t");
