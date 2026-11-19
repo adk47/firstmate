@@ -62,6 +62,7 @@ import {
   calmTranscriptClassIsVisible,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
+import { runCommandAsync } from "./lib/fm-async-exec.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
 type ArmResult = {
@@ -340,7 +341,7 @@ function branchSilenceReport(declined: boolean, now = Date.now()): string {
 // instead, which appends its own durable `check` wake that the next drain
 // presents like any other, and the throttle is written only once that record
 // exists.
-function reportBranchSilence(declined: boolean, now = Date.now()): void {
+async function reportBranchSilence(declined: boolean, now = Date.now()): Promise<void> {
   // A wake main was always going to handle says nothing about the branch unless
   // the branch itself recorded that it stopped working, so require one of the
   // two concrete faults rather than alarming on a quiet fleet.
@@ -348,9 +349,8 @@ function reportBranchSilence(declined: boolean, now = Date.now()): void {
   const report = branchSilenceReport(declined, now);
   if (!report) return;
   try {
-    const result = spawnSync("bash", [`${fmRoot}/bin/fm-inbox.sh`, "note", "--source", "watch", "-"], {
+    const result = await runCommandAsync("bash", [`${fmRoot}/bin/fm-inbox.sh`, "note", "--source", "watch", "-"], {
       cwd: fmRoot,
-      encoding: "utf8",
       input: `${report}\n`,
       env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
     });
@@ -850,7 +850,7 @@ export default function (pi: ExtensionAPI) {
       // Either the branch declined work it should have taken, or it declared
       // itself latched: both mean main is absorbing a branch's job, which is
       // the one thing nothing else reports.
-      reportBranchSilence(branchOffer.eligible);
+      await reportBranchSilence(branchOffer.eligible);
     }
     return await sendWake(owner, message, pending);
   }

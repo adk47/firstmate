@@ -680,8 +680,15 @@ export default function (pi: ExtensionAPI) {
   // afterwards, and the watcher's silence report names it.
   function recordBranchLatch(reason: string): void {
     branchBroken = reason;
+    const normalized = reason.replace(/\s+/g, " ");
     try {
-      writeFileSync(branchLatchFile, `${Math.floor(Date.now() / 1000)}\t${reason.replace(/\s+/g, " ")}\n`);
+      const [at, ...existing] = readFileSync(branchLatchFile, "utf8").trim().split("\t");
+      if (/^[0-9]+$/.test(at) && existing.join("\t") === normalized) return;
+    } catch {
+      // No existing record to preserve.
+    }
+    try {
+      writeFileSync(branchLatchFile, `${Math.floor(Date.now() / 1000)}\t${normalized}\n`);
     } catch {
       // Diagnostic only: the latch itself is in-memory state.
     }
@@ -689,6 +696,7 @@ export default function (pi: ExtensionAPI) {
 
   function clearBranchLatch(): void {
     branchBroken = "";
+    if (lockOwnershipSync() !== "owned") return;
     try {
       rmSync(branchLatchFile, { force: true });
     } catch {
@@ -700,6 +708,7 @@ export default function (pi: ExtensionAPI) {
   // arms this generation and on every durable report. The watcher's silence
   // report measures from it, so it is never written speculatively.
   function recordBranchLive(): void {
+    if (lockOwnershipSync() !== "owned") return;
     try {
       writeFileSync(branchLiveFile, `${Math.floor(Date.now() / 1000)}\n`);
     } catch {

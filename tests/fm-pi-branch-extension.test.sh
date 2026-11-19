@@ -3632,6 +3632,20 @@ if (!latch.includes("replaced or lost lock ownership")) {
   throw new Error(`latch did not name the refusal: ${latch}`);
 }
 
+// Every later decline repeats the same reason, so the record must keep the
+// epoch the branch actually stopped at instead of reporting "just now".
+const firstEpoch = latch.trim().split("\t")[0];
+const realNow = Date.now;
+Date.now = () => realNow() + 60_000;
+if (dispatch("signal: offered after shutdown again").accepted) {
+  throw new Error("a shut-down generation accepted a second wake");
+}
+Date.now = realNow;
+const repeatedEpoch = readFileSync(`${home}/state/.branch-latch`, "utf8").trim().split("\t")[0];
+if (repeatedEpoch !== firstEpoch) {
+  throw new Error(`a repeated decline rewrote the latch epoch: ${firstEpoch} -> ${repeatedEpoch}`);
+}
+
 // The replacement session is the recovery: the latch clears and work resumes.
 await fire("session_start", {});
 if (existsSync(`${home}/state/.branch-latch`)) {
@@ -3737,19 +3751,29 @@ test_secondary_session_stays_inert() {
   sleep 60 &
   foreign_pid=$!
   printf 'branch\t%s\t123\n' "$foreign_pid" > "$home/state/.lease-task-x"
+  printf '1700000000\tprimary branch latch\n' > "$home/state/.branch-latch"
+  printf '1700000000\n' > "$home/state/.branch-live"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_TEST_SKIP_LOCK=1 FM_TEST_LOCK_PID=$foreign_pid DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, home }; })()`);
-const { dispatch, home } = globalThis.__t;
-import { existsSync, writeFileSync } from "node:fs";
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, defaultSessionCtx }; })()`);
+const { dispatch, fire, home, defaultSessionCtx } = globalThis.__t;
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 writeFileSync(`${home}/state/.lock`, `${process.env.FM_TEST_LOCK_PID}\n`);
 if (dispatch("signal: secondary probe").accepted) throw new Error("secondary session accepted a wake it does not own");
+await fire("session_start", {}, defaultSessionCtx);
+await fire("model_select", { model: { provider: "anthropic", id: "secondary-model" } });
 if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
   throw new Error("secondary session wrote the primary's marker");
 }
 if (!existsSync(`${home}/state/.lease-task-x`)) {
   throw new Error("secondary session released the primary's branch lease");
+}
+if (readFileSync(`${home}/state/.branch-latch`, "utf8") !== "1700000000\tprimary branch latch\n") {
+  throw new Error("secondary session cleared the primary's branch latch");
+}
+if (readFileSync(`${home}/state/.branch-live`, "utf8") !== "1700000000\n") {
+  throw new Error("secondary session rewrote the primary's liveness record");
 }
 process.exit(0);
 EOF
