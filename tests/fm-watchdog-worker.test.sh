@@ -106,6 +106,7 @@ exit 0
 SH
   cat > "$home/fakebin/fake-crew-state" <<SH
 #!/usr/bin/env bash
+printf 'crew-state %s\n' "\$1" >> "$home/calls"
 if [ -f "$home/crew/\$1" ]; then cat "$home/crew/\$1"; else printf 'state: unknown · source: none · no record\n'; fi
 SH
   cat > "$home/fakebin/systemctl" <<SH
@@ -243,6 +244,30 @@ held_backlog_bin() {  # <home> <id...>: a tasks-axi stand-in that reports held i
 }
 
 start_clock() { date +%s; }
+
+# fake_clock <home> <base> <step>: a `date +%s` stand-in whose every call moves
+# the clock on by <step> seconds. A pass can then be given a budget it will
+# actually spend, which a frozen FM_WATCHDOG_NOW can never do. Any other date
+# invocation falls through to the real command.
+
+fake_clock() {  # <home> <base> <step>
+  local home=$1
+  cat > "$home/fakebin/date" <<SH
+#!/usr/bin/env bash
+case "\$1" in
+  +%s)
+    n=\$(cat "$home/clock" 2>/dev/null || printf 0)
+    n=\$((n + 1))
+    printf '%s\n' "\$n" > "$home/clock"
+    printf '%s\n' "\$(( $2 + n * $3 ))"
+    exit 0
+    ;;
+esac
+if [ -x /bin/date ]; then exec /bin/date "\$@"; fi
+exec /usr/bin/date "\$@"
+SH
+  chmod +x "$home/fakebin/date"
+}
 
 test_a_structural_refusal_outside_the_old_phrase_list_spends_no_budget() {
   local home now out
@@ -1095,6 +1120,8 @@ test_a_reboot_leaves_a_shipped_lane_alone_and_recovers_an_unfinished_one() {
     "the reboot path did not recover an unfinished lane: $out"
   assert_eq "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" "0" \
     "a shipped lane was charged a reboot relaunch"
+  assert_eq "$(counter "$home" '^crew-state w1$')" "1" \
+    "the task pass re-read a lane the boot pass had already judged finished in the same run"
   out=$(tick "$home" "$((now + 60))")
   assert_eq "$(counter "$home" '^control w1 ')" "0" \
     "the liveness rung relaunched a lane whose work had already shipped: $out"
@@ -1151,6 +1178,39 @@ test_a_pass_that_runs_out_of_budget_still_records_its_history() {
   assert_eq "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" "1" \
     "a lane the pass never reached lost its recorded relaunch history"
   pass "a pass that runs out of budget still records its history"
+}
+
+# A budgeted pass stops before the alphabet ends, so a pass that always
+# restarted at the first lane would leave the same tail lanes unwatched forever.
+# Each sweep resumes after the last lane it reached, so every lane is swept
+# within a bounded number of passes - including one recorded behind the cursor.
+test_a_truncated_pass_rotates_until_every_lane_is_swept() {
+  local home id out pass missed
+  home=$(make_home rotation); fake_tools "$home"
+  fake_clock "$home" 1700000000 300
+  for id in w1 w2 w3 w4; do worker "$home" "$id" dead; done
+  pass=0
+  missed=' '
+  while [ "$pass" -lt 15 ] && [ -n "$missed" ]; do
+    pass=$((pass + 1))
+    out=$(tick "$home" "" FM_WATCHDOG_PASS_BUDGET_SECS=3000)
+    if [ "$pass" -eq 1 ]; then
+      assert_contains "$out" "pass used its 3000s budget at" \
+        "a pass that spent its budget did not name the lane it stopped at: $out"
+    fi
+    if [ "$pass" -eq 2 ]; then worker "$home" a1 dead; fi
+    missed=''
+    for id in w1 w2 w3 w4 a1; do
+      grep -q "^control $id " "$home/calls" 2>/dev/null || missed="$missed $id"
+    done
+  done
+  [ -z "$missed" ] \
+    || fail "a budgeted pass never swept every lane (missed:$missed after $pass passes)"
+  [ "$pass" -gt 1 ] \
+    || fail "the whole fleet fit in one budgeted pass, so rotation is not proven"
+  [ "$pass" -lt 15 ] \
+    || fail "rotation left lanes unswept after $pass passes"
+  pass "a budgeted pass rotates so every lane, including one added behind the cursor, is swept"
 }
 
 test_a_held_task_is_never_relaunched_or_paged() {
@@ -1448,6 +1508,7 @@ test_a_reboot_leaves_a_shipped_lane_alone_and_recovers_an_unfinished_one
 test_a_status_log_checks_green_lane_is_never_resurrected
 test_a_lane_still_monitoring_its_pr_is_recovered
 test_a_pass_that_runs_out_of_budget_still_records_its_history
+test_a_truncated_pass_rotates_until_every_lane_is_swept
 test_a_held_task_is_never_relaunched_or_paged
 test_a_dry_run_plan_matches_the_connection_relaunch_model
 test_a_reboot_rebuilds_the_fleet_and_starts_the_chair_last

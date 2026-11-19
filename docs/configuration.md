@@ -894,6 +894,7 @@ The pass records what it did in `state/.watchdog-worker.json`: the boot identity
 A pass holds `state/.watchdog-worker.lock`, so a slow pass never overlaps the next tick.
 It also carries one wall-clock deadline, `FM_WATCHDOG_PASS_BUDGET_SECS`: the unit that runs it has a start timeout, and a pass that is killed by that timeout never writes the record, so every budget charge it just spent is lost and the hourly caps go back to capping nothing.
 Once the deadline is spent the pass stops taking new lanes, leaves the unvisited lanes' recorded history intact, and writes what it did; the 2026-11-16 evidence is a pass that ran thirty minutes over 250 lanes, was terminated, and left the record frozen at the previous pass.
+A truncated pass never resumes from the alphabetical front: `state/.watchdog-worker.cursor` carries one `pass=id` line per sweep (`task`, `boot`, `inbox`), and each sweep starts at the lane after the one it last reached, wraps at the end, and advances that line only for a lane it actually reached, so every lane is swept within a bounded number of passes instead of the tail lanes being skipped forever.
 
 Install it once per home, as the user that owns the fleet:
 
