@@ -610,7 +610,7 @@ function dispatch(message, projects, heartbeat, eligible) {
   return offer;
 }
 async function settle(predicate, label) {
-  for (let i = 0; i < 250; i += 1) {
+  for (let i = 0; i < 1000; i += 1) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }

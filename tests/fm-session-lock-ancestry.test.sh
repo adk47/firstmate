@@ -258,9 +258,18 @@ make_primary_home() {  # <dir>
   # owner, exactly as a real session does at session start.
   cat > "$dir/session.sh" <<'SH'
 #!/usr/bin/env bash
+fixture_orphaned() {
+  local parent
+  parent=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')
+  [ "$parent" = 1 ] && return 0
+  case "$(ps -o comm= -p "$parent" 2>/dev/null | tr -d ' ')" in
+    init|systemd) return 0 ;;
+  esac
+  return 1
+}
 if [ "${FM_FIXTURE_ORPHAN_HERE:-0}" = 1 ]; then
   i=0
-  while [ "$i" -lt 1200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  while [ "$i" -lt 1200 ] && ! fixture_orphaned; do
     sleep 0.05
     i=$((i + 1))
   done
@@ -272,8 +281,17 @@ printf '%s\n' "$?" > "$FM_HOME/state/hook.rc"
 SH
   cat > "$dir/daemon.sh" <<'SH'
 #!/usr/bin/env bash
+fixture_orphaned() {
+  local parent
+  parent=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')
+  [ "$parent" = 1 ] && return 0
+  case "$(ps -o comm= -p "$parent" 2>/dev/null | tr -d ' ')" in
+    init|systemd) return 0 ;;
+  esac
+  return 1
+}
 i=0
-while [ "$i" -lt 1200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+while [ "$i" -lt 1200 ] && ! fixture_orphaned; do
   sleep 0.05
   i=$((i + 1))
 done
@@ -285,9 +303,9 @@ SH
 }
 
 # Start the fixture tree detached from this suite's own process tree: the
-# launcher exits immediately, so the tree is reparented to init and the ancestry
-# walk terminates inside the fixture. Returns once the hook has recorded its exit
-# code.
+# launcher exits immediately, so the tree is reparented to init (or the systemd
+# user manager acting as its subreaper) and the ancestry walk terminates inside
+# the fixture. Returns once the hook has recorded its exit code.
 run_fixture_tree() {  # <dir> <session-bin> [<daemon-bin>]
   local dir=$1 session_bin=$2 daemon_bin=${3:-} i
   if [ -n "$daemon_bin" ]; then
