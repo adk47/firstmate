@@ -1330,13 +1330,13 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  while IFS='|' read -r label expect seed; do
+  while IFS='|' read -r label expect seed mode; do
     [ -n "$label" ] || continue
     rm -rf "$home/state/inbox-auto" "$home/state/.branch-silence-alarm" "$home/state/.branch-live" \
       "$home/state/.branch-latch" "$home/state/.afk" "$log" "$stop"
     eval "$seed"
     out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
-      FM_TEST_REASON="signal: task-a.status done" node --input-type=module 2>&1 <<'EOF'
+      FM_TEST_REASON="signal: task-a.status done" FM_TEST_BRANCH_MODE="$mode" node --input-type=module 2>&1 <<'EOF'
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -1354,9 +1354,14 @@ const bus = {
   },
 };
 // A branch that answers nothing at all: no accept, no rejection. This is the
-// silent-death shape the alarm exists for.
+// silent-death shape the alarm exists for. The reject mode is the other shape:
+// the branch takes the batch and then fails, so the watcher sees a rejected
+// settlement rather than a decline.
 bus.on("fm-branch-supervision:dispatch", (offer) => {
   offers.push({ message: offer.message, eligible: offer.eligible });
+  if (process.env.FM_TEST_BRANCH_MODE === "reject" && offer.eligible) {
+    offer.accept(Promise.reject(new Error("branch accepted the batch and then failed")));
+  }
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(
@@ -1404,9 +1409,10 @@ EOF
         || fail "$label note does not name how long the branch has been silent"
     fi
   done <<'CASES'
-dead-branch|1|true
-recent-branch-work|0|printf '%s\n' "$(( $(date +%s) ))" > "$home/state/.branch-live"
-away-mode|0|: > "$home/state/.afk"
+dead-branch|1|true|silent
+accepted-then-failed|1|true|reject
+recent-branch-work|0|printf '%s\n' "$(( $(date +%s) ))" > "$home/state/.branch-live"|silent
+away-mode|0|: > "$home/state/.afk"|silent
 CASES
   pass "a dead branch files exactly one throttled silence note and stays quiet when a decline is ordinary"
 }
