@@ -277,6 +277,10 @@ function lockOwnership(): LockOwnership {
 // this session owns the fleet lock (cold start, or a read-only secondary
 // session) and while away mode's daemon owns supervision. Both stay quiet.
 const branchSilenceWindowMs = positiveInteger("FM_BRANCH_SILENCE_WINDOW_MS", 600_000);
+// The note takes the wake-queue lock, which a live but wedged process can hold
+// indefinitely. The alarm must never become the thing that stops alarming, so
+// the child is bounded and a stuck lock costs one dropped note.
+const branchSilenceNoteTimeoutMs = positiveInteger("FM_BRANCH_SILENCE_NOTE_TIMEOUT_MS", 5000);
 
 function readEpochFile(path: string): number {
   try {
@@ -363,6 +367,7 @@ async function reportBranchSilence(declined: boolean, now = Date.now()): Promise
       cwd: fmRoot,
       input: `${report}\n`,
       env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
+      timeoutMs: branchSilenceNoteTimeoutMs,
     });
     if (result.status !== 0) return;
   } catch {

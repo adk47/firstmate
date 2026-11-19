@@ -35,6 +35,12 @@ export interface AsyncExecOptions {
    * maxBuffer. Defaults to 1 MiB.
    */
   maxBuffer?: number;
+  /**
+   * Hard bound on the child's lifetime. On expiry the child is killed and the
+   * result reports a null status, the same shape as a signalled child, so a
+   * caller that must not block forever can treat the bound as a failure.
+   */
+  timeoutMs?: number;
 }
 
 const DEFAULT_MAX_BUFFER = 1024 * 1024;
@@ -51,9 +57,11 @@ export function runCommandAsync(
     let stderrBytes = 0;
     const maxBuffer = options.maxBuffer ?? DEFAULT_MAX_BUFFER;
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const finish = (status: number | null, detail = ""): void => {
       if (settled) return;
       settled = true;
+      if (timer) clearTimeout(timer);
       resolve({ status, stdout, stderr: detail ? `${stderr}${detail}` : stderr });
     };
     let child;
@@ -95,6 +103,12 @@ export function runCommandAsync(
     // drained, so no output is lost the way an early "exit" would lose it.
     child.on("close", (code) => finish(code));
     child.on("error", (error: Error) => finish(null, error.message));
+    if (options.timeoutMs && options.timeoutMs > 0) {
+      timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish(null, `timed out after ${options.timeoutMs}ms`);
+      }, options.timeoutMs);
+    }
     if (child.stdin) {
       // A child that exits before reading stdin makes the write fail with
       // EPIPE, which is its answer, not this helper's failure.

@@ -1427,6 +1427,105 @@ CASES
   pass "a dead branch files exactly one throttled silence note and stays quiet when a decline is ordinary"
 }
 
+# The silence note takes the wake-queue lock, which a live but wedged process can
+# hold forever. A note that never returns must not leave the in-flight guard set
+# for the rest of the process, because that would silence every later alarm in
+# exactly the degraded state the alarm exists for.
+test_pi_hung_silence_note_does_not_silence_later_alarms() {
+  local repo home plugin out status notes
+  repo="$TMP_ROOT/pi-branch-silence-timeout-root"
+  home="$TMP_ROOT/pi-branch-silence-timeout-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  install_pi_watch_extension_fixture "$repo"
+  cp "$ROOT/bin/fm-inbox.sh" "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/"
+  mv "$repo/bin/fm-inbox.sh" "$repo/bin/fm-inbox-real.sh"
+  chmod +x "$repo/bin/fm-inbox-real.sh" "$repo/bin/fm-wake-lib.sh"
+  cat > "$repo/bin/fm-inbox.sh" <<SH
+#!/usr/bin/env bash
+count_file="$home/state/inbox-calls"
+count=\$(cat "\$count_file" 2>/dev/null || printf 0)
+count=\$((count + 1))
+printf '%s\\n' "\$count" > "\$count_file"
+if [ "\$count" -eq 1 ]; then
+  exec sleep 60
+fi
+exec "\$(dirname "\$0")/fm-inbox-real.sh" "\$@"
+SH
+  chmod +x "$repo/bin/fm-inbox.sh"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'signal: task-a.status done\n'
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
+    FM_BRANCH_SILENCE_NOTE_TIMEOUT_MS=300 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let prompt = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", () => {});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  `1\t1\tsignal\ttask-a.status\tsignal: task-a.status done\n`,
+);
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const waitForPrompt = async (label) => {
+  for (let i = 0; i < 250 && !prompt; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (!prompt) throw new Error(`${label} declined wake did not reach main`);
+};
+await tool.execute("tool-call-silence-timeout-1", {}, undefined, undefined, {});
+await waitForPrompt("first");
+// Let the first note hit its bound before the next wake asks for another one.
+await new Promise((resolve) => setTimeout(resolve, 1000));
+await tool.execute("tool-call-silence-timeout-2", {}, undefined, undefined, {});
+// The second wake folds under the still-unconsumed first doorbell, so the
+// alarm's own throttle file is the observable proof that a second note ran.
+for (let i = 0; i < 500 && !existsSync(`${process.env.FM_HOME}/state/.branch-silence-alarm`); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "a hung silence note must not wedge the watcher: $out"
+  notes=$(find "$home/state/inbox-auto" -maxdepth 1 -name '*.note' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$notes" = 1 ] || fail "a hung silence note suppressed every later alarm ($notes notes filed)"
+  grep -q 'supervision branch SILENT' "$home/state/inbox-auto"/*.note \
+    || fail "the alarm filed after a hung note does not name the branch silence"
+  pass "a hung silence note is bounded and a later wake still files the alarm"
+}
+
 # A surfaced captain-held signal uses the existing decision-owned payload, so a
 # co-present routine row cannot take the signal close away from main.
 test_pi_captain_held_signal_stays_on_main() {
@@ -5450,6 +5549,7 @@ test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
 test_pi_main_only_check_classes_stay_on_main
 test_pi_dead_branch_files_one_throttled_silence_note
+test_pi_hung_silence_note_does_not_silence_later_alarms
 test_pi_captain_held_signal_stays_on_main
 test_pi_unread_pending_reply_forces_later_stale_alias_to_main
 test_pi_distinct_files_mixed_batch_routes_whole_batch_to_main
