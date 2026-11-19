@@ -3264,10 +3264,10 @@ cw_progress_label() {  # <watch-id>
 # A reading is {"at": <epoch>, "scored": <n>, "unmeasured": <n>,
 # "awaiting": <n>, "regressed": <n>, "measured": <bool>,
 # "values": {"<metric>@<target>": "<value>", ...}}, or null when no sample was
-# ever taken at that offset. "measured" is true when the reading scored
-# something, or when everything it could not score was only waiting for the
-# rollout to land; a reading that failed to read is present but measured
-# nothing, which is exactly what makes a row unproven.
+# ever taken at that offset. "measured" is true only when the reading scored
+# something: a reading made entirely of samples that awaited their rollout is not
+# a measurement, and neither is one that failed to read. Both are present but
+# measured nothing, which is exactly what makes a row unproven.
 
 cw_rows_dir() { printf '%s/rows\n' "$WATCH_ROOT"; }
 cw_row_path() { printf '%s/%s.json\n' "$(cw_rows_dir)" "$1"; }
@@ -3479,22 +3479,12 @@ cw_unread_deployments() {  # <watch-id>
   cw_unmeasured_targets "$1" | grep -v -e '^sentry/' -e '^run/' || true
 }
 
-# Whether any sample of this watch scored anything at all. A watch whose every
-# reading only ever waited for its rollout is measured by that rule but proved by
-# nothing, so this is what keeps "awaiting forever" from reading as health.
-cw_scored_any() {  # <watch-id>
-  local samples
-  samples=$(cw_samples_path "$1")
-  [ -f "$samples" ] || return 1
-  awk -F'\t' '$7 == 1 { found = 1 } END { exit !found }' "$samples"
-}
-
 # The terminal state of a finished watch, as "<state>\t<reason>".
 #
 # The verdict rests on the +6h reading, the last of the three the row records,
 # plus the Deployments themselves: proven needs that reading to have measured
-# something, some sample of the watch to have scored, at least one target of any
-# kind to have been recorded, and every Deployment target measured at least once.
+# something, at least one target of any kind to have been recorded, and every
+# Deployment target measured at least once.
 # The recorded-target clause is what keeps the Deployment bar from holding
 # vacuously: with nothing on record there was nothing to apply it to, so the
 # readings alone cannot prove the merge. Anything less is
@@ -3527,7 +3517,7 @@ cw_scored_any() {  # <watch-id>
 # <note> explains a schedule that was cut short (an interrupted drive). It is
 # carried into the reason so a proof taken by a stopped drive says so.
 cw_terminal_state() {  # <watch-id> [<note>]
-  local id=$1 note=${2:-} r json final='' empty='' empties=0 missing=''
+  local id=$1 note=${2:-} r json final='' empty='' prior_empty='' empties=0 missing=''
   local unread gaps known why='' superseded='' plural='s' recorded=0 seen=''
   local all_awaiting=''
   # A regression a reading actually recorded is proof of a bad change, and it
@@ -3558,6 +3548,7 @@ cw_terminal_state() {  # <watch-id> [<note>]
     else
       empty="$empty${empty:+, }+$((r / 60))m"
       empties=$((empties + 1))
+      [ "$r" -eq 21600 ] || prior_empty="$prior_empty${prior_empty:+, }+$((r / 60))m"
     fi
     [ "$r" -ne 21600 ] || final=$json
   done
@@ -3585,7 +3576,6 @@ cw_terminal_state() {  # <watch-id> [<note>]
     || superseded="the $empty reading${plural} measured nothing, superseded by later readings"
   if [ "$final" != null ] \
     && printf '%s' "$final" | grep -q '"measured": true' \
-    && cw_scored_any "$id" \
     && [ "${recorded:-0}" -gt 0 ] \
     && [ -z "$unread" ]; then
     printf 'proven\t%s\n' \
@@ -3593,7 +3583,8 @@ cw_terminal_state() {  # <watch-id> [<note>]
     return 0
   fi
   if [ -n "$all_awaiting" ]; then
-    why='unmeasured: every sample awaited a rollout'
+    why='the +6h reading awaited a rollout'
+    [ -z "$prior_empty" ] || why="$why; nothing measured at $prior_empty"
   else
     [ -z "$empty" ] || why="nothing measured at $empty"
   fi
@@ -3820,9 +3811,9 @@ cw_measured_gaps() {  # <watch-id>
   '
 }
 
-# The schedule ended: proven only when the +6h reading measured, some sample
-# scored, and every Deployment target was measured at least once; anything less
-# is unmeasurable-with-reason.
+# The schedule ended: proven only when the +6h reading measured and every
+# Deployment target was measured at least once; anything less is
+# unmeasurable-with-reason.
 cw_record_completion() {  # <watch-id>
   local id=$1 state reason
   state=$(cw_terminal_state "$id")
@@ -4407,7 +4398,11 @@ cw_gate_row() {  # <watch-id> <mode>
         printf 'change-watch: gate FAIL %s: still running\n' "$id"
       fi
       return 1 ;;
-    proven|regressed|not-applicable) return 0 ;;
+    proven|not-applicable) return 0 ;;
+    regressed)
+      printf 'change-watch: gate FAIL %s: %s: %s\n' \
+        "$id" "$state" "$(cw_row_reason "$id")"
+      return 1 ;;
     *) printf 'change-watch: gate FAIL %s: the durable row records terminal_state %s\n' "$id" "$state"; return 1 ;;
   esac
 }
@@ -4570,16 +4565,21 @@ cmd_rederive() {
   printf 'change-watch rederive: %s\n' \
     "$( [ "$apply" -eq 1 ] && printf 'applying' || printf 'dry run, nothing is rewritten (pass --apply to rewrite the rows)' )"
   run_epoch=$(cw_now)
-  printf 'change-watch rederive: a row is proven when its +6h reading measured, some sample scored, and every Deployment target was measured at least once\n'
+  printf 'change-watch rederive: a row is proven when its +6h reading measured and every Deployment target was measured at least once\n'
   for id in ${ids[@]+"${ids[@]}"}; do
     if [ -f "$(cw_row_path "$id")" ]; then
       total=$((total + 1))
       state=$(cw_row_state "$id")
-      # Only a row the old rule called unmeasurable is re-derived. A regressed row
-      # is proof of a bad change and a proven or not-applicable row is already a
-      # verdict, so re-reading a later reading's absence would be throwing evidence
-      # away; an open row belongs to a drive that has not finished.
-      [ "$state" = unmeasurable-with-reason ] || continue
+      # A row the old rule called unmeasurable is re-derived, and so is a proven
+      # one: the old rule accepted an all-awaiting +6h reading, so a false clean
+      # the corrected bar rejects must not be left in place. A regressed row is
+      # proof of a bad change and a not-applicable row is already a verdict, so
+      # re-reading a later reading's absence would be throwing evidence away; an
+      # open row belongs to a drive that has not finished.
+      case "$state" in
+        unmeasurable-with-reason|proven) ;;
+        *) continue ;;
+      esac
       cw_watch_exists "$id" || continue
       note=$(cw_row_interruption "$id")
       derived=$(cw_terminal_state "$id" "$note")

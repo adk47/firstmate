@@ -1269,7 +1269,7 @@ printf '900\t1790000900\n3600\t1790003600\n21600\t1790021600\n' \
   > "$HOME_AW2/state/change-watch/aw2$CORE_ID_SUFFIX/schedule"
 aw2_cw 1790021600 drive "aw2$CORE_ID_SUFFIX" >/dev/null || fail "drive failed"
 out=$(aw2_cw 1790021600 verdict "aw2$CORE_ID_SUFFIX")
-printf '%s\n' "$out" | grep -q 'every sample awaited a rollout' \
+printf '%s\n' "$out" | grep -q 'the +6h reading awaited a rollout' \
   || fail "a watch whose whole window awaited its rollout did not name the case: $out"
 printf '%s\n' "$out" | grep -q 'clean' \
   && fail "a watch that never measured anything read clean: $out"
@@ -1279,6 +1279,23 @@ grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_AW2" \
 grep -q '"21600": {"at": [0-9]*, "scored": 0, "unmeasured": 0, "awaiting": [1-9]*, "regressed": 0, "measured": false' "$ROW_AW2" \
   || fail "the +6h all-awaiting reading was recorded as measured: $(cat "$ROW_AW2")"
 pass "a watch whose whole window awaited its rollout is unmeasured, never clean"
+
+# The pre-fix rule counted an all-awaiting +6h reading as measured, so a watch
+# that read nothing could still hold a `proven` row. The repair must re-derive
+# that false clean from the readings it kept, stamp the reconstruction, and leave
+# the completion epoch the audit window is measured from untouched.
+completed_aw2=$(sed -n 's/.*"completed_epoch": \([^,]*\),.*/\1/p' "$ROW_AW2")
+sed -i.bak 's/"terminal_state": "unmeasurable-with-reason"/"terminal_state": "proven"/' "$ROW_AW2"
+rm -f "$ROW_AW2.bak"
+out=$(aw2_cw 1790030000 rederive --apply) \
+  || fail "the re-derive over a false-proven all-awaiting row failed: $out"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_AW2" \
+  || fail "the re-derive left an all-awaiting +6h reading proven: $(cat "$ROW_AW2")"
+grep -q '"derived_epoch": 1790030000' "$ROW_AW2" \
+  || fail "the re-derived false clean was not stamped as derived: $(cat "$ROW_AW2")"
+[ "$(sed -n 's/.*"completed_epoch": \([^,]*\),.*/\1/p' "$ROW_AW2")" = "$completed_aw2" ] \
+  || fail "the re-derive of a false-proven row moved its completion epoch: $(cat "$ROW_AW2")"
+pass "the re-derive corrects a proven row whose +6h reading only awaited its rollout"
 
 # One pod read serves the landing gate and every pod-backed metric of a sample.
 # The armed drive takes all 15 samples in one process, so a read repeated per
@@ -3048,6 +3065,12 @@ printf '%s\n' "$out" | grep -q '0 row(s) rewritten' \
 cmp -s "$ROW_J4" "$TMP_ROOT/row-before-regressed-rederive.json" \
   || fail "the re-derive changed a regressed row: $(cat "$ROW_J4")"
 pass "the re-derive never rewrites a regressed row"
+run_cw "$HOME_J4" 1790050000 gate j4 --terminal-gap >/dev/null 2>&1 \
+  && fail "the gate passed a row whose terminal_state is regressed"
+out=$(run_cw "$HOME_J4" 1790050000 gate j4 --terminal-gap 2>&1 || true)
+printf '%s\n' "$out" | grep -q 'gate FAIL j4-3317: regressed:' \
+  || fail "the gate did not name the row-based regression: $out"
+pass "a row whose terminal_state is regressed fails the gate like a derived one"
 
 # A row the old rule left unmeasurable can still hold a sample that recorded a
 # regression. Re-deriving it must write the regression verdict the readings earn,
