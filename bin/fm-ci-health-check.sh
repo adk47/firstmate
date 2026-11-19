@@ -91,14 +91,18 @@ REPOS_DEFAULT='Muso-AI/H-DevOps:main:150 Muso-AI/hydra:main:40 Muso-AI/core-back
 SCHEDULED_DEFAULT='Muso-AI/H-DevOps:reconcile-prod-manifests.yaml:7200'
 TRAILER_DEFAULT='route each red to the repo lane that owns it; fix-forward, never hand-apply'
 MAX_LINE=1500
-# Each API call is bounded on its own; the whole poll must still end inside the
-# watcher's per-check timeout, so a slow or absent GitHub costs at most one
-# bounded call per signal.
+# Each API call is bounded on its own, and the poll abandons its remaining
+# signals once its budget is spent, so a slow or absent GitHub cannot hold the
+# watcher's whole sweep.
 CHECK_TIMEOUT_SECS=${FM_CHECK_TIMEOUT:-30}
 case "$CHECK_TIMEOUT_SECS" in ''|*[!0-9]*) CHECK_TIMEOUT_SECS=30 ;; esac
 CALL_TIMEOUT_SECS=$((CHECK_TIMEOUT_SECS / 3))
 [ "$CALL_TIMEOUT_SECS" -ge 3 ] || CALL_TIMEOUT_SECS=3
 [ "$CALL_TIMEOUT_SECS" -le 20 ] || CALL_TIMEOUT_SECS=20
+POLL_BUDGET_SECS=$((CHECK_TIMEOUT_SECS / 2))
+[ "$POLL_BUDGET_SECS" -le 15 ] || POLL_BUDGET_SECS=15
+[ "$POLL_BUDGET_SECS" -ge 3 ] || POLL_BUDGET_SECS=3
+POLL_START=0
 
 usage() {
   awk '
@@ -119,7 +123,7 @@ now_epoch() {
 # conf <KEY> <default>: a set environment variable, else the env file's value,
 # else the default. The file is parsed line by line and never sourced.
 conf() {
-  local key=$1 default=$2 line value='' found=0
+  local key=$1 default=$2 line value='' found=0 quote='' trimmed=''
   eval "value=\${$key:-}"
   if [ -n "$value" ]; then
     printf '%s\n' "$value"
@@ -130,22 +134,30 @@ conf() {
       case "$line" in
         "$key="*)
           value=${line#*=}
+          quote=''
           case "$value" in
-            \"*)
-              value=${value#\"}
-              value=${value%\"*}
-              ;;
-            \'*)
-              value=${value#\'}
-              value=${value%\'*}
-              ;;
-            *)
-              case "$value" in
-                *[[:space:]]#*) value=${value%%[[:space:]]#*} ;;
-              esac
-              value=${value%"${value##*[![:space:]]}"}
-              ;;
+            \"*) quote='"' ;;
+            \'*) quote="'" ;;
           esac
+          if [ -n "$quote" ]; then
+            value=${value#"$quote"}
+            case "$value" in
+              *[[:space:]]#*)
+                trimmed=${value%%[[:space:]]#*}
+                trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
+                case "$trimmed" in
+                  *"$quote") value=${trimmed%"$quote"} ;;
+                  *) value=${value%"$quote"*} ;;
+                esac
+                ;;
+              *) value=${value%"$quote"*} ;;
+            esac
+          else
+            case "$value" in
+              *[[:space:]]#*) value=${value%%[[:space:]]#*} ;;
+            esac
+            value=${value%"${value##*[![:space:]]}"}
+          fi
           found=1
           ;;
       esac
@@ -260,9 +272,12 @@ record_verdict() {  # <now> <line-or-empty>
   printf 'at=%s\nverdict=%s\n' "$1" "${2:-quiet}" > "$VERDICT" 2>/dev/null || true
 }
 
+poll_has_budget() { [ $((SECONDS - POLL_START)) -lt "$POLL_BUDGET_SECS" ]; }
+
 action_check() {
   local now interval floor per_page rem spec repo branch bar queued runs line='' part msg='' trailer
   now=$(now_epoch)
+  POLL_START=$SECONDS
   interval=$(conf_int FM_CI_HEALTH_INTERVAL_SECS 900)
   if [ -f "$STAMP" ]; then
     local last
@@ -292,6 +307,7 @@ action_check() {
       *:*) branch=${spec#*:} ;;
     esac
     [ -n "$branch" ] || branch=main
+    poll_has_budget || break
     if [ -n "$bar" ]; then
       case "$bar" in
         *[!0-9]*) bar='' ;;
@@ -302,11 +318,13 @@ action_check() {
       case "$queued" in ''|*[!0-9]*) queued=0 ;; esac
       [ "$queued" -le "$bar" ] || msg="${msg}${msg:+; }$repo queued=$queued (>$bar)"
     fi
+    poll_has_budget || break
     runs=$(gh_api "repos/$repo/actions/runs?branch=$branch&event=push&per_page=$per_page") || continue
     part=$(repo_red "$repo" "$branch" "$runs")
     [ -z "$part" ] || msg="${msg}${msg:+; }$part"
   done
   for spec in $(conf FM_CI_HEALTH_SCHEDULED "$SCHEDULED_DEFAULT"); do
+    poll_has_budget || break
     repo=${spec%%:*}
     part=${spec#*:}
     local wf max_age

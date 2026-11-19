@@ -204,7 +204,7 @@ test_a_config_file_written_as_documented_is_parsed() {  # <home>
 FM_CI_HEALTH_REPOS='acme/widgets:main:10 acme/gadgets:main:10'   # owner/repo:branch:queued-bar
 FM_CI_HEALTH_SCHEDULED=' '   # owner/repo:workflow-file:max-age-secs
 FM_CI_HEALTH_INTERVAL_SECS=100      # polls closer together than this are skipped
-FM_CI_HEALTH_TRAILER='route each red to the lane that owns it; don't hand-apply'   # routing reminder
+FM_CI_HEALTH_TRAILER='route each red to the lane that owns it; don't hand-apply'   # owner's routing reminder
 ENV
 }
 
@@ -222,7 +222,7 @@ test_the_documented_config_file_shape_drives_the_poll() {
   assert_contains "$out" "acme/widgets main red:" "the first configured repository was not polled"
   assert_contains "$out" "acme/gadgets main red:" "the second configured repository was not polled"
   assert_contains "$out" "don't hand-apply" "a quoted value containing an apostrophe was truncated"
-  assert_not_contains "$out" "# routing reminder" "the trailing comment was kept in the value"
+  assert_not_contains "$out" "# owner" "a trailing comment containing an apostrophe was kept in the value"
   out=$(env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_CONFIG_OVERRIDE="$home/config" FM_CI_HEALTH_NOW=100050 FM_CI_HEALTH_TOKEN_ENV=none \
     "$CHECK" check 2>&1)
