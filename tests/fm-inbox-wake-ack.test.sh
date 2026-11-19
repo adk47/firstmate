@@ -70,6 +70,14 @@ pending_rows() {  # -> the queued row count
   if [ -s "$STATE/.wake-queue" ]; then awk 'END { print NR }' "$STATE/.wake-queue"; else printf '0\n'; fi
 }
 
+key_rows() {  # <key> -> queued check rows carrying that exact key
+  if [ -s "$STATE/.wake-queue" ]; then
+    awk -F '\t' -v k="$1" 'NF >= 5 && $3 == "check" && $4 == k { n++ } END { print n + 0 }' "$STATE/.wake-queue"
+  else
+    printf '0\n'
+  fi
+}
+
 # --- 1. acking a note retires its wake -------------------------------------
 
 setup one-command-clears-both
@@ -121,6 +129,51 @@ assert_not_contains "$out" "retired 0 wake(s)" \
 assert_contains "$out" "no wake was still queued" \
   "acking an orphaned note should say its wake was already gone, so the state is visible"
 pass "acking a note whose wake is already gone reports the surviving note instead of a zero count"
+
+# --- 1c. a captain note whose wake was acknowledged earlier is re-announced ---
+# The exact existing damage: the note survived while its wake was consumed, so the
+# note was invisible to every queue acknowledgement. Listing must restore the wake
+# (durably, once) and the drain must then refuse naming that note.
+
+setup existing-damage
+inbox note "one of the three that sat 23h+ while newer notes moved" > /dev/null \
+  || fail "the captain note should queue"
+id=$(note_ids "$STATE/inbox")
+awk -F '\t' 'NF < 5 || $4 != "inbox:'"$id"'" { print }' "$STATE/.wake-queue" > "$STATE/.wake-queue.trim" \
+  && mv "$STATE/.wake-queue.trim" "$STATE/.wake-queue"
+[ "$(pending_rows)" = 0 ] || fail "the fixture should start with no queued wake"
+
+inbox note --source ci "an automated record whose wake is also gone" > /dev/null \
+  || fail "the automated note should queue"
+auto_id=$(note_ids "$STATE/inbox-auto")
+awk -F '\t' 'NF < 5 || $4 != "inbox:'"$auto_id"'" { print }' "$STATE/.wake-queue" > "$STATE/.wake-queue.trim" \
+  && mv "$STATE/.wake-queue.trim" "$STATE/.wake-queue"
+
+list_err="$HOME_DIR/list.err"
+inbox list > /dev/null 2> "$list_err" || fail "listing should not fail: $(cat "$list_err")"
+assert_contains "$(cat "$list_err")" "re-announced orphaned captain note $id" \
+  "listing should say it restored the wake of an orphaned captain note"
+[ "$(key_rows "inbox:$id")" = 1 ] \
+  || fail "listing should re-announce the orphaned captain note exactly once: $(cat "$STATE/.wake-queue")"
+[ "$(key_rows "inbox:$auto_id")" = 0 ] \
+  || fail "an orphaned automated record must never be re-announced"
+
+inbox list > /dev/null 2> "$list_err" || fail "the second listing should not fail: $(cat "$list_err")"
+[ "$(key_rows "inbox:$id")" = 1 ] \
+  || fail "listing twice must not duplicate the re-announced wake: $(cat "$STATE/.wake-queue")"
+
+read -r seq gen <<EOF
+$(requirement)
+EOF
+set +e
+drain --ack-through "$seq" --recovery-generation "$gen" > /dev/null 2> "$ERR"
+code=$?
+set -e
+[ "$code" -eq 3 ] \
+  || fail "the restored wake should refuse acknowledgement while the note is unacked, got exit $code: $(cat "$ERR")"
+assert_contains "$(cat "$ERR")" "$id" \
+  "the refusal should name the re-announced note that blocks it"
+pass "a captain note whose wake was acknowledged earlier is re-announced, so existing damage cannot hide"
 
 # --- 2. an unacked note blocks the acknowledgement, and writes nothing -----
 

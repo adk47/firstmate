@@ -448,6 +448,37 @@ print_auto_notes() {  # <show-all 0|1>
   fi
 }
 
+# Re-announce any captain note whose `check: inbox:<id>` wake is no longer
+# queued, so a wake acknowledged before its note cannot leave that note invisible
+# forever. The queue is the authority; a key that is already pending is left
+# alone, and state/inbox-auto is never touched because machine records are not
+# the captain's obligation.
+reannounce_orphaned_notes() {
+  local f id source summary lib="$FM_ROOT/bin/fm-wake-lib.sh"
+  [ -d "$INBOX" ] || return 0
+  [ -r "$lib" ] || return 0
+  # shellcheck source=/dev/null
+  FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" STATE="$STATE" . "$lib"
+  for f in "$INBOX"/*.note; do
+    [ -e "$f" ] || break
+    id=$(basename "$f" .note)
+    if fm_wake_queued_keys check | grep -qxF "inbox:$id"; then
+      continue
+    fi
+    source=$(sed -n 's/^source=//p' "$f" | head -1)
+    case " $CAPTAIN_CLASSES " in
+      *" $source "*) ;;
+      *) source=text ;;
+    esac
+    summary=$(sed -n '/^--$/,$p' "$f" | tail -n +2 | tr '\n\t' '  ' | cut -c1-100)
+    if wake_for "$source" "$id" "$summary"; then
+      printf 'fm-inbox: re-announced orphaned captain note %s\n' "$id" >&2
+    else
+      printf 'fm-inbox: captain note %s has no queued wake and could not be re-announced\n' "$id" >&2
+    fi
+  done
+}
+
 cmd_list() {
   local show_all=0 any=0 f
   case "${1:-}" in
@@ -455,7 +486,7 @@ cmd_list() {
     '') ;;
     *) die "usage: fm-inbox.sh list [--all]" ;;
   esac
-
+  reannounce_orphaned_notes
   for f in "$INBOX"/*.note; do
     [ -e "$f" ] || break
     any=1
@@ -516,6 +547,7 @@ cmd_drain() {
     done
     return 0
   fi
+  reannounce_orphaned_notes
   if [ "$show_all" -eq 1 ]; then cmd_list --all; else cmd_list; fi
   printf '\nAck with: fm-inbox.sh drain --ack <id>...\n'
   printf 'Acking a note retires the wake that announced it, so one command clears both.\n'

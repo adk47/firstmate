@@ -203,10 +203,7 @@ case "${1:-}" in
       || { echo "wake drain: acknowledgement requires its recovery generation" >&2; exit 2; }
     ACK_GENERATION=${4:-}
     case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
-    case "${5:-}" in
-      '') [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; } ;;
-      *) echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2 ;;
-    esac
+    [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
     ;;
   *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
 esac
