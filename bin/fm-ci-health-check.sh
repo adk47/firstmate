@@ -133,11 +133,11 @@ conf() {
           case "$value" in
             \"*)
               value=${value#\"}
-              value=${value%%\"*}
+              value=${value%\"*}
               ;;
             \'*)
               value=${value#\'}
-              value=${value%%\'*}
+              value=${value%\'*}
               ;;
             *)
               case "$value" in
