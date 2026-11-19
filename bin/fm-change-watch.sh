@@ -290,10 +290,12 @@
 #                        decides rather than the first: a deploy that failed and
 #                        was retried successfully has landed, while one that
 #                        succeeded and was then retried into a failure has not.
-#                        No run yet, one still in flight, or a merge sha the
-#                        forge cannot name is awaiting the deploy and unmeasured:
-#                        a run that does not carry the merge is never scored as
-#                        this release's success or regression.
+#                        No run yet, one still in flight, or a containment read
+#                        that failed or was cut is awaiting the deploy and
+#                        unmeasured, as is a merge sha the forge cannot name: a
+#                        run that does not carry the merge is never scored as
+#                        this release's success or regression, and neither is an
+#                        unreadable answer treated as one that does not carry it.
 # The baseline window is the 60 minutes before the change's rollout start, read
 # as a level for counters (restarts, oomkilled, rss_ratio) and as a rate for the
 # others. An unmeasured metric is skipped, never scored as a pass, and a metric
@@ -2233,8 +2235,10 @@ print(count)
 # LIVE QUERY (forge) - the mapped deploy workflow's run created at or after the
 # merge: 1 when the latest run whose tree carries the merge completed
 # successfully, 0 when that run failed, and nothing while no run exists or one is
-# still in flight (both are awaiting the deploy, never health). The latest carrier
-# decides, not the first: a deploy that failed and was retried successfully has
+# still in flight (both are awaiting the deploy, never health), and so is a
+# containment read that failed or was cut, because an unreadable answer cannot say
+# the tree lacks the merge. The latest carrier decides, not the first: a deploy
+# that failed and was retried successfully has
 # landed, while one that succeeded and was then retried into a failure has not.
 # With no merge sha to check carriers against, no run
 # can be attributed to this release, so none is scored: an unrelated run is
