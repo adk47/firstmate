@@ -743,6 +743,7 @@ tests/fm-watch-arm.test.sh 64026
 tests/fm-watch-checkpoint.test.sh 5779
 tests/fm-watch-recovery-loop.test.sh 59837
 tests/fm-watch-triage.test.sh 663532
+tests/fm-watchdog-orca-restart.test.sh 2418
 tests/fm-watchdog-worker.test.sh 40000
 tests/fm-watcher-lock.test.sh 88554
 EOF
