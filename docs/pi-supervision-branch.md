@@ -93,11 +93,12 @@ The branch's failure mode is silence, and the fallback hides it: when the branch
 The two records below are how a branch that is no longer working states so.
 
 `state/.branch-live` holds the epoch second of the branch's last durable report or session start, so a reader can measure silence without asking the branch anything.
-`state/.branch-latch` holds the epoch second and the one-line reason the branch stopped taking work, written every time a latch is set and removed when a durable report clears it.
+`state/.branch-latch` holds the epoch second and the one-line reason the branch stopped taking work; a repeated latch reason keeps the original epoch, and the record is removed when a durable report clears it or a new generation takes the lock.
 A latch is set by repeated provider errors, by a branch that could not be constructed, by a reconcile that could not deliver stored outcomes into main, and by a branch that still owns the fleet lock but no longer owns the current session's generation, so the reason names the actual fault rather than a generic timeout.
 That last one is the shape that stays dead the longest: a main session that shut down without a replacement leaves the branch unable to act, and before the latch existed it declined every wake in silence for as long as the session stayed down.
 
-Every latch is re-probeable: a latch with no provider-retry schedule of its own inherits the same cooldown and single-probe ladder, which is what stops a non-provider failure from leaving a branch that can never be offered another wake for the rest of the main session.
+A latch raised while this generation still owns the lock is re-probeable: one with no provider-retry schedule of its own inherits the same cooldown and single-probe ladder, which is what stops a non-provider failure from leaving a branch that can never be offered another wake for the rest of the main session.
+The generation-mismatch latch is the exception: this session can no longer act on it, so only a replacement session start or a selection change recovers it.
 A durable report clears the latch and refreshes `state/.branch-live` in one step, because a report is proof the branch worked.
 
 Failure is reported where a declined wake is actually visible.

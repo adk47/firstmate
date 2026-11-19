@@ -719,7 +719,7 @@ export default function (pi: ExtensionAPI) {
   // The dispatch gate re-offers a wake only when a probe is due, so a latch
   // with no schedule is a branch that can never be offered another wake for the
   // life of this main session. Reusing the provider ladder's shape keeps one
-  // gate and one probe-finish path for every latch reason.
+  // gate and one probe-finish path for every latch this generation can act on.
   function ensureLatchProbeSchedule(): void {
     if (providerRecovery) return;
     providerRecovery = {
@@ -895,6 +895,8 @@ export default function (pi: ExtensionAPI) {
         return false;
       }
       markLoaded();
+      recordBranchLive();
+      clearBranchLatch();
       activatedGeneration = expectedGeneration;
     }
     return generationOwnsLock(expectedGeneration);
@@ -1530,11 +1532,10 @@ ${context.command}
       // A branch that still owns the fleet lock but no longer owns this
       // session's generation is dead until a new session starts, and declining
       // silently is exactly how it stayed dead for a day: record the reason so
-      // the probe ladder can recover it and the watcher can report it. A
+      // the watcher can report it and a new session start can recover it. A
       // secondary session or a cold start owns no lock and stays silent.
       if (lockOwnershipSync() === "owned") {
         recordBranchLatch("supervision session was replaced or lost lock ownership");
-        ensureLatchProbeSchedule();
       }
       return;
     }

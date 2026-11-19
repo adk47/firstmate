@@ -3524,7 +3524,15 @@ test_cold_start_activates_after_lock_acquisition() {
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, mainEntries, outcomeScript, defaultSessionCtx }; })()`);
 const { fire, dispatch, settle, home, mainEntries, outcomeScript, defaultSessionCtx } = globalThis.__t;
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+
+// A latch and liveness record left by a process that has since died describe a
+// generation this one replaces: the pre-lock session must not touch them, and
+// the first activation as owner must clear them instead of carrying a dead
+// session's failure into a healthy branch.
+const staleLatch = "1700000000\tprovider kept failing\n";
+writeFileSync(`${home}/state/.branch-latch`, staleLatch);
+writeFileSync(`${home}/state/.branch-live`, "1700000000\n");
 
 const summary = "Recovered the stored captain result after cold startup.";
 const seq = Number(outcomeScript(["append", "--task", "cold-result", "--verdict", "captain", "--summary", summary]));
@@ -3536,8 +3544,20 @@ if (dispatch("signal: before lock").accepted) throw new Error("branch accepted a
 if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
   throw new Error("branch wrote its marker before owning the lock");
 }
+if (readFileSync(`${home}/state/.branch-latch`, "utf8") !== staleLatch) {
+  throw new Error("a session that owns no lock rewrote the dead session's latch");
+}
+if (readFileSync(`${home}/state/.branch-live`, "utf8") !== "1700000000\n") {
+  throw new Error("a session that owns no lock refreshed the dead session's liveness record");
+}
 writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
 await fire("turn_end", {}, defaultSessionCtx);
+if (existsSync(`${home}/state/.branch-latch`)) {
+  throw new Error("activation as owner kept the dead session's latch");
+}
+if (!(Number(readFileSync(`${home}/state/.branch-live`, "utf8").trim()) > 1700000000)) {
+  throw new Error("activation as owner did not refresh the liveness record");
+}
 const visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
 if (visible.length !== 1 || visible[0].data.seq !== seq || visible[0].data.summary !== summary) {
   throw new Error(`post-lock turn_end did not recover the exact captain outcome: ${JSON.stringify(visible)}`);
