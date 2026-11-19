@@ -813,20 +813,24 @@ cw_forge_merge_sha() {  # <url>
 
 # LIVE QUERY (forge) - success when <head-sha>'s history contains <base-sha>: the
 # run built a tree that carries the merged change. A run of an older branch tip
-# carries it too, and a run of a tag or a side branch does not.
-cw_forge_run_carries() {  # <owner/repo> <base-sha> <head-sha>
-  local repo=$1 base=$2 head=$3 status
-  [ -n "$base" ] && [ -n "$head" ] || return 1
+# carries it too, and a run of a tag or a side branch does not. A read that failed
+# or was cut returns 3, so a caller never mistakes it for a tree that lacks the
+# merge.
+cw_forge_run_carries() {  # <owner/repo> <base-sha> <head-sha> [<deadline-epoch>]
+  local repo=$1 base=$2 head=$3 deadline=${4:-} state
+  [ -n "$base" ] && [ -n "$head" ] || return 3
   if [ -n "${FM_CW_GH_DIR:-}" ]; then
     # A stubbed forge lists the shas each run's tree carries, one per line.
     [ -f "$FM_CW_GH_DIR/contains-$head" ] || return 1
     grep -qxF -- "$base" "$FM_CW_GH_DIR/contains-$head"
     return $?
   fi
-  command -v gh >/dev/null 2>&1 || return 1
-  status=$(cw_forge_run gh api "repos/$repo/compare/$base...$head" --jq .status) || return 1
-  case "$status" in ahead|identical) return 0 ;; esac
-  return 1
+  state=$(cw_forge_carries_state "$repo" "$base" "$head" "$deadline")
+  case "$state" in
+    carried) return 0 ;;
+    not) return 1 ;;
+  esac
+  return 3
 }
 
 # LIVE QUERY (forge) - the same containment question answered as carried, not,
@@ -2239,7 +2243,12 @@ print(count)
 cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch> [<merge-sha>]
   local repo=$1 workflow=$2 since=$3 sha=${4:-}
   local gh_cmd=${FM_CW_GH:-gh} out rc=0 cands created runsha status conclusion carried=''
-  local carried_status='' carried_conclusion=''
+  local carried_status='' carried_conclusion='' deadline='' cap crc=0
+  if [ -n "$CW_BUDGET_START" ]; then
+    deadline=$(( CW_BUDGET_START + SAMPLE_DEADLINE_SECONDS ))
+    cap=$(( $(cw_now) + FORGE_TIMEOUT ))
+    if [ "$cap" -lt "$deadline" ]; then deadline=$cap; fi
+  fi
   if [ -n "${FM_CW_GH_DIR:-}" ]; then
     local safe=${workflow//[\/ ]/_}
     [ -f "$FM_CW_GH_DIR/runs-$repo-$safe.json" ] || {
@@ -2311,7 +2320,15 @@ for run in candidates:
     if [ "$status" = "-" ]; then status=''; fi
     if [ "$conclusion" = "-" ]; then conclusion=''; fi
     if [ "$runsha" != "$sha" ]; then
-      cw_forge_run_carries "$repo" "$sha" "$runsha" || continue
+      crc=0
+      cw_forge_run_carries "$repo" "$sha" "$runsha" "$deadline" || crc=$?
+      case "$crc" in
+        0) ;;
+        1) continue ;;
+        *) printf 'awaiting the deploy: whether the %s run carries %s could not be read\n' \
+             "$workflow" "${sha:0:8}"
+           return 1 ;;
+      esac
     fi
     # Cands are sorted oldest first, so the last carrier seen is the latest one and
     # it is the one that decides; an earlier failure stays visible in the history
@@ -4499,7 +4516,7 @@ cw_row_interruption() {  # <watch-id>
 # Dry run unless --apply: the rewritten corpus is the evidence for the change,
 # so it is printed and read before it is written.
 cmd_rederive() {
-  local apply=0 id row state derived new reason note completed total=0 changed=0 arg
+  local apply=0 id row state derived new reason note completed total=0 changed=0 arg wdir wid
   local rl_total=0 rl_proven=0 rl_regressed=0 rl_unmeasurable=0 run_epoch
   local -a ids=()
   for arg in "$@"; do

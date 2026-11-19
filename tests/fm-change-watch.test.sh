@@ -3150,3 +3150,33 @@ run_hydra_cw "$HOME_RT" 1790007200 sample rt1-1961 3600 >/dev/null || fail "samp
 [ "$(deploy_run_value "$HOME_RT" rt1-1961 3600)" = 0 ] \
   || fail "a retry that failed after an earlier success was not read as a failed deploy: $(cat "$HOME_RT/state/change-watch/rt1-1961/samples.log" 2>/dev/null)"
 pass "a failed retry is still a failed deploy"
+
+# A truncated containment read is not proof that a candidate lacks the merge: it
+# must leave the deploy unmeasured instead of settling on the last carrier that
+# happened to be readable.
+HOME_TB=$(hydra_world tb "$MERGED")
+mkdir -p "$HOME_TB/bin"
+cat > "$HOME_TB/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+if [ "$1" = run ] && [ "$2" = list ]; then
+  printf '%s\n' '[{"conclusion":"failure","status":"completed","createdAt":"2026-09-21T15:00:00Z","databaseId":1,"headSha":"oldcarrier","url":"https://example.invalid/1"},{"conclusion":"success","status":"completed","createdAt":"2026-09-21T15:30:00Z","databaseId":2,"headSha":"newcarrier","url":"https://example.invalid/2"}]'
+  exit 0
+fi
+if [ "$1" = api ]; then
+  case "$2" in
+    *oldcarrier*) printf 'ahead\n'; exit 0 ;;
+  esac
+fi
+exit 1
+STUB
+chmod +x "$HOME_TB/bin/gh"
+out=$(CW_CLUSTER_DIR='' FM_CW_GH="$HOME_TB/bin/gh" run_cw "$HOME_TB" 1790000000 register tb1 \
+  'https://github.com/Muso-AI/hydra/pull/1990') || fail "hydra register failed: $out"
+CW_CLUSTER_DIR='' FM_CW_GH="$HOME_TB/bin/gh" run_cw "$HOME_TB" 1790000900 sample tb1-1990 900 >/dev/null \
+  || fail "sample failed"
+[ -z "$(deploy_run_value "$HOME_TB" tb1-1990 900)" ] \
+  || fail "a truncated carrier read scored the earlier failed run: $(cat "$HOME_TB/state/change-watch/tb1-1990/samples.log" 2>/dev/null)"
+grep -q 'whether the .* run carries aaaa1111 could not be read' \
+  "$HOME_TB/state/change-watch/tb1-1990/read-failures" \
+  || fail "a truncated carrier read was not stated as unreadable: $(cat "$HOME_TB/state/change-watch/tb1-1990/read-failures" 2>/dev/null)"
+pass "a truncated carrier read cannot decide a deploy failure"
