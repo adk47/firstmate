@@ -1150,9 +1150,11 @@ crew_reads_working() {  # <id>
 # two terminal claims count, and a terminal claim that is really a pipeline still
 # watching an open PR does not, so a lane whose status log is merely old, parked,
 # or blocked is still recovered: the question here is not "is this lane working"
-# but "is there anything left to work on".
+# but "is there anything left to work on". The detail is read together with its
+# source, because a worker's own `checks green` report is a finished lane while
+# the pipeline's `checks green` is a PR it is still watching.
 task_has_finished() {  # <id>
-  local crew state detail
+  local crew state source detail
   [ -n "$CREW_STATE_BIN" ] || return 1
   crew=$(fm_run_timed "$READ_TIMEOUT_SECS" "$CREW_STATE_BIN" "$1" 2>/dev/null) || return 1
   state=$(printf '%s\n' "$crew" | sed -n 's/^state: \([a-z-]*\).*/\1/p' | head -1)
@@ -1160,11 +1162,17 @@ task_has_finished() {  # <id>
     done|failed) ;;
     *) return 1 ;;
   esac
-  # `done` also covers a run whose pipeline is still watching an open PR: that
-  # lane has work left, so it is recovered like any other unfinished one.
+  source=$(printf '%s\n' "$crew" | sed -n 's/^state: [a-z-]* · source: \([a-z-]*\).*/\1/p' | head -1)
   detail=$(printf '%s\n' "$crew" | sed -n 's/^state: [a-z-]* · source: [a-z-]* · //p' | head -1)
+  # A pipeline still watching an open PR reads `done`, and that lane has work
+  # left whatever source said so.
   case "$detail" in
-    *monitoring*|*'PR ready for review'*|*'checks green'*) return 1 ;;
+    *monitoring*|*'PR ready for review'*) return 1 ;;
+  esac
+  # Only a run-step claim is the pipeline's own word that checks merely pass;
+  # the same words in a status log are the worker's terminal report.
+  case "$source:$detail" in
+    run-step:*'checks green'*) return 1 ;;
   esac
   return 0
 }

@@ -1045,6 +1045,34 @@ test_a_finished_lane_is_left_alone_and_an_unfinished_one_is_recovered() {
   pass "a finished lane is left alone and an unfinished one is still recovered"
 }
 
+# A worker without an attributed run finishes by appending the documented
+# `done: PR {url} checks green` line, so its crew-state detail is the same word
+# the pipeline uses while it is still watching. That is the lane's own terminal
+# report: it shipped, and neither the liveness rung nor the reboot path may
+# resurrect it.
+test_a_status_log_checks_green_lane_is_never_resurrected() {
+  local home now out
+  home=$(make_home status-log-green); fake_tools "$home"
+  worker "$home" w1 dead
+  worker "$home" w2 dead
+  printf 'state: done · source: status-log · PR https://github.com/x/y/pull/1 checks green\n' \
+    > "$home/crew/w1"
+  printf 'state: working · source: status-log · mid-task\n' > "$home/crew/w2"
+  printf 'dead\n' > "$home/fix/chair.state"
+  now=$(start_clock)
+  out=$(tick "$home" "$now" FM_WATCHDOG_BOOT_ID=boot-a)
+  assert_contains "$out" "watchdog: boot recovery: relaunched 1 of 2 task(s)" \
+    "a reboot did not skip the shipped lane and recover the unfinished one: $out"
+  assert_eq "$(counter "$home" '^control w1 ')" "0" \
+    "the reboot path relaunched a lane whose own status log declared its PR green"
+  assert_eq "$(counter "$home" '^control w2 ')" "1" \
+    "the reboot path did not recover an unfinished lane: $out"
+  out=$(tick "$home" "$((now + 60))")
+  assert_eq "$(counter "$home" '^control w1 ')" "0" \
+    "the liveness rung relaunched a lane whose own status log declared its PR green: $out"
+  pass "a status-log checks-green claim stays finished through the liveness rung and a reboot"
+}
+
 # The same finished lane must be left alone by the reboot path as well: the boot
 # pass runs before the task pass, so a guard that lived only in the task pass
 # would relaunch every already-shipped lane after a power loss and spend a model
@@ -1417,6 +1445,7 @@ test_a_dry_run_reports_every_lane_and_changes_nothing
 test_the_watchdog_exports_its_home_to_every_command_it_runs
 test_a_finished_lane_is_left_alone_and_an_unfinished_one_is_recovered
 test_a_reboot_leaves_a_shipped_lane_alone_and_recovers_an_unfinished_one
+test_a_status_log_checks_green_lane_is_never_resurrected
 test_a_lane_still_monitoring_its_pr_is_recovered
 test_a_pass_that_runs_out_of_budget_still_records_its_history
 test_a_held_task_is_never_relaunched_or_paged
