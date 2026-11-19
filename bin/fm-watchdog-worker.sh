@@ -91,10 +91,16 @@
 # over, and resurrecting it buys a whole model run of work firstmate has
 # already been told is complete, then wakes firstmate to say so. Measured
 # 2026-11-16 19:57Z: 79 of 190 lanes had already finished and were being
-# relaunched twice an hour. Every other state - parked, blocked, paused,
-# unknown - is still recovered, because those are unfinished lanes with nobody
-# at the controls, and a finished lane that firstmate wants resumed is
-# firstmate's to relaunch through bin/fm-control.sh.
+# relaunched twice an hour. The terminal claim is read together with its
+# crew-state source, because a worker's own status-log note is its finishing
+# word while this pipeline's `run-step` sentences (`checks green`, `PR ready
+# for review`, `monitoring`) and crew-state's `run still monitoring PR` suffix
+# mean an open PR with work left, which is recovered like any unfinished lane.
+# Every other state - parked, blocked, paused, unknown - is still recovered,
+# because those are unfinished lanes with nobody at the controls, and a
+# finished lane that firstmate wants resumed is firstmate's to relaunch through
+# bin/fm-control.sh. Both the liveness rung and the boot pass ask the same
+# predicate, so a reboot cannot resurrect what the per-lane sweep would skip.
 #
 # THE STALL LADDER. A live worker whose pane keeps one SHAPE for
 # no_progress_secs while it reads busy is stalled. Shape means printable ASCII
@@ -168,7 +174,7 @@
 # hands the hourly caps back to the crash loop they exist to stop. Measured
 # 2026-11-16 19:57Z: a pass ran thirty minutes over 250 lanes, was terminated
 # by systemd, and left the record frozen at the previous pass. The pass
-# therefore carries one wall-clock deadline (fm_watchdog_pass_budget_secs, 20
+# therefore carries one wall-clock deadline (FM_WATCHDOG_PASS_BUDGET_SECS, 20
 # minutes), checked before each lane; once it is spent the remaining lanes keep
 # their recorded history untouched and the record is written with what the
 # pass actually did. A truncated pass never starts again at the alphabetical
