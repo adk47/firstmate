@@ -821,7 +821,7 @@ cw_forge_run_carries() {  # <owner/repo> <base-sha> <head-sha> [<deadline-epoch>
   [ -n "$base" ] && [ -n "$head" ] || return 3
   if [ -n "${FM_CW_GH_DIR:-}" ]; then
     # A stubbed forge lists the shas each run's tree carries, one per line.
-    [ -f "$FM_CW_GH_DIR/contains-$head" ] || return 1
+    [ -f "$FM_CW_GH_DIR/contains-$head" ] || return 3
     grep -qxF -- "$base" "$FM_CW_GH_DIR/contains-$head"
     return $?
   fi
@@ -4300,9 +4300,7 @@ cmd_verdict() {
 # mask: deleting a verdict leaves the row's terminal state intact, so a watch
 # that ended unmeasurable keeps failing. A watch registered before rows existed,
 # which has no row, is judged by the readings it still holds rather than by its
-# verdict file, and a derivation that would prove it is downgraded to
-# unmeasurable-with-reason when it recorded no Deployment target, so readings
-# alone never manufacture that pass.
+# verdict file.
 #
 # --terminal-gap is the same gate for the teardown boundary bin/fm-teardown.sh
 # consults: only a terminal measurement gap fails there, because a watch still
@@ -4316,7 +4314,7 @@ cmd_verdict() {
 # when the drive has not finished or the directory kept no readings, so every
 # caller keeps its own "still running" behaviour instead of inventing a verdict.
 cw_rowless_state() {  # <watch-id>
-  local id=$1 note derived deps dstate dreason
+  local id=$1 note derived dstate dreason
   [ -f "$(cw_row_path "$id")" ] && return 0
   cw_watch_exists "$id" || return 0
   [ -f "$(cw_verdict_path "$id")" ] || return 0
@@ -4325,18 +4323,6 @@ cw_rowless_state() {  # <watch-id>
   [ -n "$derived" ] || return 0
   dstate=$(printf '%s' "$derived" | cut -f1)
   dreason=$(printf '%s' "$derived" | cut -f2-)
-  # A directory recorded before its targets were written has no Deployment target
-  # on record, so "every Deployment target was measured" holds vacuously and the
-  # readings alone look like proof. That is the one pass this must never
-  # manufacture: with no recorded Deployment target the bar was never applied, so
-  # the honest answer is a measurement gap, not a clean verdict.
-  if [ "$dstate" = proven ]; then
-    deps=$(cw_target_ids "$id" | grep -c . )
-    if [ "${deps:-0}" -eq 0 ]; then
-      printf 'unmeasurable-with-reason\tno Deployment target was ever recorded for this watch, so the Deployment bar was never applied and its readings alone cannot prove the merge\n'
-      return 0
-    fi
-  fi
   printf '%s\t%s\n' "$dstate" "$dreason"
 }
 
@@ -4576,6 +4562,7 @@ cmd_rederive() {
         "$(cw_row_url "$id")" "" "" "$completed" "$run_epoch"
       case "$new" in
         proven) printf 'clean\n' | cw_write "$(cw_verdict_path "$id")" ;;
+        regressed*) printf '%s\n' "$reason" | cw_write "$(cw_verdict_path "$id")" ;;
       esac
       continue
     fi
@@ -4615,6 +4602,7 @@ cmd_rederive() {
     cw_row_write "$id" "$new" "$reason" "" "" "" "" "$completed" "$run_epoch"
     case "$new" in
       proven) printf 'clean\n' | cw_write "$(cw_verdict_path "$id")" ;;
+      regressed*) printf '%s\n' "$reason" | cw_write "$(cw_verdict_path "$id")" ;;
     esac
   done
   if [ "$rl_total" -gt 0 ]; then

@@ -2454,6 +2454,7 @@ case "$out" in
 esac
 pass "a repository watched through its deploy workflow measures the change"
 hydra_runs "$HOME_DS" "[$(hydra_run 2026-09-21T15:00:00Z completed failure "$OLDER"),$(hydra_run 2026-09-21T15:30:00Z completed success "$MERGED")]"
+printf '%s\n' "$OLDER" > "$HOME_DS/gh/contains-$OLDER"
 run_hydra_cw "$HOME_DS" 1790000900 sample ds1-1957 900 >/dev/null || fail "sample failed"
 [ "$(deploy_run_value "$HOME_DS" ds1-1957 900)" = 1 ] \
   || fail "a deploy run carrying the merged commit was not measured: $(cat "$HOME_DS/state/change-watch/ds1-1957/samples.log" 2>/dev/null)"
@@ -2472,12 +2473,21 @@ run_hydra_cw "$HOME_DS" 1790003600 sample ds1-1957 3600 >/dev/null || fail "samp
 
 # A run of an unrelated tip with no proof it carries the merge is awaited, never
 # read as a failure.
-rm -f "$HOME_DS/gh/contains-$OLDER"
+printf '%s\n' "$OLDER" > "$HOME_DS/gh/contains-$OLDER"
 run_hydra_cw "$HOME_DS" 1790007200 sample ds1-1957 7200 >/dev/null || fail "sample failed"
 [ -z "$(deploy_run_value "$HOME_DS" ds1-1957 7200)" ] \
   || fail "an unrelated run was read as this release's deploy"
 grep -q 'carrying aaaa1111 yet' "$HOME_DS/state/change-watch/ds1-1957/read-failures" \
   || fail "an unrelated run was not stated as awaiting a run that carries the merge: $(cat "$HOME_DS/state/change-watch/ds1-1957/read-failures" 2>/dev/null)"
+
+# A carrier read that cannot be read is stated as itself, never mistaken for a run
+# whose tree provably lacks the merge.
+rm -f "$HOME_DS/gh/contains-$OLDER"
+run_hydra_cw "$HOME_DS" 1790010800 sample ds1-1957 10800 >/dev/null || fail "sample failed"
+[ -z "$(deploy_run_value "$HOME_DS" ds1-1957 10800)" ] \
+  || fail "an unreadable carrier read was scored as a deploy"
+grep -q 'whether the .* run carries aaaa1111 could not be read' "$HOME_DS/state/change-watch/ds1-1957/read-failures" \
+  || fail "an unreadable carrier read was not stated as a failed read: $(cat "$HOME_DS/state/change-watch/ds1-1957/read-failures" 2>/dev/null)"
 pass "a deploy run is the one whose tree carries the merged commit"
 
 # However many unrelated runs were created before the one whose tree carries the
@@ -2491,6 +2501,7 @@ for n in 02 03 04 05 06; do
   CC_RUNS="$CC_RUNS,$(hydra_run "2026-09-21T15:0${n#0}:00Z" completed success "oldtip$n")"
 done
 hydra_runs "$HOME_CC" "[$CC_RUNS,$(hydra_run 2026-09-21T15:30:00Z completed failure "$OLDER")]"
+for n in 01 02 03 04 05 06; do : > "$HOME_CC/gh/contains-oldtip$n"; done
 printf '%s\n' "$MERGED" > "$HOME_CC/gh/contains-$OLDER"
 run_hydra_cw "$HOME_CC" 1790000900 sample cc1-1980 900 >/dev/null || fail "sample failed"
 [ "$(deploy_run_value "$HOME_CC" cc1-1980 900)" = 0 ] \
@@ -2504,7 +2515,7 @@ hydra_runs "$HOME_CC" "[$CC_RUNS,$(hydra_run 2026-09-21T15:30:00Z completed succ
 run_hydra_cw "$HOME_CC" 1790003600 sample cc1-1980 3600 >/dev/null || fail "sample failed"
 [ "$(deploy_run_value "$HOME_CC" cc1-1980 3600)" = 1 ] \
   || fail "a successful carrier created after more than five unrelated runs was not proven: $(cat "$HOME_CC/state/change-watch/cc1-1980/samples.log" 2>/dev/null)"
-rm -f "$HOME_CC/gh/contains-$OLDER"
+printf '%s\n' "$OLDER" > "$HOME_CC/gh/contains-$OLDER"
 run_hydra_cw "$HOME_CC" 1790007200 sample cc1-1980 7200 >/dev/null || fail "sample failed"
 [ -z "$(deploy_run_value "$HOME_CC" cc1-1980 7200)" ] \
   || fail "a run whose tree carries nothing of the merge was scored"
@@ -3004,6 +3015,29 @@ printf '%s\n' "$out" | grep -q '0 row(s) rewritten' \
 cmp -s "$ROW_J4" "$TMP_ROOT/row-before-regressed-rederive.json" \
   || fail "the re-derive changed a regressed row: $(cat "$ROW_J4")"
 pass "the re-derive never rewrites a regressed row"
+
+# A row the old rule left unmeasurable can still hold a sample that recorded a
+# regression. Re-deriving it must write the regression verdict the readings earn,
+# not leave the stale measurement gap in place for `verdict` to report.
+sed -i.bak 's/"terminal_state": "regressed"/"terminal_state": "unmeasurable-with-reason"/; s/"reason": "[^"]*"/"reason": "nothing measured at +15m"/' "$ROW_J4"
+rm -f "$ROW_J4.bak"
+awk -F'\t' 'BEGIN { OFS = "\t" } !done && $1 ~ /^[0-9]+$/ { $6 = 1; done = 1 } { print }' \
+  "$HOME_J4/state/change-watch/j4-3317/samples.log" > "$TMP_ROOT/j4-regressed-samples.log"
+mv "$TMP_ROOT/j4-regressed-samples.log" "$HOME_J4/state/change-watch/j4-3317/samples.log"
+printf 'unmeasurable-with-reason: nothing measured at +15m\n' > "$HOME_J4/state/change-watch/j4-3317/verdict"
+out=$(run_cw "$HOME_J4" 1790050000 rederive --apply) \
+  || fail "the re-derive over a row holding a regression failed: $out"
+grep -q '"terminal_state": "regressed"' "$ROW_J4" \
+  || fail "the re-derive lost the regression its readings recorded: $(cat "$ROW_J4")"
+verdict=$(run_cw "$HOME_J4" 1790050000 verdict j4-3317)
+case "$verdict" in
+  "change-watch regressed at +"*) ;;
+  *) fail "the re-derive did not write the regression verdict: $verdict" ;;
+esac
+case "$verdict" in
+  *unmeasurable*) fail "the re-derive left a stale measurement gap in the verdict file: $verdict" ;;
+esac
+pass "the re-derive writes the regression verdict its readings recorded"
 
 # --- a watch with no durable row is judged by the readings it still holds -----
 
