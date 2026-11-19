@@ -4260,6 +4260,7 @@ cmd_verdict() {
       dreason=$(printf '%s' "$derived" | cut -f2-)
       case "$dstate" in
         proven) line=clean ;;
+        regressed) line=$dreason ;;
         *) line="$dstate: $dreason" ;;
       esac
     fi
@@ -4298,7 +4299,7 @@ cmd_verdict() {
 # when the drive has not finished or the directory kept no readings, so every
 # caller keeps its own "still running" behaviour instead of inventing a verdict.
 cw_rowless_state() {  # <watch-id>
-  local id=$1 note derived dstate dreason
+  local id=$1 note derived deps dstate dreason
   [ -f "$(cw_row_path "$id")" ] && return 0
   cw_watch_exists "$id" || return 0
   [ -f "$(cw_verdict_path "$id")" ] || return 0
@@ -4324,7 +4325,7 @@ cw_rowless_state() {  # <watch-id>
 
 # One watch's gate decision: 0 passes, 1 fails.
 cw_gate_row() {  # <watch-id> <mode>
-  local id=$1 mode=${2:-} state line
+  local id=$1 mode=${2:-} state line derived
   state=$(cw_row_state "$id")
   if [ -z "$state" ]; then
     line=''

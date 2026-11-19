@@ -2927,7 +2927,8 @@ pass "the re-derive over no rows reports an empty run"
 # re-derive that verdict from the readings the watch still holds, without
 # inventing a measurement, and must not move the completion time the audit
 # window is measured from.
-sed -i 's/"terminal_state": "proven"/"terminal_state": "unmeasurable-with-reason"/; s/"reason": "the +6h reading/"reason": "nothing measured at +15m; the +6h reading/' "$ROW_J"
+sed -i.bak 's/"terminal_state": "proven"/"terminal_state": "unmeasurable-with-reason"/; s/"reason": "the +6h reading/"reason": "nothing measured at +15m; the +6h reading/' "$ROW_J"
+rm -f "$ROW_J.bak"
 grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_J" \
   || fail "the pre-fix row fixture was not written: $(cat "$ROW_J")"
 printf 'unmeasurable-with-reason: nothing measured at +15m\n' > "$HOME_J/state/change-watch/j1-3317/verdict"
@@ -2993,7 +2994,8 @@ pass "an interrupted drive that took every reading is proven and queues nothing"
 
 # A regressed row is proof that the change was bad, so the re-derive never
 # re-reads it away: only a row the old rule called unmeasurable is repaired.
-sed -i 's/"terminal_state": "proven"/"terminal_state": "regressed"/' "$ROW_J4"
+sed -i.bak 's/"terminal_state": "proven"/"terminal_state": "regressed"/' "$ROW_J4"
+rm -f "$ROW_J4.bak"
 cp "$ROW_J4" "$TMP_ROOT/row-before-regressed-rederive.json"
 out=$(run_cw "$HOME_J4" 1790050000 rederive --apply) \
   || fail "the re-derive over a regressed row failed: $out"
