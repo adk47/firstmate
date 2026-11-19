@@ -21,6 +21,8 @@ case_lane() {
   LANE_ROOT=$TMP_ROOT/$name
   LANE_WT=$LANE_ROOT/$name
   LANE_REMOTE=$LANE_ROOT/repo.origin.git
+  FM_LANE_GUARD_STORE=$LANE_ROOT/store
+  export FM_LANE_GUARD_STORE
   mkdir -p "$LANE_ROOT"
   fm_git_worktree "$LANE_ROOT/repo" "$LANE_WT" "fm/$name"
 }
@@ -41,6 +43,11 @@ guard() {
 
 rc_of() { printf '%s\n' "$1" | head -1; }
 out_of() { printf '%s\n' "$1" | tail -n +2; }
+
+# saved_local_dir <output>: the store directory named by a SAVED line, or empty.
+saved_local_dir() {
+  printf '%s\n' "$1" | sed -n 's/^SAVED .*: local \([^ ]*\).*$/\1/p' | head -1
+}
 
 # remote_file <ref> <path>: the bytes of <path> in <ref> as stored on the origin.
 remote_file() {
@@ -82,9 +89,12 @@ test_unchanged_dirty_tree_is_not_repushed() {
   printf 'the only copy of the work\n' > "$LANE_WT/only-copy.txt"
 
   r=$(guard "$LANE_WT" HEAD 30 '2020-01-01T00:00:00Z')
-  expect_code 0 "$(rc_of "$r")" "the first snapshot of a dirty tree must be silent"
+  expect_code 0 "$(rc_of "$r")" "the first snapshot of a dirty tree must succeed"
+  first_dir=$(saved_local_dir "$(out_of "$r")")
+  [ -n "$first_dir" ] || fail "a successful save did not name its local snapshot"
   [ "$(remote_file refs/wip/idle only-copy.txt)" = "the only copy of the work" ] ||
     fail "the first snapshot did not reach the origin"
+  [ -f "$first_dir/MANIFEST" ] || fail "the local snapshot has no MANIFEST"
 
   # The worker wrote nothing new, so the already-published snapshot is still the
   # current one and the guard must not build and force-push it again. The
@@ -92,10 +102,16 @@ test_unchanged_dirty_tree_is_not_repushed() {
   # second committer date guarantees a repush would be a visible new commit
   # rather than a second-identical one git reports as up to date.
   r=$(guard "$LANE_WT" HEAD 30 '2020-01-02T00:00:00Z')
-  expect_code 0 "$(rc_of "$r")" "a repeat run on an unchanged dirty tree must be silent"
+  expect_code 0 "$(rc_of "$r")" "a repeat run on an unchanged dirty tree must succeed"
+  [ "$(saved_local_dir "$(out_of "$r")")" = "$first_dir" ] ||
+    fail "the repeat run named a different local snapshot"
   count=$(wc -l < "$pushes")
   count=$(printf '%s' "$count" | tr -d '[:space:]')
   [ "$count" = 1 ] || fail "the unchanged tree was pushed $count times, not once"
+  [ "$(find "$LANE_ROOT/store/idle" -mindepth 1 -maxdepth 1 -type d | wc -l)" = 1 ] ||
+    fail "the repeat run duplicated the local snapshot"
+  [ "$(cat "$first_dir/only-copy.txt")" = "the only copy of the work" ] ||
+    fail "the local snapshot no longer holds the work"
   [ "$(remote_file refs/wip/idle only-copy.txt)" = "the only copy of the work" ] ||
     fail "the unchanged snapshot no longer carries the work"
   pass "an unchanged dirty tree is not re-snapshotted or re-pushed"
@@ -189,15 +205,53 @@ test_failed_push_still_reports_the_trip() {
   pass "a failed push still reports the trip and never claims the work is saved"
 }
 
-test_no_remote_refuses() {
-  local r
-  mkdir -p "$TMP_ROOT/no-remote"
-  fm_git_init_commit "$TMP_ROOT/no-remote/wt"
-  r=$(guard "$TMP_ROOT/no-remote/wt" HEAD 30)
-  expect_code 2 "$(rc_of "$r")" "a lane with no origin remote must refuse"
-  assert_contains "$(out_of "$r")" "REFUSE wt: no remote" \
-    "the refusal did not name the lane and the missing remote"
-  pass "a worktree with no origin remote refuses with exit 2"
+test_no_remote_lane_saves_locally_and_trips() {
+  local r local_dir
+  LANE_ROOT=$TMP_ROOT/no-remote-trip
+  LANE_WT=$LANE_ROOT/no-remote-trip
+  FM_LANE_GUARD_STORE=$LANE_ROOT/store
+  export FM_LANE_GUARD_STORE
+  fm_git_init_commit "$LANE_WT"
+  printf 'the only copy of the work\n' > "$LANE_WT/only-copy.py"
+  git -C "$LANE_WT" config "lane.no-remote-trip.seen" "$(($(date -u +%s) - 600))"
+
+  r=$(guard "$LANE_WT" HEAD 5)
+  expect_code 3 "$(rc_of "$r")" "a no-remote lane at its budget must trip"
+  assert_contains "$(out_of "$r")" "TRIP no-remote-trip: 0 commits in" \
+    "the no-remote lane did not trip"
+  assert_not_contains "$(out_of "$r")" "nothing to save" \
+    "the trip claimed nothing was saved on a no-remote lane"
+  assert_not_contains "$(out_of "$r")" "matches HEAD" \
+    "the trip claimed the no-remote worktree matches HEAD"
+  local_dir=$(saved_local_dir "$(out_of "$r")")
+  [ -n "$local_dir" ] || fail "the no-remote save did not name its local snapshot"
+  [ -d "$local_dir" ] || fail "the named local snapshot directory does not exist"
+  cmp -s "$LANE_WT/only-copy.py" "$local_dir/only-copy.py" ||
+    fail "the local snapshot bytes differ from the only copy of the work"
+  [ -f "$local_dir/MANIFEST" ] || fail "the local snapshot has no MANIFEST"
+  ! git -C "$LANE_WT" remote get-url origin >/dev/null 2>&1 ||
+    fail "the no-remote case somehow has an origin"
+  pass "a no-remote lane saves locally, trips, and pushes nothing"
+}
+
+test_no_remote_lane_inside_budget_reports_saved() {
+  local r local_dir
+  LANE_ROOT=$TMP_ROOT/no-remote-budget
+  LANE_WT=$LANE_ROOT/no-remote-budget
+  FM_LANE_GUARD_STORE=$LANE_ROOT/store
+  export FM_LANE_GUARD_STORE
+  fm_git_init_commit "$LANE_WT"
+  printf 'saved without a remote\n' > "$LANE_WT/only-copy.py"
+
+  r=$(guard "$LANE_WT" HEAD 30)
+  expect_code 0 "$(rc_of "$r")" "a no-remote lane inside its budget must save and exit 0"
+  assert_contains "$(out_of "$r")" "SAVED no-remote-budget: local " \
+    "a no-remote save was silent instead of reporting the local snapshot"
+  local_dir=$(saved_local_dir "$(out_of "$r")")
+  [ -n "$local_dir" ] || fail "the no-remote save did not name its local snapshot"
+  [ "$(cat "$local_dir/only-copy.py")" = "saved without a remote" ] ||
+    fail "the local snapshot does not hold the no-remote work"
+  pass "a no-remote lane inside its budget saves locally and reports it"
 }
 
 test_clean_tree_is_silent() {
@@ -221,8 +275,15 @@ test_untracked_file_reaches_the_remote() {
   printf 'the only copy of the work\n' > "$LANE_WT/only-copy.txt"
 
   r=$(guard "$LANE_WT" HEAD 30)
-  expect_code 0 "$(rc_of "$r")" "an untracked-only lane inside its budget must be silent"
-  [ -z "$(out_of "$r")" ] || fail "the healthy path printed: '$(out_of "$r")'"
+  expect_code 0 "$(rc_of "$r")" "an untracked-only lane inside its budget must succeed"
+  assert_contains "$(out_of "$r")" "SAVED untracked: local " \
+    "a successful save did not report its local snapshot"
+  assert_contains "$(out_of "$r")" " remote refs/wip/untracked" \
+    "a save that also pushed did not report the remote ref"
+  local_dir=$(saved_local_dir "$(out_of "$r")")
+  [ -n "$local_dir" ] || fail "the SAVED line did not name a local snapshot directory"
+  [ "$(cat "$local_dir/only-copy.txt")" = "the only copy of the work" ] ||
+    fail "the local snapshot does not hold the untracked work"
 
   [ "$(remote_file refs/wip/untracked only-copy.txt)" = "the only copy of the work" ] ||
     fail "the untracked file did not reach refs/wip/untracked on the origin"
@@ -368,7 +429,8 @@ test_fresh_first_sighting_does_not_trip() {
 
   r=$(guard "$LANE_WT" HEAD 5)
   expect_code 0 "$(rc_of "$r")" "a freshly sighted lane must not trip"
-  [ -z "$(out_of "$r")" ] || fail "the healthy path printed: '$(out_of "$r")'"
+  assert_contains "$(out_of "$r")" "SAVED fresh: local " \
+    "a save inside the budget did not report its local snapshot"
   local seen now
   seen=$(git -C "$LANE_WT" config --get lane.fresh.seen)
   now=$(date -u +%s)
@@ -400,7 +462,8 @@ test_commits_ahead_never_trip() {
   pass "a lane that committed past its base never trips"
 }
 
-test_no_remote_refuses
+test_no_remote_lane_saves_locally_and_trips
+test_no_remote_lane_inside_budget_reports_saved
 test_clean_tree_is_silent
 test_untracked_file_reaches_the_remote
 test_tracked_changes_and_deletions_are_saved
