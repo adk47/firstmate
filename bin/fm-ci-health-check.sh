@@ -5,7 +5,7 @@
 #
 # Usage:
 #   fm-ci-health-check.sh [check]                       run the poll (silent unless firstmate should wake)
-#   fm-ci-health-check.sh classify <status> <conclusion> print the class of one run answer: red|green|pending|unknown
+#   fm-ci-health-check.sh classify <status> <conclusion> print the class of one run answer: red|green|pending|cancelled|unknown
 #   fm-ci-health-check.sh classify-run <owner/repo> <run-id>
 #                                                       read one run live and print its class with its evidence
 #   fm-ci-health-check.sh status                        print the last recorded poll verdict (no network)
@@ -20,17 +20,26 @@
 # newest push run, which really had concluded failure, but a newer run was
 # created seconds after the poll and was still in progress when the line was
 # read, so the reader could not tell a genuine red from a misread in-progress
-# run. Two things fix that for good: every run answer goes through ONE
-# classifier (bin/fm-ci-run-lib.sh), and every red names the run it read.
+# run. The same day main carried three real failures the check could not see
+# at all, because the scheduled smoke and the dispatched deploy that failed
+# were not push runs and it read only push runs. Three things fix that for
+# good: every run answer goes through ONE classifier (bin/fm-ci-run-lib.sh),
+# every red names the run it read, and the poll reads every run on the branch
+# whatever started it.
 #
 # THE SIGNALS, per watched repository:
-#   red      the newest push run on the watched branch of some workflow has a
-#            red conclusion (failure, timed_out, cancelled). The line names the
-#            workflow, the run id, the conclusion it read, the head commit,
-#            the run's creation time, and the exact `gh run view` that confirms
-#            it. A pending run (conclusion null: queued, in_progress, waiting,
-#            requested) is never red, and neither is an unknown conclusion: a
-#            new GitHub state must not silently become "red".
+#   red      the newest run on the watched branch of some workflow, whatever
+#            event started it, concluded red (failure or timed_out). The line
+#            names the workflow, the run id, the conclusion it read, the head
+#            commit, the run's creation time, and the exact `gh run view` that
+#            confirms it. A pending run (conclusion null: queued, in_progress,
+#            waiting, requested) is never red; a cancelled run is work that
+#            never ran, not work that broke, and is never red; an unknown
+#            conclusion is never red either, because a new GitHub state must
+#            not silently become "red". Two runs created in the same second
+#            are ordered by run id, so a same-second retry wins over the run
+#            it replaced. A red is not suppressed, delayed, or retried: while
+#            the newest run of a workflow stays red, every poll says so.
 #   queued   more queued runs than the repository's bar.
 #   cadence  a scheduled workflow (FM_CI_HEALTH_SCHEDULED) has not succeeded
 #            inside its allowed age. Judged only when the workflow file
@@ -56,7 +65,7 @@
 #                                (default: Muso-AI/H-DevOps:reconcile-prod-manifests.yaml:7200)
 #   FM_CI_HEALTH_INTERVAL_SECS   seconds between polls (default 900)
 #   FM_CI_HEALTH_RATE_FLOOR      stand down below this many remaining core calls (default 1500)
-#   FM_CI_HEALTH_PER_PAGE        push runs read per repository (default 60)
+#   FM_CI_HEALTH_PER_PAGE        runs read per repository, newest first (default 100, the API's most)
 #   FM_CI_HEALTH_TOKEN_ENV       an installer-managed env file to source for GH_TOKEN
 #                                (default ~/.config/muso/gh-app-token.env; "none" skips it)
 #   FM_CI_HEALTH_TRAILER         the routing reminder appended to a wake line
@@ -200,7 +209,7 @@ FS=$'\x1f'
 # name: name, id, status, conclusion, short head, created.
 newest_runs() {
   printf '%s\n' "$1" | jq -r '
-    [.workflow_runs // [] | group_by(.name)[] | max_by(.created_at)]
+    [.workflow_runs // [] | group_by(.name)[] | max_by([.created_at, .id])]
     | sort_by(.name)[]
     | [ (.name // ""), (.id // "" | tostring), (.status // ""), (.conclusion // ""),
         ((.head_sha // "")[0:9]), (.created_at // "") ]
@@ -273,7 +282,7 @@ action_check() {
   printf '%s\n' "$now" > "$STAMP" 2>/dev/null || return 0
   load_token_env
   floor=$(conf_int FM_CI_HEALTH_RATE_FLOOR 1500)
-  per_page=$(conf_int FM_CI_HEALTH_PER_PAGE 60)
+  per_page=$(conf_int FM_CI_HEALTH_PER_PAGE 100)
   rem=$(gh_api rate_limit | jq -r '.resources.core.remaining // 0' 2>/dev/null)
   case "$rem" in ''|*[!0-9]*) rem=0 ;; esac
   if [ "$rem" -lt "$floor" ]; then
@@ -301,7 +310,7 @@ action_check() {
       [ "$queued" -le "$bar" ] || msg="${msg}${msg:+; }$repo queued=$queued (>$bar)"
     fi
     poll_has_budget || break
-    runs=$(gh_api "repos/$repo/actions/runs?branch=$branch&event=push&per_page=$per_page") || continue
+    runs=$(gh_api "repos/$repo/actions/runs?branch=$branch&per_page=$per_page") || continue
     part=$(repo_red "$repo" "$branch" "$runs")
     [ -z "$part" ] || msg="${msg}${msg:+; }$part"
   done

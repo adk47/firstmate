@@ -20,13 +20,19 @@
 # because GitHub leaves the conclusion null until the run has completed and a
 # completed run with no conclusion is a state this code cannot vouch for.
 #
-#   red      failure, timed_out, cancelled: the run finished and did not pass.
-#   green    success, plus skipped and neutral: the run ended without failing.
-#   pending  an empty or null conclusion: the run has not answered yet, whatever
-#            its status says (queued, in_progress, waiting, requested, pending).
-#   unknown  any other string, including stale, action_required,
-#            startup_failure, and whatever GitHub adds next. Unknown never
-#            pages: a new upstream state must not silently become "red".
+#   red        failure, timed_out: the run ran and did not pass.
+#   green      success, plus skipped and neutral: the run ended without failing.
+#   pending    an empty or null conclusion: the run has not answered yet,
+#              whatever its status says (queued, in_progress, waiting,
+#              requested, pending).
+#   cancelled  cancelled: the run was stopped before it answered, by a newer
+#              push, a concurrency group, or a person. Work that never ran is
+#              not work that broke, so cancelled never pages.
+#   unknown    any other string, including stale, action_required,
+#              startup_failure, and whatever GitHub adds next. Unknown never
+#              pages: a new upstream state must not silently become "red".
+#
+# Only red pages.
 #
 # Both inputs are compared case-insensitively after trimming, so a `null` that
 # arrived as the four-letter word from a jq `tostring` reads the same as an
@@ -39,19 +45,15 @@ fm_ci_run_normalize() {
   printf '%s\n' "$v" | tr '[:upper:]' '[:lower:]'
 }
 
-# fm_ci_run_class <status> <conclusion>: print red|green|pending|unknown.
+# fm_ci_run_class <status> <conclusion>: print red|green|pending|cancelled|unknown.
 fm_ci_run_class() {
   local conclusion
   conclusion=$(fm_ci_run_normalize "${2:-}")
   case "$conclusion" in
-    failure|timed_out|cancelled) printf 'red\n' ;;
+    failure|timed_out) printf 'red\n' ;;
     success|skipped|neutral) printf 'green\n' ;;
     ''|null) printf 'pending\n' ;;
+    cancelled) printf 'cancelled\n' ;;
     *) printf 'unknown\n' ;;
   esac
-}
-
-# fm_ci_run_is_red <status> <conclusion>: true only for the red class.
-fm_ci_run_is_red() {
-  [ "$(fm_ci_run_class "$1" "$2")" = red ]
 }

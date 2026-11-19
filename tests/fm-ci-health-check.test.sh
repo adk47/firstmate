@@ -36,13 +36,13 @@ fixture_path() {  # <home> <api-path>
   printf '%s/api/%s\n' "$1" "$(printf '%s' "$2" | tr '/?&=' '____')"
 }
 
-# runs_fixture <home> <owner/repo> <branch> <per-page> <row>...: the push-runs
-# answer, each row "name|id|status|conclusion|created|head". A conclusion of
+# runs_fixture <home> <owner/repo> <branch> <per-page> <row>...: the branch's
+# runs answer, each row "name|id|status|conclusion|created|head". A conclusion of
 # "null" is written as JSON null, the way GitHub answers for an unfinished run.
 runs_fixture() {
   local home=$1 repo=$2 branch=$3 per_page=$4 path
   shift 4
-  path=$(fixture_path "$home" "repos/$repo/actions/runs?branch=$branch&event=push&per_page=$per_page")
+  path=$(fixture_path "$home" "repos/$repo/actions/runs?branch=$branch&per_page=$per_page")
   printf '%s\n' "$@" | jq -R -s '
     split("\n") | map(select(length > 0) | split("|"))
     | { workflow_runs: map({ name: .[0], id: (.[1] | tonumber), status: .[2],
@@ -70,9 +70,12 @@ classify() {  # <status> <conclusion>
 # Requirement 1 and 4: the classifier's table, through the public command.
 test_classifier_reads_only_a_finished_failure_as_red() {
   local c
-  for c in failure timed_out cancelled FAILURE ' failure '; do
+  for c in failure timed_out FAILURE ' failure '; do
     [ "$(classify completed "$c")" = red ] || fail "conclusion '$c' did not read as red: $(classify completed "$c")"
   done
+  [ "$(classify completed cancelled)" = cancelled ] || fail "cancelled did not read as cancelled: $(classify completed cancelled)"
+  [ "$(classify completed CANCELLED)" = cancelled ] || fail "CANCELLED did not read as cancelled"
+
   [ "$(classify completed success)" = green ] || fail "success did not read as green"
   [ "$(classify completed skipped)" = green ] || fail "skipped did not read as green"
   for s in queued in_progress waiting requested pending completed; do
@@ -82,7 +85,7 @@ test_classifier_reads_only_a_finished_failure_as_red() {
   for c in stale action_required startup_failure banana 'not a conclusion'; do
     [ "$(classify completed "$c")" = unknown ] || fail "conclusion '$c' did not read as unknown: $(classify completed "$c")"
   done
-  pass "only failure, timed_out, and cancelled read as red; null is pending; anything else is unknown"
+  pass "only failure and timed_out read as red; null is pending; cancelled is cancelled; anything else is unknown"
 }
 
 # Requirement 2: the 2026-11-19 shape. The newest run of each workflow is in
@@ -92,7 +95,7 @@ test_an_in_progress_newest_run_is_pending_and_prints_nothing() {
   local home out
   home=$(make_home pending)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 60 \
+  runs_fixture "$home" acme/widgets main 100 \
     'verify-devops-agent-tests|44632777885|in_progress|null|2026-11-19T22:53:30Z|a1ba56fdf0000' \
     'verify-devops-agent-tests|44623276860|completed|failure|2026-11-19T21:53:33Z|a9d29e8800000' \
     'Verify: pin-bump PRs run CI|44619765371|queued|null|2026-11-19T21:32:21Z|7ba1f876b0000' \
@@ -112,13 +115,13 @@ test_a_red_names_workflow_run_id_and_conclusion_and_still_pages_after_a_pending_
   local home out
   home=$(make_home red)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 60 \
+  runs_fixture "$home" acme/widgets main 100 \
     'verify-devops-agent-tests|44632777885|in_progress|null|2026-11-19T22:53:30Z|a1ba56fdf0000' \
     'verify-devops-agent-tests|44623276860|completed|failure|2026-11-19T21:53:33Z|a9d29e8800000'
   out=$(poll "$home" 100000)
   [ -z "$out" ] || fail "the in-progress poll printed: $out"
   # The run finished red; the next poll (one interval later) must page.
-  runs_fixture "$home" acme/widgets main 60 \
+  runs_fixture "$home" acme/widgets main 100 \
     'verify-devops-agent-tests|44632777885|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000' \
     'verify-devops-agent-tests|44623276860|completed|failure|2026-11-19T21:53:33Z|a9d29e8800000' \
     'build|7|completed|timed_out|2026-11-19T22:00:00Z|ccccccccc0000' \
@@ -132,10 +135,10 @@ test_a_red_names_workflow_run_id_and_conclusion_and_still_pages_after_a_pending_
   assert_contains "$out" "head a1ba56fdf created 2026-11-19T22:53:30Z" "the line did not carry the head and creation time"
   assert_contains "$out" "(gh run view 44632777885 --repo acme/widgets)" "the line did not carry the command that confirms it"
   assert_contains "$out" "build run 7 conclusion=timed_out" "a timed_out newest run was not red"
-  assert_contains "$out" "release run 8 conclusion=cancelled" "a cancelled newest run was not red"
+  assert_not_contains "$out" "release run 8" "a cancelled newest run was reported as red"
   assert_not_contains "$out" "44623276860" "an older run of the same workflow was reported instead of the newest"
   assert_not_contains "$out" "docs run 9" "a green workflow was reported"
-  pass "a red names the workflow, run id, conclusion, head, and the confirming command, and a fresh failure pages after a pending poll"
+  pass "a red names the workflow, run id, conclusion, head, and the confirming command; cancelled is not red; a fresh failure pages after a pending poll"
 }
 
 # Requirement 4: an unrecognised conclusion is unknown, and unknown never pages.
@@ -143,7 +146,7 @@ test_an_unrecognised_conclusion_does_not_page() {
   local home out
   home=$(make_home unknown)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 60 \
+  runs_fixture "$home" acme/widgets main 100 \
     'verify|11|completed|exploded|2026-11-19T22:53:30Z|a1ba56fdf0000' \
     'verify|10|completed|failure|2026-11-19T21:53:33Z|a9d29e8800000' \
     'lint|12|completed|stale|2026-11-19T22:53:30Z|b1ba56fdf0000' \
@@ -153,11 +156,62 @@ test_an_unrecognised_conclusion_does_not_page() {
   pass "an unrecognised or stale conclusion is unknown and does not page"
 }
 
+# Firstmate's re-scope of 2026-11-19: main really was red that hour, and the
+# check could not see it. `Health: smoke (every 15 min)` run 44632006730
+# concluded failure at 22:48Z on a schedule event, not a push, and the poll read
+# push runs only. While that failure is the workflow's newest run, every poll
+# must say red, and a cancelled run elsewhere must not.
+test_a_scheduled_failure_on_the_branch_keeps_paging_until_it_is_replaced() {
+  local home out
+  home=$(make_home smoke)
+  queued_fixture "$home" acme/widgets 0
+  runs_fixture "$home" acme/widgets main 100 \
+    'verify-devops-agent-tests|44632777885|in_progress|null|2026-11-19T22:53:30Z|a1ba56fdf0000' \
+    'Health: smoke (every 15 min)|44632006730|completed|failure|2026-11-19T22:48:19Z|a9d29e8800000' \
+    'Health: smoke (every 15 min)|44631000000|completed|success|2026-11-19T22:33:19Z|a9d29e8800000' \
+    'Deploy: web-credits-next|44630948368|completed|failure|2026-11-19T22:41:20Z|a9d29e8800000' \
+    'verify-no-plaintext-db-credentials|44630000001|completed|cancelled|2026-11-19T22:40:00Z|a9d29e8800000'
+  out=$(poll "$home" 100000)
+  assert_contains "$out" "Health: smoke (every 15 min) run 44632006730 conclusion=failure" "the scheduled smoke failure was not reported"
+  assert_contains "$out" "Deploy: web-credits-next run 44630948368 conclusion=failure" "the dispatched deploy failure was not reported"
+  assert_not_contains "$out" "44630000001" "a cancelled run was reported as red"
+  assert_not_contains "$out" "44632777885" "an in-progress run was reported as red"
+  # Nothing changed: the next poll says red again, with the same evidence.
+  out=$(poll "$home" 100900)
+  assert_contains "$out" "Health: smoke (every 15 min) run 44632006730 conclusion=failure" "a standing failure stopped paging on the next poll"
+  # The next scheduled run passes: the workflow is no longer red.
+  runs_fixture "$home" acme/widgets main 100 \
+    'Health: smoke (every 15 min)|44633000000|completed|success|2026-11-19T23:03:19Z|a9d29e8800000' \
+    'Health: smoke (every 15 min)|44632006730|completed|failure|2026-11-19T22:48:19Z|a9d29e8800000'
+  out=$(poll "$home" 101800)
+  [ -z "$out" ] || fail "a workflow whose newest run passed was still reported: $out"
+  pass "a failure started by a schedule or a dispatch pages on every poll until a newer run of that workflow replaces it"
+}
+
+# Two runs of one workflow created in the same second: the higher run id is the
+# newer one, whichever order the API listed them in.
+test_same_second_runs_are_ordered_by_run_id() {
+  local home out
+  home=$(make_home tie)
+  queued_fixture "$home" acme/widgets 0
+  runs_fixture "$home" acme/widgets main 100 \
+    'verify|3|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000' \
+    'verify|2|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  out=$(poll "$home" 100000)
+  [ -z "$out" ] || fail "a same-second retry that passed was reported red from the run it replaced: $out"
+  runs_fixture "$home" acme/widgets main 100 \
+    'verify|2|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000' \
+    'verify|3|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  out=$(poll "$home" 100900)
+  assert_contains "$out" "verify run 3 conclusion=failure" "a same-second retry that failed was hidden by the run it replaced"
+  pass "same-second runs of one workflow are ordered by run id"
+}
+
 test_queued_backlog_over_the_bar_pages_with_the_count() {
   local home out
   home=$(make_home queued)
   queued_fixture "$home" acme/widgets 11
-  runs_fixture "$home" acme/widgets main 60 'verify|1|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  runs_fixture "$home" acme/widgets main 100 'verify|1|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000'
   out=$(poll "$home" 100000)
   assert_contains "$out" "acme/widgets queued=11 (>10)" "a queued backlog over the bar was not reported"
   pass "a queued backlog over the repository's bar pages with the count and the bar"
@@ -167,7 +221,7 @@ test_poll_is_throttled_and_stands_down_on_a_thin_rate_budget() {
   local home out calls
   home=$(make_home throttle)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 60 'verify|1|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  runs_fixture "$home" acme/widgets main 100 'verify|1|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
   out=$(poll "$home" 100000)
   assert_contains "$out" "verify run 1 conclusion=failure" "the first poll did not page"
   calls=$(wc -l < "$home/gh.calls" | tr -d ' ')
@@ -187,10 +241,10 @@ test_an_unreadable_answer_is_silent_not_red() {
   local home out
   home=$(make_home unreadable)
   queued_fixture "$home" acme/widgets 0
-  printf 'HTTP 502 bad gateway\n' > "$(fixture_path "$home" 'repos/acme/widgets/actions/runs?branch=main&event=push&per_page=60')"
+  printf 'HTTP 502 bad gateway\n' > "$(fixture_path "$home" 'repos/acme/widgets/actions/runs?branch=main&per_page=100')"
   out=$(poll "$home" 100000)
   [ -z "$out" ] || fail "an unreadable runs answer printed: $out"
-  rm -f "$(fixture_path "$home" 'repos/acme/widgets/actions/runs?branch=main&event=push&per_page=60')"
+  rm -f "$(fixture_path "$home" 'repos/acme/widgets/actions/runs?branch=main&per_page=100')"
   out=$(poll "$home" 101000)
   [ -z "$out" ] || fail "a failed runs call printed: $out"
   pass "an unreadable or failed runs read is silent, never red"
@@ -218,8 +272,8 @@ test_the_documented_config_file_shape_drives_the_poll() {
   test_a_config_file_written_as_documented_is_parsed "$home"
   queued_fixture "$home" acme/widgets 0
   queued_fixture "$home" acme/gadgets 0
-  runs_fixture "$home" acme/widgets main 60 'verify|1|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
-  runs_fixture "$home" acme/gadgets main 60 'lint|2|completed|failure|2026-11-19T22:53:30Z|b1ba56fdf0000'
+  runs_fixture "$home" acme/widgets main 100 'verify|1|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  runs_fixture "$home" acme/gadgets main 100 'lint|2|completed|failure|2026-11-19T22:53:30Z|b1ba56fdf0000'
   out=$(env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_CONFIG_OVERRIDE="$home/config" FM_CI_HEALTH_NOW=100000 FM_CI_HEALTH_TOKEN_ENV=none \
     "$CHECK" check 2>&1)
@@ -252,7 +306,7 @@ SH
   printf 'export GH_TOKEN=tok-from-file\n' > "$home/app-token.env"
   printf 'FM_CI_HEALTH_TOKEN_ENV=~/app-token.env\n' > "$home/config/ci-health.env"
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 60 'verify|1|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  runs_fixture "$home" acme/widgets main 100 'verify|1|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000'
   out=$(env PATH="$home/fakebin:$PATH" HOME="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_CONFIG_OVERRIDE="$home/config" FM_CI_HEALTH_NOW=100000 FM_CI_HEALTH_REPOS='acme/widgets:main:10' \
     FM_CI_HEALTH_SCHEDULED=' ' "$CHECK" check 2>&1)
@@ -265,7 +319,7 @@ test_a_scheduled_workflow_is_judged_only_when_it_declares_a_schedule() {
   local home out wf_plain wf_sched
   home=$(make_home cadence)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 60 'verify|1|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  runs_fixture "$home" acme/widgets main 100 'verify|1|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000'
   wf_plain=$(printf 'on:\n  push:\n    branches: [main]\n' | base64 | tr -d '\n')
   wf_sched=$(printf 'on:\n  schedule:\n    - cron: "0 * * * *"\n' | base64 | tr -d '\n')
   printf '{"content":"%s"}\n' "$wf_plain" > "$(fixture_path "$home" 'repos/acme/widgets/contents/.github/workflows/reconcile.yaml')"
@@ -306,7 +360,7 @@ test_status_and_arm() {
   assert_present "$home/state/ci-health.check-trust" "arm bound no trust record"
   [ "$(stat -c %a "$home/state/ci-health.check.sh" 2>/dev/null || stat -f %Lp "$home/state/ci-health.check.sh")" = 700 ] || fail "the shim is not mode 0700"
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 60 'verify|1|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  runs_fixture "$home" acme/widgets main 100 'verify|1|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
   # The armed shim runs the tracked check against the home it was armed in.
   out=$(env PATH="$home/fakebin:$PATH" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
     FM_CI_HEALTH_NOW=100000 FM_CI_HEALTH_TOKEN_ENV=none FM_CI_HEALTH_REPOS='acme/widgets:main:10' \
@@ -324,6 +378,8 @@ test_classifier_reads_only_a_finished_failure_as_red
 test_an_in_progress_newest_run_is_pending_and_prints_nothing
 test_a_red_names_workflow_run_id_and_conclusion_and_still_pages_after_a_pending_poll
 test_an_unrecognised_conclusion_does_not_page
+test_a_scheduled_failure_on_the_branch_keeps_paging_until_it_is_replaced
+test_same_second_runs_are_ordered_by_run_id
 test_queued_backlog_over_the_bar_pages_with_the_count
 test_poll_is_throttled_and_stands_down_on_a_thin_rate_budget
 test_an_unreadable_answer_is_silent_not_red

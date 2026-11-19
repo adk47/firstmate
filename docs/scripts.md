@@ -143,6 +143,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fable-runway-check.sh` | Registered slow-poll check that wakes firstmate on a Fable or pool runway change, a sustained RED, or an account needing a login |
 | `fm-fable-runway-alert.sh` | The runway check's outward actions: the once-per-episode handoff note, Grok doorbell, and notifications |
 | `fm-fleet-stall-check.sh` | Registered check that wakes firstmate when several live workers stall on the model gateway at once, pages the captain when it persists, and probes the local CLIProxyAPI gateway |
+| `fm-ci-health-check.sh`  | Registered check that wakes firstmate when a watched repository's default branch is red, naming the workflow, run id, and conclusion it read; a run that has not concluded, was cancelled, or carries an unknown conclusion is never red; `classify-run` reads one run live with the same evidence |
+| `fm-ci-run-lib.sh`       | Single owner of how a GitHub Actions run's status and conclusion are read: red, green, pending, cancelled, or unknown |
 | `fm-board.sh`            | Single reader and writer of the board (`data/board.md`): at most five ordered goals, each with an acceptance check, a state, and a next action; prints the next unblocked action and the wake drain's one agenda line |
 | `fm-board-audit.sh`      | Registered check that wakes firstmate with the item to drive when the board is stale, no item advanced while one is unblocked, tasks never reported, or a `needs-decision` key was raised again unanswered |
 | `fm-watchdog-worker.sh`  | Timer-driven model-free fleet watchdog: relaunch dead or missing endpoints, walk a frozen worker up a stall ladder, nudge an idle one, restart failed fleet units, and rebuild the fleet after a reboot |
