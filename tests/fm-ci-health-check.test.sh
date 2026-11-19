@@ -196,15 +196,19 @@ test_an_unreadable_answer_is_silent_not_red() {
   pass "an unreadable or failed runs read is silent, never red"
 }
 
-# A config file is the operator interface the docs describe: a quoted
-# multi-value line with a trailing comment, and numeric lines with one too.
+# A config file is the operator interface the docs describe: a multi-value line
+# and numeric lines, with their comments on their own lines.
 test_a_config_file_written_as_documented_is_parsed() {  # <home>
   local home=$1
   cat > "$home/config/ci-health.env" <<'ENV'
-FM_CI_HEALTH_REPOS='acme/widgets:main:10 acme/gadgets:main:10'   # owner/repo:branch:queued-bar
-FM_CI_HEALTH_SCHEDULED=' '   # owner/repo:workflow-file:max-age-secs
-FM_CI_HEALTH_INTERVAL_SECS=100      # polls closer together than this are skipped
-FM_CI_HEALTH_TRAILER='route each red to the lane that owns it; don't hand-apply'   # owner's routing reminder
+# owner/repo:branch:queued-bar
+FM_CI_HEALTH_REPOS=acme/widgets:main:10 acme/gadgets:main:10
+# owner/repo:workflow-file:max-age-secs
+FM_CI_HEALTH_SCHEDULED=
+# polls closer together than this are skipped
+FM_CI_HEALTH_INTERVAL_SECS=100
+# the routing reminder appended to a wake line
+FM_CI_HEALTH_TRAILER=route each red to the lane that owns it; don't hand-apply
 ENV
 }
 
@@ -221,8 +225,7 @@ test_the_documented_config_file_shape_drives_the_poll() {
     "$CHECK" check 2>&1)
   assert_contains "$out" "acme/widgets main red:" "the first configured repository was not polled"
   assert_contains "$out" "acme/gadgets main red:" "the second configured repository was not polled"
-  assert_contains "$out" "don't hand-apply" "a quoted value containing an apostrophe was truncated"
-  assert_not_contains "$out" "# owner" "a trailing comment containing an apostrophe was kept in the value"
+  assert_contains "$out" "route each red to the lane that owns it; don't hand-apply" "the configured trailer was not read whole"
   out=$(env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_CONFIG_OVERRIDE="$home/config" FM_CI_HEALTH_NOW=100050 FM_CI_HEALTH_TOKEN_ENV=none \
     "$CHECK" check 2>&1)
@@ -231,7 +234,7 @@ test_the_documented_config_file_shape_drives_the_poll() {
     FM_CONFIG_OVERRIDE="$home/config" FM_CI_HEALTH_NOW=100150 FM_CI_HEALTH_TOKEN_ENV=none \
     "$CHECK" check 2>&1)
   assert_contains "$out" "acme/widgets main red:" "the configured interval of 100s was not read"
-  pass "a config file with quoted values and trailing comments is parsed and drives the poll"
+  pass "a config file written as documented is parsed and drives the poll"
 }
 
 test_a_tilde_token_env_path_is_expanded() {

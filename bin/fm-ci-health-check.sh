@@ -46,8 +46,9 @@
 # repository per poll).
 #
 # CONFIGURATION. config/ci-health.env is optional, local, gitignored, parsed
-# line by line and never sourced; a set environment variable of the same name
-# wins over the file, and the built-in default applies otherwise.
+# line by line and never sourced; a value is the rest of its line, so a comment
+# belongs on its own line. A set environment variable of the same name wins over
+# the file, and the built-in default applies otherwise.
 #
 #   FM_CI_HEALTH_REPOS           space-separated owner/repo[:branch[:queued-bar]]
 #                                (default: the Muso-AI fleet set, see REPOS_DEFAULT)
@@ -121,11 +122,13 @@ now_epoch() {
 }
 
 # conf <KEY> <default>: a set environment variable, else the env file's value,
-# else the default. The file is parsed line by line and never sourced.
+# else the default. The file is parsed line by line and never sourced; a value
+# is the rest of its line, so a comment belongs on its own line above it.
 conf() {
-  local key=$1 default=$2 line value='' found=0 quote='' trimmed=''
-  eval "value=\${$key:-}"
-  if [ -n "$value" ]; then
+  local key=$1 default=$2 line value='' found=0 set=''
+  eval "set=\${$key+x}"
+  if [ -n "$set" ]; then
+    eval "value=\${$key}"
     printf '%s\n' "$value"
     return 0
   fi
@@ -134,36 +137,13 @@ conf() {
       case "$line" in
         "$key="*)
           value=${line#*=}
-          quote=''
-          case "$value" in
-            \"*) quote='"' ;;
-            \'*) quote="'" ;;
-          esac
-          if [ -n "$quote" ]; then
-            value=${value#"$quote"}
-            case "$value" in
-              *[[:space:]]#*)
-                trimmed=${value%%[[:space:]]#*}
-                trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
-                case "$trimmed" in
-                  *"$quote") value=${trimmed%"$quote"} ;;
-                  *) value=${value%"$quote"*} ;;
-                esac
-                ;;
-              *) value=${value%"$quote"*} ;;
-            esac
-          else
-            case "$value" in
-              *[[:space:]]#*) value=${value%%[[:space:]]#*} ;;
-            esac
-            value=${value%"${value##*[![:space:]]}"}
-          fi
+          value=${value%"${value##*[![:space:]]}"}
           found=1
           ;;
       esac
     done < "$ENV_FILE"
   fi
-  if [ "$found" = 1 ] && [ -n "$value" ]; then
+  if [ "$found" = 1 ]; then
     printf '%s\n' "$value"
   else
     printf '%s\n' "$default"
@@ -254,10 +234,12 @@ EOF
 # empty when the workflow declares no schedule or is inside its allowance.
 scheduled_late() {
   local repo=$1 wf=$2 max_age=$3 now=$4 content has_schedule runs last last_epoch age
+  poll_has_budget || return 0
   content=$(gh_api "repos/$repo/contents/.github/workflows/$wf") || return 0
   has_schedule=$(printf '%s\n' "$content" | jq -r '.content // ""' | base64 -d 2>/dev/null \
     | grep -cE '^[[:space:]]+schedule:' || true)
   [ "${has_schedule:-0}" -gt 0 ] || return 0
+  poll_has_budget || return 0
   runs=$(gh_api "repos/$repo/actions/workflows/$wf/runs?status=success&per_page=1") || return 0
   last=$(printf '%s\n' "$runs" | jq -r '.workflow_runs[0].updated_at // ""' 2>/dev/null)
   [ -n "$last" ] || return 0
