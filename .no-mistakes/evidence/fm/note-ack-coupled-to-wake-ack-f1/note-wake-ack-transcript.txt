@@ -1,0 +1,69 @@
+=== Step 0: a captain note arrives (state/inbox/<id>.note + one check wake) ===
+
+$ /home/aaron/.no-mistakes/worktrees/72295860b10d/01M7S88SNH2BQH3J2511QPY8FA/bin/fm-inbox.sh note read the recovery plan before the lease work
+queued 1795075686-th4Joc
+  read the recovery plan before the lease work
+  firstmate will pick this up at its next check.
+[exit 0]
+note id: 1795075686-th4Joc
+--- queued wake rows:
+1795075686	1	check	inbox:1795075686-th4Joc	check: captain inbox note 1795075686-th4Joc - read the recovery plan before the lease work
+
+=== Step 1: reproduce the existing damage - the wake was acknowledged earlier, the note survived ===
+wake rows now: 0  (note is invisible to the queue)
+
+=== Step 2: fm-inbox.sh list self-heals the orphaned captain note ===
+[exit 0] stderr:
+fm-inbox: re-announced orphaned captain note 1795075686-th4Joc
+--- queued wake rows after list:
+1795075686	2	check	inbox:1795075686-th4Joc	check: captain inbox note 1795075686-th4Joc - read the recovery plan before the lease work 
+
+=== Step 3: run list again - the re-announcement is idempotent ===
+[exit 0] stderr:
+inbox:1795075686-th4Joc rows: 1
+
+=== Step 4: fm-wake-drain.sh presents the queue ===
+[exit 0] stderr:
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 98644.1795075686.vBtH50
+
+=== Step 5: a bare acknowledgement is REFUSED, naming the blocking note id ===
+
+$ /home/aaron/.no-mistakes/worktrees/72295860b10d/01M7S88SNH2BQH3J2511QPY8FA/bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 98644.1795075686.vBtH50
+wake drain: NOT acknowledged through 2 - these captain notes are still unacknowledged, so the wakes that announced them stay pending too:
+  1795075686-th4Joc
+Read and handle each note, then run bin/fm-inbox.sh drain --ack <id>... (it retires the note and the wake that announced it together), and re-run this acknowledgement.
+[exit 3]
+--- queue preserved:
+1795075686	2	check	inbox:1795075686-th4Joc	check: captain inbox note 1795075686-th4Joc - read the recovery plan before the lease work 
+--- note preserved:
+1795075686-th4Joc.note
+
+=== Step 6: one command clears both records ===
+
+$ /home/aaron/.no-mistakes/worktrees/72295860b10d/01M7S88SNH2BQH3J2511QPY8FA/bin/fm-inbox.sh drain --ack 1795075686-th4Joc
+acked 1795075686-th4Joc
+retired 1 wake(s) for 1795075686-th4Joc
+[exit 0]
+--- queue now:
+--- inbox now:
+handled
+--- handled:
+1795075686-th4Joc.note
+
+=== Step 7: the same acknowledgement now succeeds ===
+
+$ /home/aaron/.no-mistakes/worktrees/72295860b10d/01M7S88SNH2BQH3J2511QPY8FA/bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 98644.1795075686.vBtH50
+[exit 0]
+--- queue now: 0 rows
+
+=== Step 8: no override flag exists (fail-safe, not fail-open) ===
+
+$ /home/aaron/.no-mistakes/worktrees/72295860b10d/01M7S88SNH2BQH3J2511QPY8FA/bin/fm-inbox.sh note another note that must not be bypassed
+queued 1795075686-jjhrPg
+  another note that must not be bypassed
+  firstmate will pick this up at its next check.
+[exit 0]
+
+$ /home/aaron/.no-mistakes/worktrees/72295860b10d/01M7S88SNH2BQH3J2511QPY8FA/bin/fm-wake-drain.sh --ack-through 3 --recovery-generation 101619.1795075686.lrHsjx --allow-unacked-notes
+wake drain: unexpected acknowledgement arguments
+[exit 2]

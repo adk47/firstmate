@@ -1,0 +1,9 @@
+# Same new suite, run against the BASE commit tree (978bfca) with only the new
+# test files copied in, to prove the regression reproduces before the fix.
+# Command: git archive 978bfca | tar -x -C /tmp/fm-base-repro
+#          cp tests/fm-inbox-wake-ack.test.sh tests/wake-helpers.sh /tmp/fm-base-repro/tests/
+#          bash /tmp/fm-base-repro/tests/fm-inbox-wake-ack.test.sh
+not ok - acking a note should retire the wake that announced it (missing: 'retired 1 wake(s) for 1795075745-q9oWdZ')
+--- output ---
+acked 1795075745-q9oWdZ
+exit=1

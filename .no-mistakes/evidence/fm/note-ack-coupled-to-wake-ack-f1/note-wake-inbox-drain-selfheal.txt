@@ -1,0 +1,28 @@
+=== an orphaned captain note (its wake was already acknowledged) ===
+note waiting: 1795075753-aA8nrI
+queue rows: 0  (note is invisible to the queue)
+
+=== fm-inbox.sh drain re-announces it before printing ===
+[exit 0]
+stdout:
+  1795075753-aA8nrI
+      one of the three that sat 23h+
+  
+  Ack with: fm-inbox.sh drain --ack <id>...
+  Acking a note retires the wake that announced it, so one command clears both.
+stderr:
+  fm-inbox: re-announced orphaned captain note 1795075753-aA8nrI
+queue rows: 1
+
+=== the presented wake now cannot be bare-acknowledged ===
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 336420.1795075754.JQKIaS
+wake drain: NOT acknowledged through 2 - these captain notes are still unacknowledged, so the wakes that announced them stay pending too:
+  1795075753-aA8nrI
+Read and handle each note, then run bin/fm-inbox.sh drain --ack <id>... (it retires the note and the wake that announced it together), and re-run this acknowledgement.
+[exit 3]
+
+=== one command clears both, then the acknowledgement succeeds ===
+acked 1795075753-aA8nrI
+retired 1 wake(s) for 1795075753-aA8nrI
+[exit 0]
+[exit 0]
