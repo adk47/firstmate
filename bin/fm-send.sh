@@ -135,7 +135,11 @@
 # On the typed plane an unconfirmed submit (exit 3) keeps it armed rather than
 # dropping it, and only a proven send failure discards it.
 # Set FM_PENDING_REPLY_EXISTING_CORR=<id> when re-sending a recovery request
-# for an already-open expectation so a second record is not created. Direct
+# for an already-open expectation so a second record is not created. A plain
+# resend of the same body to the same secondmate inside the library's
+# duplicate window (FM_PENDING_REPLY_DEDUP_WINDOW_SECS) also reuses the open
+# record's corr instead of minting a sibling (fm_pending_reply_create exit 3),
+# and then follows the same resend rules as an explicit corr. Direct
 # unmarked captain input never creates one. A marked secondmate instruction
 # sent with --fire-and-forget <16-hex-delivery-id> uses the same inbox transport
 # without creating a reply expectation; its delivery id makes uncertain retries
@@ -947,9 +951,19 @@ else
         echo "error: cannot create pending-reply expectation without a resolvable secondmate task id" >&2
         exit 1
       fi
-      PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE") \
-        || { echo "error: failed to create parent pending-reply expectation for $TARGET_TASK_ID" >&2; exit 1; }
-      PENDING_REPLY_CREATED=1
+      pending_reply_create_rc=0
+      PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE" dedup) \
+        || pending_reply_create_rc=$?
+      case "$pending_reply_create_rc" in
+        0) PENDING_REPLY_CREATED=1 ;;
+        3)
+          # Same body, same secondmate, inside the duplicate window: this is a
+          # resend of the open request, so it rides that record's corr.
+          [ -n "$PENDING_REPLY_CORR" ] \
+            || { echo "error: duplicate pending-reply detection for $TARGET_TASK_ID returned no correlation" >&2; exit 1; }
+          ;;
+        *) echo "error: failed to create parent pending-reply expectation for $TARGET_TASK_ID" >&2; exit 1 ;;
+      esac
     fi
     fm_pending_reply_embed_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE
     if [ "$PENDING_REPLY_CREATED" != 1 ] \

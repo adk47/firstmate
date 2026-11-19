@@ -19,8 +19,53 @@
 # state/<task_id>.status onto the parent channel is a repair of the
 # FM_HOME-relative mixup, not acknowledgement of an arbitrary mate-home file.
 #
+# Matcher rules (captain incident 2026-11-19, two sibling records for one
+# steer to `lights` reposting each other on every answer):
+#   - One answer resolves exactly one record: a correlated line carrying corr A
+#     resolves A and nothing else. Resolution is terminal for that corr: a
+#     resolved or retired record never sends a recovery and never escalates.
+#   - A sibling answer is not a missed report. When A resolves, every still-open
+#     sibling record for the same task (delivered, recovery not yet attempted,
+#     or recovery sent and its turn not yet judged) has its turn evidence reset
+#     and records sibling_resolved_corr/epoch. From then on only a genuine
+#     busy->idle transition observed AFTER that epoch completes the sibling's
+#     turn, so the idle that followed the answer to A can never draw a REPOST
+#     REQUIRED for B. B is still resolvable by its own correlated answer at any
+#     time, and by the age sweep below once it has aged out.
+#   - No duplicate record for one request: a steer creator that passes the
+#     `dedup` flag to fm_pending_reply_create gets the existing open record's
+#     corr back (exit 3) when the same task already has an open record with
+#     the same request body created within FM_PENDING_REPLY_DEDUP_WINDOW_SECS,
+#     so a resend points at that corr instead of minting a sibling. fm-send is
+#     that creator; programmatic creators that need one delivery proof per
+#     operation (backlog handoff, secondmate restart) omit the flag.
+#   - Semantic busy state wins over the rendered tail: when the mate's
+#     state/<task_id>.busy-state (bin/fm-busy-lib.sh) is valid and its source is
+#     trusted for the recorded harness, that record is the observation.
+#
+# Age sweep (fm_pending_reply_sweep, run by the tick at most once per
+# FM_PENDING_REPLY_SWEEP_INTERVAL_SECS): retirement is an audited move of the
+# record to state/pending-replies/.retired/<corr_id> with phase=retired,
+# retired_epoch, retired_reason, and a terminal resolved_via. Horizons:
+#   - resolved records whose escalation (if any) is closed are archived
+#     FM_PENDING_REPLY_RESOLVED_RETAIN_SECS (default 3600) after resolution:
+#     retired_reason=resolved-closed, resolved_via unchanged.
+#   - records never delivered are retired FM_PENDING_REPLY_RETIRE_HORIZON_SECS
+#     (default 86400) after creation: a corr already seen resolved on the parent
+#     channel retires as retired_reason=resolved-elsewhere with the line's via;
+#     otherwise retired_reason=expired-undelivered, resolved_via=expired-undelivered.
+#   - delivered records whose recovery was withheld because a sibling resolved
+#     retire after the same horizon: retired_reason=superseded-by-sibling:<corr>,
+#     resolved_via=superseded-by-sibling.
+# Nothing else ages out. A delivered record with no answer and no resolved
+# sibling, a recovery in flight, and an escalated record all stay in the active
+# directory until a correlated answer or the captain closes them: "never
+# silently expire unresolved" still holds, and a retirement is never silent -
+# the record remains on disk stating why and when.
+#
 # Record location (parent FM_HOME):
 #   state/pending-replies/<corr_id>
+#   state/pending-replies/.retired/<corr_id>   retired records (audit trail)
 # One more durable input, owned by bin/fm-procevent-remote-reply.sh and read
 # here: state/remote-replies/<task_id>.caught-up, the remote reply mirror's
 # watermark (see the remote reply-channel freshness section below).
@@ -32,12 +77,14 @@
 #   parent_status=          absolute path of parent state/<task_id>.status
 #   parent_status_scan_signature=
 #   request_summary=        short sanitized summary (no secrets by design)
+#   request_digest=         cksum of the request body (marker and corr stripped)
+#                           used only for same-task duplicate detection
 #   created_epoch=          when the expectation was created
 #   delivered_epoch=        when the marked request was confirmed delivered
 #                           (empty until delivery; delivery never resolves)
 #   phase=                  awaiting_report | delivery_unknown | recovery_sending |
 #                           recovery_sent | recovery_failed | recovery_unknown |
-#                           escalated | resolved
+#                           escalated | resolved | retired
 #   turn_seen_busy=         0|1 after delivery for the original request turn
 #   request_turn_completed_epoch=
 #   recovery_attempted_epoch=
@@ -53,7 +100,14 @@
 #                           escalation was closed again (see the escalation
 #                           lifecycle note below); empty until then
 #   resolved_epoch=
-#   resolved_via=           status | document | helper | empty
+#   resolved_via=           status | document | helper | empty, or a terminal
+#                           sweep value: expired-undelivered | superseded-by-sibling
+#   sibling_resolved_corr=  corr of the same-task sibling whose resolution reset
+#                           this record's turn evidence (empty until then)
+#   sibling_resolved_epoch=
+#   retired_epoch=          when the sweep moved the record to .retired/
+#   retired_reason=         resolved-closed | resolved-elsewhere |
+#                           expired-undelivered | superseded-by-sibling:<corr>
 #   wrong_home_hits=        count of corr sightings under the secondmate home
 #   wrong_home_first_sighting= encoded path:line identity of the first sighting
 #   wrong_home_sightings=   comma-separated encoded path:line identities
@@ -85,6 +139,11 @@
 #   FM_PENDING_REPLY_SEND_HOOK    optional command template for recovery delivery
 #                                 (tests); receives task_id and full message as args
 #   FM_PENDING_REPLY_NOW          optional fixed epoch for deterministic tests
+#   FM_PENDING_REPLY_DEDUP_WINDOW_SECS      default 300; same-body same-task
+#                                           records inside it reuse one corr
+#   FM_PENDING_REPLY_RESOLVED_RETAIN_SECS   default 3600; see the age sweep
+#   FM_PENDING_REPLY_RETIRE_HORIZON_SECS    default 86400; see the age sweep
+#   FM_PENDING_REPLY_SWEEP_INTERVAL_SECS    default 600; 0 sweeps every tick
 
 # shellcheck source=bin/fm-marker-lib.sh
 _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PENDING_REPLY_LIB_DIR="."
@@ -100,6 +159,34 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
+FM_PENDING_REPLY_DEDUP_WINDOW_DEFAULT=300
+FM_PENDING_REPLY_RESOLVED_RETAIN_DEFAULT=3600
+FM_PENDING_REPLY_RETIRE_HORIZON_DEFAULT=86400
+FM_PENDING_REPLY_SWEEP_INTERVAL_DEFAULT=600
+
+_fm_pending_reply_uint_env() {  # <env-name> <default>
+  local value=${!1:-}
+  case "$value" in
+    ''|*[!0-9]*) printf '%s' "$2" ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+fm_pending_reply_dedup_window_secs() {
+  _fm_pending_reply_uint_env FM_PENDING_REPLY_DEDUP_WINDOW_SECS "$FM_PENDING_REPLY_DEDUP_WINDOW_DEFAULT"
+}
+
+fm_pending_reply_resolved_retain_secs() {
+  _fm_pending_reply_uint_env FM_PENDING_REPLY_RESOLVED_RETAIN_SECS "$FM_PENDING_REPLY_RESOLVED_RETAIN_DEFAULT"
+}
+
+fm_pending_reply_retire_horizon_secs() {
+  _fm_pending_reply_uint_env FM_PENDING_REPLY_RETIRE_HORIZON_SECS "$FM_PENDING_REPLY_RETIRE_HORIZON_DEFAULT"
+}
+
+fm_pending_reply_sweep_interval_secs() {
+  _fm_pending_reply_uint_env FM_PENDING_REPLY_SWEEP_INTERVAL_SECS "$FM_PENDING_REPLY_SWEEP_INTERVAL_DEFAULT"
+}
 
 fm_pending_reply_now() {
   if [ -n "${FM_PENDING_REPLY_NOW:-}" ]; then
@@ -176,6 +263,40 @@ fm_pending_reply_summarize() {  # <text>
     cleaned="${cleaned:0:117}..."
   fi
   printf '%s' "$cleaned"
+}
+
+# Stable digest of a request body for same-task duplicate detection: the
+# from-firstmate marker and any leading corr token are stripped so a resend that
+# fm-send re-marks or re-embeds hashes the same as the original.
+fm_pending_reply_request_digest() {  # <text>
+  local body=$1
+  body=${body#"$FM_FROMFIRST_MARK"}
+  body=$(printf '%s' "$body" | sed -E "1s/^corr=[A-Fa-f0-9]{16}[[:space:]]*//")
+  printf '%s' "$body" | cksum 2>/dev/null | awk '{printf "%s-%s", $1, $2}'
+}
+
+# Prints the corr of an open record for <task_id> carrying <digest> created
+# within the duplicate window before <now>; empty when none.
+fm_pending_reply_find_duplicate() {  # <state-dir> <task_id> <digest> <now>
+  local state=$1 task_id=$2 digest=$3 now=$4 dir rec corr created window
+  [ -n "$digest" ] || return 1
+  dir=$(fm_pending_reply_dir "$state")
+  [ -d "$dir" ] || return 1
+  window=$(fm_pending_reply_dedup_window_secs)
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    case "$(basename "$rec")" in .*) continue ;; esac
+    [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || continue
+    [ "$(fm_pending_reply_get "$rec" request_digest)" = "$digest" ] || continue
+    created=$(fm_pending_reply_get "$rec" created_epoch)
+    case "$created" in ''|*[!0-9]*) continue ;; esac
+    [ "$created" -le "$now" ] && [ $((now - created)) -le "$window" ] || continue
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    fm_pending_reply_corr_reusable "$state" "$corr" "$task_id" || continue
+    printf '%s' "$corr"
+    return 0
+  done
+  return 1
 }
 
 fm_pending_reply_get() {  # <record-path> <key>
@@ -272,13 +393,27 @@ fm_pending_reply_embed_corr() {  # <message> <corr_id> <result-var>
 
 # Create a durable pending-reply expectation. Prints corr_id on success.
 # Does not deliver anything. Fails if parent paths cannot be prepared.
-fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text>
-  local parent_home=$1 state=$2 task_id=$3 request_text=$4
-  local dir rec corr now summary status_path tmp
+# With the optional `dedup` flag, exit 3 (with the corr printed) means the
+# same task already holds an open record for this exact request body inside
+# the duplicate window: the caller must deliver under that corr rather than
+# treat the record as newly created. Without the flag every call mints its own
+# expectation, which is what a creator that needs one delivery proof per
+# operation relies on.
+fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text> [dedup]
+  local parent_home=$1 state=$2 task_id=$3 request_text=$4 dedup=${5:-}
+  local dir rec corr now summary status_path tmp digest existing
   [ -n "$parent_home" ] && [ -n "$state" ] && [ -n "$task_id" ] || return 2
+  case "$dedup" in ''|dedup) ;; *) return 2 ;; esac
   dir=$(fm_pending_reply_dir "$state")
   mkdir -p "$dir" || return 1
   chmod 700 "$dir" 2>/dev/null || true
+  now=$(fm_pending_reply_now)
+  digest=$(fm_pending_reply_request_digest "$request_text")
+  if [ "$dedup" = dedup ] \
+    && existing=$(fm_pending_reply_find_duplicate "$state" "$task_id" "$digest" "$now"); then
+    printf '%s' "$existing"
+    return 3
+  fi
   corr=$(fm_pending_reply_new_id)
   [ "${#corr}" -eq 16 ] || return 1
   rec=$(fm_pending_reply_path "$state" "$corr")
@@ -288,7 +423,6 @@ fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text
     rec=$(fm_pending_reply_path "$state" "$corr")
     [ ! -e "$rec" ] || return 1
   fi
-  now=$(fm_pending_reply_now)
   summary=$(fm_pending_reply_summarize "$request_text")
   status_path="$state/${task_id}.status"
   # Prefer absolute parent_status when parent_home/state resolve.
@@ -309,6 +443,7 @@ parent_home=$parent_home
 parent_status=$status_path
 parent_status_scan_signature=
 request_summary=$summary
+request_digest=$digest
 created_epoch=$now
 delivered_epoch=
 phase=awaiting_report
@@ -324,6 +459,10 @@ recovery_turn_completed_epoch=
 escalated_epoch=
 resolved_epoch=
 resolved_via=
+sibling_resolved_corr=
+sibling_resolved_epoch=
+retired_epoch=
+retired_reason=
 wrong_home_hits=0
 wrong_home_first_sighting=
 wrong_home_sightings=
@@ -671,6 +810,71 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   # The record is resolved either way; a failed close stays retryable from the
   # watcher tick rather than turning a settled request back into a failure.
   _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
+  # The mate just reported through the parent channel: the idle that follows is
+  # the end of THIS answer's turn, not proof that a sibling request was missed.
+  fm_pending_reply_note_sibling_resolved "$state" \
+    "$(fm_pending_reply_get "$rec" task_id)" "$corr" "$now" || true
+  return 0
+}
+
+# One answer resolves exactly one record. Called once when <resolved-corr>
+# resolves: every other open record for <task_id> that is still waiting on a
+# turn judgement has that evidence reset and the sibling resolution recorded,
+# so fm_pending_reply_observe_busy demands a fresh busy->idle transition after
+# <epoch> before the sibling's turn counts as completed. A record whose
+# recovery is already in flight (recovery_sending) or already judged
+# (recovery_failed/unknown, escalated) is left alone: nothing pending there can
+# be triggered by this idle.
+fm_pending_reply_note_sibling_resolved() {  # <state-dir> <task_id> <resolved-corr> <epoch>
+  local state=$1 task_id=$2 resolved_corr=$3 epoch=$4 dir rec corr phase
+  [ -n "$task_id" ] && [ -n "$resolved_corr" ] || return 1
+  dir=$(fm_pending_reply_dir "$state")
+  [ -d "$dir" ] || return 0
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    case "$(basename "$rec")" in .*) continue ;; esac
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    [ -n "$corr" ] && [ "$corr" != "$resolved_corr" ] || continue
+    [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || continue
+    [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ] || continue
+    phase=$(fm_pending_reply_get "$rec" phase)
+    case "$phase" in
+      awaiting_report)
+        [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || continue
+        fm_pending_reply_set "$rec" turn_seen_busy 0 || continue
+        fm_pending_reply_set "$rec" request_turn_completed_epoch "" || continue
+        ;;
+      recovery_sent)
+        fm_pending_reply_set "$rec" recovery_turn_seen_busy 0 || continue
+        fm_pending_reply_set "$rec" recovery_turn_completed_epoch "" || continue
+        ;;
+      *) continue ;;
+    esac
+    fm_pending_reply_set "$rec" sibling_resolved_corr "$resolved_corr" || continue
+    fm_pending_reply_set "$rec" sibling_resolved_epoch "$epoch" || continue
+  done
+  return 0
+}
+
+# Resolve every other open delivered record for <task_id> from the parent
+# channel before <corr> acts on its own turn evidence. Record order inside one
+# tick is arbitrary, so without this a sibling's fresh answer could sit unread
+# in the status file while this record sends a repost that answer makes wrong.
+fm_pending_reply_resolve_siblings() {  # <state-dir> <task_id> <corr>
+  local state=$1 task_id=$2 own=$3 dir rec corr phase
+  dir=$(fm_pending_reply_dir "$state")
+  [ -d "$dir" ] || return 0
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    case "$(basename "$rec")" in .*) continue ;; esac
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    [ -n "$corr" ] && [ "$corr" != "$own" ] || continue
+    [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || continue
+    phase=$(fm_pending_reply_get "$rec" phase)
+    case "$phase" in resolved|retired) continue ;; esac
+    [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ] || continue
+    fm_pending_reply_try_resolve "$state" "$corr" >/dev/null 2>&1 || true
+  done
   return 0
 }
 
@@ -706,8 +910,11 @@ fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
     idle)
       if [ -z "$completed" ]; then
         # Prefer a busy->idle transition. Also accept a pure idle after delivery
-        # when the first observation already missed the busy window (fast turns).
-        if [ "$seen" = 1 ] || [ "$seen" = 0 ]; then
+        # when the first observation already missed the busy window (fast turns)
+        # - except after a sibling record resolved: that idle is the end of the
+        # sibling's answer, so only a transition observed since then counts.
+        if [ "$seen" = 1 ] \
+          || { [ "$seen" = 0 ] && [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_epoch)" ]; }; then
           now=$(fm_pending_reply_now)
           fm_pending_reply_set "$rec" "$field_completed" "$now" || return 1
         fi
@@ -901,7 +1108,7 @@ fm_pending_reply_recovery_message() {  # <record-path>
 fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
   local rec phase completed delivered attempted grace now age task_id msg parent_home send_status=0
-  local sender_pid sender_identity
+  local sender_pid sender_identity sibling_epoch
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -921,6 +1128,21 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   age=$((now - delivered))
   [ "$age" -ge "$grace" ] || return 1
   task_id=$(fm_pending_reply_get "$rec" task_id)
+  # A sibling's answer may already be on the channel but not yet read this
+  # tick; let it reset this record's turn evidence before anything is sent.
+  fm_pending_reply_resolve_siblings "$state" "$task_id" "$corr"
+  [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] || return 1
+  completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
+  [ -n "$completed" ] || return 1
+  sibling_epoch=$(fm_pending_reply_get "$rec" sibling_resolved_epoch)
+  if [ -n "$sibling_epoch" ]; then
+    # After a sibling resolved, only a busy->idle transition observed since
+    # then is evidence, and the grace restarts from that resolution.
+    [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] || return 1
+    case "$sibling_epoch" in *[!0-9]*) return 1 ;; esac
+    [ "$completed" -gt "$sibling_epoch" ] || return 1
+    [ $((now - sibling_epoch)) -ge "$grace" ] || return 1
+  fi
   # A remote mate's report may exist and simply not have been mirrored yet.
   fm_pending_reply_missing_report_is_evidence "$state" "$task_id" "$completed" || return 1
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
@@ -1196,6 +1418,9 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   fi
   case "$phase" in
     recovery_sent)
+      # A sibling's answer already on the channel resets this record's turn
+      # evidence (fm_pending_reply_note_sibling_resolved); read it first.
+      fm_pending_reply_resolve_siblings "$state" "$(fm_pending_reply_get "$rec" task_id)" "$corr"
       completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)
       [ -n "$completed" ] || return 1
       # Same reply-channel evidence rule the recovery repost obeys: a missing
@@ -1431,6 +1656,7 @@ fm_pending_reply_tick() {  # <state-dir>
       fm_pending_reply_close_escalation "$state" "$corr" || true
       continue
     fi
+    [ "$phase" != retired ] || continue
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
     phase=$(fm_pending_reply_get "$rec" phase)
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -1509,7 +1735,7 @@ fm_pending_reply_tick() {  # <state-dir>
             observation=$("$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
               fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
             case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
-          else
+          elif ! observation=$(fm_pending_reply_semantic_observation "$state" "$task_id" "$harness"); then
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
           fi
           observation_tasks+=("$task_id")
@@ -1520,10 +1746,183 @@ fm_pending_reply_tick() {  # <state-dir>
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true
   done
+  fm_pending_reply_sweep_if_due "$state" || true
   return 0
 }
 
-# True when any open (non-resolved) pending reply exists for a task.
+# --- semantic busy observation ----------------------------------------------
+#
+# A secondmate launched on a converted harness (Pi, Claude, OpenCode, Gemini)
+# still writes the semantic busy record state/<task_id>.busy-state through its
+# per-task adapter, exactly like an ordinary worker. When that record is valid
+# for the armed gen and its source is trusted for the recorded harness, it is a
+# better observation than the rendered tail: the captain incident of 2026-11-19
+# had `lights` (Pi) reported missed three times while its busy-state said busy,
+# because the rendered-tail fallback aged into fallback-idle during long turns.
+# Prints busy|idle on success; anything else (missing, malformed, stale gen,
+# untrusted source, unknown) returns 1 so the caller falls back as before.
+fm_pending_reply_semantic_observation() {  # <state-dir> <task_id> <harness>
+  local state=$1 task_id=$2 harness=$3 record r_state r_source
+  [ -n "$task_id" ] && [ -n "$harness" ] || return 1
+  [ -f "$state/${task_id}.busy-state" ] || return 1
+  if ! command -v fm_busy_record_read >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-busy-lib.sh
+    . "$_FM_PENDING_REPLY_LIB_DIR/fm-busy-lib.sh" || return 1
+  fi
+  record=$(fm_busy_record_read "$state" "$task_id") || return 1
+  r_state=${record%% *}
+  r_source=${record#* }
+  r_source=${r_source%% *}
+  case "$r_state" in busy|idle) ;; *) return 1 ;; esac
+  fm_busy_source_trusted "$harness" "$r_source" || return 1
+  printf '%s' "$r_state"
+}
+
+# --- age sweep and retirement -----------------------------------------------
+
+fm_pending_reply_retired_dir() {  # <state-dir>
+  printf '%s/.retired' "$(fm_pending_reply_dir "$1")"
+}
+
+fm_pending_reply_retired_path() {  # <state-dir> <corr_id>
+  printf '%s/%s' "$(fm_pending_reply_retired_dir "$1")" "$2"
+}
+
+# Retire one record: stamp why and when, give it a terminal resolved_via when it
+# never resolved, drop its delivery sidecar, and move it to .retired/ where no
+# tick, matcher, or duplicate search reads it again. Never deletes.
+fm_pending_reply_retire() {  # <state-dir> <corr_id> <reason> [terminal-via]
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_pending_reply_retire_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+_fm_pending_reply_retire_locked() {  # <state-dir> <corr_id> <reason> [terminal-via]
+  local state=$1 corr=$2 reason=$3 via=${4-} rec dest dir now marker
+  [ -n "$reason" ] || return 2
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  dir=$(fm_pending_reply_retired_dir "$state")
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  dest="$dir/$corr"
+  [ ! -e "$dest" ] || return 1
+  now=$(fm_pending_reply_now)
+  if [ -n "$via" ]; then
+    fm_pending_reply_set "$rec" resolved_via "$via" || return 1
+    [ -n "$(fm_pending_reply_get "$rec" resolved_epoch)" ] \
+      || fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
+  fi
+  fm_pending_reply_set "$rec" retired_reason "$reason" || return 1
+  fm_pending_reply_set "$rec" retired_epoch "$now" || return 1
+  fm_pending_reply_set "$rec" phase retired || return 1
+  marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+  rm -f "$marker" 2>/dev/null || true
+  mv -f "$rec" "$dest"
+}
+
+# Bounded age sweep. See the header's "Age sweep" section for the exact
+# horizons and for what deliberately never ages out. Prints one
+# "<corr>\t<reason>" line per retired record so a caller can account for them.
+fm_pending_reply_sweep() {  # <state-dir>
+  local state=$1 dir rec corr phase now created resolved delivered age
+  local retain horizon escalated closed line via sibling reason
+  dir=$(fm_pending_reply_dir "$state")
+  [ -d "$dir" ] || return 0
+  now=$(fm_pending_reply_now)
+  retain=$(fm_pending_reply_resolved_retain_secs)
+  horizon=$(fm_pending_reply_retire_horizon_secs)
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    case "$(basename "$rec")" in .*) continue ;; esac
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    [ -n "$corr" ] || continue
+    [ "$(basename "$rec")" = "$corr" ] || continue
+    phase=$(fm_pending_reply_get "$rec" phase)
+    created=$(fm_pending_reply_get "$rec" created_epoch)
+    case "$created" in ''|*[!0-9]*) continue ;; esac
+    delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+    case "$phase" in
+      resolved)
+        resolved=$(fm_pending_reply_get "$rec" resolved_epoch)
+        case "$resolved" in ''|*[!0-9]*) resolved=$created ;; esac
+        [ $((now - resolved)) -ge "$retain" ] || continue
+        escalated=$(fm_pending_reply_get "$rec" escalated_epoch)
+        if [ -n "$escalated" ]; then
+          closed=$(fm_pending_reply_get "$rec" escalation_closed_epoch)
+          if [ -z "$closed" ]; then
+            fm_pending_reply_close_escalation "$state" "$corr" || true
+            closed=$(fm_pending_reply_get "$rec" escalation_closed_epoch)
+            [ -n "$closed" ] || continue
+          fi
+        fi
+        reason='resolved-closed'
+        via=
+        ;;
+      awaiting_report|delivery_unknown)
+        [ $((now - created)) -ge "$horizon" ] || continue
+        if [ -z "$delivered" ]; then
+          # Never delivered. A correlated line on the parent channel still wins
+          # (the mate may have answered a copy that reached it another way).
+          line=$(fm_pending_reply_find_resolve_line \
+            "$(fm_pending_reply_get "$rec" parent_status)" "$corr")
+          if [ -n "$line" ]; then
+            reason='resolved-elsewhere'
+            via=$(fm_pending_reply_resolve_via_of_line "$line")
+          else
+            reason='expired-undelivered'
+            via=expired-undelivered
+          fi
+        else
+          [ "$phase" = awaiting_report ] || continue
+          sibling=$(fm_pending_reply_get "$rec" sibling_resolved_corr)
+          [ -n "$sibling" ] || continue
+          [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || continue
+          # Its own answer still wins over retirement.
+          if fm_pending_reply_try_resolve "$state" "$corr" >/dev/null 2>&1; then
+            continue
+          fi
+          reason="superseded-by-sibling:$sibling"
+          via=superseded-by-sibling
+        fi
+        ;;
+      *) continue ;;
+    esac
+    if fm_pending_reply_retire "$state" "$corr" "$reason" "$via"; then
+      printf '%s\t%s\n' "$corr" "$reason"
+    fi
+  done
+  return 0
+}
+
+# The tick's throttle around the sweep: at most once per sweep interval,
+# recorded in a dot-stamp inside the pending-replies directory.
+fm_pending_reply_sweep_if_due() {  # <state-dir>
+  local state=$1 dir stamp interval now last
+  dir=$(fm_pending_reply_dir "$state")
+  [ -d "$dir" ] || return 0
+  interval=$(fm_pending_reply_sweep_interval_secs)
+  stamp="$dir/.sweep-last"
+  now=$(fm_pending_reply_now)
+  if [ "$interval" -gt 0 ] && [ -f "$stamp" ]; then
+    last=$(cat "$stamp" 2>/dev/null || true)
+    case "$last" in
+      ''|*[!0-9]*) ;;
+      *) [ $((now - last)) -ge "$interval" ] || return 0 ;;
+    esac
+  fi
+  printf '%s\n' "$now" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp" || true
+  fm_pending_reply_sweep "$state" >/dev/null
+}
+
+# True when any open (non-terminal) pending reply exists for a task.
 fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
   local state=$1 task_id=$2 dir rec phase tid
   dir=$(fm_pending_reply_dir "$state")
@@ -1533,7 +1932,7 @@ fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
     tid=$(fm_pending_reply_get "$rec" task_id)
     [ "$tid" = "$task_id" ] || continue
     phase=$(fm_pending_reply_get "$rec" phase)
-    [ "$phase" != resolved ] || continue
+    case "$phase" in resolved|retired) continue ;; esac
     return 0
   done
   return 1
