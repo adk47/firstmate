@@ -1,0 +1,50 @@
+=== 1. Three captain notes arrive while firstmate is mid-turn ===
+--- state/.wake-queue ---
+seq=1 kind=check key=inbox:1795057962-Ep4oGa payload=check: captain inbox note 1795057962-Ep4oGa - Fable recovery plan
+seq=2 kind=check key=inbox:1795057962-heGsrZ payload=check: captain inbox note 1795057962-heGsrZ - Orchestration review
+seq=3 kind=check key=inbox:1795057962-XbBkV8 payload=check: captain inbox note 1795057962-XbBkV8 - Proof-only request
+--- pending captain notes ---
+1795057962-Ep4oGa
+1795057962-heGsrZ
+1795057962-XbBkV8
+
+=== 2. Present the queue and try to acknowledge the wakes only ===
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 3 --recovery-generation 3125968.1795057962.GTeOho
+exit code: 3
+  wake drain: NOT acknowledged through 3 - these captain notes are still unacknowledged, so the wakes that announced them stay pending too:
+    1795057962-Ep4oGa
+    1795057962-heGsrZ
+    1795057962-XbBkV8
+  Read and handle each note, then run bin/fm-inbox.sh drain --ack <id>... (it retires the note and the wake that announced it together), and re-run this acknowledgement.
+  To acknowledge the wakes anyway and leave those notes pending, add --allow-unacked-notes.
+
+--- state/.wake-queue ---
+seq=1 kind=check key=inbox:1795057962-Ep4oGa payload=check: captain inbox note 1795057962-Ep4oGa - Fable recovery plan
+seq=2 kind=check key=inbox:1795057962-heGsrZ payload=check: captain inbox note 1795057962-heGsrZ - Orchestration review
+seq=3 kind=check key=inbox:1795057962-XbBkV8 payload=check: captain inbox note 1795057962-XbBkV8 - Proof-only request
+--- pending captain notes ---
+1795057962-Ep4oGa
+1795057962-heGsrZ
+1795057962-XbBkV8
+
+=== 3. One command handles all three notes and retires their wakes ===
+acked 1795057962-Ep4oGa
+retired 1 wake(s) for 1795057962-Ep4oGa
+acked 1795057962-heGsrZ
+retired 1 wake(s) for 1795057962-heGsrZ
+acked 1795057962-XbBkV8
+retired 1 wake(s) for 1795057962-XbBkV8
+
+--- state/.wake-queue ---
+(empty)
+--- pending captain notes ---
+(none)
+
+=== 4. The same wake acknowledgement now succeeds ===
+exit code: 0
+--- state/.wake-queue ---
+(empty)
+--- pending captain notes ---
+(none)
+
+=== demo complete ===
