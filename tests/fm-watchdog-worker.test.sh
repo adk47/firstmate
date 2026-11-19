@@ -1045,6 +1045,62 @@ test_a_finished_lane_is_left_alone_and_an_unfinished_one_is_recovered() {
   pass "a finished lane is left alone and an unfinished one is still recovered"
 }
 
+# The same finished lane must be left alone by the reboot path as well: the boot
+# pass runs before the task pass, so a guard that lived only in the task pass
+# would relaunch every already-shipped lane after a power loss and spend a model
+# run on each before the task pass ever looked at it.
+test_a_reboot_leaves_a_shipped_lane_alone_and_recovers_an_unfinished_one() {
+  local home now out
+  home=$(make_home boot-finished); fake_tools "$home"
+  worker "$home" w1 dead
+  worker "$home" w2 dead
+  printf 'state: done · source: run-step · run passed: PR merged/closed\n' > "$home/crew/w1"
+  printf 'state: working · source: status-log · mid-task\n' > "$home/crew/w2"
+  printf 'dead\n' > "$home/fix/chair.state"
+  now=$(start_clock)
+  out=$(tick "$home" "$now" FM_WATCHDOG_BOOT_ID=boot-a)
+  assert_contains "$out" "watchdog: boot recovery: relaunched 1 of 2 task(s)" \
+    "a reboot relaunched a shipped lane, so finished work was resurrected at model cost: $out"
+  assert_eq "$(counter "$home" '^control w1 ')" "0" \
+    "the reboot path relaunched a lane whose work had already shipped"
+  assert_eq "$(counter "$home" '^control w2 ')" "1" \
+    "the reboot path did not recover an unfinished lane: $out"
+  assert_eq "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" "0" \
+    "a shipped lane was charged a reboot relaunch"
+  out=$(tick "$home" "$((now + 60))")
+  assert_eq "$(counter "$home" '^control w1 ')" "0" \
+    "the liveness rung relaunched a lane whose work had already shipped: $out"
+  pass "a reboot leaves a shipped lane alone and recovers an unfinished one"
+}
+
+# `done` also covers a run whose pipeline is still watching an open PR, which is
+# work firstmate has not been told has shipped: killing that lane's agent on a
+# "Connection error" must still bring it back, through both the liveness rung and
+# the reboot path.
+test_a_lane_still_monitoring_its_pr_is_recovered() {
+  local home now out
+  home=$(make_home monitoring); fake_tools "$home"
+  worker "$home" w1 dead
+  printf 'state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)\n' \
+    > "$home/crew/w1"
+  now=$(start_clock)
+  out=$(tick "$home" "$now")
+  assert_eq "$(counter "$home" '^control w1 ')" "1" \
+    "a lane done only because its PR was still being monitored was never recovered: $out"
+
+  home=$(make_home monitoring-boot); fake_tools "$home"
+  worker "$home" w2 dead
+  printf 'state: done · source: status-log · pushed and opened the PR · run still monitoring PR\n' \
+    > "$home/crew/w2"
+  printf 'dead\n' > "$home/fix/chair.state"
+  out=$(tick "$home" "$now" FM_WATCHDOG_BOOT_ID=boot-a)
+  assert_eq "$(counter "$home" '^control w2 ')" "1" \
+    "a reboot did not recover a lane whose PR was still being monitored: $out"
+  assert_contains "$out" "boot recovery: relaunched 1 of 1 task(s)" \
+    "the reboot reported no relaunch for a lane still watching its PR: $out"
+  pass "a lane still monitoring its PR is recovered by both the liveness rung and the reboot path"
+}
+
 # Measured 2026-11-16 19:57Z: a pass ran thirty minutes over 250 lanes and was
 # terminated by its unit, so the record was never written and every budget charge
 # it had just spent was lost. The pass now carries a wall-clock deadline, and a
@@ -1360,6 +1416,8 @@ test_in_flight_backlog_items_without_a_record_are_reported_once
 test_a_dry_run_reports_every_lane_and_changes_nothing
 test_the_watchdog_exports_its_home_to_every_command_it_runs
 test_a_finished_lane_is_left_alone_and_an_unfinished_one_is_recovered
+test_a_reboot_leaves_a_shipped_lane_alone_and_recovers_an_unfinished_one
+test_a_lane_still_monitoring_its_pr_is_recovered
 test_a_pass_that_runs_out_of_budget_still_records_its_history
 test_a_held_task_is_never_relaunched_or_paged
 test_a_dry_run_plan_matches_the_connection_relaunch_model

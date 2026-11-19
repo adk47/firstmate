@@ -1013,6 +1013,13 @@ boot_pass() {  # <boot>
       dead|missing) ;;
       *) continue ;;
     esac
+    if task_has_finished "$id"; then
+      # The lane's work shipped before the reboot, so there is nothing to
+      # recover. Keep its own record for this pass instead of dropping it.
+      task_load "$id"
+      task_store "$id"
+      continue
+    fi
     rc=0
     task_relaunch "$id" "host reboot (endpoint $state)" \
       "The host rebooted and every worker process and terminal session died; your worktree and commits are intact. Re-orient from your status log, your steering inbox (state/$id.inbox/), and your worktree, then resume exactly where you left off. Anything you had under /tmp is gone; re-create it if needed. Do not repeat any send, merge, or prod write your status log shows already done." \
@@ -1138,19 +1145,28 @@ crew_reads_working() {  # <id>
 }
 
 # task_has_finished <id>: 0 when firstmate's own state read says this lane's
-# work is over. Only the two terminal claims count, so a lane whose status log
-# is merely old, parked, or blocked is still recovered by the liveness rung: the
-# question here is not "is this lane working" but "is there anything left to
-# work on".
+# work is over, and the only callers that may skip a lane are the task pass's
+# liveness rung and the boot pass's reboot recovery, which both ask it. Only the
+# two terminal claims count, and a terminal claim that is really a pipeline still
+# watching an open PR does not, so a lane whose status log is merely old, parked,
+# or blocked is still recovered: the question here is not "is this lane working"
+# but "is there anything left to work on".
 task_has_finished() {  # <id>
-  local crew state
+  local crew state detail
   [ -n "$CREW_STATE_BIN" ] || return 1
   crew=$(fm_run_timed "$READ_TIMEOUT_SECS" "$CREW_STATE_BIN" "$1" 2>/dev/null) || return 1
   state=$(printf '%s\n' "$crew" | sed -n 's/^state: \([a-z-]*\).*/\1/p' | head -1)
   case "$state" in
-    done|failed) return 0 ;;
+    done|failed) ;;
+    *) return 1 ;;
   esac
-  return 1
+  # `done` also covers a run whose pipeline is still watching an open PR: that
+  # lane has work left, so it is recovered like any other unfinished one.
+  detail=$(printf '%s\n' "$crew" | sed -n 's/^state: [a-z-]* · source: [a-z-]* · //p' | head -1)
+  case "$detail" in
+    *monitoring*|*'PR ready for review'*|*'checks green'*) return 1 ;;
+  esac
+  return 0
 }
 
 # pass_spent: 0 once this pass has used its whole wall-clock budget.
