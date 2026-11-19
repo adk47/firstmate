@@ -123,9 +123,9 @@
 #           "change-watch absent at +Nm: <reason>", or
 #           "change-watch regressed at +Nm on <metric> (<value> vs baseline <value>)".
 #           Clean means every Deployment target had at least one scored reading
-#           across the schedule AND the +6h reading scored something, with some
-#           sample of the watch scoring at all AND at least one target recorded
-#           at registration, because the Deployment bar holds vacuously for a
+#           across the schedule AND the +6h reading scored something AND at least
+#           one target recorded at registration, because the Deployment bar
+#           holds vacuously for a
 #           watch that recorded no target to apply it to. A reading that measured nothing
 #           earlier in the schedule is disclosed in the reason and superseded by
 #           the later evidence, because an early read can fail for a reason the
@@ -154,7 +154,15 @@
 #           not a task record and keeps sampling after the task is gone. Both
 #           modes decide from the watch's durable row, so deleting the verdict
 #           file never turns a failing row into a pass, and a row whose merge
-#           never created a watch directory is still seen.
+#           never created a watch directory is still seen. A recorded
+#           regression fails the done-claim gate, and --terminal-gap passes it
+#           only after the follow-up work item is recorded with
+#           followup <watch-id> <work-item>.
+# followup  Record the follow-up work item a regressed watch's regression was
+#           handed to. Writes work_item, recorded_epoch and the reason to
+#           <watch dir>/followup; refuses a watch with no recorded regression
+#           and a malformed work-item reference. gate <task-id> --terminal-gap
+#           passes a recorded regression once this file exists.
 # audit     The 7-day acceptance, measured. It fails (exit 1) when any status log
 #           under state/ carries the literal "change-watch completed unmeasured"
 #           line, or when any durable row completed inside the window ended
@@ -165,9 +173,11 @@
 #           the same rule verdict applies. It is the repair for rows written by
 #           an earlier, stricter derivation: hand-editing a row would be writing
 #           a verdict nobody measured. Only a row the old rule called
-#           unmeasurable-with-reason is re-derived: an open row belongs to a
-#           drive that has not finished, and a regressed, proven or
-#           not-applicable row is already a verdict. A watch registered before
+#           unmeasurable-with-reason, or one it called proven from an
+#           all-awaiting +6h reading, is re-derived: an open row belongs to a
+#           drive that has not finished, and a regressed or not-applicable row
+#           is already a verdict. A re-derivation also rewrites the verdict file
+#           to the state it derived. A watch registered before
 #           rows existed has no row to rewrite, so the readings it still holds
 #           get one written and completed at its last sample. Every row it writes
 #           or rewrites carries derived_epoch, so a reconstructed row is never
@@ -667,6 +677,8 @@ cw_baseline_path() { printf '%s/baseline\n' "$(cw_watch_dir "$1")"; }
 cw_schedule_path() { printf '%s/schedule\n' "$(cw_watch_dir "$1")"; }
 cw_samples_path() { printf '%s/samples.log\n' "$(cw_watch_dir "$1")"; }
 cw_verdict_path() { printf '%s/verdict\n' "$(cw_watch_dir "$1")"; }
+cw_followup_path() { printf '%s/followup\n' "$(cw_watch_dir "$1")"; }
+cw_rearm_history_path() { printf '%s/rearm-history\n' "$(cw_watch_dir "$1")"; }
 cw_sampled_path() { printf '%s/sampled\n' "$(cw_watch_dir "$1")"; }
 cw_drive_pid_path() { printf '%s/drive.pid\n' "$(cw_watch_dir "$1")"; }
 cw_drive_alive_path() { printf '%s/drive.alive\n' "$(cw_watch_dir "$1")"; }
@@ -3952,10 +3964,16 @@ cw_arm() {  # <watch-id> <when-name> <url>
 
 # Re-arm a watch that ended interrupted, unmeasurable, or absent.
 cw_rearm() {  # <watch-id> <url>
-  local id=$1 url=$2 remaining old attempt when_name arm_cmd state
+  local id=$1 url=$2 remaining old attempt when_name arm_cmd state old_verdict
   state=$(cw_row_state "$id")
+  [ -n "$state" ] || state=$(cw_rowless_state "$id" | cut -f1)
+  old_verdict=$(cat "$(cw_verdict_path "$id")" 2>/dev/null || true)
+  if [ -n "$old_verdict" ]; then
+    { printf '%s\t%s\n' "$(cw_now)" "$(printf '%s' "$old_verdict" | tr '\n' ' ')"; } \
+      >> "$(cw_rearm_history_path "$id")"
+  fi
   remaining=$(cw_remaining_count "$id")
-  if [ "$remaining" -eq 0 ] || [ "$state" = absent ]; then
+  if [ "$remaining" -eq 0 ] || [ "$state" = absent ] || [ "$state" = regressed ]; then
     # A completed schedule has nothing left to sample, so re-arming it would
     # only recompute the same terminal state. Recovery re-measures from now:
     # the readings are taken again and the row goes back to open.
@@ -4011,11 +4029,12 @@ cmd_register() {
   if cw_watch_exists "$id"; then
     cw_reconcile_drive "$id"
     case "$(cat "$(cw_verdict_path "$id")" 2>/dev/null || true)" in
-      interrupted*|unmeasurable-with-reason*|absent*) cw_rearm "$id" "$url"; return 0 ;;
+      interrupted*|unmeasurable-with-reason*|absent*|regressed*) cw_rearm "$id" "$url"; return 0 ;;
     esac
     row_state=$(cw_row_state "$id")
+    [ -n "$row_state" ] || row_state=$(cw_rowless_state "$id" | cut -f1)
     case "$row_state" in
-      unmeasurable-with-reason|absent) cw_rearm "$id" "$url"; return 0 ;;
+      unmeasurable-with-reason|absent|regressed) cw_rearm "$id" "$url"; return 0 ;;
     esac
     printf 'change-watch: %s already registered for %s\n' "$id" "$url"
     return 0
@@ -4344,6 +4363,16 @@ cw_rowless_state() {  # <watch-id>
   printf '%s\t%s\n' "$dstate" "$dreason"
 }
 
+cw_followup_recorded() {  # <watch-id>
+  local file
+  file=$(cw_followup_path "$1")
+  [ -s "$file" ] && grep -q '^work_item=' "$file"
+}
+
+cw_followup_hint() {  # <watch-id>
+  printf 'record the follow-up work item with bin/fm-change-watch.sh followup %s <work-item>' "$1"
+}
+
 # One watch's gate decision: 0 passes, 1 fails.
 cw_gate_row() {  # <watch-id> <mode>
   local id=$1 mode=${2:-} state line derived
@@ -4365,8 +4394,15 @@ cw_gate_row() {  # <watch-id> <mode>
         # inherit the stale literal's pass: the same evidence cannot be a pass
         # here and a failure when a row happens to exist.
         regressed*)
-          printf 'change-watch: gate FAIL %s: %s\n' "$id" \
+          if [ "$mode" = --terminal-gap ] && cw_followup_recorded "$id"; then
+            return 0
+          fi
+          printf 'change-watch: gate FAIL %s: %s' "$id" \
             "$(printf '%s' "$derived" | cut -f2-)"
+          if [ "$mode" = --terminal-gap ]; then
+            printf ' (%s)' "$(cw_followup_hint "$id")"
+          fi
+          printf '\n'
           return 1 ;;
         unmeasurable-with-reason*)
           printf 'change-watch: gate FAIL %s: %s\n' "$id" \
@@ -4400,8 +4436,14 @@ cw_gate_row() {  # <watch-id> <mode>
       return 1 ;;
     proven|not-applicable) return 0 ;;
     regressed)
-      printf 'change-watch: gate FAIL %s: %s: %s\n' \
-        "$id" "$state" "$(cw_row_reason "$id")"
+      if [ "$mode" = --terminal-gap ] && cw_followup_recorded "$id"; then
+        return 0
+      fi
+      printf 'change-watch: gate FAIL %s: %s' "$id" "$(cw_row_reason "$id")"
+      if [ "$mode" = --terminal-gap ]; then
+        printf ' (%s)' "$(cw_followup_hint "$id")"
+      fi
+      printf '\n'
       return 1 ;;
     *) printf 'change-watch: gate FAIL %s: the durable row records terminal_state %s\n' "$id" "$state"; return 1 ;;
   esac
@@ -4434,6 +4476,33 @@ cmd_gate() {  # <task-id> [--terminal-gap]
   [ "$found" -eq 1 ] || return 0
   [ "$rc" -ne 0 ] || printf 'change-watch: gate ok for %s\n' "$task"
   return "$rc"
+}
+
+cmd_followup() {  # <watch-id> <work-item>
+  local id=$1 item=$2 state derived reason
+  case "$id" in ''|*[!A-Za-z0-9._-]*) die "invalid watch id: $id" ;; esac
+  case "$item" in
+    ''|-*|*[!A-Za-z0-9._#/:@+~?=\&%-]*) die "invalid work item: $item" ;;
+  esac
+  cw_watch_exists "$id" || die "unknown watch: $id"
+  cw_reconcile_drive "$id"
+  state=$(cw_row_state "$id")
+  if [ -n "$state" ]; then
+    [ "$state" = regressed ] \
+      || die "change-watch $id is not a recorded regression (terminal_state: $state)"
+    reason=$(cw_row_reason "$id")
+  else
+    derived=$(cw_rowless_state "$id")
+    [ "$(printf '%s' "$derived" | cut -f1)" = regressed ] \
+      || die "change-watch $id is not a recorded regression"
+    reason=$(printf '%s' "$derived" | cut -f2-)
+  fi
+  {
+    printf 'work_item=%s\n' "$item"
+    printf 'recorded_epoch=%s\n' "$(cw_now)"
+    printf 'reason=%s\n' "$reason"
+  } | cw_write "$(cw_followup_path "$id")"
+  printf 'change-watch: recorded follow-up %s for %s\n' "$item" "$id"
 }
 
 # The 7-day acceptance, measured. It fails when any status log under state/
@@ -4597,6 +4666,7 @@ cmd_rederive() {
       case "$new" in
         proven) printf 'clean\n' | cw_write "$(cw_verdict_path "$id")" ;;
         regressed*) printf '%s\n' "$reason" | cw_write "$(cw_verdict_path "$id")" ;;
+        unmeasurable-with-reason*) printf 'unmeasurable-with-reason: %s\n' "$reason" | cw_write "$(cw_verdict_path "$id")" ;;
       esac
       continue
     fi
@@ -4637,6 +4707,7 @@ cmd_rederive() {
     case "$new" in
       proven) printf 'clean\n' | cw_write "$(cw_verdict_path "$id")" ;;
       regressed*) printf '%s\n' "$reason" | cw_write "$(cw_verdict_path "$id")" ;;
+      unmeasurable-with-reason*) printf 'unmeasurable-with-reason: %s\n' "$reason" | cw_write "$(cw_verdict_path "$id")" ;;
     esac
   done
   if [ "$rl_total" -gt 0 ]; then
@@ -5000,6 +5071,7 @@ case "${1:-}" in
   sample) if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then usage; fi; shift; cmd_sample "$@" ;;
   verdict) [ "$#" -eq 2 ] || usage; shift; cmd_verdict "$@" ;;
   gate) [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || usage; shift; cmd_gate "$@" ;;
+  followup) [ "$#" -eq 3 ] || usage; shift; cmd_followup "$@" ;;
   audit) [ "$#" -le 2 ] || usage; shift; cmd_audit "$@" ;;
   status) [ "$#" -le 2 ] || usage; shift; cmd_status "$@" ;;
   rederive) shift; cmd_rederive "$@" ;;

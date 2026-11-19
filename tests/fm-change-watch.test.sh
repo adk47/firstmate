@@ -1287,10 +1287,14 @@ pass "a watch whose whole window awaited its rollout is unmeasured, never clean"
 completed_aw2=$(sed -n 's/.*"completed_epoch": \([^,]*\),.*/\1/p' "$ROW_AW2")
 sed -i.bak 's/"terminal_state": "unmeasurable-with-reason"/"terminal_state": "proven"/' "$ROW_AW2"
 rm -f "$ROW_AW2.bak"
+printf 'clean\n' > "$HOME_AW2/state/change-watch/aw2$CORE_ID_SUFFIX/verdict"
 out=$(aw2_cw 1790030000 rederive --apply) \
   || fail "the re-derive over a false-proven all-awaiting row failed: $out"
 grep -q '"terminal_state": "unmeasurable-with-reason"' "$ROW_AW2" \
   || fail "the re-derive left an all-awaiting +6h reading proven: $(cat "$ROW_AW2")"
+grep -q '^unmeasurable-with-reason: the +6h reading awaited a rollout' \
+  "$HOME_AW2/state/change-watch/aw2$CORE_ID_SUFFIX/verdict" \
+  || fail "the re-derive left a clean verdict beside an unmeasurable row: $(cat "$HOME_AW2/state/change-watch/aw2$CORE_ID_SUFFIX/verdict")"
 grep -q '"derived_epoch": 1790030000' "$ROW_AW2" \
   || fail "the re-derived false clean was not stamped as derived: $(cat "$ROW_AW2")"
 [ "$(sed -n 's/.*"completed_epoch": \([^,]*\),.*/\1/p' "$ROW_AW2")" = "$completed_aw2" ] \
@@ -3054,8 +3058,9 @@ run_cw "$HOME_J4" 1790040000 gate j4 --terminal-gap >/dev/null \
 pass "an interrupted drive that took every reading is proven and queues nothing"
 
 # A regressed row is proof that the change was bad, so the re-derive never
-# re-reads it away: only a row the old rule called unmeasurable is repaired.
-sed -i.bak 's/"terminal_state": "proven"/"terminal_state": "regressed"/' "$ROW_J4"
+# re-reads it away: it repairs a row the old rule called unmeasurable, or a
+# proven row its all-awaiting +6h reading no longer supports.
+sed -i.bak 's/"terminal_state": "proven"/"terminal_state": "regressed"/; s/"reason": "[^"]*"/"reason": "regressed at +30m on restarts"/' "$ROW_J4"
 rm -f "$ROW_J4.bak"
 cp "$ROW_J4" "$TMP_ROOT/row-before-regressed-rederive.json"
 out=$(run_cw "$HOME_J4" 1790050000 rederive --apply) \
@@ -3065,12 +3070,27 @@ printf '%s\n' "$out" | grep -q '0 row(s) rewritten' \
 cmp -s "$ROW_J4" "$TMP_ROOT/row-before-regressed-rederive.json" \
   || fail "the re-derive changed a regressed row: $(cat "$ROW_J4")"
 pass "the re-derive never rewrites a regressed row"
+run_cw "$HOME_J4" 1790050000 gate j4 >/dev/null 2>&1 \
+  && fail "the done-claim gate passed a row whose terminal_state is regressed"
 run_cw "$HOME_J4" 1790050000 gate j4 --terminal-gap >/dev/null 2>&1 \
-  && fail "the gate passed a row whose terminal_state is regressed"
+  && fail "teardown passed a regressed row with no follow-up work item recorded"
 out=$(run_cw "$HOME_J4" 1790050000 gate j4 --terminal-gap 2>&1 || true)
-printf '%s\n' "$out" | grep -q 'gate FAIL j4-3317: regressed:' \
+printf '%s\n' "$out" | grep -q 'gate FAIL j4-3317: regressed at +' \
   || fail "the gate did not name the row-based regression: $out"
-pass "a row whose terminal_state is regressed fails the gate like a derived one"
+printf '%s\n' "$out" | grep -q 'fm-change-watch.sh followup j4-3317' \
+  || fail "the teardown refusal did not name the follow-up command: $out"
+if run_cw "$HOME_J4" 1790050000 followup j4-3317 'bad item' >/dev/null 2>&1; then
+  fail "followup accepted a malformed work-item reference"
+fi
+run_cw "$HOME_J4" 1790050000 followup j4-3317 'repo#42' >/dev/null \
+  || fail "recorded follow-up for a regressed row was refused"
+grep -q '^work_item=repo#42$' "$HOME_J4/state/change-watch/j4-3317/followup" \
+  || fail "the follow-up record did not name the work item"
+run_cw "$HOME_J4" 1790050000 gate j4 --terminal-gap >/dev/null \
+  || fail "teardown still refused a regressed row after its follow-up was recorded"
+run_cw "$HOME_J4" 1790050000 gate j4 >/dev/null 2>&1 \
+  && fail "the done-claim gate passed a regressed row after its follow-up was recorded"
+pass "a regressed row fails the done claim and clears teardown only once its follow-up is recorded"
 
 # A row the old rule left unmeasurable can still hold a sample that recorded a
 # regression. Re-deriving it must write the regression verdict the readings earn,
@@ -3094,6 +3114,18 @@ case "$verdict" in
   *unmeasurable*) fail "the re-derive left a stale measurement gap in the verdict file: $verdict" ;;
 esac
 pass "the re-derive writes the regression verdict its readings recorded"
+
+# Re-registering a regressed watch re-arms it so a fix can be measured, and the
+# verdict it replaced is kept on disk rather than dropped.
+run_cw "$HOME_J4" 1790060000 register j4 "$PR_URL" >/dev/null \
+  || fail "re-registering a regressed watch failed"
+grep -q '"terminal_state": "open"' "$ROW_J4" \
+  || fail "re-registering a regressed watch did not reopen its row: $(cat "$ROW_J4")"
+[ ! -e "$HOME_J4/state/change-watch/j4-3317/verdict" ] \
+  || fail "re-registering a regressed watch kept the old verdict live"
+grep -q 'regressed at +' "$HOME_J4/state/change-watch/j4-3317/rearm-history" \
+  || fail "the replaced regression verdict was not kept in rearm-history"
+pass "re-registering a regressed watch re-arms it and keeps the replaced verdict"
 
 # --- a watch with no durable row is judged by the readings it still holds -----
 
@@ -3200,6 +3232,17 @@ fi
 printf '%s\n' "$out" | grep -q 'regressed at +15m' \
   || fail "the gate did not name the derived regression: $out"
 pass "a row-less watch whose readings recorded a regression fails the gate"
+if run_cw "$HOME_RG" 1790044000 gate rg >/dev/null 2>&1; then
+  fail "the done-claim gate passed a derived regression"
+fi
+run_cw "$HOME_RG" 1790044000 followup rg-3317 'repo#43' >/dev/null \
+  || fail "recording a follow-up for a derived regression was refused"
+run_cw "$HOME_RG" 1790044000 gate rg --terminal-gap >/dev/null \
+  || fail "teardown still refused a derived regression after its follow-up was recorded"
+if run_cw "$HOME_RG" 1790044000 gate rg >/dev/null 2>&1; then
+  fail "the done-claim gate passed a derived regression after its follow-up was recorded"
+fi
+pass "a derived regression also clears teardown only once its follow-up is recorded"
 
 # A directory that recorded no target of any kind makes "every Deployment target
 # was measured" vacuous, so its readings alone look like proof. Deriving a clean
