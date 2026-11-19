@@ -29,10 +29,12 @@
 #
 # THE SIGNALS, per watched repository:
 #   red      the newest run on the watched branch of some workflow, whatever
-#            event started it, concluded red (failure or timed_out). The line
-#            names the workflow, the run id, the conclusion it read, the head
-#            commit, the run's creation time, and the exact `gh run view` that
-#            confirms it. A pending run (conclusion null: queued, in_progress,
+#            event started it except a pull_request or pull_request_target run
+#            (GitHub keys those to the base branch, so they describe a pull
+#            request, not the branch tip), concluded red (failure or timed_out).
+#            The line names the workflow, the run id, the conclusion it read,
+#            the head commit, the run's creation time, and the exact `gh run
+#            view` that confirms it. A pending run (conclusion null: queued, in_progress,
 #            waiting, requested) is never red; a cancelled run is work that
 #            never ran, not work that broke, and is never red; an unknown
 #            conclusion is never red either, because a new GitHub state must
@@ -206,10 +208,14 @@ gh_api() {
 FS=$'\x1f'
 
 # newest_runs <runs-json>: one row per workflow name for the newest run of that
-# name: name, id, status, conclusion, short head, created.
+# name: name, id, status, conclusion, short head, created. Pull-request-context
+# runs are not runs of the branch, so they never take part.
 newest_runs() {
   printf '%s\n' "$1" | jq -r '
-    [.workflow_runs // [] | group_by(.name)[] | max_by([.created_at, .id])]
+    [.workflow_runs // []
+     | map(select((.event // "") as $e
+         | $e != "pull_request" and $e != "pull_request_target"))
+     | group_by(.name)[] | max_by([.created_at, .id])]
     | sort_by(.name)[]
     | [ (.name // ""), (.id // "" | tostring), (.status // ""), (.conclusion // ""),
         ((.head_sha // "")[0:9]), (.created_at // "") ]

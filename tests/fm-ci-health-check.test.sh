@@ -37,8 +37,9 @@ fixture_path() {  # <home> <api-path>
 }
 
 # runs_fixture <home> <owner/repo> <branch> <per-page> <row>...: the branch's
-# runs answer, each row "name|id|status|conclusion|created|head". A conclusion of
-# "null" is written as JSON null, the way GitHub answers for an unfinished run.
+# runs answer, each row "name|id|status|conclusion|created|head", optionally a
+# seventh field event (push when absent). A conclusion of "null" is written as
+# JSON null, the way GitHub answers for an unfinished run.
 runs_fixture() {
   local home=$1 repo=$2 branch=$3 per_page=$4 path
   shift 4
@@ -47,7 +48,7 @@ runs_fixture() {
     split("\n") | map(select(length > 0) | split("|"))
     | { workflow_runs: map({ name: .[0], id: (.[1] | tonumber), status: .[2],
         conclusion: (if .[3] == "null" then null else .[3] end),
-        created_at: .[4], head_sha: .[5] }) }' > "$path"
+        created_at: .[4], head_sha: .[5], event: (.[6] // "push") }) }' > "$path"
 }
 
 queued_fixture() {  # <home> <owner/repo> <count>
@@ -205,6 +206,36 @@ test_same_second_runs_are_ordered_by_run_id() {
   out=$(poll "$home" 100900)
   assert_contains "$out" "verify run 3 conclusion=failure" "a same-second retry that failed was hidden by the run it replaced"
   pass "same-second runs of one workflow are ordered by run id"
+}
+
+# A pull_request or pull_request_target run is keyed to the base branch and
+# describes a pull request, not the branch tip: it must never make main red, and
+# it must not hide the branch's own older run either.
+test_a_pull_request_context_run_never_pages() {
+  local home out
+  home=$(make_home pr-context)
+  queued_fixture "$home" acme/widgets 0
+  runs_fixture "$home" acme/widgets main 100 \
+    'triage|21|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000|pull_request_target' \
+    'triage|20|completed|success|2026-11-19T21:53:33Z|a9d29e8800000|push' \
+    'label|22|completed|failure|2026-11-19T22:54:30Z|b1ba56fdf0000|pull_request'
+  out=$(poll "$home" 100000)
+  [ -z "$out" ] || fail "a pull-request-context run was reported as main red: $out"
+  pass "a pull_request or pull_request_target run is never a red signal for the branch"
+}
+
+# Every other event on the branch stays eligible, so a scheduled failure is a
+# red of the branch and names its evidence.
+test_a_schedule_event_failure_on_the_branch_pages() {
+  local home out
+  home=$(make_home schedule-event)
+  queued_fixture "$home" acme/widgets 0
+  runs_fixture "$home" acme/widgets main 100 \
+    'Health: smoke (every 15 min)|44632006730|completed|failure|2026-11-19T22:48:19Z|a9d29e8800000|schedule' \
+    'Health: smoke (every 15 min)|44631000000|completed|success|2026-11-19T22:33:19Z|a9d29e8800000|schedule'
+  out=$(poll "$home" 100000)
+  assert_contains "$out" "Health: smoke (every 15 min) run 44632006730 conclusion=failure" "a schedule-event failure on the branch did not page"
+  pass "a schedule-event failure on the branch pages with its run id and conclusion"
 }
 
 test_queued_backlog_over_the_bar_pages_with_the_count() {
@@ -380,6 +411,8 @@ test_a_red_names_workflow_run_id_and_conclusion_and_still_pages_after_a_pending_
 test_an_unrecognised_conclusion_does_not_page
 test_a_scheduled_failure_on_the_branch_keeps_paging_until_it_is_replaced
 test_same_second_runs_are_ordered_by_run_id
+test_a_pull_request_context_run_never_pages
+test_a_schedule_event_failure_on_the_branch_pages
 test_queued_backlog_over_the_bar_pages_with_the_count
 test_poll_is_throttled_and_stands_down_on_a_thin_rate_budget
 test_an_unreadable_answer_is_silent_not_red
