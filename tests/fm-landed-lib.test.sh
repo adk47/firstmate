@@ -138,10 +138,54 @@ SH
   pass "a merged PR whose head contains the work reads landed"
 }
 
+# --- proven: an acceptance probe's claim row ------------------------------
+
+test_landed_proven_reads_the_claim_row() {
+  local st out rc
+  st="$TMP_ROOT/proven-state"
+  mkdir -p "$st/acceptance" "$st/change-watch/rows"
+  fm_landed_proven lp-x1 "$st" || fail "a task with no acceptance probe must not read unproven"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$st/acceptance/lp-x1.sh"
+  rc=0; out=$(fm_landed_proven lp-x1 "$st") || rc=$?
+  [ "$rc" -eq 1 ] || fail "a probe with no claim row must read unproven, got rc=$rc"
+  case "$out" in *"no claim row for lp-x1"*) ;; *) fail "the missing claim row was not named: $out" ;; esac
+  printf '{"kind": "claim", "task": "lp-x1", "terminal_state": "absent", "reason": "the acceptance probe still exited 1 at +360m, the last reading"}\n' \
+    > "$st/change-watch/rows/lp-x1-claim.json"
+  rc=0; out=$(fm_landed_proven lp-x1 "$st") || rc=$?
+  [ "$rc" -eq 1 ] || fail "an absent claim must read unproven"
+  [ "$out" = "lp-x1 is absent: the acceptance probe still exited 1 at +360m, the last reading" ] \
+    || fail "the absent reason was not reported: $out"
+  printf '{"kind": "claim", "task": "lp-x1", "terminal_state": "proven", "reason": "the acceptance probe exited 0 at +15m"}\n' \
+    > "$st/change-watch/rows/lp-x1-claim.json"
+  fm_landed_proven lp-x1 "$st" || fail "a proven claim must read proven"
+  pass "fm_landed_proven reads proven only from a proven claim row"
+}
+
+test_landed_proven_refuses_a_deleted_probe() {
+  local st out rc
+  st="$TMP_ROOT/deleted-probe-state"
+  mkdir -p "$st/acceptance" "$st/change-watch/rows"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$st/acceptance/lp-x2.sh"
+  printf 'fm-acceptance-probe-v1\nabc123\n' > "$st/acceptance/lp-x2.trust"
+  rm -f "$st/acceptance/lp-x2.sh"
+  rc=0; out=$(fm_landed_proven lp-x2 "$st") || rc=$?
+  [ "$rc" -eq 1 ] || fail "a task whose bound probe was deleted must read unproven, got rc=$rc"
+  case "$out" in *"no claim row for lp-x2"*) ;; *) fail "the missing claim row was not named: $out" ;; esac
+  printf '{"kind": "claim", "task": "lp-x2", "terminal_state": "open", "reason": "the acceptance probe exited 1 at +0m"}\n' \
+    > "$st/change-watch/rows/lp-x2-claim.json"
+  rm -f "$st/acceptance/lp-x2.trust"
+  rc=0; out=$(fm_landed_proven lp-x2 "$st") || rc=$?
+  [ "$rc" -eq 1 ] || fail "a task whose probe was deleted after its claim must read unproven, got rc=$rc"
+  [ "$out" = "lp-x2 is open: the acceptance probe exited 1 at +0m" ] || fail "the open claim was not reported: $out"
+  pass "fm_landed_proven refuses a task whose probe was deleted after its binding or claim"
+}
+
 test_squash_merged_and_deleted_is_landed
 test_local_only_merged_into_local_default_is_landed
 test_genuinely_unlanded_is_refused
 test_unreadable_remote_is_undecidable
 test_merged_pr_containing_the_work_is_landed
+test_landed_proven_reads_the_claim_row
+test_landed_proven_refuses_a_deleted_probe
 
 echo "all fm-landed-lib tests passed"

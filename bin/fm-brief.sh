@@ -12,9 +12,15 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> --probe <file> [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   --probe is required for every ship brief: a script that reads the LIVE
+#   consumer surface (served bytes, bucket object, running revision, production
+#   row count) and exits 0 only once the change is there. It is installed at
+#   state/acceptance/<task-id>.sh, mode 0700, hash-bound, and the brief tells the
+#   worker done means that probe exits 0 when something other than the worker
+#   runs it (bin/fm-dod-lib.sh owns the contract). No probe, no ship brief.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -124,6 +130,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+PROBE_SRC=
+PROBE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -133,6 +141,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      probe) PROBE_SRC=$a; PROBE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -145,6 +154,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --probe) want_value=probe ;;
+    --probe=*) PROBE_SRC=${a#--probe=}; PROBE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -168,6 +179,14 @@ if [ "$KIND" = ship ]; then
       exit 1 ;;
     *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
   esac
+  [ "$PROBE_SET" -eq 1 ] && [ -n "$PROBE_SRC" ] || {
+    echo "error: ship briefs require --probe <file>: an acceptance probe that reads the live consumer surface (served bytes, bucket object, running revision, production row count) and exits 0 only once the change is there; without one, done cannot be proven" >&2
+    exit 1
+  }
+  fm_acceptance_source_ok "$PROBE_SRC" || exit 1
+elif [ "$PROBE_SET" -eq 1 ]; then
+  echo "error: --probe applies only to ship briefs" >&2
+  exit 1
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
@@ -448,7 +467,8 @@ case "$MODE" in
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+PROBE_PATH=$(fm_acceptance_install "$STATE" "$ID" "$PROBE_SRC") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$PROBE_PATH") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

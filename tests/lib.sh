@@ -54,7 +54,6 @@ export FM_AGENT_PROC_OPEN_FILES=/nonexistent/fm-agent-proc-open-files
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
 # --- reporters --------------------------------------------------------------
 
 fail() {
@@ -203,6 +202,14 @@ trap fm_test_cleanup EXIT
 trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM
 trap 'fm_test_cleanup; exit 129' HUP
+
+# The acceptance probe every ship brief and promotion now requires; it never
+# reaches a network (bin/fm-dod-lib.sh owns the probe contract). It is written
+# into a per-run private temp root rather than tracked, so it owns no path in
+# the changed-file map and is reaped with the run.
+# shellcheck disable=SC2034
+FM_TEST_PROBE="$(fm_test_tmproot fm-test-probe)/acceptance-probe.sh"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$FM_TEST_PROBE"
 
 # fm_test_reap_orphans: best-effort sweep for fixture roots left behind by a
 # prior run that was killed hard enough to skip the traps above (e.g. a

@@ -21,7 +21,10 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
+# --probe is REQUIRED too: the acceptance probe that reads the live consumer
+# surface, installed and hash-bound by bin/fm-dod-lib.sh exactly as a ship
+# brief's is, so a promoted ship task is proven the same way.
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> --probe <file>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,6 +54,8 @@ MODE=
 YOLO=
 MODE_SET=0
 YOLO_SET=0
+PROBE_SRC=
+PROBE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -61,6 +66,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      probe) PROBE_SRC=$a; PROBE_SET=1 ;;
     esac
     want_value=
     continue
@@ -70,11 +76,13 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --probe) want_value=probe ;;
+    --probe=*) PROBE_SRC=${a#--probe=}; PROBE_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
-[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
+[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> --probe <file>" >&2; exit 1; }
 [ "$MODE_SET" -eq 1 ] || {
   echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
   exit 1
@@ -90,6 +98,11 @@ case "$MODE" in
     exit 1 ;;
   *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
 esac
+[ "$PROBE_SET" -eq 1 ] && [ -n "$PROBE_SRC" ] || {
+  echo "error: promotion requires --probe <file>: an acceptance probe that reads the live consumer surface and exits 0 only once the change is there" >&2
+  exit 1
+}
+fm_acceptance_source_ok "$PROBE_SRC" || exit 1
 case "$YOLO" in
   on|off) ;;
   *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
@@ -165,6 +178,7 @@ if [ "$MODE" = no-mistakes ]; then
 fi
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
+PROBE_PATH=$(fm_acceptance_install "$STATE" "$ID" "$PROBE_SRC") || exit 1
 TMP="$DATA/$ID/.ship-instructions.md.${BASHPID:-$$}"
 {
   cat <<EOF
@@ -187,7 +201,7 @@ $PROMOTION_ASK_USER_BLOCK
 7. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or ship-time instructions.
 EOF
   printf '\n'
-  fm_dod_block "$MODE" "$ID"
+  fm_dod_block "$MODE" "$ID" "$PROBE_PATH"
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
 mv "$TMP" "$INSTRUCTIONS"
 TMP=

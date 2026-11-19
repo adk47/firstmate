@@ -607,6 +607,7 @@ tests/fm-busy-adapter-wiring.test.sh 17873
 tests/fm-busy-state.test.sh 3279
 tests/fm-calm-pi-extension.test.sh 256
 tests/fm-change-watch.test.sh 56339
+tests/fm-landing-police.test.sh 3000
 tests/fm-check-unregister.test.sh 517
 tests/fm-classify-corr-token.test.sh 38742
 tests/fm-classify-decision-key.test.sh 1167
@@ -1470,6 +1471,14 @@ families_for_changed_path() {
       fixture_ref=${fixture_ref%%/*}
       if [ -d "tests/fixtures/$fixture_ref" ]; then
         families_for_test_reference "fixtures/$fixture_ref" \
+          || printf '%s\n' "__unmapped__:$path"
+      fi
+      ;;
+    tests/fixtures/*)
+      # A loose fixture belongs to whichever suite names its full path. A
+      # removed loose fixture has no consuming suite left to select.
+      if [ -e "$path" ]; then
+        families_for_test_reference "$path" \
           || printf '%s\n' "__unmapped__:$path"
       fi
       ;;

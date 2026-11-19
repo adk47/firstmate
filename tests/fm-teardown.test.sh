@@ -3945,6 +3945,58 @@ test_change_watch_interrupted_refuses_until_reregistered() {
   pass "an interrupted change watch refuses teardown until it is re-registered"
 }
 
+# A ship task with an acceptance probe has landed only when the landing police
+# proved it: no claim row, or an open one, refuses; a proven row proceeds.
+test_acceptance_probe_unproven_refuses_teardown() {
+  local case_dir rc probe
+  case_dir=$(make_case acceptance-unproven)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  mkdir -p "$case_dir/state/acceptance"
+  probe="$case_dir/state/acceptance/task-x1.sh"
+  printf '#!/usr/bin/env bash\ntest -e %q\n' "$case_dir/landed" > "$probe"
+  chmod 0700 "$probe"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "acceptance-unproven: teardown should refuse a task with no claim row"
+  grep -q 'acceptance probe has not proven it landed' "$case_dir/stderr" || fail "acceptance-unproven: no unproven refusal: $(cat "$case_dir/stderr")"
+  grep -q 'no claim row for task-x1' "$case_dir/stderr" || fail "acceptance-unproven: the refusal did not say the claim row is missing"
+
+  run_change_watch "$case_dir" claim task-x1 "$probe" > /dev/null 2>&1 || fail "acceptance-unproven: claim failed"
+  run_change_watch "$case_dir" acceptance task-x1-claim 0 > /dev/null 2>&1 || fail "acceptance-unproven: acceptance failed"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "acceptance-unproven: teardown should refuse an open claim"
+  grep -q 'task-x1 is open: the acceptance probe exited 1' "$case_dir/stderr" || fail "acceptance-unproven: the refusal did not name the open claim: $(cat "$case_dir/stderr")"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "acceptance-unproven: the task meta was removed despite the refusal"
+
+  cp "$probe" "$case_dir/probe.saved"
+  rm -f "$probe"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "acceptance-unproven: deleting the probe must not bypass the gate"
+  grep -q 'task-x1 is open: the acceptance probe exited 1' "$case_dir/stderr" || fail "acceptance-unproven: the deleted probe was not gated by its claim: $(cat "$case_dir/stderr")"
+  cp "$case_dir/probe.saved" "$probe"
+  chmod 0700 "$probe"
+
+  touch "$case_dir/landed"
+  run_change_watch "$case_dir" acceptance task-x1-claim 900 > /dev/null 2>&1 || fail "acceptance-unproven: acceptance failed"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "acceptance-unproven: teardown should proceed once the claim is proven: $(cat "$case_dir/stderr")"
+  pass "a ship task with an acceptance probe is refused at teardown until its claim is proven"
+}
+
 # The durable row is the authority: removing the verdict file must not clear a
 # refusal, because that would make the guard satisfiable by deleting the artifact
 # it guards.
@@ -5361,6 +5413,7 @@ test_migrated_orca_unpushed_worktree_refuses
 test_change_watch_terminal_gap_refuses_teardown
 test_change_watch_interrupted_refuses_until_reregistered
 test_change_watch_gap_survives_verdict_deletion
+test_acceptance_probe_unproven_refuses_teardown
 test_running_change_watch_does_not_block_teardown
 test_proven_change_watch_allows_teardown
 test_missing_return_tool_refuses_before_killing_the_agent
