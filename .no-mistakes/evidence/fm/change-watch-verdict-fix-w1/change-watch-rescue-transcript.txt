@@ -1,0 +1,41 @@
+$ bin/fm-change-watch.sh register j1 <PR>
+change-watch: registered j1-3317 for https://github.com/Muso-AI/H-DevOps/pull/3317 (1 target(s)); beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)
+
+$ # the +15m sample runs while the rollout is still landing: its read fails
+row after +15m only: terminal_state=open reason='the watch is still running; beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)'
+readings[900] = null
+
+$ # the rollout lands; the drive takes the +1h and +6h readings
+notice: change-watch: completion note skipped for https://github.com/Muso-AI/H-DevOps/pull/3317 (task j1 has no status record)
+notice: change-watch: clean for https://github.com/Muso-AI/H-DevOps/pull/3317 on every metric it could read, but these metrics were never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; the rollout could not be proven for: muso-prod/feed-service
+$ bin/fm-change-watch.sh verdict j1-3317
+change-watch clean
+
+$ bin/fm-change-watch.sh gate j1 --terminal-gap   # the teardown boundary
+change-watch: gate ok for j1
+exit=0
+row terminal_state=proven
+reason: the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)
+readings[900] measured=False scored=0 awaiting=0
+readings[3600] measured=True scored=1 awaiting=0
+readings[21600] measured=True scored=1 awaiting=0
+
+$ # a legacy row the old rule latched to unmeasurable-with-reason: rederive --apply
+before: change-watch unmeasurable-with-reason: nothing measured at +15m
+change-watch rederive: applying
+change-watch rederive: a row is proven when its +6h reading measured, some sample scored, and every Deployment target was measured at least once
+rederive: j1-3317: unmeasurable-with-reason -> proven (the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service)
+change-watch rederive: 1 row(s) rewritten of 1 row(s) read
+after:  change-watch clean
+change-watch: gate ok for j1
+gate exit=0
+rewritten row terminal_state=proven completed_epoch=1790044000 derived_epoch=1790050000
+reason: the +6h reading measured and every Deployment target was measured at least once; the +15m reading measured nothing, superseded by later readings; never measured: http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; beta: beta clean: nothing to measure: no changed path is served by a beta target (web-credits-next -> muso-dev/credits-gate)
+
+$ # an old row whose readings recorded a regression: rederive --apply rewrites verdict too
+before: change-watch unmeasurable-with-reason: nothing measured at +15m
+change-watch rederive: applying
+change-watch rederive: a row is proven when its +6h reading measured, some sample scored, and every Deployment target was measured at least once
+rederive: k1-3317: unmeasurable-with-reason -> regressed (regressed at +15m on restarts@muso-prod/feed-service (2 vs baseline 2))
+change-watch rederive: 1 row(s) rewritten of 1 row(s) read
+after:  change-watch regressed at +15m on restarts@muso-prod/feed-service (2 vs baseline 2)
