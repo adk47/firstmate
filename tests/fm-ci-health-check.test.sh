@@ -11,6 +11,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CHECK="$ROOT/bin/fm-ci-health-check.sh"
+PER_PAGE=30
 TMP_ROOT=$(fm_test_tmproot fm-ci-health)
 
 # A home with a fake gh that answers `gh api <path>` from <home>/api/<path with
@@ -80,6 +81,7 @@ poll() {
   shift 2
   env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_CONFIG_OVERRIDE="$home/config" FM_CI_HEALTH_NOW="$now" FM_CI_HEALTH_TOKEN_ENV=none \
+    FM_CI_HEALTH_PER_PAGE="$PER_PAGE" \
     FM_CI_HEALTH_REPOS='acme/widgets:main:10' FM_CI_HEALTH_SCHEDULED=' ' "$@" "$CHECK" check 2>&1
 }
 
@@ -118,7 +120,7 @@ test_an_in_progress_newest_run_is_pending_and_prints_nothing() {
   local home out
   home=$(make_home pending)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 10 \
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" \
     'verify-devops-agent-tests|44632777885|in_progress|null|2026-11-19T22:53:30Z|a1ba56fdf0000' \
     'verify-devops-agent-tests|44623276585|completed|success|2026-11-19T21:53:33Z|a9d29e8800000' \
     'Verify: pin-bump PRs run CI|44619765371|queued|null|2026-11-19T21:32:21Z|7ba1f876b0000' \
@@ -131,7 +133,7 @@ test_an_in_progress_newest_run_is_pending_and_prints_nothing() {
   assert_contains "$out" "verdict=quiet" "the quiet poll was not recorded as quiet"
   # The last answer of one workflow was red: that answer pages, named by its
   # own id, never the id of the run that has not answered.
-  runs_fixture "$home" acme/widgets main 10 \
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" \
     'verify-devops-agent-tests|44632777885|in_progress|null|2026-11-19T22:53:30Z|a1ba56fdf0000' \
     'verify-devops-agent-tests|44623276860|completed|failure|2026-11-19T21:53:33Z|a9d29e8800000'
   out=$(poll "$home" 100900)
@@ -146,14 +148,14 @@ test_a_red_names_workflow_run_id_and_conclusion_and_still_pages_after_a_pending_
   local home out
   home=$(make_home red)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 10 \
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" \
     'verify-devops-agent-tests|44632777885|in_progress|null|2026-11-19T22:53:30Z|a1ba56fdf0000' \
     'verify-devops-agent-tests|44623276860|completed|failure|2026-11-19T21:53:33Z|a9d29e8800000'
   out=$(poll "$home" 100000)
   assert_contains "$out" "verify-devops-agent-tests run 44623276860 conclusion=failure" "the last completed answer did not page while the newest run was in progress"
   assert_not_contains "$out" "44632777885" "an in-progress run was named"
   # The newer run finished red; the next poll (one interval later) names it.
-  runs_fixture "$home" acme/widgets main 10 \
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" \
     'verify-devops-agent-tests|44632777885|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000' \
     'verify-devops-agent-tests|44623276860|completed|failure|2026-11-19T21:53:33Z|a9d29e8800000' \
     'build|7|completed|timed_out|2026-11-19T22:00:00Z|ccccccccc0000' \
@@ -178,7 +180,7 @@ test_an_unrecognised_conclusion_does_not_page() {
   local home out
   home=$(make_home unknown)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 10 \
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" \
     'verify|11|completed|exploded|2026-11-19T22:53:30Z|a1ba56fdf0000' \
     'verify|10|completed|failure|2026-11-19T21:53:33Z|a9d29e8800000' \
     'lint|12|completed|stale|2026-11-19T22:53:30Z|b1ba56fdf0000' \
@@ -197,7 +199,7 @@ test_a_scheduled_failure_on_the_branch_keeps_paging_until_it_is_replaced() {
   local home out
   home=$(make_home smoke)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 10 \
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" \
     'verify-devops-agent-tests|44632777885|in_progress|null|2026-11-19T22:53:30Z|a1ba56fdf0000' \
     'Health: smoke (every 15 min)|44632006730|completed|failure|2026-11-19T22:48:19Z|a9d29e8800000' \
     'Health: smoke (every 15 min)|44631000000|completed|success|2026-11-19T22:33:19Z|a9d29e8800000' \
@@ -212,7 +214,7 @@ test_a_scheduled_failure_on_the_branch_keeps_paging_until_it_is_replaced() {
   out=$(poll "$home" 100900)
   assert_contains "$out" "Health: smoke (every 15 min) run 44632006730 conclusion=failure" "a standing failure stopped paging on the next poll"
   # The next scheduled run passes: the workflow is no longer red.
-  runs_fixture "$home" acme/widgets main 10 \
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" \
     'Health: smoke (every 15 min)|44633000000|completed|success|2026-11-19T23:03:19Z|a9d29e8800000' \
     'Health: smoke (every 15 min)|44632006730|completed|failure|2026-11-19T22:48:19Z|a9d29e8800000'
   out=$(poll "$home" 101800)
@@ -226,12 +228,12 @@ test_same_second_runs_are_ordered_by_run_id() {
   local home out
   home=$(make_home tie)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 10 \
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" \
     'verify|3|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000' \
     'verify|2|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
   out=$(poll "$home" 100000)
   [ -z "$out" ] || fail "a same-second retry that passed was reported red from the run it replaced: $out"
-  runs_fixture "$home" acme/widgets main 10 \
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" \
     'verify|2|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000' \
     'verify|3|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
   out=$(poll "$home" 100900)
@@ -246,7 +248,7 @@ test_a_pull_request_context_run_never_pages() {
   local home out
   home=$(make_home pr-context)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 10 \
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" \
     'triage|21|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000|pull_request_target' \
     'triage|20|completed|success|2026-11-19T21:53:33Z|a9d29e8800000|push' \
     'label|22|completed|failure|2026-11-19T22:54:30Z|b1ba56fdf0000|pull_request'
@@ -261,7 +263,7 @@ test_a_schedule_event_failure_on_the_branch_pages() {
   local home out
   home=$(make_home schedule-event)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 10 \
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" \
     'Health: smoke (every 15 min)|44632006730|completed|failure|2026-11-19T22:48:19Z|a9d29e8800000|schedule' \
     'Health: smoke (every 15 min)|44631000000|completed|success|2026-11-19T22:33:19Z|a9d29e8800000|schedule'
   out=$(poll "$home" 100000)
@@ -276,7 +278,7 @@ test_a_startup_failure_is_red_and_pages() {
   local home out
   home=$(make_home startup)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 10 \
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" \
     'deploy|31|completed|startup_failure|2026-11-19T22:53:30Z|a1ba56fdf0000' \
     'deploy|30|completed|success|2026-11-19T21:53:33Z|a9d29e8800000'
   out=$(poll "$home" 100000)
@@ -297,7 +299,7 @@ test_a_red_older_than_the_window_still_pages_while_it_is_the_workflow_newest_com
     rows+=("chatty|$((5000 + i))|completed|success|2026-11-19T$(printf '%02d:%02d' $((i / 60)) $((i % 60))):00Z|a1ba56fdf0000")
   done
   rows+=('rare-nightly|4000|completed|failure|2026-11-18T03:00:00Z|a9d29e8800000|schedule')
-  runs_fixture "$home" acme/widgets main 10 "${rows[@]}"
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" "${rows[@]}"
   # The branch's newest hundred runs, had the check asked for them, hold no
   # trace of the rare workflow; the fixture answers that page too, so a check
   # that still read it would get a page with no red in it.
@@ -318,7 +320,7 @@ test_queued_backlog_over_the_bar_pages_with_the_count() {
   local home out
   home=$(make_home queued)
   queued_fixture "$home" acme/widgets 11
-  runs_fixture "$home" acme/widgets main 10 'verify|1|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" 'verify|1|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000'
   out=$(poll "$home" 100000)
   assert_contains "$out" "acme/widgets queued=11 (>10)" "a queued backlog over the bar was not reported"
   pass "a queued backlog over the repository's bar pages with the count and the bar"
@@ -328,7 +330,7 @@ test_poll_is_throttled_and_stands_down_on_a_thin_rate_budget() {
   local home out calls
   home=$(make_home throttle)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 10 'verify|1|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" 'verify|1|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
   out=$(poll "$home" 100000)
   assert_contains "$out" "verify run 1 conclusion=failure" "the first poll did not page"
   calls=$(wc -l < "$home/gh.calls" | tr -d ' ')
@@ -371,6 +373,21 @@ test_an_unreadable_answer_is_silent_not_red() {
   pass "an unreadable or failed runs read is silent, never red"
 }
 
+test_unreadable_workflow_reads_are_counted_but_stay_silent() {
+  local home out
+  home=$(make_home partial-sweep)
+  queued_fixture "$home" acme/widgets 0
+  jq -n '{ total_count: 2,
+    workflows: [ { id: 1001, name: "alpha", state: "active" },
+                 { id: 1002, name: "beta", state: "active" } ] }' \
+    > "$(fixture_path "$home" 'repos/acme/widgets/actions/workflows?per_page=100&page=1')"
+  out=$(poll "$home" 100000)
+  [ -z "$out" ] || fail "unreadable per-workflow reads printed: $out"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CHECK" status)
+  assert_contains "$out" "2 workflow reads in acme/widgets were skipped or unreadable" "a truncated sweep was recorded as plainly quiet"
+  pass "unreadable per-workflow reads are counted in the verdict and stay silent"
+}
+
 # A config file is the operator interface the docs describe: a multi-value line
 # and numeric lines, with their comments on their own lines.
 test_an_empty_repository_list_polls_quietly_without_a_scratch_dir() {
@@ -400,7 +417,7 @@ test_a_workflow_on_the_second_list_page_is_read() {
     workflows: [ { id: 1101, name: "rare-on-page-two", state: "active" } ] }' \
     > "$(fixture_path "$home" 'repos/acme/widgets/actions/workflows?per_page=100&page=2')"
   printf '%s\n' '{"workflow_runs":[{"name":"rare-on-page-two","id":9001,"status":"completed","conclusion":"failure","head_sha":"abc12345678","created_at":"2026-11-19T22:53:30Z","event":"push"}]}' \
-    > "$(fixture_path "$home" 'repos/acme/widgets/actions/workflows/1101/runs?branch=main&status=completed&per_page=10')"
+    > "$(fixture_path "$home" 'repos/acme/widgets/actions/workflows/1101/runs?branch=main&status=completed&per_page=30')"
   out=$(poll "$home" 100000)
   assert_contains "$out" "rare-on-page-two run 9001 conclusion=failure" "a workflow on the workflow list's second page was not read"
   pass "the workflow list is paged until a short page, so a later page's workflow is still read"
@@ -441,8 +458,8 @@ test_the_documented_config_file_shape_drives_the_poll() {
   test_a_config_file_written_as_documented_is_parsed "$home"
   queued_fixture "$home" acme/widgets 0
   queued_fixture "$home" acme/gadgets 0
-  runs_fixture "$home" acme/widgets main 10 'verify|1|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
-  runs_fixture "$home" acme/gadgets main 10 'lint|2|completed|failure|2026-11-19T22:53:30Z|b1ba56fdf0000'
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" 'verify|1|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  runs_fixture "$home" acme/gadgets main "$PER_PAGE" 'lint|2|completed|failure|2026-11-19T22:53:30Z|b1ba56fdf0000'
   out=$(env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_CONFIG_OVERRIDE="$home/config" FM_CI_HEALTH_NOW=100000 FM_CI_HEALTH_TOKEN_ENV=none \
     "$CHECK" check 2>&1)
@@ -475,7 +492,7 @@ SH
   printf 'export GH_TOKEN=tok-from-file\n' > "$home/app-token.env"
   printf 'FM_CI_HEALTH_TOKEN_ENV=~/app-token.env\n' > "$home/config/ci-health.env"
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 10 'verify|1|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" 'verify|1|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000'
   out=$(env PATH="$home/fakebin:$PATH" HOME="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_CONFIG_OVERRIDE="$home/config" FM_CI_HEALTH_NOW=100000 FM_CI_HEALTH_REPOS='acme/widgets:main:10' \
     FM_CI_HEALTH_SCHEDULED=' ' "$CHECK" check 2>&1)
@@ -488,7 +505,7 @@ test_a_scheduled_workflow_is_judged_only_when_it_declares_a_schedule() {
   local home out wf_plain wf_sched
   home=$(make_home cadence)
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 10 'verify|1|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" 'verify|1|completed|success|2026-11-19T22:53:30Z|a1ba56fdf0000'
   wf_plain=$(printf 'on:\n  push:\n    branches: [main]\n' | base64 | tr -d '\n')
   wf_sched=$(printf 'on:\n  schedule:\n    - cron: "0 * * * *"\n' | base64 | tr -d '\n')
   printf '{"content":"%s"}\n' "$wf_plain" > "$(fixture_path "$home" 'repos/acme/widgets/contents/.github/workflows/reconcile.yaml')"
@@ -529,7 +546,7 @@ test_status_and_arm() {
   assert_present "$home/state/ci-health.check-trust" "arm bound no trust record"
   [ "$(stat -c %a "$home/state/ci-health.check.sh" 2>/dev/null || stat -f %Lp "$home/state/ci-health.check.sh")" = 700 ] || fail "the shim is not mode 0700"
   queued_fixture "$home" acme/widgets 0
-  runs_fixture "$home" acme/widgets main 10 'verify|1|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
+  runs_fixture "$home" acme/widgets main "$PER_PAGE" 'verify|1|completed|failure|2026-11-19T22:53:30Z|a1ba56fdf0000'
   # The armed shim runs the tracked check against the home it was armed in.
   out=$(env PATH="$home/fakebin:$PATH" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
     FM_CI_HEALTH_NOW=100000 FM_CI_HEALTH_TOKEN_ENV=none FM_CI_HEALTH_REPOS='acme/widgets:main:10' \
@@ -557,6 +574,7 @@ test_queued_backlog_over_the_bar_pages_with_the_count
 test_poll_is_throttled_and_stands_down_on_a_thin_rate_budget
 test_an_unreadable_rate_limit_is_not_reported_as_a_stand_down
 test_an_unreadable_answer_is_silent_not_red
+test_unreadable_workflow_reads_are_counted_but_stay_silent
 test_an_empty_repository_list_polls_quietly_without_a_scratch_dir
 test_a_workflow_on_the_second_list_page_is_read
 test_a_partial_workflow_list_is_recorded_but_stays_silent

@@ -31,7 +31,11 @@
 # Four things fix that for
 # good: every run answer goes through ONE classifier (bin/fm-ci-run-lib.sh),
 # every red names the run it read, the poll reads runs of every event, and it
-# reads them PER WORKFLOW, so no window can hide a red.
+# reads them PER WORKFLOW, so a workflow that runs rarely cannot be hidden
+# behind the ones that run often. The one remaining window is that pull-request
+# runs are filtered after the API has returned the page: a workflow whose newest
+# FM_CI_HEALTH_PER_PAGE completed runs on the branch are all pull-request runs
+# reads as having no completed run (quiet, never red).
 #
 # THE SIGNALS, per watched repository:
 #   red      for each active workflow, its newest COMPLETED run on the watched
@@ -82,8 +86,10 @@
 #                                (default: Muso-AI/H-DevOps:reconcile-prod-manifests.yaml:7200)
 #   FM_CI_HEALTH_INTERVAL_SECS   seconds between polls (default 900)
 #   FM_CI_HEALTH_RATE_FLOOR      stand down below this many remaining core calls (default 1500)
-#   FM_CI_HEALTH_PER_PAGE        completed runs read per workflow, newest first (default 10: enough
-#                                that a few pull-request-context runs cannot crowd out the branch's own)
+#   FM_CI_HEALTH_PER_PAGE        completed runs read per workflow, newest first (default 30:
+#                                pull-request runs are dropped after the page is fetched, so a
+#                                workflow with chatty pull_request_target runs needs a page larger
+#                                than the branch runs it must see through)
 #   FM_CI_HEALTH_PARALLEL        per-workflow reads in flight at once, per repository; the
 #                                repositories themselves are read concurrently, so the ceiling is
 #                                repositories x parallel short-lived gh processes (about 80 for the
@@ -229,6 +235,7 @@ gh_api() {
 # on runs of whitespace, so an EMPTY conclusion between two tabs would vanish
 # and the head commit would be read as the conclusion.
 FS=$'\x1f'
+W_UNREAD='__unread__'
 
 # newest_completed_run <runs-json>: one row for the newest completed run in
 # the answer: name, id, status, conclusion, short head, created; nothing when
@@ -275,10 +282,15 @@ action_read_workflow() {
   deadline=${FM_CI_HEALTH_DEADLINE:-}
   case "$deadline" in
     ''|*[!0-9]*) ;;
-    *) [ "$(date -u +%s)" -lt "$deadline" ] || return 0 ;;
+    *) [ "$(date -u +%s)" -lt "$deadline" ] || { unread_row "$wf"; return 0; } ;;
   esac
-  runs=$(gh_api "repos/$repo/actions/workflows/$wf/runs?branch=$branch&status=completed&per_page=$per_page") || return 0
+  runs=$(gh_api "repos/$repo/actions/workflows/$wf/runs?branch=$branch&status=completed&per_page=$per_page") \
+    || { unread_row "$wf"; return 0; }
   newest_completed_run "$runs"
+}
+
+unread_row() {  # <workflow-id>
+  printf '%s%s%s\n' "$W_UNREAD" "$FS" "$1"
 }
 
 # workflow_rows <repo> <branch> <per-page> <parallel> <partial-file>: one row
@@ -286,13 +298,16 @@ action_read_workflow() {
 # appends the repository to <partial-file> when its workflow list was not read
 # to the end.
 workflow_rows() {
-  local repo=$1 branch=$2 per_page=$3 parallel=$4 partial=$5 ids rc
+  local repo=$1 branch=$2 per_page=$3 parallel=$4 partial=$5 ids rc rows skipped
   ids=$(active_workflow_ids "$repo")
   rc=$?
-  [ "$rc" -eq 0 ] || printf '%s\n' "$repo" >> "$partial"
+  [ "$rc" -eq 0 ] || printf 'list %s\n' "$repo" >> "$partial"
   [ -n "$ids" ] || return 0
-  printf '%s\n' "$ids" | FM_CI_HEALTH_DEADLINE=$((POLL_EPOCH_START + POLL_BUDGET_SECS)) \
-    xargs -P "$parallel" -I '{}' "$SCRIPT_BIN" read-workflow "$repo" "$branch" '{}' "$per_page" 2>/dev/null
+  rows=$(printf '%s\n' "$ids" | FM_CI_HEALTH_DEADLINE=$((POLL_EPOCH_START + POLL_BUDGET_SECS)) \
+    xargs -P "$parallel" -I '{}' "$SCRIPT_BIN" read-workflow "$repo" "$branch" '{}' "$per_page" 2>/dev/null)
+  skipped=$(printf '%s\n' "$rows" | awk -F "$FS" -v marker="$W_UNREAD" '$1 == marker { n++ } END { print n + 0 }')
+  [ "$skipped" -eq 0 ] || printf 'skipped %s %s\n' "$repo" "$skipped" >> "$partial"
+  printf '%s\n' "$rows" | awk -F "$FS" -v marker="$W_UNREAD" '$1 != marker'
 }
 
 # run_evidence <repo> <name> <id> <status> <conclusion> <head> <created>: the
@@ -388,7 +403,7 @@ action_check() {
   printf '%s\n' "$now" > "$STAMP" 2>/dev/null || return 0
   load_token_env
   floor=$(conf_int FM_CI_HEALTH_RATE_FLOOR 1500)
-  per_page=$(conf_int FM_CI_HEALTH_PER_PAGE 10)
+  per_page=$(conf_int FM_CI_HEALTH_PER_PAGE 30)
   parallel=$(conf_int FM_CI_HEALTH_PARALLEL 32)
   [ "$parallel" -ge 1 ] || parallel=1
   answer=$(gh_api rate_limit) || {
@@ -410,7 +425,7 @@ action_check() {
   # findings to one scratch file, so the small repositories' round trips
   # overlap the big one's sweep; the findings are assembled in configured
   # order once every job has returned or given up at the deadline.
-  local scratch='' i=0 specs=() partial_note='' pfile
+  local scratch='' i=0 specs=() notes='' pkind prepo pcount
   for spec in $(conf FM_CI_HEALTH_REPOS "$REPOS_DEFAULT"); do
     specs+=("$spec")
   done
@@ -426,9 +441,11 @@ action_check() {
       part=$(cat "$scratch/$i" 2>/dev/null)
       [ -z "$part" ] || msg="${msg}${msg:+; }$part"
       if [ -f "$scratch/$i.partial" ]; then
-        while IFS= read -r pfile; do
-          [ -n "$pfile" ] || continue
-          partial_note="${partial_note}${partial_note:+, }$pfile"
+        while read -r pkind prepo pcount; do
+          case "$pkind" in
+            list) notes="${notes}${notes:+; }workflow list read only partially: $prepo" ;;
+            skipped) notes="${notes}${notes:+; }$pcount workflow reads in $prepo were skipped or unreadable" ;;
+          esac
         done < "$scratch/$i.partial"
       fi
       i=$((i + 1))
@@ -453,12 +470,10 @@ action_check() {
   if [ -n "$msg" ]; then
     trailer=$(conf FM_CI_HEALTH_TRAILER "$TRAILER_DEFAULT")
     line="ci-health: $msg - $trailer"
-    [ -z "$partial_note" ] || partial_note="; workflow list read only partially: $partial_note"
-    record_verdict "$now" "$line$partial_note"
+    record_verdict "$now" "$line${notes:+; $notes}"
     fm_cap_line "$line" "$MAX_LINE"
   else
-    [ -z "$partial_note" ] || partial_note="workflow list read only partially: $partial_note"
-    record_verdict "$now" "$partial_note"
+    record_verdict "$now" "$notes"
   fi
   return 0
 }

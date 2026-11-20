@@ -756,6 +756,7 @@ Any other conclusion is unknown and never wakes anyone either.
 The check exists in this shape because on 2026-11-19 its hand-written predecessor reported two workflows red naming only the workflow, and the newest run of each was in progress by the time anyone looked; a red that cannot be confirmed teaches the reader to ignore real failures.
 The same hour main carried a scheduled smoke failure and a dispatched deploy failure the predecessor could not see, because it read push runs only; and a single page of a branch's runs, however long, hides a workflow that runs rarely behind the ones that run often, so a red could age off the page while it was still that workflow's newest answer.
 So the poll reads each active workflow on its own: its newest completed run on the branch, whatever event started it, except a `pull_request` or `pull_request_target` run, which GitHub keys to the base branch although it describes a pull request.
+Pull-request-context runs are dropped after the API returns the page, so a workflow whose newest `FM_CI_HEALTH_PER_PAGE` completed runs on the branch are all pull-request-context runs reads as having no completed run: quiet, never red, and that is the one remaining window.
 Two runs created in the same second are ordered by run id, and every red line names the workflow, the run id, the conclusion it read, the head commit, the creation time, and the one `gh run view` command that confirms it; `bin/fm-ci-health-check.sh classify-run <owner/repo> <run-id>` reads one run live and prints the same evidence.
 The check does not wait, retry, or grace a failure: while a workflow's newest completed run is red, every poll says so, however old that run is and however many runs of other workflows came after it, and a run that concludes `failure` pages on the next poll.
 An answer the check cannot read, or a call that fails, is silent for that repository rather than red.
@@ -772,8 +773,8 @@ FM_CI_HEALTH_SCHEDULED=Muso-AI/H-DevOps:reconcile-prod-manifests.yaml:7200
 FM_CI_HEALTH_INTERVAL_SECS=900
 # stand down when fewer core API calls remain
 FM_CI_HEALTH_RATE_FLOOR=1500
-# completed runs read per workflow, newest first; a few is enough, the newest is what counts
-FM_CI_HEALTH_PER_PAGE=10
+# completed runs read per workflow, newest first; pull-request-context runs are dropped after the page is fetched, so a chatty pull_request_target workflow needs this larger than the branch runs it must see through
+FM_CI_HEALTH_PER_PAGE=30
 # per-workflow reads in flight at once, per repository; repositories are read concurrently, so the ceiling is repositories x parallel short-lived gh processes (about 80 for the default set, since only H-DevOps has more than 32 workflows), each about 55 MB for well under a second
 FM_CI_HEALTH_PARALLEL=32
 # sourced for GH_TOKEN when present; none disables
