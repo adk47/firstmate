@@ -607,6 +607,7 @@ tests/fm-busy-adapter-wiring.test.sh 17873
 tests/fm-busy-state.test.sh 3279
 tests/fm-calm-pi-extension.test.sh 256
 tests/fm-change-watch.test.sh 56339
+tests/fm-ci-health-check.test.sh 6000
 tests/fm-check-unregister.test.sh 517
 tests/fm-classify-corr-token.test.sh 38742
 tests/fm-classify-decision-key.test.sh 1167
