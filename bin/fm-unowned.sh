@@ -74,12 +74,19 @@ fail=0
 # accept. A listing the tool refuses, or whose rows disagree with its stated
 # count, is a read failure, not an empty state.
 backlog_ids() {  # <state>
-  local data out count rows
-  data=$(fm_backlog_data_absolute "$DATA") || {
-    echo "fm-unowned: $FM_BACKLOG_TRANSITION_ERROR" >&2
+  local file root out count rows
+  FM_BACKLOG_TRANSITION_ERROR=
+  if ! fm_backlog_file "$DATA" >/dev/null; then
+    echo "fm-unowned: ${FM_BACKLOG_TRANSITION_ERROR:-data directory cannot be resolved: $DATA}" >&2
     return 1
-  }
-  out=$(fm_backlog_row_list "$data" --state "$1") || {
+  fi
+  file=$(fm_backlog_file "$DATA") || return 1
+  root=$(fm_backlog_root "$DATA") || return 1
+  if [ "$(fm_tasks_axi_backend "$root")" = markdown ] && [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    echo "fm-unowned: no backlog at $file" >&2
+    return 1
+  fi
+  out=$(fm_backlog_row_list "$DATA" --state "$1") || {
     echo "fm-unowned: tasks-axi list --state $1 failed: $out" >&2
     return 1
   }

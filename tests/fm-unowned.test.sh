@@ -35,15 +35,13 @@ make_home() {  # <name>
 printf '%s\n' "$*" >> "$FM_FAKE_HOME/tasks.log"
 shift
 state=
-file=
 while [ $# -gt 0 ]; do
   case "$1" in
     --state) state=$2; shift 2 ;;
-    --file) file=$2; shift 2 ;;
+    --file) shift 2 ;;
     *) shift ;;
   esac
 done
-[ -z "$file" ] || [ -f "$file" ] || { echo "error: backlog file not found at $file"; echo 'code: NOT_FOUND'; exit 1; }
 [ -f "$FM_FAKE_HOME/refuse" ] && { echo 'error: "--state must be one of queued, in_flight, done, held"'; echo 'code: VALIDATION_ERROR'; exit 1; }
 f="$FM_FAKE_HOME/backlog.$state"
 n=0; [ -f "$f" ] && n=$(grep -c . "$f")
@@ -342,8 +340,22 @@ test_missing_backlog_is_exit_2() {
   rm -f "$home/data/backlog.md"
   run_unowned "$home"; out=$OUT
   [ "$RC" = 2 ] || fail "a markdown home with no backlog exits 2, got $RC"
-  grep -q 'backlog file not found' "$home/err" || fail "the missing backlog is named by the tool: $(cat "$home/err")"
-  pass "a markdown home with no backlog exits 2 and carries the tool's own reason"
+  [ -z "$out" ] || fail "a missing backlog prints no alarms, got: $out"
+  grep -q "no backlog at $home/data/backlog.md" "$home/err" \
+    || fail "the missing backlog is named by the script: $(cat "$home/err")"
+  pass "a markdown home with no backlog exits 2 and names the missing file"
+}
+
+test_unresolvable_data_dir_says_why() {
+  local home out
+  home=$(make_home nodata)
+  rm -rf "$home/data"
+  run_unowned "$home"; out=$OUT
+  [ "$RC" = 2 ] || fail "an unresolvable data directory exits 2, got $RC"
+  [ -z "$out" ] || fail "an unresolvable data directory prints no alarms, got: $out"
+  grep -q "fm-unowned: .*$home/data" "$home/err" \
+    || fail "the data directory failure carries a reason: $(cat "$home/err")"
+  pass "an unresolvable data directory exits 2 with a concrete reason"
 }
 
 test_non_markdown_backend_needs_no_backlog_file() {
@@ -411,6 +423,7 @@ test_refused_backlog_listing_is_exit_2_not_silence
 test_hung_forge_is_skipped
 test_listing_count_mismatch_is_exit_2
 test_missing_backlog_is_exit_2
+test_unresolvable_data_dir_says_why
 test_non_markdown_backend_needs_no_backlog_file
 test_zero_timeout_still_bounds_the_read
 test_root_override_selects_the_home
