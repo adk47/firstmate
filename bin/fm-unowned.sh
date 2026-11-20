@@ -11,7 +11,7 @@
 # WHAT IT DOES. Reads this home's backlog and task records and reports, one
 # line each:
 #   UNOWNED <item> <why>    an in-flight backlog item with no task record at all
-#   NO-LANE <item> <why>    a task record's latest claim still says work is under way but its endpoint is dead
+#   NO-LANE <item> <why>    a task record's latest claim still says work is under way but its endpoint verdict is dead
 #   STALE-DONE <task> <why> a task record's latest status says done/landed but its PR is still open
 # Prints nothing and exits 0 when everything that claims to be in flight is
 # actually owned; exits 1 when it printed at least one line; exits 2 when it
@@ -113,8 +113,14 @@ for m in "$STATE"/*.meta; do
   esac
   st="$(fm_run_timed "$TIMEOUT" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null | head -1)"
   case "$st" in
-    *dead*) echo "NO-LANE $id its latest status says '$verb' but the endpoint is dead"; fail=1 ;;
+    state:\ *) verdict=${st#state: } ;;
+    *) continue ;;
   esac
+  verdict=${verdict%% · *}
+  verdict=${verdict%% *}
+  [ "$verdict" = dead ] || continue
+  echo "NO-LANE $id its latest status says '$verb' but the endpoint is dead"
+  fail=1
 done
 
 # 3. done/landed claims whose PR is still open. The canonical record is the

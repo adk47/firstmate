@@ -64,9 +64,17 @@ cat "$f"
 SH
   cat > "$home/bin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
+# The reader's real output shape is
+#   state: <verdict> · source: <src> · <detail>
+# A fixture may give a bare verdict (it is wrapped) or the whole line (it is
+# printed as-is), so the note/detail text a live crew writes is exercised too.
 f="$FM_HOME/crew.$1"
-[ -f "$f" ] || { echo "unknown" >&2; exit 1; }
-head -n 1 "$f"
+[ -f "$f" ] || { echo "no endpoint state for $1" >&2; exit 1; }
+line=$(head -n 1 "$f")
+case "$line" in
+  state:\ *) printf '%s\n' "$line" ;;
+  *) printf 'state: %s · source: fixture · recorded for this test\n' "$line" ;;
+esac
 SH
   chmod 700 "$home/fakebin/tasks-axi" "$home/fakebin/gh" "$home/bin/fm-crew-state.sh"
   printf '%s' "$home"
@@ -94,7 +102,7 @@ test_owned_fleet_is_silent() {
   printf 'alpha\n' > "$home/backlog.in_flight"
   printf 'queued-one\nqueued-two\n' > "$home/backlog.queued"
   printf 'held-one\n' > "$home/backlog.held"
-  add_task "$home" alpha "working: on it" "alpha run-step=working alive"
+  add_task "$home" alpha "working: on it" "working"
   add_task "$home" beta "done: PR https://github.com/acme/widget/pull/7 checks green"
   printf 'MERGED\n' > "$home/pr.7"
   run_unowned "$home"; out=$OUT
@@ -108,7 +116,7 @@ test_in_flight_without_record_is_unowned() {
   local home out
   home=$(make_home unowned)
   printf 'ghost\nghost_item.v2\nUPPER.Case_1\nalpha\n' > "$home/backlog.in_flight"
-  add_task "$home" alpha "working: on it" "alpha run-step=working alive"
+  add_task "$home" alpha "working: on it" "working"
   run_unowned "$home"; out=$OUT
   [ "$RC" = 1 ] || fail "an unowned item exits 1, got $RC"
   printf '%s\n' "$out" | grep -q '^UNOWNED ghost ' || fail "ghost must be UNOWNED, got: $out"
@@ -145,15 +153,19 @@ test_queued_and_held_are_not_alarms() {
 test_dead_endpoint_under_working_claim_is_no_lane() {
   local home out
   home=$(make_home nolane)
-  add_task "$home" dead-one "working: half way" "dead-one dead"
-  add_task "$home" dead-two "working: still going" "dead-two dead no agent process in worktree"
-  add_task "$home" alive "working: fine" "alive run-step=working"
-  add_task "$home" finished "done: shipped" "finished dead"
+  add_task "$home" dead-one "working: half way" "dead"
+  add_task "$home" dead-two "working: still going" "dead"
+  add_task "$home" alive "working: fine" "working"
+  add_task "$home" dead-note "working: removed the dead-letter retry path" \
+    "state: working · source: status-log · removed the dead-letter retry path"
+  add_task "$home" finished "done: shipped" "dead"
   run_unowned "$home"; out=$OUT
   [ "$RC" = 1 ] || fail "a dead lane exits 1, got $RC"
   printf '%s\n' "$out" | grep -q "^NO-LANE dead-one its latest status says 'working'" || fail "dead-one must be NO-LANE: $out"
   printf '%s\n' "$out" | grep -q "^NO-LANE dead-two its latest status says 'working'" || fail "dead-two must be NO-LANE: $out"
   ! printf '%s\n' "$out" | grep -q 'alive' || fail "a live endpoint is not reported: $out"
+  ! printf '%s\n' "$out" | grep -q 'dead-note' \
+    || fail "a live endpoint whose own note mentions dead is not reported: $out"
   ! printf '%s\n' "$out" | grep -q 'finished' || fail "a finished task with no working claim is not a missing lane: $out"
   pass "a dead endpoint under a working claim is NO-LANE"
 }
@@ -168,7 +180,7 @@ test_state_and_data_overrides_are_honoured() {
   printf 'ghost_override.v1\n' > "$home/backlog.in_flight"
   printf 'window=firstmate:fm-override\n' > "$altstate/override.meta"
   printf 'working: implementing\n' > "$altstate/override.status"
-  printf 'override dead\n' > "$home/crew.override"
+  printf 'dead\n' > "$home/crew.override"
   RC=0
   FM_HOME="$home" FM_FAKE_HOME="$home" FM_CREW_STATE_BIN="$home/bin/fm-crew-state.sh" \
     FM_STATE_OVERRIDE="$altstate" FM_DATA_OVERRIDE="$altdata" PATH="$home/fakebin:$PATH" \
@@ -184,20 +196,20 @@ test_state_and_data_overrides_are_honoured() {
 test_grades_off_the_latest_status_line() {
   local home out
   home=$(make_home graded)
-  add_task "$home" worked-then-done "working: implementing" "worked-then-done dead"
+  add_task "$home" worked-then-done "working: implementing" "dead"
   printf 'done: shipped, checks green\n' >> "$home/state/worked-then-done.status"
-  add_task "$home" resumed "done: PR https://github.com/acme/widget/pull/61" "resumed run-step=working"
+  add_task "$home" resumed "done: PR https://github.com/acme/widget/pull/61" "working"
   printf 'OPEN\n' > "$home/pr.61"
   printf 'working: resumed after a captain answer\n' >> "$home/state/resumed.status"
-  add_task "$home" resumed-dead "done: PR https://github.com/acme/widget/pull/62" "resumed-dead dead"
+  add_task "$home" resumed-dead "done: PR https://github.com/acme/widget/pull/62" "dead"
   printf 'OPEN\n' > "$home/pr.62"
   printf 'working: resumed and then the pane died\n' >> "$home/state/resumed-dead.status"
-  add_task "$home" swept-dead "working: implementing" "swept-dead dead"
+  add_task "$home" swept-dead "working: implementing" "dead"
   printf 'resolved [key=k]: auto-closed by sweep (no-process-48h)\n' >> "$home/state/swept-dead.status"
-  add_task "$home" swept-done "done: PR https://github.com/acme/widget/pull/63" "swept-done dead"
+  add_task "$home" swept-done "done: PR https://github.com/acme/widget/pull/63" "dead"
   printf 'OPEN\n' > "$home/pr.63"
   printf 'resolved [key=k]: auto-closed by sweep (no-process-48h)\n' >> "$home/state/swept-done.status"
-  add_task "$home" answered-dead "needs-decision [key=k]: which way?" "answered-dead dead"
+  add_task "$home" answered-dead "needs-decision [key=k]: which way?" "dead"
   printf 'resolved [key=k]: answered: go left\n' >> "$home/state/answered-dead.status"
   run_unowned "$home"; out=$OUT
   [ "$RC" = 1 ] || fail "the still-working dead lane exits 1, got $RC"
@@ -224,7 +236,7 @@ test_grades_off_the_latest_status_line() {
 test_bounded_reads_do_not_need_a_timeout_binary() {
   local home out
   home=$(make_home notimeout)
-  add_task "$home" dead-one "working: half way" "dead-one dead"
+  add_task "$home" dead-one "working: half way" "dead"
   add_task "$home" claimed "done: PR https://github.com/acme/widget/pull/71"
   printf 'OPEN\n' > "$home/pr.71"
   RC=0
@@ -241,7 +253,7 @@ test_bounded_reads_do_not_need_a_timeout_binary() {
 test_stopped_task_and_unreadable_state_are_skipped() {
   local home out
   home=$(make_home skipped)
-  add_task "$home" parked "working: paused by captain" "parked dead"
+  add_task "$home" parked "working: paused by captain" "dead"
   : > "$home/state/parked.stopped"
   add_task "$home" unreadable "working: fine"
   run_unowned "$home"; out=$OUT
@@ -285,7 +297,7 @@ test_refused_backlog_listing_is_exit_2_not_silence() {
   local home out
   home=$(make_home refused)
   : > "$home/refuse"
-  add_task "$home" alpha "working: on it" "alpha dead"
+  add_task "$home" alpha "working: on it" "dead"
   run_unowned "$home"; out=$OUT
   [ "$RC" = 2 ] || fail "a refused listing exits 2, got $RC"
   [ -z "$out" ] || fail "a refused listing prints no alarms, got: $out"
