@@ -211,9 +211,10 @@ test_a_pause_without_evidence_is_still_not_a_declared_wait() {
 # The watcher labels an absorbed declared wait with the pause's OWN deadline
 # (`declared wait until HH:MMZ (Nm remaining)`), which is why the label is a pure
 # function of the line and a wall-clock epoch rather than prose assembled at the
-# call site. Both the clock and its absence are pinned here: a future wait counts
-# down, a stale one reads as due, and a pause naming no time yields no label at
-# all so no countdown is ever invented.
+# call site. Both declaration shapes and both sides of the clock are pinned here:
+# a future wait counts down, a dated deadline behind us reads as due, an undated
+# one behind us keeps only its time so no date is invented, and a pause declaring
+# no deadline yields no label at all.
 test_wait_label_names_the_pauses_own_deadline() {
   local label now
   now=$(date -u -d "$(date -u +%Y-%m-%d) 05:00:00" +%s) \
@@ -226,21 +227,38 @@ test_wait_label_names_the_pauses_own_deadline() {
   now=$(( now + 31 * 60 ))
   label=$(status_pause_wait_label 'paused [key=vendor]: rate-limit reset until 05:30Z' "$now") \
     || fail "a pause whose wake time passed produced no label"
-  [ "$label" = '05:30Z (due now)' ] \
-    || fail "a wake time already behind us was labelled '$label'"
+  [ "$label" = '05:30Z' ] \
+    || fail "an undated wake time behind us was labelled '$label'"
+
+  now=$(date -u -d '2031-03-04 23:50:00' +%s) || fail "date(1) could not express 2031-03-04T23:50Z"
+  label=$(status_pause_wait_label 'paused [key=vendor]: rate-limit reset until 00:10Z' "$now") \
+    || fail "a pause naming a wake time across midnight produced no label"
+  [ "$label" = '00:10Z' ] \
+    || fail "an undated wake time across midnight was labelled '$label'"
 
   now=$(date -u -d '2029-12-31 23:00:00' +%s) || fail "date(1) could not express 2029-12-31T23:00Z"
   label=$(status_pause_wait_label 'paused [key=release]: until 2030-01-01T00:00Z' "$now") \
     || fail "a paused line with a dated wake time produced no label"
-  [ "$label" = '00:00Z (60m remaining)' ] \
+  [ "$label" = '2030-01-01T00:00Z (60m remaining)' ] \
     || fail "a dated wake time was labelled '$label'"
+
+  now=$(date -u -d '2031-03-05 15:00:00' +%s) || fail "date(1) could not express 2031-03-05T15:00Z"
+  label=$(status_pause_wait_label 'paused [key=release]: upstream cut until 2035-01-01T00:00Z' "$now") \
+    || fail "a paused line with a multi-day wake time produced no label"
+  [ "$label" = '2035-01-01T00:00Z (1397d 9h remaining)' ] \
+    || fail "a multi-day wake time was labelled '$label'"
+
+  label=$(status_pause_wait_label 'paused [key=vendor]: rate-limit reset predicate=curl -fsS http://x/health expires=2031-03-05T16:00:00Z' "$now") \
+    || fail "a predicate/expires pause produced no label"
+  [ "$label" = '2031-03-05T16:00:00Z (60m remaining)' ] \
+    || fail "a predicate/expires deadline was labelled '$label'"
 
   label=$(status_pause_wait_label 'paused [key=winback]: waiting for the next send window' "$now")
   [ -z "$label" ] || fail "a pause naming no wake time was given the label '$label'"
   if status_pause_wait_label 'paused [key=winback]: waiting for the next send window' "$now" >/dev/null; then
     fail "a pause naming no wake time reported a label status"
   fi
-  pass "the wait label names the pause's own deadline, reads a passed one as due, and invents nothing without one"
+  pass "the wait label names both declared deadlines, counts down, reads a dated passed one as due, and invents nothing"
 }
 
 # A sweep case: <name> <task> <status-content>, then run the sweep over it.

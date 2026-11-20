@@ -337,39 +337,62 @@ status_pause_has_wake_time() {  # <status-line-or-note>
   [[ "$1" =~ $FM_CLASSIFY_PAUSE_UNTIL_RE ]]
 }
 
-# Render the wake time that pause names as `HH:MMZ (Nm remaining)`, the label a
-# supervisor prints so a declared wait shows its own deadline instead of a bare
-# age that reads the same whether the wait ends in a minute or never.
-# Prints nothing when the line names no wake time, so a caller can tell a
+# Render the deadline a pause declares as `<deadline> (Nm remaining)`, the label
+# a supervisor prints so a declared wait shows its own deadline instead of a
+# bare age that reads the same whether the wait ends in a minute or never. Both
+# declaration shapes are labelled: `until HH:MMZ` (with or without a date) and
+# the machine-checkable `predicate=... expires=<ISO8601>`.
+# Prints nothing when the line declares no deadline, so a caller can tell a
 # declared wait from an unendorsed pause without a second parse; when the clock
-# cannot be compared the bare time is printed rather than an invented countdown,
-# and a wake time already behind us reads `(due now)` because the wait is
-# overdue. Builtins plus one date(1) conversion, no per-line subshells beyond it.
+# cannot be compared the bare deadline is printed rather than an invented
+# countdown. A dated deadline already behind us reads `(due now)`; an undated
+# `HH:MMZ` behind us keeps just its time, because the line states no date and the
+# wait may still lie ahead across midnight. Builtins plus one date(1)
+# conversion, no per-line subshells beyond it.
 status_pause_wait_label() {  # <status-line-or-note> [<now-epoch>]
-  local line=$1 now=${2:-} date_part time_part epoch diff mins
+  local line=$1 now=${2:-} date_part time_part deadline epoch diff mins days hours undated=no
   [ -n "$line" ] || return 1
-  [[ "$line" =~ $FM_CLASSIFY_PAUSE_UNTIL_RE ]] || return 1
-  date_part=${BASH_REMATCH[1]}
-  time_part=${BASH_REMATCH[2]}
-  date_part=${date_part%%[[:space:]T]*}
   case "$now" in ''|*[!0-9]*) now=$(date -u +%s) ;; esac
-  if [ -n "$date_part" ]; then
-    epoch=$(fm_pause_expires_epoch "${date_part}T${time_part}:00Z")
+  if [[ "$line" =~ $FM_CLASSIFY_PAUSE_UNTIL_RE ]]; then
+    date_part=${BASH_REMATCH[1]}
+    time_part=${BASH_REMATCH[2]}
+    date_part=${date_part%%[[:space:]T]*}
+    if [ -n "$date_part" ]; then
+      deadline="${date_part}T${time_part}Z"
+      epoch=$(fm_pause_expires_epoch "${date_part}T${time_part}:00Z")
+    else
+      undated=yes
+      deadline="${time_part}Z"
+      epoch=$(fm_pause_expires_epoch "$(date -u +%Y-%m-%d)T${time_part}:00Z")
+    fi
   else
-    epoch=$(fm_pause_expires_epoch "$(date -u +%Y-%m-%d)T${time_part}:00Z")
+    fm_pause_parse "$line" || return 1
+    [ -n "$FM_PAUSE_EXPIRES" ] || return 1
+    deadline=$FM_PAUSE_EXPIRES
+    epoch=$(fm_pause_expires_epoch "$deadline")
   fi
   if [ -z "$epoch" ]; then
-    printf '%sZ' "$time_part"
+    printf '%s' "$deadline"
     return 0
   fi
   diff=$(( epoch - now ))
   if [ "$diff" -le 0 ]; then
-    printf '%sZ (due now)' "$time_part"
+    if [ "$undated" = yes ]; then
+      printf '%s' "$deadline"
+    else
+      printf '%s (due now)' "$deadline"
+    fi
     return 0
   fi
   # Round up: a wait with 40 seconds left is a minute away, never "0m".
   mins=$(( (diff + 59) / 60 ))
-  printf '%sZ (%dm remaining)' "$time_part" "$mins"
+  if [ "$mins" -ge 1440 ]; then
+    days=$(( mins / 1440 ))
+    hours=$(( (mins % 1440) / 60 ))
+    printf '%s (%dd %dh remaining)' "$deadline" "$days" "$hours"
+    return 0
+  fi
+  printf '%s (%dm remaining)' "$deadline" "$mins"
 }
 
 
