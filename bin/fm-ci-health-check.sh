@@ -55,7 +55,7 @@
 #            "red". Two runs created in the same second are ordered by run
 #            id, so a same-second retry wins over the run it replaced. A red
 #            is not suppressed, delayed, or retried: while a workflow's newest
-#            completed run stays red, every poll says so.
+#            completed run stays red, every poll that reads it says so.
 #   queued   more queued runs than the repository's bar.
 #   cadence  a scheduled workflow (FM_CI_HEALTH_SCHEDULED) has not succeeded
 #            inside its allowed age. Judged only when the workflow file
@@ -102,7 +102,11 @@
 # Test hooks: FM_CI_HEALTH_NOW (epoch) and FM_CI_HEALTH_GH (the gh binary).
 #
 # RECORD. state/.ci-health.last is the throttle stamp. state/.ci-health.verdict
-# keeps the last poll's time and verdict for `status`. `disarm` removes both.
+# keeps the last poll's time and verdict for `status`. A poll whose reads the
+# deadline cut short records that in the verdict - the workflow list read only
+# partially, workflow reads skipped or unreadable, a repository not read, or a
+# cadence check not judged - so a truncated sweep is never recorded as plain
+# quiet, while the wake line stays silent and never red. `disarm` removes both.
 set -u
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
