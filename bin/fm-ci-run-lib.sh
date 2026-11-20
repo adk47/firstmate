@@ -37,9 +37,9 @@
 #
 # Only red pages.
 #
-# Both inputs are compared case-insensitively after trimming, so a `null` that
-# arrived as the four-letter word from a jq `tostring` reads the same as an
-# empty field.
+# The conclusion is trimmed and lowercased before it is compared, so a `null`
+# that arrived as the four-letter word from a jq `tostring` reads the same as
+# an empty field; the status is evidence only and the classifier never reads it.
 
 fm_ci_run_normalize() {
   local v=$1

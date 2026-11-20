@@ -344,6 +344,20 @@ test_poll_is_throttled_and_stands_down_on_a_thin_rate_budget() {
   pass "polls are throttled to the interval and stand down below the rate floor without reading runs"
 }
 
+test_an_unreadable_rate_limit_is_not_reported_as_a_stand_down() {
+  local home out
+  home=$(make_home rate-unreadable)
+  rm -f "$home/api/rate_limit"
+  out=$(poll "$home" 100000)
+  [ -z "$out" ] || fail "an unreadable rate limit printed: $out"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CHECK" status)
+  assert_contains "$out" "rate limit unreadable" "an unreadable rate limit was not recorded as such"
+  case "$out" in
+    *"stood down"*) fail "an unreadable rate limit was reported as a rate stand-down: $out" ;;
+  esac
+  pass "an unreadable rate-limit answer is recorded as unreadable, never as a rate stand-down"
+}
+
 test_an_unreadable_answer_is_silent_not_red() {
   local home out
   home=$(make_home unreadable)
@@ -493,6 +507,7 @@ test_a_startup_failure_is_red_and_pages
 test_a_red_older_than_the_window_still_pages_while_it_is_the_workflow_newest_completed_run
 test_queued_backlog_over_the_bar_pages_with_the_count
 test_poll_is_throttled_and_stands_down_on_a_thin_rate_budget
+test_an_unreadable_rate_limit_is_not_reported_as_a_stand_down
 test_an_unreadable_answer_is_silent_not_red
 test_a_scheduled_workflow_is_judged_only_when_it_declares_a_schedule
 test_the_documented_config_file_shape_drives_the_poll

@@ -774,7 +774,7 @@ FM_CI_HEALTH_INTERVAL_SECS=900
 FM_CI_HEALTH_RATE_FLOOR=1500
 # completed runs read per workflow, newest first; a few is enough, the newest is what counts
 FM_CI_HEALTH_PER_PAGE=10
-# per-workflow reads in flight at once, per repository
+# per-workflow reads in flight at once, per repository; repositories are read concurrently, so the ceiling is repositories x parallel short-lived gh processes (about 80 for the default set, since only H-DevOps has more than 32 workflows), each about 55 MB for well under a second
 FM_CI_HEALTH_PARALLEL=32
 # sourced for GH_TOKEN when present; none disables
 FM_CI_HEALTH_TOKEN_ENV=~/.config/muso/gh-app-token.env
@@ -785,6 +785,7 @@ FM_CI_HEALTH_TRAILER=route each red to the repo lane that owns it; fix-forward, 
 Arm the check once per home with `bin/fm-ci-health-check.sh arm`, which writes `state/ci-health.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
 A poll costs one API call per active workflow plus two or three per repository, about 460 for the default set (H-DevOps alone has about 400 active workflows), which four polls an hour keep well inside the rate floor.
 Every API call is bounded at a third of `FM_CHECK_TIMEOUT`, between three and twenty seconds; the repositories are read concurrently, the per-workflow reads inside each run `FM_CI_HEALTH_PARALLEL` at a time, and no new read starts once the poll's budget (that timeout less one call's bound and a margin, at most 18 seconds) is spent, so a slow forge cannot hold the watcher's sweep, and the default set sweeps in about ten seconds.
+The bound is per repository: repositories are read concurrently, so the ceiling is repositories x parallel short-lived `gh` processes (about 80 for the default set, since only H-DevOps has more than 32 workflows), each about 55 MB for well under a second.
 The wake line is capped at 1,500 characters; the full verdict, every red with its evidence, is what `status` prints.
 `bin/fm-ci-health-check.sh status` prints the last recorded verdict, `bin/fm-ci-health-check.sh classify <status> <conclusion>` prints the class the check would assign, and `bin/fm-ci-health-check.sh disarm` removes the shim, its trust binding, the throttle stamp `state/.ci-health.last`, and the verdict record `state/.ci-health.verdict`.
 

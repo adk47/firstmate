@@ -83,10 +83,11 @@
 #   FM_CI_HEALTH_RATE_FLOOR      stand down below this many remaining core calls (default 1500)
 #   FM_CI_HEALTH_PER_PAGE        completed runs read per workflow, newest first (default 10: enough
 #                                that a few pull-request-context runs cannot crowd out the branch's own)
-#   FM_CI_HEALTH_PARALLEL        per-workflow reads in flight at once, per repository, the
-#                                repositories themselves being read concurrently (default 32: the
-#                                default set, about 450 active workflows, then sweeps in about nine
-#                                seconds; each read is one short-lived gh process)
+#   FM_CI_HEALTH_PARALLEL        per-workflow reads in flight at once, per repository; the
+#                                repositories themselves are read concurrently, so the ceiling is
+#                                repositories x parallel short-lived gh processes (about 80 for the
+#                                default set, since only H-DevOps has more than 32 workflows), each
+#                                about 55 MB for well under a second (default 32)
 #   FM_CI_HEALTH_TOKEN_ENV       an installer-managed env file to source for GH_TOKEN
 #                                (default ~/.config/muso/gh-app-token.env; "none" skips it)
 #   FM_CI_HEALTH_TRAILER         the routing reminder appended to a wake line
@@ -363,7 +364,7 @@ repo_job() {
 }
 
 action_check() {
-  local now interval floor per_page parallel rem spec line='' part msg='' trailer
+  local now interval floor per_page parallel rem answer spec line='' part msg='' trailer
   now=$(now_epoch)
   POLL_START=$SECONDS
   POLL_EPOCH_START=$(date -u +%s)
@@ -383,8 +384,17 @@ action_check() {
   per_page=$(conf_int FM_CI_HEALTH_PER_PAGE 10)
   parallel=$(conf_int FM_CI_HEALTH_PARALLEL 32)
   [ "$parallel" -ge 1 ] || parallel=1
-  rem=$(gh_api rate_limit | jq -r '.resources.core.remaining // 0' 2>/dev/null)
-  case "$rem" in ''|*[!0-9]*) rem=0 ;; esac
+  answer=$(gh_api rate_limit) || {
+    record_verdict "$now" 'rate limit unreadable: gh api rate_limit failed (no gh, no credential, or no network)'
+    return 0
+  }
+  rem=$(printf '%s\n' "$answer" | jq -r '.resources.core.remaining // empty' 2>/dev/null)
+  case "$rem" in
+    ''|*[!0-9]*)
+      record_verdict "$now" 'rate limit unreadable: gh api rate_limit failed (no gh, no credential, or no network)'
+      return 0
+      ;;
+  esac
   if [ "$rem" -lt "$floor" ]; then
     record_verdict "$now" "stood down: $rem core calls remaining (< $floor)"
     return 0
