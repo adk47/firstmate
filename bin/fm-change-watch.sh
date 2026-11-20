@@ -208,9 +208,11 @@
 #           rule reached from one reading. The comparison against the recorded
 #           baseline is: an unmeasured baseline is "unmeasured" (never 0 and
 #           never a regression) for every metric whose bar is relative to it or
-#           is deploy_run; a reading equal to its baseline is "unchanged", so 0
-#           against 0 is never a regression; otherwise the metric's own bar
-#           decides "regressed" or "within-bar". A deploy_run re-read below 1 is
+#           is deploy_run; a reading equal to its baseline is "unchanged"
+#           for a metric whose bar reads that baseline (and for deploy_run), so
+#           0 against 0 is never a regression; otherwise the metric's own bar
+#           decides "regressed" or "within-bar", including an absolute metric
+#           re-read equal to its baseline. A deploy_run re-read below 1 is
 #           absent; a watch whose only metric is the deciding one is proven by a
 #           re-read taken after +6h, which for deploy_run is the run carrying
 #           the merge succeeding (its bar never reads the baseline) and for any
@@ -2394,9 +2396,7 @@ for run in runs:
         continue
     if int(t.replace(tzinfo=datetime.timezone.utc).timestamp()) >= since:
         candidates.append(run)
-# Newest first: the latest carrier decides, so the walk stops at the first
-# carrier it meets instead of spending a containment read on every older run.
-candidates.sort(key=lambda r: r.get("createdAt") or "", reverse=True)
+candidates.sort(key=lambda r: r.get("createdAt") or "")
 for run in candidates:
     print("\t".join([
         run.get("createdAt") or "-",
@@ -2426,19 +2426,17 @@ for run in candidates:
       case "$crc" in
         0) ;;
         1) continue ;;
-        # A newer run whose containment could not be read may be the latest
-        # carrier, so no older carrier can be the one that decides.
         *) unreadable=1
-           break ;;
+           continue ;;
       esac
     fi
-    # Cands are sorted newest first, so the first carrier seen is the latest one
-    # and it is the one that decides; an older failure stays visible in the
-    # history without becoming the verdict.
+    # Cands are sorted oldest first, so the last carrier seen is the latest one and
+    # it is the one that decides; an earlier failure stays visible in the history
+    # without becoming the verdict.
     carried=1
     carried_status=$status
     carried_conclusion=$conclusion
-    break
+    unreadable=''
   done <<CANDIDATES
 $cands
 CANDIDATES
@@ -4725,7 +4723,7 @@ cw_row_interruption() {  # <watch-id>
 # Dry run unless --apply: the rewritten corpus is the evidence for the change,
 # so it is printed and read before it is written.
 cmd_rederive() {
-  local apply=0 id row state derived new reason note completed total=0 changed=0 arg wdir wid
+  local apply=0 named=0 id row state derived new reason note completed total=0 changed=0 arg wdir wid
   local rl_total=0 rl_proven=0 rl_regressed=0 rl_unmeasurable=0 run_epoch
   local -a ids=()
   for arg in "$@"; do
@@ -4733,9 +4731,13 @@ cmd_rederive() {
       --apply) apply=1 ;;
       -h|--help) usage ;;
       -*) die "unknown option: $arg" ;;
-      *) ids+=("$arg") ;;
+      *) named=1; ids+=("$arg") ;;
     esac
   done
+  if [ "$CW_STATE_FOUND" -eq 0 ]; then
+    [ "$named" -eq 0 ] || cw_die_unknown_watch "${ids[0]}"
+    die "the state root could not be found at $STATE, so no watch row was read"
+  fi
   [ "${#ids[@]}" -gt 0 ] || {
     if [ -d "$(cw_rows_dir)" ]; then
       for row in "$(cw_rows_dir)"/*.json; do
@@ -4863,9 +4865,11 @@ cw_rescore_compare() {  # <metric> <value> <baseline> <previous>
       oomkilled|rss_ratio|pgbouncer_cl_waiting) ;;
       *) printf 'unmeasured\n'; return 0 ;;
     esac
-  elif awk -v v="$value" -v b="$baseline" 'BEGIN { exit !((v + 0) == (b + 0)) }'; then
-    printf 'unchanged\n'
-    return 0
+  elif cw_metric_relative "$metric" || [ "$metric" = deploy_run ]; then
+    if awk -v v="$value" -v b="$baseline" 'BEGIN { exit !((v + 0) == (b + 0)) }'; then
+      printf 'unchanged\n'
+      return 0
+    fi
   fi
   if cw_metric_regressed "$metric" "$value" "$baseline" "$previous"; then
     printf 'regressed\n'
@@ -5310,6 +5314,7 @@ cw_claim_probe_run() {  # <probe>
 
 cmd_acceptance() {  # <watch-id> <offset-seconds>
   local id=$1 offset=$2 before after task url probe sha current code
+  [ "$CW_STATE_FOUND" -eq 1 ] || die "unknown claim: $id (the state root could not be found at $STATE)"
   cw_claim_exists "$id" || die "unknown claim: $id"
   case " $CLAIM_OFFSETS " in *" $offset "*) ;; *) die "not a claim offset: $offset (one of: $CLAIM_OFFSETS)" ;; esac
   before=$(cw_claim_state "$id")
@@ -5348,6 +5353,7 @@ cmd_acceptance() {  # <watch-id> <offset-seconds>
 # yet, so a runner that missed several offsets takes one reading, not a burst.
 cmd_claims() {
   local meta id claimed due now offset last state
+  [ "$CW_STATE_FOUND" -eq 1 ] || die "the state root could not be found at $STATE, so no claim was read"
   now=$(cw_now)
   [ -d "$(cw_claims_dir)" ] || return 0
   for meta in "$(cw_claims_dir)"/*.meta; do

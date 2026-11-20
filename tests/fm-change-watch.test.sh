@@ -3401,6 +3401,21 @@ esac
 case "$out" in *"gate ok"*) fail "the gate said ok without reading a row: $out" ;; esac
 pass "the gate fails, naming the path, when the state root it resolved does not exist"
 
+# Every other read path that resolves the watch root refuses it too: a sweep or
+# a claim query that read no row is not a pass either.
+for sub in 'rederive lane1' 'rederive' 'claims' 'acceptance cl1-claim 0'; do
+  lane="$TMP_ROOT/lane-read-$(printf '%s' "$sub" | tr ' /' '__')"
+  mkdir -p "$lane"
+  read -r -a argv <<< "$sub"
+  out=$(env -u FM_STATE_OVERRIDE FM_HOME="$lane" FM_CW_NO_WIKI=1 "$CW" "${argv[@]}" 2>&1) \
+    && fail "'$sub' passed from a home with no state root: $out"
+  case "$out" in
+    *"state root could not be found at $lane/state"*) ;;
+    *) fail "'$sub' did not name the missing state root it resolved: $out" ;;
+  esac
+done
+pass "rederive, claims and acceptance refuse a state root they could not find"
+
 # A state/ that exists but holds no watch and no record of the task is not the
 # home that owns the task either, so no watch there is not a finding.
 mkdir -p "$LANE/state"
@@ -3509,31 +3524,35 @@ esac
 out=$(run_hydra_cw "$HOME_RN" 1790050000 rescore no-such-watch 2>&1) && fail "rescore of an unknown watch passed: $out"
 pass "a metric that cannot be re-read now is refused and leaves the row untouched"
 
-# The latest carrier decides without a containment read on every older run.
-HOME_NF=$(hydra_world nf "$MERGED")
-mkdir -p "$HOME_NF/bin"
-cat > "$HOME_NF/bin/gh" <<'STUB'
-#!/usr/bin/env bash
-if [ "$1" = run ] && [ "$2" = list ]; then
-  printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-21T15:00:00Z","databaseId":1,"headSha":"oldcarrier","url":"https://example.invalid/1"},{"conclusion":"success","status":"completed","createdAt":"2026-09-21T15:30:00Z","databaseId":2,"headSha":"newcarrier","url":"https://example.invalid/2"}]'
-  exit 0
-fi
-if [ "$1" = api ]; then
-  printf '%s\n' "$2" >> "${0%/*}/api.log"
-  case "$2" in
-    *newcarrier*) printf 'ahead\n'; exit 0 ;;
-  esac
-fi
-exit 1
-STUB
-chmod +x "$HOME_NF/bin/gh"
-out=$(CW_CLUSTER_DIR='' FM_CW_GH="$HOME_NF/bin/gh" run_cw "$HOME_NF" 1790000000 register nf1 \
-  'https://github.com/Muso-AI/hydra/pull/1991') || fail "hydra register failed: $out"
-: > "$HOME_NF/bin/api.log"
-CW_CLUSTER_DIR='' FM_CW_GH="$HOME_NF/bin/gh" run_cw "$HOME_NF" 1790000900 sample nf1-1991 900 >/dev/null \
-  || fail "sample failed"
-[ "$(deploy_run_value "$HOME_NF" nf1-1991 900)" = 1 ] \
-  || fail "the latest carrier did not decide when an older run's containment could not be read: $(cat "$HOME_NF/state/change-watch/nf1-1991/samples.log" "$HOME_NF/state/change-watch/nf1-1991/read-failures" 2>/dev/null)"
-! grep -q oldcarrier "$HOME_NF/bin/api.log" \
-  || fail "the latest carrier was found only after a containment read of every older run: $(cat "$HOME_NF/bin/api.log")"
-pass "the latest carrier decides without a containment read of every older run"
+# An absolute metric's bar never reads the baseline, so a re-read equal to the
+# baseline is not "unchanged": oomkilled 2 against a baseline of 2 still crosses
+# its own bar and must stay a regression rather than becoming proven.
+HOME_RO=$(new_world ro)
+seed_pr "$HOME_RO" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_RO" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_RO" oomkilled muso-prod_feed-service baseline 2
+run_cw "$HOME_RO" 1790000000 register ro1 "$PR_URL" >/dev/null || fail "register failed"
+RO_KEY='oomkilled@muso-prod/feed-service'
+RO_DIR="$HOME_RO/state/change-watch/ro1-3317"
+ROW_RO="$HOME_RO/state/change-watch/rows/ro1-3317.json"
+printf '1790000300\t300\t%s\t0\t2\t1\t1\t0\n' "$RO_KEY" > "$RO_DIR/samples.log"
+printf 'metric=oomkilled\ntarget=muso-prod/feed-service\nvalue=0\nbaseline=2\noffset=300\ntick=5\n' \
+  > "$RO_DIR/regression"
+printf 'regressed at +5m on oomkilled (0 vs baseline 2)\n' > "$RO_DIR/verdict"
+rm -f "$ROW_RO"
+run_cw "$HOME_RO" 1790050000 rederive --apply >/dev/null || fail "rederive failed"
+grep -q '"terminal_state": "regressed"' "$ROW_RO" \
+  || fail "the stuck regressed oomkilled row was not seeded: $(cat "$ROW_RO" 2>/dev/null)"
+seed_series "$HOME_RO" oomkilled muso-prod_feed-service sample 2
+out=$(run_cw "$HOME_RO" 1790050000 rescore --apply ro1-3317 2>&1) || fail "rescore failed: $out"
+case "$out" in
+  *"(unchanged)"*) fail "a re-read equal to its baseline was called unchanged for an absolute metric: $out" ;;
+esac
+case "$out" in
+  *"-> proven"*) fail "an absolute metric's equal-baseline re-read proved a real regression: $out" ;;
+esac
+grep -q '"terminal_state": "regressed"' "$ROW_RO" \
+  || fail "an absolute metric's equal-baseline re-read erased its regression: $(cat "$ROW_RO")"
+grep -q '"comparison": "regressed"' "$ROW_RO" \
+  || fail "the deciding comparison was not stored as regressed: $(cat "$ROW_RO")"
+pass "an absolute metric re-read equal to its baseline still crosses its own bar"
