@@ -600,6 +600,7 @@ fi
 MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
+PENDING_REPLY_DEDUP_REUSED=0
 TARGET_TASK_ID=
 # fm_send_last_activity <task-id>: the newest epoch at which the task showed any
 # sign of life in this home's records, or empty when it has none.
@@ -959,6 +960,7 @@ else
         3)
           # Same body, same secondmate, inside the duplicate window: this is a
           # resend of the open request, so it rides that record's corr.
+          PENDING_REPLY_DEDUP_REUSED=1
           [ -n "$PENDING_REPLY_CORR" ] \
             || { echo "error: duplicate pending-reply detection for $TARGET_TASK_ID returned no correlation" >&2; exit 1; }
           ;;
@@ -1118,7 +1120,8 @@ else
     # The remote record is durable delivery, exactly as a local enqueue is.
     if [ -n "$PENDING_REPLY_CORR" ]; then
       if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
-        :
+        [ "$PENDING_REPLY_DEDUP_REUSED" != 1 ] \
+          || fm_pending_reply_rearm_turn "$STATE" "$PENDING_REPLY_CORR" || true
       else
         delivery_commit_status=$?
         if [ "$delivery_commit_status" = 2 ]; then
@@ -1202,7 +1205,8 @@ else
     # parent report acknowledges the request.
     if [ -n "$PENDING_REPLY_CORR" ]; then
       if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
-        :
+        [ "$PENDING_REPLY_DEDUP_REUSED" != 1 ] \
+          || fm_pending_reply_rearm_turn "$STATE" "$PENDING_REPLY_CORR" || true
       else
         delivery_commit_status=$?
         if [ "$delivery_commit_status" = 2 ]; then
@@ -1315,7 +1319,8 @@ else
   # it: only a correlated parent report acknowledges the request.
   if [ -n "$PENDING_REPLY_CORR" ]; then
     if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
-      :
+      [ "$PENDING_REPLY_DEDUP_REUSED" != 1 ] \
+        || fm_pending_reply_rearm_turn "$STATE" "$PENDING_REPLY_CORR" || true
     else
       delivery_commit_status=$?
       if [ "$delivery_commit_status" = 2 ]; then

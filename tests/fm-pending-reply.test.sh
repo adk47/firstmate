@@ -1657,6 +1657,44 @@ test_sibling_still_gets_one_repost_after_a_fresh_turn() {
   pass "a sibling earns its one repost only from a turn observed after the answer"
 }
 
+test_sibling_marked_recovery_turn_completes_from_idle() {
+  (
+    local home state a b rec_b
+    IFS=$'\t' read -r home a b <<< "$(sibling_fixture recovery-sibling-idle)"
+    state="$home/state"
+    rec_b=$(fm_pending_reply_path "$state" "$b")
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    printf 'done [corr=%s]: shipped\n' "$a" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$a" || fail "A should resolve"
+    [ -n "$(fm_pending_reply_get "$rec_b" sibling_resolved_epoch)" ] \
+      || fail "B must be sibling-marked before its recovery turn"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20070
+    fm_pending_reply_set "$rec_b" recovery_attempted_epoch 20065 \
+      || fail "fixture should record the recovery attempt"
+    fm_pending_reply_set "$rec_b" recovery_sent_epoch 20070 \
+      || fail "fixture should record the recovery send"
+    fm_pending_reply_set "$rec_b" recovery_turn_seen_busy 0 \
+      || fail "fixture should leave the recovery turn unseen"
+    fm_pending_reply_set "$rec_b" recovery_turn_completed_epoch "" \
+      || fail "fixture should leave the recovery turn incomplete"
+    fm_pending_reply_set "$rec_b" phase recovery_sent \
+      || fail "fixture should put B in recovery_sent"
+    # The mate handles the repost entirely between polls: only idle is observed.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20130
+    fm_pending_reply_tick_one "$state" "$b" idle || fail "tick should succeed"
+    [ -n "$(fm_pending_reply_get "$rec_b" recovery_turn_completed_epoch)" ] \
+      || fail "a sibling-marked recovery turn must complete from idle after grace"
+    [ "$(phase_of "$state" "$b")" = escalated ] \
+      || fail "the missed recovery must escalate, got $(phase_of "$state" "$b")"
+    grep -q 'pending-reply-missed' "$state/lights.status" \
+      || fail "the escalation must reach the parent channel"
+  ) || fail "sibling-marked recovery-idle regression failed"
+  pass "a sibling-marked recovery turn completes from idle and escalates"
+}
+
 test_distinct_request_is_not_a_sibling() {
   (
     local home state a b rec hook_log out
@@ -2038,6 +2076,79 @@ test_fm_send_resend_of_same_body_points_at_existing_corr() {
   pass "fm-send resend of the same body points at the existing corr"
 }
 
+test_dedup_resend_restarts_turn_clock() {
+  (
+    local home state dir fb log corr body rec hook_log lines
+    dir="$TMP_ROOT/dedup-resend-clock"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); log="$dir/send.log"
+    home=$(setup_parent dedup-resend-clock)
+    state="$home/state"
+    fm_write_secondmate_meta "$state/hibit.meta" "$home/sm" "sess:fm-hibit"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1000
+    run_send "$fb" "$home" "$log" hibit "please report the ledger status" \
+      || fail "first send failed"
+    body=$(latest_record_body "$home" hibit) || fail "first record missing"
+    corr=$(fm_pending_reply_extract_corr "$body")
+    [ -n "$corr" ] || fail "first send must embed a corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_set "$rec" grace_secs 120 || fail "fixture should set the grace"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1010
+    fm_pending_reply_observe_busy "$state" "$corr" busy || fail "busy observation failed"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1121
+    fm_pending_reply_observe_busy "$state" "$corr" idle || fail "idle observation failed"
+    [ "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" = 1121 ] \
+      || fail "fixture should complete the first turn"
+    # The captain resends the identical body while the completed turn is past
+    # grace; delivery rides the dedup record and restarts that record's clock.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1130
+    run_send "$fb" "$home" "$log" hibit "please report the ledger status" \
+      || fail "identical resend failed"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "the dedup resend must keep the record open"
+    [ "$(fm_pending_reply_get "$rec" delivered_epoch)" = 1130 ] \
+      || fail "the resend must restart the delivered clock"
+    [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 0 ] \
+      || fail "the resend must clear the seen-busy flag"
+    [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "the resend must clear the completed turn"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1131
+    fm_pending_reply_tick_one "$state" "$corr" idle || fail "tick should succeed"
+    [ ! -s "$hook_log" ] \
+      || fail "a resend must not repost while its fresh grace is running"$'\n'"$(cat "$hook_log")"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "the record must stay open after the resend"
+    # A genuine later turn that ends unanswered still earns exactly one repost.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1140
+    fm_pending_reply_tick_one "$state" "$corr" busy || fail "busy tick failed"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1200
+    fm_pending_reply_tick_one "$state" "$corr" idle || fail "idle tick failed"
+    [ ! -s "$hook_log" ] \
+      || fail "the post-resend turn must wait out its own grace before reposting"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1260
+    fm_pending_reply_tick_one "$state" "$corr" idle || fail "final tick failed"
+    [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+      || fail "the later unanswered turn must earn its repost"
+    lines=$(wc -l < "$hook_log" | tr -d ' ')
+    [ "$lines" = 1 ] || fail "expected exactly one repost, got $lines"
+  ) || fail "dedup-resend clock regression failed"
+  pass "an identical resend restarts the turn clock and earns one later repost"
+}
+
 test_semantic_busy_record_beats_rendered_tail() {
   (
     local home state corr gen hook_log
@@ -2373,6 +2484,7 @@ test_local_parent_replies_is_wrong_home_evidence
 test_one_answer_resolves_exactly_one_record
 test_sibling_answer_order_within_one_tick_is_irrelevant
 test_sibling_still_gets_one_repost_after_a_fresh_turn
+test_sibling_marked_recovery_turn_completes_from_idle
 test_distinct_request_is_not_a_sibling
 test_resolved_sibling_is_not_reopened_by_a_later_note
 test_pending_reply_set_never_resurrects_a_vanished_record
@@ -2381,6 +2493,7 @@ test_age_sweep_retires_with_recorded_reason
 test_sweep_runs_from_tick_on_its_interval
 test_same_request_within_window_reuses_corr
 test_fm_send_resend_of_same_body_points_at_existing_corr
+test_dedup_resend_restarts_turn_clock
 test_semantic_busy_record_beats_rendered_tail
 test_semantic_idle_waits_for_the_grace_gate
 test_retire_never_overwrites_a_race_resolution

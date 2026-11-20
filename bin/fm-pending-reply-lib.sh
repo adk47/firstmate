@@ -558,6 +558,39 @@ _fm_pending_reply_confirm_delivery_locked() {  # <state-dir> <corr_id>
   return 2
 }
 
+fm_pending_reply_rearm_turn() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_pending_reply_rearm_turn_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+_fm_pending_reply_rearm_turn_locked() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec phase now
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  now=$(fm_pending_reply_now)
+  case "$phase" in
+    awaiting_report)
+      fm_pending_reply_set "$rec" delivered_epoch "$now" || return 1
+      fm_pending_reply_set "$rec" turn_seen_busy 0 || return 1
+      fm_pending_reply_set "$rec" request_turn_completed_epoch "" || return 1
+      ;;
+    recovery_sent)
+      fm_pending_reply_set "$rec" recovery_sent_epoch "$now" || return 1
+      fm_pending_reply_set "$rec" recovery_turn_seen_busy 0 || return 1
+      fm_pending_reply_set "$rec" recovery_turn_completed_epoch "" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # Preserve an expectation when a remote transport disconnect makes delivery
 # completion unknowable. This never resolves or retries the request; it moves
 # the existing prepared record to the owner's explicit unknown-delivery path.
@@ -952,7 +985,9 @@ fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
         # - except after a sibling record resolved: that idle is the end of the
         # sibling's answer, so only a transition observed since then counts.
         if [ "$seen" = 1 ] \
-          || { [ "$seen" = 0 ] && [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_epoch)" ]; }; then
+          || { [ "$seen" = 0 ] \
+            && { [ "$field_completed" != request_turn_completed_epoch ] \
+              || [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_epoch)" ]; }; }; then
           now=$(fm_pending_reply_now)
           fm_pending_reply_set "$rec" "$field_completed" "$now" || return 1
         fi
