@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # tests/fm-unowned.test.sh - the alarm for work that exists only as a note
 # (bin/fm-unowned.sh): an in-flight backlog item with no task record is
-# UNOWNED, a task whose status claims work under way while its endpoint is dead
-# is NO-LANE, a done claim whose PR is still open is STALE-DONE, a queued or
+# UNOWNED, a task whose latest status claims work under way while its endpoint
+# is dead is NO-LANE, a latest done claim whose PR is still open is STALE-DONE,
+# a historical verb never grades a task, a queued or
 # held item is never an alarm, a stopped task is never a missing lane, a forge
 # that cannot answer is skipped rather than reported, a backlog listing the
 # tool refuses is exit 2 on stderr rather than silence, and a fully owned
@@ -147,11 +148,36 @@ test_dead_endpoint_under_working_claim_is_no_lane() {
   add_task "$home" finished "done: shipped" "finished dead"
   run_unowned "$home"; out=$OUT
   [ "$RC" = 1 ] || fail "a dead lane exits 1, got $RC"
-  printf '%s\n' "$out" | grep -q "^NO-LANE dead-one its status says 'working'" || fail "dead-one must be NO-LANE: $out"
-  printf '%s\n' "$out" | grep -q "^NO-LANE dead-two its status says 'working'" || fail "dead-two must be NO-LANE: $out"
+  printf '%s\n' "$out" | grep -q "^NO-LANE dead-one its latest status says 'working'" || fail "dead-one must be NO-LANE: $out"
+  printf '%s\n' "$out" | grep -q "^NO-LANE dead-two its latest status says 'working'" || fail "dead-two must be NO-LANE: $out"
   ! printf '%s\n' "$out" | grep -q 'alive' || fail "a live endpoint is not reported: $out"
   ! printf '%s\n' "$out" | grep -q 'finished' || fail "a finished task with no working claim is not a missing lane: $out"
   pass "a dead endpoint under a working claim is NO-LANE"
+}
+
+test_grades_off_the_latest_status_line() {
+  local home out
+  home=$(make_home graded)
+  add_task "$home" worked-then-done "working: implementing" "worked-then-done dead"
+  printf 'done: shipped, checks green\n' >> "$home/state/worked-then-done.status"
+  add_task "$home" resumed "done: PR https://github.com/acme/widget/pull/61" "resumed run-step=working"
+  printf 'OPEN\n' > "$home/pr.61"
+  printf 'working: resumed after a captain answer\n' >> "$home/state/resumed.status"
+  add_task "$home" resumed-dead "done: PR https://github.com/acme/widget/pull/62" "resumed-dead dead"
+  printf 'OPEN\n' > "$home/pr.62"
+  printf 'working: resumed and then the pane died\n' >> "$home/state/resumed-dead.status"
+  run_unowned "$home"; out=$OUT
+  [ "$RC" = 1 ] || fail "the still-working dead lane exits 1, got $RC"
+  ! printf '%s\n' "$out" | grep -q 'worked-then-done' \
+    || fail "a task that finished after working is not NO-LANE: $out"
+  ! printf '%s\n' "$out" | grep -q 'STALE-DONE resumed ' \
+    || fail "a resumed task is not STALE-DONE off its old done line: $out"
+  ! printf '%s\n' "$out" | grep -q 'STALE-DONE resumed-dead ' \
+    || fail "a resumed task's old PR is not reported, its live claim is: $out"
+  printf '%s\n' "$out" | grep -q "^NO-LANE resumed-dead its latest status says 'working'" \
+    || fail "a resumed task whose endpoint then died is NO-LANE: $out"
+  [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] || fail "only the still-working dead lane is reported, got: $out"
+  pass "every task is graded off its latest status line, never a historical verb"
 }
 
 test_stopped_task_and_unreadable_state_are_skipped() {
@@ -254,6 +280,7 @@ test_held_in_flight_item_is_not_unowned
 test_queued_and_held_are_not_alarms
 test_dead_endpoint_under_working_claim_is_no_lane
 test_stopped_task_and_unreadable_state_are_skipped
+test_grades_off_the_latest_status_line
 test_done_claim_with_open_pr_is_stale_done
 test_refused_backlog_listing_is_exit_2_not_silence
 test_hung_forge_is_skipped

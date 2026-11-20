@@ -11,8 +11,8 @@
 # WHAT IT DOES. Reads this home's backlog and task records and reports, one
 # line each:
 #   UNOWNED <item> <why>    an in-flight backlog item with no task record at all
-#   NO-LANE <item> <why>    a task record says work is under way but its endpoint is dead
-#   STALE-DONE <task> <why> a task says done/landed but its PR is still open
+#   NO-LANE <item> <why>    a task record's latest status says working but its endpoint is dead
+#   STALE-DONE <task> <why> a task record's latest status says done/landed but its PR is still open
 # Prints nothing and exits 0 when everything that claims to be in flight is
 # actually owned; exits 1 when it printed at least one line; exits 2 when it
 # could not read the backlog at all (and says why on stderr).
@@ -34,6 +34,9 @@
 set -uo pipefail
 FM_HOME="${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export FM_HOME
+# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-classify-lib.sh"
 STATE="$FM_HOME/state"
 BACKLOG="$FM_HOME/data/backlog.md"
 TIMEOUT="${FM_UNOWNED_TIMEOUT:-20}"
@@ -82,17 +85,20 @@ while IFS= read -r id; do
   fail=1
 done <<< "$in_flight"
 
-# 2. Task records whose endpoint is dead while their status still claims work
-#    under way. A task the captain ordered left stopped is not a missing lane.
+# 2. Task records whose endpoint is dead while their latest status still
+#    claims work under way. A task the captain ordered left stopped is not a
+#    missing lane.
 for m in "$STATE"/*.meta; do
   [ -f "$m" ] || continue
   id="$(basename "$m" .meta)"
   [ -f "$STATE/$id.stopped" ] && continue
-  last="$(grep -E '^working:' "$STATE/$id.status" 2>/dev/null | tail -1)"
-  [ -n "$last" ] || continue
+  last="$(last_status_line_behind_sweep "$STATE/$id.status")"
+  status_line_verb_core "$last"
+  verb=$_FM_STATUS_VERB
+  [ "$verb" = working ] || continue
   st="$(timeout "$TIMEOUT" "$FM_HOME/bin/fm-crew-state.sh" "$id" 2>/dev/null | head -1)"
   case "$st" in
-    *dead*) echo "NO-LANE $id its status says '${last%%:*}' but the endpoint is dead"; fail=1 ;;
+    *dead*) echo "NO-LANE $id its latest status says '$verb' but the endpoint is dead"; fail=1 ;;
   esac
 done
 
@@ -103,7 +109,12 @@ done
 for m in "$STATE"/*.meta; do
   [ -f "$m" ] || continue
   id="$(basename "$m" .meta)"
-  grep -qE '^(done|landed)' "$STATE/$id.status" 2>/dev/null || continue
+  last="$(last_status_line_behind_sweep "$STATE/$id.status")"
+  status_line_verb_core "$last"
+  case "$_FM_STATUS_VERB" in
+    done|landed) ;;
+    *) continue ;;
+  esac
   url="$(sed -n 's/^pr=\([^[:space:]]*\).*/\1/p' "$m" 2>/dev/null | tail -1)"
   [ -n "$url" ] || url="$(grep -oE 'https://github.com/[^ )]+/pull/[0-9]+' "$STATE/$id.status" 2>/dev/null | tail -1)"
   printf '%s' "$url" | grep -qE '^https://github\.com/[^/]+/[^/]+/pull/[0-9]+$' || continue
