@@ -24,9 +24,20 @@
 #   - One answer resolves exactly one record: a correlated line carrying corr A
 #     resolves A and nothing else. Resolution is terminal for that corr: a
 #     resolved or retired record never sends a recovery and never escalates.
+#   - No body, no dedup: request identity is the request_digest of the full
+#     request body, read only through fm_pending_reply_request_identity. A
+#     record with no digest - every record written before digests existed,
+#     which stores only the 120-character request_summary, and any request
+#     whose body is empty - is UNCOMPARABLE: it never enters the duplicate
+#     lookup or the sibling reset below, on either side, and keeps the
+#     ordinary one-repost-then-escalate path. The summary is never hashed or
+#     compared in its place: a truncation is not an identity, and two
+#     different requests sharing their first 120 characters would collapse
+#     into one, so an unanswered request would quietly disappear because it
+#     looked like another.
 #   - A sibling answer is not a missed report. When A resolves, every
-#     awaiting_report record for the same task AND the same request body (same
-#     request_digest; an empty digest on either side is never a sibling) that is
+#     awaiting_report record for the same task AND the same request identity
+#     (both records comparable, equal request_digest) that is
 #     delivered and whose recovery is not yet attempted has its turn evidence
 #     reset and records sibling_resolved_corr/epoch. From then on only a genuine
 #     busy->idle transition observed AFTER that epoch completes the sibling's
@@ -97,7 +108,9 @@
 #   request_summary=        short sanitized summary (no secrets by design)
 #   request_digest=         cksum of the request body (marker and corr stripped)
 #                           used for same-task duplicate detection and to scope
-#                           sibling-evidence reset to the same request
+#                           sibling-evidence reset to the same request; empty
+#                           (uncomparable) for an empty body and for legacy
+#                           records, never derived from request_summary
 #   created_epoch=          when the expectation was created
 #   delivered_epoch=        when the marked request was confirmed delivered
 #                           (empty until delivery; delivery never resolves)
@@ -287,12 +300,27 @@ fm_pending_reply_summarize() {  # <text>
 
 # Stable digest of a request body for same-task duplicate detection: the
 # from-firstmate marker and any leading corr token are stripped so a resend that
-# fm-send re-marks or re-embeds hashes the same as the original.
+# fm-send re-marks or re-embeds hashes the same as the original. An empty body
+# has no identity and prints nothing (no body, no dedup).
 fm_pending_reply_request_digest() {  # <text>
   local body=$1
   body=${body#"$FM_FROMFIRST_MARK"}
   body=$(printf '%s' "$body" | sed -E "1s/^corr=[A-Fa-f0-9]{16}[[:space:]]*//")
+  [ -n "$body" ] || return 0
   printf '%s' "$body" | cksum 2>/dev/null | awk '{printf "%s-%s", $1, $2}'
+}
+
+# The one reader of a record's request identity for every comparison (duplicate
+# lookup, sibling reset). Prints the record's request_digest and succeeds only
+# when the record is comparable; a record with no digest (legacy summary-only
+# records, empty bodies) fails and therefore never matches anything. Never fall
+# back to request_summary: it is a 120-character truncation, not an identity.
+fm_pending_reply_request_identity() {  # <record-path>
+  local digest
+  [ -f "$1" ] || return 1
+  digest=$(fm_pending_reply_get "$1" request_digest)
+  [ -n "$digest" ] || return 1
+  printf '%s' "$digest"
 }
 
 # Prints the corr of an open record for <task_id> carrying <digest> created
@@ -307,7 +335,7 @@ fm_pending_reply_find_duplicate() {  # <state-dir> <task_id> <digest> <now>
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in .*) continue ;; esac
     [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || continue
-    [ "$(fm_pending_reply_get "$rec" request_digest)" = "$digest" ] || continue
+    [ "$(fm_pending_reply_request_identity "$rec")" = "$digest" ] || continue
     created=$(fm_pending_reply_get "$rec" created_epoch)
     case "$created" in ''|*[!0-9]*) continue ;; esac
     [ "$created" -le "$now" ] && [ $((now - created)) -le "$window" ] || continue
@@ -892,9 +920,8 @@ fm_pending_reply_note_sibling_resolved() {  # <state-dir> <task_id> <resolved-co
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   [ -n "$task_id" ] && [ -n "$resolved_corr" ] || return 1
   STATE=$state
-  resolved_digest=$(fm_pending_reply_get \
-    "$(fm_pending_reply_path "$state" "$resolved_corr")" request_digest)
-  [ -n "$resolved_digest" ] || return 0
+  resolved_digest=$(fm_pending_reply_request_identity \
+    "$(fm_pending_reply_path "$state" "$resolved_corr")") || return 0
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   # shellcheck source=bin/fm-wake-lib.sh
@@ -905,8 +932,8 @@ fm_pending_reply_note_sibling_resolved() {  # <state-dir> <task_id> <resolved-co
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] && [ "$corr" != "$resolved_corr" ] || continue
     [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || continue
-    digest=$(fm_pending_reply_get "$rec" request_digest)
-    [ -n "$digest" ] && [ "$digest" = "$resolved_digest" ] || continue
+    digest=$(fm_pending_reply_request_identity "$rec") || continue
+    [ "$digest" = "$resolved_digest" ] || continue
     lock="$state/.pending-reply-$corr.lock"
     fm_lock_acquire_wait_bounded "$lock" 1 || continue
     _fm_pending_reply_note_sibling_locked "$state" "$task_id" \
@@ -923,8 +950,8 @@ _fm_pending_reply_note_sibling_locked() {  # <state-dir> <task_id> <resolved-cor
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" corr_id)" = "$corr" ] || return 1
   [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || return 1
-  digest=$(fm_pending_reply_get "$rec" request_digest)
-  [ -n "$digest" ] && [ "$digest" = "$resolved_digest" ] || return 1
+  digest=$(fm_pending_reply_request_identity "$rec") || return 1
+  [ -n "$resolved_digest" ] && [ "$digest" = "$resolved_digest" ] || return 1
   [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in

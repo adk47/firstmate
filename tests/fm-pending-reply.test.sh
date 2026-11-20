@@ -1809,6 +1809,89 @@ test_distinct_request_is_not_a_sibling() {
   pass "a distinct request body is not a sibling and keeps its own repost path"
 }
 
+# No body, no dedup. A legacy record stores only a 120-character
+# request_summary and no request_digest; two of them may share an identical
+# summary while being different requests. They must be UNCOMPARABLE: neither the
+# sibling reset nor the duplicate lookup may pair them with each other or with a
+# new request whose summary matches, and each keeps the ordinary
+# one-repost-then-escalate path. Empty bodies have no identity either.
+test_legacy_record_without_body_is_uncomparable() {
+  (
+    local home state l1 l2 rec hook_log out rc n summary e1 e2
+    home=$(setup_parent legacy-uncomparable)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=10
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=30000
+    # Two genuinely different requests whose first 120 characters are equal.
+    summary='My last message to you was recorded as MISSED, so here it is short and only the parts that matter, in the order I need them: '
+    l1=$(fm_pending_reply_create "$home" "$state" lights "${summary}(1) ship the credit-trust fix")
+    l2=$(fm_pending_reply_create "$home" "$state" lights "${summary}(1) pause the credit-trust fix")
+    for rec in "$(fm_pending_reply_path "$state" "$l1")" "$(fm_pending_reply_path "$state" "$l2")"; do
+      # Make each a legacy record: no request_digest line at all.
+      grep -v '^request_digest=' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
+    done
+    [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$l1")" request_summary)" \
+      = "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$l2")" request_summary)" ] \
+      || fail "fixture: the two legacy records must share an identical summary"
+    fm_pending_reply_request_identity "$(fm_pending_reply_path "$state" "$l1")" >/dev/null \
+      && fail "a legacy record with no body must have no request identity"
+    fm_pending_reply_mark_delivered "$state" "$l1"
+    fm_pending_reply_mark_delivered "$state" "$l2"
+    # Dedup refuses to guess: a new request whose summary matches a legacy
+    # record gets its own corr, never the legacy one.
+    rc=0
+    n=$(fm_pending_reply_create "$home" "$state" lights "${summary}(1) ship the credit-trust fix" dedup) || rc=$?
+    [ "$rc" = 0 ] || fail "a new request must not be deduped onto a legacy record (rc=$rc, corr=$n)"
+    [ "$n" != "$l1" ] && [ "$n" != "$l2" ] || fail "dedup reused a legacy corr"
+    # Answering one legacy record must not reset the other as a sibling, and
+    # answering the new comparable request must not reach either legacy record.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=30060
+    printf 'done [corr=%s]: answered\n' "$l1" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$l1" || fail "L1 should resolve"
+    fm_pending_reply_mark_delivered "$state" "$n"
+    printf 'done [corr=%s]: answered\n' "$n" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$n" || fail "the new request should resolve"
+    rec=$(fm_pending_reply_path "$state" "$l2")
+    [ "$(phase_of "$state" "$l2")" = awaiting_report ] \
+      || fail "an uncomparable legacy record must stay open, got $(phase_of "$state" "$l2")"
+    [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_corr)" ] \
+      || fail "an uncomparable legacy record must never be reset as a sibling"
+    fm_pending_reply_observe_busy "$state" "$l2" idle
+    [ -n "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "an uncomparable legacy record must keep the ordinary idle completion"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=116500
+    out=$(fm_pending_reply_sweep "$state")
+    case "$out" in
+      *"$l2"*) fail "an uncomparable legacy record must not be retired:"$'\n'"$out" ;;
+    esac
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    fm_pending_reply_send_recovery "$state" "$l2" \
+      || fail "an uncomparable legacy record must earn its ordinary repost"
+    [ "$(wc -l < "$hook_log" | tr -d ' ')" = 1 ] || fail "expected exactly one repost"
+    # Empty bodies have no identity: two of them are never duplicates.
+    [ -z "$(fm_pending_reply_request_digest "")" ] \
+      || fail "an empty body must have no request digest"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=116600
+    e1=$(fm_pending_reply_create "$home" "$state" lights "" dedup) || fail "empty create"
+    rc=0
+    e2=$(fm_pending_reply_create "$home" "$state" lights "" dedup) || rc=$?
+    [ "$rc" = 0 ] && [ "$e1" != "$e2" ] \
+      || fail "two empty bodies must never be deduped into one (rc=$rc)"
+  ) || fail "legacy uncomparable regression failed"
+  pass "a legacy record with no body is uncomparable: never deduped or reset as a sibling"
+}
+
 test_resolved_sibling_is_not_reopened_by_a_later_note() {
   (
     local home state a b rec hook_log epoch
@@ -2701,6 +2784,7 @@ test_sibling_answer_order_within_one_tick_is_irrelevant
 test_sibling_still_gets_one_repost_after_a_fresh_turn
 test_sibling_marked_recovery_turn_completes_from_idle
 test_distinct_request_is_not_a_sibling
+test_legacy_record_without_body_is_uncomparable
 test_resolved_sibling_is_not_reopened_by_a_later_note
 test_pending_reply_set_never_resurrects_a_vanished_record
 test_resolved_corr_never_reposts
