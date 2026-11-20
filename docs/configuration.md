@@ -860,8 +860,9 @@ It exists because a monitor nobody reads cannot raise anything: on 2026-11-11 a 
 Its header owns the domains, the numbers, the thresholds, the disagreement rule, and the record format; this section owns the configuration and the operator contract.
 
 The overseer measures nothing itself.
-Every number is read from its source on every run, and a source that is absent, stale, unreadable, or cut short reads `unmeasured` with the reason, never as zero.
-A stored verdict is never read back, and a pull request's check result counts only when it is attached to that pull request's current head commit.
+Every number is read from its source on every run, and a source that is absent, stale, or unreadable reads `unmeasured` with the reason, never as zero.
+A forge read cut short before its last page, or a pull request whose mergeability is not computed yet, leaves its count a lower bound that opens and closes no crossing.
+A stored verdict is never read back, and a pull request's check result counts only when it is attached to that pull request's current head commit; a result on an older commit is set aside and named, never counted as merged or unmerged.
 
 `fm-overlord.sh digest` prints one line per domain, each number with its source and its age, and changes nothing.
 `fm-overlord.sh arm` registers the check, and `fm-overlord.sh disarm` removes it together with its record.

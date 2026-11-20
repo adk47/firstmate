@@ -101,7 +101,15 @@
 #
 # A STALE READ IS NOT A READING. The merge count is taken from the check result
 # of each pull request's current head commit; a result attached to any other
-# commit is not counted.
+# commit is not counted, is never taken as merged or unmerged, and is set aside
+# and named with its count and pull request numbers, so one stale head cannot
+# hide or unbalance the rest of the fleet.
+#
+# A LOWER BOUND IS NOT A MEASUREMENT EITHER. A forge read cut short before its
+# last page, or a pull request whose mergeability is not computed yet, leaves
+# the green-unmerged count a lower bound. That reading opens no crossing,
+# closes no open one, and does not replace the previous reading; the number
+# holds until a complete read says otherwise.
 #
 # CONFIGURATION. config/overlord.env (gitignored, per-home) holds KEY=value
 # lines and is parsed, never sourced. A set environment variable of the same
@@ -135,9 +143,10 @@
 # back from it.
 #
 # BOUNDED. The reads end inside half the watcher's FM_CHECK_TIMEOUT, at most 14
-# seconds; a source not read in time is unmeasured for that check. A page is
-# bounded at 5 seconds and a steer at 6; an interjection that could not finish
-# inside the timeout waits for the next poll, which reads again at once.
+# seconds, and a read killed at that bound is reaped within 2 further seconds; a
+# source not read in time is unmeasured for that check. A page is bounded at 5
+# seconds and a steer at 6; an interjection that could not finish inside the
+# timeout waits for the next poll, which reads again at once.
 #
 # Test seams: FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, FM_OVERLORD_NOW (frozen
 # clock), FM_OVERLORD_GH_BIN (the forge client, default gh), FM_OVERLORD_SEND_BIN
