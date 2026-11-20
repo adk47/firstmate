@@ -1715,6 +1715,85 @@ test_distinct_request_is_not_a_sibling() {
   pass "a distinct request body is not a sibling and keeps its own repost path"
 }
 
+test_resolved_sibling_is_not_reopened_by_a_later_note() {
+  (
+    local home state a b rec hook_log epoch
+    IFS=$'\t' read -r home a b <<< "$(sibling_fixture resolved-sibling)"
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    printf 'done [corr=%s]: answered first\n' "$b" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$b" || fail "B should resolve"
+    rec=$(fm_pending_reply_path "$state" "$b")
+    epoch=$(fm_pending_reply_get "$rec" resolved_epoch)
+    # A resolves afterwards and its note looks at B, which is already terminal.
+    printf 'done [corr=%s]: answered second\n' "$a" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$a" || fail "A should resolve"
+    [ "$(phase_of "$state" "$b")" = resolved ] \
+      || fail "an already-resolved sibling must stay resolved"
+    [ "$(fm_pending_reply_get "$rec" resolved_via)" = status ] \
+      || fail "an already-resolved sibling must keep its resolution label"
+    [ "$(fm_pending_reply_get "$rec" resolved_epoch)" = "$epoch" ] \
+      || fail "an already-resolved sibling must keep its resolution epoch"
+    [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_corr)" ] \
+      || fail "a terminal record must not be marked a superseded sibling"
+    [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_epoch)" ] \
+      || fail "a terminal record must not receive a sibling epoch"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20100
+    fm_pending_reply_observe_busy "$state" "$b" busy
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20130
+    fm_pending_reply_observe_busy "$state" "$b" idle
+    if fm_pending_reply_send_recovery "$state" "$b" 2>/dev/null; then
+      fail "a resolved sibling must never repost"
+    fi
+    [ ! -s "$hook_log" ] || fail "a resolved sibling must never repost:"$'\n'"$(cat "$hook_log")"
+  ) || fail "resolved-sibling regression failed"
+  pass "a sibling resolved before the note keeps its resolution and never reposts"
+}
+
+test_pending_reply_set_never_resurrects_a_vanished_record() {
+  (
+    local home state corr rec retired other rec2
+    home=$(setup_parent vanished-set)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=50000
+    corr=$(fm_pending_reply_create "$home" "$state" lights "the duplicated steer")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    retired=$(fm_pending_reply_retired_dir "$state")
+    mkdir -p "$retired"
+    mv "$rec" "$retired/$corr" || fail "fixture should retire the record"
+    if fm_pending_reply_set "$rec" phase resolved; then
+      fail "a vanished record must not accept an update"
+    fi
+    [ ! -e "$rec" ] || fail "a vanished record must not be recreated in the active directory"
+    [ -f "$retired/$corr" ] || fail "the retired record must stay retired"
+    # An unreadable record is the same failure boundary: the update must not
+    # replace the full record with a one-key file.
+    other=$(fm_pending_reply_create "$home" "$state" lights "another steer")
+    fm_pending_reply_mark_delivered "$state" "$other"
+    rec2=$(fm_pending_reply_path "$state" "$other")
+    chmod 000 "$rec2"
+    fm_pending_reply_set "$rec2" phase resolved
+    chmod 600 "$rec2"
+    [ "$(fm_pending_reply_get "$rec2" corr_id)" = "$other" ] \
+      || fail "a failed read must leave the record intact"
+    [ -n "$(fm_pending_reply_get "$rec2" task_id)" ] \
+      || fail "a failed read must not create a one-key orphan"
+  ) || fail "vanished-set regression failed"
+  pass "a pending-reply update never recreates a vanished or unreadable record"
+}
+
 test_resolved_corr_never_reposts() {
   (
     local home state a b hook_log rec
@@ -2160,6 +2239,8 @@ test_one_answer_resolves_exactly_one_record
 test_sibling_answer_order_within_one_tick_is_irrelevant
 test_sibling_still_gets_one_repost_after_a_fresh_turn
 test_distinct_request_is_not_a_sibling
+test_resolved_sibling_is_not_reopened_by_a_later_note
+test_pending_reply_set_never_resurrects_a_vanished_record
 test_resolved_corr_never_reposts
 test_age_sweep_retires_with_recorded_reason
 test_sweep_runs_from_tick_on_its_interval

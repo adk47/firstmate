@@ -358,8 +358,9 @@ fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
 
 # Rewrite one key in a pending-reply record atomically. Other keys preserved.
 fm_pending_reply_set() {  # <record-path> <key> <value>
-  local rec=$1 key=$2 value=$3 dir base tmp line
+  local rec=$1 key=$2 value=$3 dir base tmp line content
   [ -f "$rec" ] || return 1
+  content=$(cat -- "$rec" 2>/dev/null) || return 1
   dir=$(dirname "$rec")
   base=$(basename "$rec")
   tmp="$dir/.${base}.tmp.$$"
@@ -369,7 +370,8 @@ fm_pending_reply_set() {  # <record-path> <key> <value>
       "${key}="*) continue ;;
     esac
     printf '%s\n' "$line" >> "$tmp" || return 1
-  done < "$rec"
+  done <<< "$content"
+  [ -f "$rec" ] || { rm -f "$tmp"; return 1; }
   printf '%s=%s\n' "$key" "$value" >> "$tmp" || return 1
   mv -f "$tmp" "$rec"
 }
@@ -834,13 +836,17 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
 # (recovery_failed/unknown, escalated) is left alone: nothing pending there can
 # be triggered by this idle.
 fm_pending_reply_note_sibling_resolved() {  # <state-dir> <task_id> <resolved-corr> <epoch>
-  local state=$1 task_id=$2 resolved_corr=$3 epoch=$4 dir rec corr phase digest resolved_digest
+  local state=$1 task_id=$2 resolved_corr=$3 epoch=$4 dir rec corr digest resolved_digest lock
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   [ -n "$task_id" ] && [ -n "$resolved_corr" ] || return 1
+  STATE=$state
   resolved_digest=$(fm_pending_reply_get \
     "$(fm_pending_reply_path "$state" "$resolved_corr")" request_digest)
   [ -n "$resolved_digest" ] || return 0
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in .*) continue ;; esac
@@ -849,24 +855,40 @@ fm_pending_reply_note_sibling_resolved() {  # <state-dir> <task_id> <resolved-co
     [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || continue
     digest=$(fm_pending_reply_get "$rec" request_digest)
     [ -n "$digest" ] && [ "$digest" = "$resolved_digest" ] || continue
-    [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ] || continue
-    phase=$(fm_pending_reply_get "$rec" phase)
-    case "$phase" in
-      awaiting_report)
-        [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || continue
-        fm_pending_reply_set "$rec" turn_seen_busy 0 || continue
-        fm_pending_reply_set "$rec" request_turn_completed_epoch "" || continue
-        ;;
-      recovery_sent)
-        fm_pending_reply_set "$rec" recovery_turn_seen_busy 0 || continue
-        fm_pending_reply_set "$rec" recovery_turn_completed_epoch "" || continue
-        ;;
-      *) continue ;;
-    esac
-    fm_pending_reply_set "$rec" sibling_resolved_corr "$resolved_corr" || continue
-    fm_pending_reply_set "$rec" sibling_resolved_epoch "$epoch" || continue
+    lock="$state/.pending-reply-$corr.lock"
+    fm_lock_acquire_wait_bounded "$lock" 1 || continue
+    _fm_pending_reply_note_sibling_locked "$state" "$task_id" \
+      "$resolved_corr" "$epoch" "$corr" "$resolved_digest" || true
+    fm_lock_release "$lock"
   done
   return 0
+}
+
+_fm_pending_reply_note_sibling_locked() {  # <state-dir> <task_id> <resolved-corr> <epoch> <corr> <digest>
+  local state=$1 task_id=$2 resolved_corr=$3 epoch=$4 corr=$5 resolved_digest=$6
+  local rec phase digest
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  [ "$(fm_pending_reply_get "$rec" corr_id)" = "$corr" ] || return 1
+  [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || return 1
+  digest=$(fm_pending_reply_get "$rec" request_digest)
+  [ -n "$digest" ] && [ "$digest" = "$resolved_digest" ] || return 1
+  [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in
+    awaiting_report)
+      [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || return 1
+      fm_pending_reply_set "$rec" turn_seen_busy 0 || return 1
+      fm_pending_reply_set "$rec" request_turn_completed_epoch "" || return 1
+      ;;
+    recovery_sent)
+      fm_pending_reply_set "$rec" recovery_turn_seen_busy 0 || return 1
+      fm_pending_reply_set "$rec" recovery_turn_completed_epoch "" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  fm_pending_reply_set "$rec" sibling_resolved_corr "$resolved_corr" || return 1
+  fm_pending_reply_set "$rec" sibling_resolved_epoch "$epoch" || return 1
 }
 
 # Resolve every other open delivered record for <task_id> from the parent
