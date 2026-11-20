@@ -853,9 +853,10 @@ A `working` claim is not compared (work in progress is expected to hold work), a
 Arm the check once per home with `bin/fm-fleet-integrity-check.sh arm`, which writes `state/fleet-integrity.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
 `FM_FLEET_INTEGRITY_INTERVAL` (default 300 seconds) sets the self-throttle, and `bin/fm-fleet-integrity-check.sh status` prints the last recorded verdict.
 `bin/fm-fleet-integrity-check.sh disarm` removes the shim, its trust binding, the record, and the stamp.
+
 ## Overseer (config/overlord.env)
 
-[`bin/fm-overlord.sh`](../bin/fm-overlord.sh) is a registered watcher check that reads one number per domain from the monitors a home already runs and interjects when a named threshold is crossed.
+[`bin/fm-overlord.sh`](../bin/fm-overlord.sh) is a registered watcher check that reads each domain's numbers from the monitors a home already runs and interjects when a named threshold is crossed.
 It exists because a monitor nobody reads cannot raise anything: on 2026-11-11 a send count of zero held for a day and green pull requests sat unmerged, each visible in some monitor's output, and each found only by the captain looking.
 Its header owns the domains, the numbers, the thresholds, the disagreement rule, and the record format; this section owns the configuration and the operator contract.
 
@@ -866,8 +867,8 @@ A stored verdict is never read back, and a pull request's check result counts on
 
 `fm-overlord.sh digest` prints one line per domain, each number with its source and its age, and changes nothing.
 `fm-overlord.sh arm` registers the check, and `fm-overlord.sh disarm` removes it together with its record.
-When a threshold is crossed the check does three things once, in order: it appends a `blocked [key=overlord-<rule>]` line to `state/overlord.status`, which the watcher delivers as an ordinary wake; it runs the page command with the crossed threshold; and it steers the owning lane with the specific correction as a fire-and-forget steer.
-An unchanged number is not a crossing, and an open crossing says nothing more until the number is back inside its threshold, when one `resolved` line with the same key closes it.
+When a threshold is crossed the check does three things once, in order: it appends a `blocked [key=overlord-<rule>]` line to `state/overlord.status`, which the watcher delivers as an ordinary wake; it runs the page command with the crossed threshold; and it steers the lane that can apply the correction with the specific correction as a fire-and-forget steer.
+An unchanged number is not a crossing; while a crossing stays open a further rise interjects again at most once per `FM_OVERLORD_REMIND_SECS`, and one `resolved` line with the same key closes it when the number is back inside its threshold.
 A correction that could not be delivered to a lane is recorded on that key, so the correction is routed by hand rather than lost.
 
 The Fable lane has two jobs.
@@ -876,7 +877,7 @@ When two readings of one number disagree, `fm-overlord.sh adjudicate` names the 
 The overseer never averages.
 
 `config/overlord.env` is optional, local, gitignored, and not inherited by secondmate homes.
-It holds `KEY=value` lines, it is parsed rather than sourced, and a set environment variable of the same name wins.
+It holds `KEY=value` lines, it is parsed rather than sourced, and a set environment variable of the same name wins, including one set to an empty value.
 A source left unset leaves its numbers `unmeasured (not configured)`, which is not a crossing.
 
 ```sh

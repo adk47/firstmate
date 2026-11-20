@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# fm-overlord.sh - the standing overseer: one number per domain, read from the
-# monitors that already exist, and an interjection when a named threshold is
-# crossed.
+# fm-overlord.sh - the standing overseer: the numbers each domain's monitors
+# already publish, and an interjection when a named threshold is crossed.
 #
 # Usage:
 #   fm-overlord.sh digest      read every source now and print one line per
@@ -113,7 +112,8 @@
 #
 # CONFIGURATION. config/overlord.env (gitignored, per-home) holds KEY=value
 # lines and is parsed, never sourced. A set environment variable of the same
-# name wins. An unset source leaves its numbers `unmeasured (not configured)`.
+# name wins, even when it is set to an empty value. An unset source leaves its
+# numbers `unmeasured (not configured)`.
 #   FM_OVERLORD_REMOTE            command prefix that runs `sh -s` where the
 #                                 remote files live (for example an ssh hop);
 #                                 empty reads them on this host
@@ -139,14 +139,15 @@
 #
 # RECORD. state/.overlord.json holds the previous reading of each number, the
 # open crossings, and the last lines, stamped with its schema. It is what makes
-# "rises", "two consecutive ticks", and "page once" possible; no verdict is read
+# "rises", "two consecutive checks", and "page once" possible; no verdict is read
 # back from it.
 #
 # BOUNDED. The reads end inside half the watcher's FM_CHECK_TIMEOUT, at most 14
-# seconds, and a read killed at that bound is reaped within 2 further seconds; a
-# source not read in time is unmeasured for that check. A page is bounded at 5
-# seconds and a steer at 6; an interjection that could not finish inside the
-# timeout waits for the next poll, which reads again at once.
+# seconds (at least 3 seconds of read budget), and a read killed at that bound is
+# reaped within 2 further seconds; a source not read in time is unmeasured for
+# that check. A page is bounded at 5 seconds and a steer at 6; an interjection
+# that could not finish inside the timeout waits for the next poll, which reads
+# again at once.
 #
 # Test seams: FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, FM_OVERLORD_NOW (frozen
 # clock), FM_OVERLORD_GH_BIN (the forge client, default gh), FM_OVERLORD_SEND_BIN
