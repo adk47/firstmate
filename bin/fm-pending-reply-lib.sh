@@ -1774,8 +1774,12 @@ fm_pending_reply_tick() {  # <state-dir>
 # better observation than the rendered tail: the captain incident of 2026-11-19
 # had `lights` (Pi) reported missed three times while its busy-state said busy,
 # because the rendered-tail fallback aged into fallback-idle during long turns.
-# Prints busy|idle on success; anything else (missing, malformed, stale gen,
-# untrusted source, unknown) returns 1 so the caller falls back as before.
+# Prints busy|fallback-idle on success; anything else (missing, malformed,
+# stale gen, untrusted source, unknown) returns 1 so the caller falls back as
+# before. A semantic idle is reported as fallback-idle, not idle: the semantic
+# record is idle between turns too, so only the caller's existing grace gate
+# may treat that observation as the end of the delivered turn. A semantic busy
+# stays authoritative.
 fm_pending_reply_semantic_observation() {  # <state-dir> <task_id> <harness>
   local state=$1 task_id=$2 harness=$3 record r_state r_source
   [ -n "$task_id" ] && [ -n "$harness" ] || return 1
@@ -1790,7 +1794,10 @@ fm_pending_reply_semantic_observation() {  # <state-dir> <task_id> <harness>
   r_source=${r_source%% *}
   case "$r_state" in busy|idle) ;; *) return 1 ;; esac
   fm_busy_source_trusted "$harness" "$r_source" || return 1
-  printf '%s' "$r_state"
+  case "$r_state" in
+    busy) printf 'busy' ;;
+    idle) printf 'fallback-idle' ;;
+  esac
 }
 
 # --- age sweep and retirement -----------------------------------------------
@@ -1820,10 +1827,15 @@ fm_pending_reply_retire() {  # <state-dir> <corr_id> <reason> [terminal-via]
 }
 
 _fm_pending_reply_retire_locked() {  # <state-dir> <corr_id> <reason> [terminal-via]
-  local state=$1 corr=$2 reason=$3 via=${4-} rec dest dir now marker
+  local state=$1 corr=$2 reason=$3 via=${4-} rec dest dir now marker phase existing_via
   [ -n "$reason" ] || return 2
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  existing_via=$(fm_pending_reply_get "$rec" resolved_via)
+  if [ -n "$via" ] && { [ "$phase" = resolved ] || [ -n "$existing_via" ]; }; then
+    return 1
+  fi
   dir=$(fm_pending_reply_retired_dir "$state")
   mkdir -p "$dir" || return 1
   chmod 700 "$dir" 2>/dev/null || true

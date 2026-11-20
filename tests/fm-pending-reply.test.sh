@@ -2011,6 +2011,111 @@ test_semantic_busy_record_beats_rendered_tail() {
   pass "a trusted semantic busy record beats the rendered-tail fallback"
 }
 
+test_semantic_idle_waits_for_the_grace_gate() {
+  (
+    local home state corr rec gen hook_log
+    home=$(setup_parent semantic-grace)
+    state="$home/state"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=120
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1000
+    corr=$(fm_pending_reply_create "$home" "$state" lights "long ruling")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    fm_write_secondmate_meta "$state/lights.meta" "$home/lights" "firstmate:fm-lights" "" pi
+    gen=g4.5.6
+    printf '%s\n' "$gen" > "$state/lights.busy-gen"
+    # shellcheck disable=SC2329
+    fm_backend_busy_state() { printf 'unknown'; }
+    # shellcheck disable=SC2329
+    fm_backend_capture() { printf '> '; }
+    # The mate is still idle from its previous turn when the steer lands.
+    printf 'v1 gen=%s seq=1 state=idle source=pi-ext event=agent-settled ts=1000\n' "$gen" > "$state/lights.busy-state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1010
+    fm_pending_reply_tick "$state"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "idle before grace must not complete the delivered turn"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "idle before grace must not repost, got $(phase_of "$state" "$corr")"
+    [ ! -s "$hook_log" ] || fail "idle before grace must not repost"
+    # The turn starts, and stays busy past the original grace window.
+    printf 'v1 gen=%s seq=2 state=busy source=pi-ext event=agent-start ts=1030\n' "$gen" > "$state/lights.busy-state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1030
+    fm_pending_reply_tick "$state"
+    [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] || fail "busy must be observed"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1120
+    fm_pending_reply_tick "$state"
+    [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "a busy mate must never be completed by an earlier idle"
+    [ ! -s "$hook_log" ] || fail "a busy mate must not be reposted mid-turn"
+    # The settled turn ends the request normally and earns its one repost.
+    printf 'v1 gen=%s seq=3 state=idle source=pi-ext event=agent-settled ts=1130\n' "$gen" > "$state/lights.busy-state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1130
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+      || fail "a completed busy turn earns the one repost, got $(phase_of "$state" "$corr")"
+    # An idle on the poll right after recovery_sent is not that turn ending.
+    printf 'v1 gen=%s seq=4 state=idle source=pi-ext event=agent-settled ts=1140\n' "$gen" > "$state/lights.busy-state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1140
+    fm_pending_reply_tick "$state"
+    [ -z "$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)" ] \
+      || fail "idle before grace must not complete the recovery turn"
+    [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+      || fail "idle before grace must not escalate, got $(phase_of "$state" "$corr")"
+    ! grep -q 'pending-reply-missed' "$state/lights.status" 2>/dev/null \
+      || fail "idle before grace must not write an escalation"
+    # After the grace window the same idle observation completes the turn.
+    printf 'v1 gen=%s seq=5 state=idle source=pi-ext event=agent-settled ts=1250\n' "$gen" > "$state/lights.busy-state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1250
+    fm_pending_reply_tick "$state"
+    [ -n "$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)" ] \
+      || fail "idle after grace must complete the recovery turn"
+  ) || fail "semantic grace-gate regression failed"
+  pass "a semantic idle waits for the grace gate before completing either turn"
+}
+
+test_retire_never_overwrites_a_race_resolution() {
+  (
+    local home state corr rec
+    home=$(setup_parent retire-race)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=50000
+    corr=$(fm_pending_reply_create "$home" "$state" lights "the duplicated steer")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_set "$rec" sibling_resolved_corr deadbeefdeadbeef
+    fm_pending_reply_set "$rec" sibling_resolved_epoch 40000
+    # A concurrent resolver wins between the sweep's check and its retire call.
+    printf 'done [corr=%s]: answered after all\n' "$corr" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$corr" || fail "the record should resolve"
+    if fm_pending_reply_retire "$state" "$corr" \
+      "superseded-by-sibling:deadbeefdeadbeef" superseded-by-sibling; then
+      fail "retire must not overwrite a record resolved under it"
+    fi
+    [ -f "$rec" ] || fail "the resolved record must stay in the active directory"
+    [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || fail "phase must stay resolved"
+    [ "$(fm_pending_reply_get "$rec" resolved_via)" = status ] \
+      || fail "the genuine resolution label must survive"
+    [ -z "$(fm_pending_reply_get "$rec" retired_reason)" ] || fail "must not be marked retired"
+  ) || fail "retire-race regression failed"
+  pass "retire never overwrites a resolution that raced it"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -2061,5 +2166,7 @@ test_sweep_runs_from_tick_on_its_interval
 test_same_request_within_window_reuses_corr
 test_fm_send_resend_of_same_body_points_at_existing_corr
 test_semantic_busy_record_beats_rendered_tail
+test_semantic_idle_waits_for_the_grace_gate
+test_retire_never_overwrites_a_race_resolution
 
 printf 'ok - all pending-reply tests passed\n'
