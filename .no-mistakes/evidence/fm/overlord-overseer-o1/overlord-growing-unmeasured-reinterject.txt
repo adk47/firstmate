@@ -1,0 +1,13 @@
+=== check 1 (one support field missing): status lines = 0 ===
+=== check 2 (same single field missing on a second consecutive check) ===
+blocked [key=overlord-meter-unmeasured-support]: OVERLORD meter: support unmeasured on two consecutive checks
+=== check 3 (~4h later, the whole support file is now gone: 4 unmeasured readings, a worse condition) ===
+blocked [key=overlord-meter-unmeasured-support]: OVERLORD meter: support unmeasured on two consecutive checks; unmeasured=1
+blocked [key=overlord-meter-unmeasured-support]: OVERLORD meter: support unmeasured on two consecutive checks; unmeasured=4
+
+=== digest at that moment (what the captain reads) ===
+support | waiting_on_us,promised_a_person_24h,promises_broken_24h,commitments_overdue=unmeasured (/tmp/overlord-grow.vA2Jhm/remote/support.json does not exist: no monitor writes it yet) | unmeasured: waiting_on_us, promised_a_person_24h, promises_broken_24h, commitments_overdue
+
+=== steers sent ===
+support-lane --fire-and-forget 8778120050a92191 OVERLORD meter: support unmeasured on two consecutive checks; 
+support-lane --fire-and-forget 8778120050a92191 OVERLORD meter: support unmeasured on two consecutive checks; 

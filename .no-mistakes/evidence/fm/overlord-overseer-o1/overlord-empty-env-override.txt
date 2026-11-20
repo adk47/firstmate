@@ -1,0 +1,29 @@
+=== A. config file sets an ssh-hop remote: the digest reads through it (remote: source labels) ===
+credit | users_told_today=140 [pass 2 window 2026-11-11T11:50:00Z->2026-11-11T11:59:00Z; source state/watch-lane.status; age 1m] would_send=4,3 [last two completed ticks, done 09:40Z and 11:40Z; cap=250; source remote:/tmp/overlord-emptyenv.FbTddN/remote/tick.log; age 20m] | inside thresholds
+claims | stuck_over_7d_no_step=0 [source remote:/tmp/overlord-emptyenv.FbTddN/remote/claims.json; age 1m] reason_loss=0 [source remote:/tmp/overlord-emptyenv.FbTddN/remote/claims.json; age 1m] | inside thresholds
+support | waiting_on_us=0 [source remote:/tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] promised_a_person_24h=7 [source remote:/tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] promises_broken_24h=0 [source remote:/tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] commitments_overdue=0 [source remote:/tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] | inside thresholds
+merges | open,green_unmerged_2h=unmeasured (not configured) | unmeasured (not configured): open, green_unmerged_2h
+meter | tick=started 30m ago [ran 10m; cadence 2h00m; source remote:/tmp/overlord-emptyenv.FbTddN/remote/tick.log; age 30m] unmeasured=0 [source this check's own reads + state/watch-lane.status; age 0m] stopped_lanes=unmeasured (not configured) | inside thresholds
+remote hop invoked: yes
+
+=== B. the operator overrides the hop with an explicitly empty FM_OVERLORD_REMOTE=: reads happen on this host ===
+credit | users_told_today=140 [pass 2 window 2026-11-11T11:50:00Z->2026-11-11T11:59:00Z; source state/watch-lane.status; age 1m] would_send=4,3 [last two completed ticks, done 09:40Z and 11:40Z; cap=250; source /tmp/overlord-emptyenv.FbTddN/remote/tick.log; age 20m] | inside thresholds
+claims | stuck_over_7d_no_step=0 [source /tmp/overlord-emptyenv.FbTddN/remote/claims.json; age 1m] reason_loss=0 [source /tmp/overlord-emptyenv.FbTddN/remote/claims.json; age 1m] | inside thresholds
+support | waiting_on_us=0 [source /tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] promised_a_person_24h=7 [source /tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] promises_broken_24h=0 [source /tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] commitments_overdue=0 [source /tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] | inside thresholds
+merges | open,green_unmerged_2h=unmeasured (not configured) | unmeasured (not configured): open, green_unmerged_2h
+meter | tick=started 30m ago [ran 10m; cadence 2h00m; source /tmp/overlord-emptyenv.FbTddN/remote/tick.log; age 30m] unmeasured=0 [source this check's own reads + state/watch-lane.status; age 0m] stopped_lanes=unmeasured (not configured) | inside thresholds
+remote hop invoked: no
+
+=== C. FM_OVERLORD_PR_SCOPE= silences the forge read instead of falling back to the file value ===
+credit | users_told_today=140 [pass 2 window 2026-11-11T11:50:00Z->2026-11-11T11:59:00Z; source state/watch-lane.status; age 1m] would_send=4,3 [last two completed ticks, done 09:40Z and 11:40Z; cap=250; source /tmp/overlord-emptyenv.FbTddN/remote/tick.log; age 20m] | inside thresholds
+claims | stuck_over_7d_no_step=0 [source /tmp/overlord-emptyenv.FbTddN/remote/claims.json; age 1m] reason_loss=0 [source /tmp/overlord-emptyenv.FbTddN/remote/claims.json; age 1m] | inside thresholds
+support | waiting_on_us=0 [source /tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] promised_a_person_24h=7 [source /tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] promises_broken_24h=0 [source /tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] commitments_overdue=0 [source /tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] | inside thresholds
+merges | open,green_unmerged_2h=unmeasured (not configured) | unmeasured (not configured): open, green_unmerged_2h
+meter | tick=started 30m ago [ran 10m; cadence 2h00m; source /tmp/overlord-emptyenv.FbTddN/remote/tick.log; age 30m] unmeasured=0 [source this check's own reads + state/watch-lane.status; age 0m] stopped_lanes=unmeasured (not configured) | inside thresholds
+
+=== D. unset variables still fall through to the config file, as before ===
+credit | users_told_today=140 [pass 2 window 2026-11-11T11:50:00Z->2026-11-11T11:59:00Z; source state/watch-lane.status; age 1m] would_send=4,3 [last two completed ticks, done 09:40Z and 11:40Z; cap=250; source remote:/tmp/overlord-emptyenv.FbTddN/remote/tick.log; age 20m] | inside thresholds
+claims | stuck_over_7d_no_step=0 [source remote:/tmp/overlord-emptyenv.FbTddN/remote/claims.json; age 1m] reason_loss=0 [source remote:/tmp/overlord-emptyenv.FbTddN/remote/claims.json; age 1m] | inside thresholds
+support | waiting_on_us=0 [source remote:/tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] promised_a_person_24h=7 [source remote:/tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] promises_broken_24h=0 [source remote:/tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] commitments_overdue=0 [source remote:/tmp/overlord-emptyenv.FbTddN/remote/support.json; age 1m] | inside thresholds
+merges | open=24 [source forge search org:o; age 0m] green_unmerged_2h=5 [green and mergeable on the current head, head older than 2h00m; source forge search org:o; age 0m] | WRONG: green_unmerged_2h rises
+meter | tick=started 30m ago [ran 10m; cadence 2h00m; source remote:/tmp/overlord-emptyenv.FbTddN/remote/tick.log; age 30m] unmeasured=0 [source this check's own reads + state/watch-lane.status; age 0m] stopped_lanes=unmeasured (not configured) | inside thresholds
