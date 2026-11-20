@@ -11,7 +11,7 @@
 # WHAT IT DOES. Reads this home's backlog and task records and reports, one
 # line each:
 #   UNOWNED <item> <why>    an in-flight backlog item with no task record at all
-#   NO-LANE <item> <why>    a task record's latest status says working but its endpoint is dead
+#   NO-LANE <item> <why>    a task record's latest claim still says work is under way but its endpoint is dead
 #   STALE-DONE <task> <why> a task record's latest status says done/landed but its PR is still open
 # Prints nothing and exits 0 when everything that claims to be in flight is
 # actually owned; exits 1 when it printed at least one line; exits 2 when it
@@ -23,10 +23,14 @@
 # still lists as in_flight, so the held ids are subtracted before reporting.
 #
 # It never writes, kills, or dispatches. It is a read: firstmate acts on what
-# it prints. Each probe degrades to silence rather than to a false alarm: a
-# backlog listing the tool refuses, or whose rows disagree with its own count,
-# is reported on stderr and exit 2, an endpoint whose state cannot be read is
-# skipped, and a PR the forge cannot answer for is skipped.
+# it prints. What state a task is in is owned elsewhere: the claimed line comes
+# from last_status_line_behind_sweep in bin/fm-classify-lib.sh, and the verb's
+# meaning is the mapping bin/fm-fleet-digest.sh state_of applies, so a lane is
+# never graded by a rule of this script's own. Each probe degrades to silence
+# rather than to a false alarm: a backlog listing the tool refuses, or whose
+# rows disagree with its own count, is reported on stderr and exit 2, an
+# endpoint whose state cannot be read is skipped, and a PR the forge cannot
+# answer for is skipped.
 #
 # Usage: bin/fm-unowned.sh
 #   FM_HOME            the home to read (default: this script's repo root)
@@ -79,22 +83,6 @@ backlog_ids() {  # <state>
   [ -z "$rows" ] || printf '%s\n' "$rows"
 }
 
-# The line a task's latest claim is graded from: its last status line, looking
-# behind a trailing run of decisions-sweep closes to the claim they closed.
-claimed_status_line() {  # <status-file>
-  local f=$1 last line
-  last=$(last_status_line "$f")
-  status_line_is_sweep_close "$last" || { printf '%s\n' "$last"; return 0; }
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
-    status_line_is_sweep_close "$line" && continue
-    last=$line
-  done <<EOF
-$(tail -n "${FM_STATUS_SWEEP_LOOKBACK_LINES:-400}" "$f" 2>/dev/null)
-EOF
-  printf '%s\n' "$last"
-}
-
 # 1. Items the backlog says are in flight with no task record behind them. A
 #    held item also lists as in_flight, and the captain owns it, so it is not a
 #    missing lane.
@@ -116,10 +104,13 @@ for m in "$STATE"/*.meta; do
   [ -f "$m" ] || continue
   id="$(basename "$m" .meta)"
   [ -f "$STATE/$id.stopped" ] && continue
-  last="$(claimed_status_line "$STATE/$id.status")"
+  last="$(last_status_line_behind_sweep "$STATE/$id.status")"
   status_line_verb_core "$last"
   verb=$_FM_STATUS_VERB
-  [ "$verb" = working ] || continue
+  case "$verb" in
+    working|resolved|note|ruling) ;;
+    *) continue ;;
+  esac
   st="$(fm_run_timed "$TIMEOUT" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null | head -1)"
   case "$st" in
     *dead*) echo "NO-LANE $id its latest status says '$verb' but the endpoint is dead"; fail=1 ;;
@@ -133,7 +124,7 @@ done
 for m in "$STATE"/*.meta; do
   [ -f "$m" ] || continue
   id="$(basename "$m" .meta)"
-  last="$(claimed_status_line "$STATE/$id.status")"
+  last="$(last_status_line_behind_sweep "$STATE/$id.status")"
   status_line_verb_core "$last"
   case "$_FM_STATUS_VERB" in
     done|landed) ;;

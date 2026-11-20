@@ -197,6 +197,8 @@ test_grades_off_the_latest_status_line() {
   add_task "$home" swept-done "done: PR https://github.com/acme/widget/pull/63" "swept-done dead"
   printf 'OPEN\n' > "$home/pr.63"
   printf 'resolved [key=k]: auto-closed by sweep (no-process-48h)\n' >> "$home/state/swept-done.status"
+  add_task "$home" answered-dead "needs-decision [key=k]: which way?" "answered-dead dead"
+  printf 'resolved [key=k]: answered: go left\n' >> "$home/state/answered-dead.status"
   run_unowned "$home"; out=$OUT
   [ "$RC" = 1 ] || fail "the still-working dead lane exits 1, got $RC"
   ! printf '%s\n' "$out" | grep -q 'worked-then-done' \
@@ -207,13 +209,15 @@ test_grades_off_the_latest_status_line() {
     || fail "a resumed task's old PR is not reported, its live claim is: $out"
   printf '%s\n' "$out" | grep -q "^NO-LANE resumed-dead its latest status says 'working'" \
     || fail "a resumed task whose endpoint then died is NO-LANE: $out"
-  printf '%s\n' "$out" | grep -q "^NO-LANE swept-dead its latest status says 'working'" \
+  printf '%s\n' "$out" | grep -q "^NO-LANE swept-dead its latest status says 'resolved'" \
     || fail "a working claim closed by the decisions sweep is still NO-LANE when the endpoint is dead: $out"
   ! printf '%s\n' "$out" | grep -q 'NO-LANE swept-done' \
     || fail "a done line behind the sweep close is not NO-LANE: $out"
   printf '%s\n' "$out" | grep -q '^STALE-DONE swept-done claims done but https://github.com/acme/widget/pull/63 is still OPEN$' \
     || fail "a done claim behind the sweep close still grades done: $out"
-  [ "$(printf '%s\n' "$out" | grep -c .)" = 3 ] || fail "only the live claims are reported, got: $out"
+  printf '%s\n' "$out" | grep -q "^NO-LANE answered-dead its latest status says 'resolved'" \
+    || fail "an answered decision is progress on a running task, so a dead crew under it is NO-LANE: $out"
+  [ "$(printf '%s\n' "$out" | grep -c .)" = 4 ] || fail "only the live claims are reported, got: $out"
   pass "every task is graded off its latest claim line, never a historical verb or a sweep close"
 }
 
