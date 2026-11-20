@@ -20,7 +20,10 @@
 # A queued item is the queue, not an alarm: nothing claims to be building it
 # yet, so it is not reported here. A held item is the captain's, and a hold
 # with a date is a date gate, so neither is reported either; a held item also
-# still lists as in_flight, so the held ids are subtracted before reporting.
+# still lists as in_flight, so the held ids are subtracted before reporting. A
+# task the captain ordered left stopped (state/<id>.stopped, written by
+# bin/fm-leave-stopped.sh) is not a missing lane either, so its dead endpoint
+# is not reported.
 #
 # It never writes, kills, or dispatches. It is a read: firstmate acts on what
 # it prints. What state a task is in is owned elsewhere: the claimed line comes
