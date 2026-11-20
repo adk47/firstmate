@@ -1049,6 +1049,137 @@ test_no_run_grok_pull_source_is_corroborated() {
   pass "a pull-sourced busy verdict is corroborated against a live agent"
 }
 
+# (f2) no run + the crew's own record says it is waiting in a blocking harness
+# dialog (the Pi extension's dialog-open, e.g. the /model picker) -> blocked via
+# pane, naming the dialog and the exit-and-respawn recovery, on either side of a
+# run; a closed dialog reads as its ordinary state again, and an untrusted
+# record's dialog event is never credited.
+test_no_run_blocking_dialog_reads_blocked() {
+  reset_fakes
+  local d; d=$(new_case dialog)
+  make_repo_on_branch "$d/wt" fm/feat-dlg
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dlg.meta" "window=fm:fm-feat-dlg" "worktree=$d/wt" "kind=ship" "harness=pi"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  printf 'working: implementing the fix\n' > "$d/state/feat-dlg.status"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-dlg)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-dlg idle --gen "$gen" \
+    --source pi-ext --event dialog-open --detail 'select: Select model'
+  local out; out=$(run_crew_state "$d" feat-dlg)
+  assert_contains "$out" "state: blocked" "an idle picker -> blocked"
+  assert_contains "$out" "source: pane" "the dialog verdict is a pane source"
+  assert_contains "$out" "select: Select model" "the verdict names the dialog kind and title"
+  assert_contains "$out" "exit and respawn" "the verdict names the documented recovery"
+  assert_not_contains "$out" "source: status-log" "a blocking dialog must not fall through to the log's working line"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-dlg busy --gen "$gen" \
+    --source pi-ext --event dialog-open --detail 'confirm: Proceed?'
+  out=$(run_crew_state "$d" feat-dlg)
+  assert_contains "$out" "state: blocked" "a dialog inside a run -> blocked, not working"
+  assert_contains "$out" "confirm: Proceed?" "the in-run verdict names its dialog"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-dlg idle --gen "$gen" \
+    --source pi-ext --event dialog-closed --detail 'select: Select model'
+  out=$(run_crew_state "$d" feat-dlg)
+  assert_not_contains "$out" "state: blocked" "a closed dialog is no longer blocked"
+  assert_contains "$out" "state: working" "a closed idle dialog falls through to the log as before"
+
+  # The same dialog event under a source the harness does not trust is not
+  # credited, exactly as the classifier itself would not credit the record.
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-dlg idle --gen "$gen" \
+    --source claude-hook --event dialog-open --detail 'select: Select model'
+  out=$(run_crew_state "$d" feat-dlg)
+  assert_not_contains "$out" "state: blocked" "an untrusted record's dialog event is never credited"
+  assert_contains "$out" "state: unknown" "an untrusted record stays unknown"
+  pass "a crew recorded as waiting in a blocking dialog reads blocked with the dialog and the exit-and-respawn recovery named, on either side of a run"
+}
+
+# (f3) Pi's built-in /model picker is an overlay the per-task extension cannot
+# observe, so a Pi crew showing it is read from the rendered tail: the picker's
+# hint row together with a rendered model list row carries the blocked verdict,
+# a document quoting the picker's rows does not, an ordinary idle pane carries
+# none, and a non-Pi crew never reads it.
+test_pi_model_picker_on_screen_reads_blocked() {
+  reset_fakes
+  local d sig out
+  d=$(new_case picker)
+  make_repo_on_branch "$d/wt" fm/feat-pick
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pick.meta" "window=fm:fm-feat-pick" "worktree=$d/wt" "kind=ship" "harness=pi"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  printf 'working: implementing the fix\n' > "$d/state/feat-pick.status"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-pick)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-pick idle --gen "$gen" --source pi-ext --event agent-settled
+  # The rows exactly as Pi 1.4.0 rendered them live, with Pi's own footer
+  # below the picker (the hint row's keys are whatever Pi has bound, so the
+  # connectives are what is read). The rows are assembled so this file does
+  # not itself contain a verbatim picker screen.
+  local badge='[anthropic]'
+  local list_row=$'  → ✓claude-opus-5-5 (Claude Opus 5.5) '"$badge"
+  local list_row2=$'    claude-sonnet-4-5 (Claude Sonnet 4.5) '"$badge"
+  local hint_row='  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel'
+  local footer=$'  /home/aaron/project\n  main · 12% · 3 files'
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="$list_row"$'\n'"$list_row2"$'\n'"$hint_row"$'\n'"$footer"
+  out=$(run_crew_state "$d" feat-pick)
+  assert_contains "$out" "state: blocked" "two consecutive picker list rows, the hint row, and Pi's footer below them carry the verdict"
+  assert_contains "$out" "/model picker" "the verdict names the picker"
+  assert_contains "$out" "exit and respawn" "the verdict names the documented recovery"
+
+  local no_models='  No matching models'
+  FM_FAKE_BUSY_TEXT="$no_models"$'\n'"$hint_row"$'\n'"$footer"
+  out=$(run_crew_state "$d" feat-pick)
+  assert_contains "$out" "state: blocked" "the picker's no-matching-models row and hint row carry the verdict"
+
+  # A markdown bullet or quote in the transcript above the picker belongs to
+  # the transcript, not to the candidate picker block, so it cannot veto it.
+  FM_FAKE_BUSY_TEXT=$'Fixed the parser.\n- reran the suite\n'"$list_row"$'\n'"$list_row2"$'\n'"$hint_row"$'\n'"$footer"
+  out=$(run_crew_state "$d" feat-pick)
+  assert_contains "$out" "state: blocked" "a styled transcript line above a real picker screen does not veto the verdict"
+
+  # A pane that merely prints the hint line and a badge-looking line in the
+  # source's order (hint then badge) is not the picker.
+  FM_FAKE_BUSY_TEXT=$'  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel\n  printf '\''%s\\n'\'' tail | grep -qE '\''\\[[A-Za-z0-9._-]+\\]'\'''
+  out=$(run_crew_state "$d" feat-pick)
+  assert_not_contains "$out" "state: blocked" "a hint line followed by a badge-looking line is not the picker"
+
+  # A document that quotes the picker's rows is not the picker: the hint row
+  # alone, the Model Name row alone, the provider-scope hint alone, the docs'
+  # single-row excerpt, and all of them together without two consecutive
+  # rendered list rows must all stay unblocked.
+  for sig in \
+    "$hint_row" \
+    '  Model Name: TOKEN POOL · Claude Opus 5.5' \
+    'Only showing models from configured providers. Use /login to add providers.' \
+    $'  → ✓claude-opus-5-5 (Claude Opus 5.5) [anthropic]\n  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    $'Only showing models from configured providers. Use /login to add providers.\n  Model Name: TOKEN POOL · Claude Opus 5.5\n  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel'; do
+    FM_FAKE_BUSY_TEXT="$sig"
+    out=$(run_crew_state "$d" feat-pick)
+    assert_not_contains "$out" "state: blocked" "quoted picker text without two consecutive rendered list rows is not the picker: $sig"
+  done
+
+  # Markdown/code styling is not a rendered picker even with two consecutive
+  # list rows: a fenced quote of the screen must stay unblocked.
+  FM_FAKE_BUSY_TEXT=$'```\n  → ✓claude-opus-5-5 (Claude Opus 5.5) [anthropic]\n    claude-sonnet-4-5 (Claude Sonnet 4.5) [anthropic]\n  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel\n```'
+  out=$(run_crew_state "$d" feat-pick)
+  assert_not_contains "$out" "state: blocked" "a fenced picker screen quote is not the picker"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" feat-pick)
+  assert_not_contains "$out" "state: blocked" "an ordinary idle Pi pane is not a picker"
+  assert_contains "$out" "state: working" "an ordinary idle Pi pane falls through to the log"
+
+  fm_write_meta "$d/state/feat-pick.meta" "window=fm:fm-feat-pick" "worktree=$d/wt" "kind=ship" "harness=claude"
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-pick idle --gen "$gen" --source claude-hook --event stop
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="$list_row"$'\n'"$list_row2"$'\n'"$hint_row"$'\n'"$footer"
+  out=$(run_crew_state "$d" feat-pick)
+  assert_not_contains "$out" "state: blocked" "the picker read is scoped to the Pi harness"
+  pass "a Pi crew showing its /model picker reads blocked from its hint row plus two consecutive list rows, while quoted picker text does not, and only for Pi"
+}
+
 # A converted adapter must NOT read working from rendered footer text: the
 # redesign removed that dependency, so a pane painting "esc to interrupt" with
 # no semantic record is unknown, never working and never silently idle.
@@ -2357,6 +2488,8 @@ test_no_run_busy_pane
 test_no_run_busy_record_without_live_agent_is_stale
 test_no_run_busy_record_with_gemini_shaped_agent_reads_working
 test_no_run_grok_pull_source_is_corroborated
+test_no_run_blocking_dialog_reads_blocked
+test_pi_model_picker_on_screen_reads_blocked
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
