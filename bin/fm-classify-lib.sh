@@ -346,11 +346,12 @@ status_pause_has_wake_time() {  # <status-line-or-note>
 # declared wait from an unendorsed pause without a second parse; when the clock
 # cannot be compared the bare deadline is printed rather than an invented
 # countdown. A dated deadline already behind us reads `(due now)`; an undated
-# `HH:MMZ` behind us keeps just its time, because the line states no date and the
-# wait may still lie ahead across midnight. Builtins plus one date(1)
+# `HH:MMZ` is anchored to the UTC day of the supplied clock and rolls to its next
+# occurrence when that time is already behind, so a wait crossing midnight keeps
+# its countdown instead of reading as already due. Builtins plus one date(1)
 # conversion, no per-line subshells beyond it.
 status_pause_wait_label() {  # <status-line-or-note> [<now-epoch>]
-  local line=$1 now=${2:-} date_part time_part deadline epoch diff mins days hours undated=no
+  local line=$1 now=${2:-} date_part time_part day deadline epoch diff mins days hours undated=no
   [ -n "$line" ] || return 1
   case "$now" in ''|*[!0-9]*) now=$(date -u +%s) ;; esac
   if [[ "$line" =~ $FM_CLASSIFY_PAUSE_UNTIL_RE ]]; then
@@ -363,7 +364,11 @@ status_pause_wait_label() {  # <status-line-or-note> [<now-epoch>]
     else
       undated=yes
       deadline="${time_part}Z"
-      epoch=$(fm_pause_expires_epoch "$(date -u +%Y-%m-%d)T${time_part}:00Z")
+      day=$(date -u -d "@$now" +%Y-%m-%d 2>/dev/null || date -u -r "$now" +%Y-%m-%d 2>/dev/null) || day=
+      epoch=$(fm_pause_expires_epoch "${day}T${time_part}:00Z")
+      if [ -n "$epoch" ] && [ "$epoch" -lt "$now" ]; then
+        epoch=$(( epoch + 86400 ))
+      fi
     fi
   else
     fm_pause_parse "$line" || return 1

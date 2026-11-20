@@ -198,6 +198,15 @@ test_a_pause_without_evidence_is_still_not_a_declared_wait() {
     *) fail "a pause with a predicate but no expiry was treated as a declared wait: $open" ;;
   esac
 
+  # The documented field spelling is lowercase; a case variant is not admitted,
+  # so it cannot slip a pause past the reader that enforces its expiry.
+  printf 'paused [key=vendor]: waiting Predicate=probe Expires=2031-03-05T16:00:00Z\n' > "$statusf"
+  open=$(status_open_decisions "$statusf")
+  case "$open" in
+    *vendor*blocked*) ;;
+    *) fail "a pause with a case-variant predicate= was treated as a declared wait: $open" ;;
+  esac
+
   # The two documented admissions keep their shape and need no fields.
   printf 'paused [key=vendor]: rate-limit reset until 05:30Z\n' > "$statusf"
   [ -z "$(status_open_decisions "$statusf")" ] \
@@ -213,8 +222,8 @@ test_a_pause_without_evidence_is_still_not_a_declared_wait() {
 # function of the line and a wall-clock epoch rather than prose assembled at the
 # call site. Both declaration shapes and both sides of the clock are pinned here:
 # a future wait counts down, a dated deadline behind us reads as due, an undated
-# one behind us keeps only its time so no date is invented, and a pause declaring
-# no deadline yields no label at all.
+# one rolls to its next occurrence so a wait across midnight keeps its countdown,
+# and a pause declaring no deadline yields no label at all.
 test_wait_label_names_the_pauses_own_deadline() {
   local label now
   now=$(date -u -d "$(date -u +%Y-%m-%d) 05:00:00" +%s) \
@@ -227,14 +236,20 @@ test_wait_label_names_the_pauses_own_deadline() {
   now=$(( now + 31 * 60 ))
   label=$(status_pause_wait_label 'paused [key=vendor]: rate-limit reset until 05:30Z' "$now") \
     || fail "a pause whose wake time passed produced no label"
-  [ "$label" = '05:30Z' ] \
+  [ "$label" = '05:30Z (1439m remaining)' ] \
     || fail "an undated wake time behind us was labelled '$label'"
 
   now=$(date -u -d '2031-03-04 23:50:00' +%s) || fail "date(1) could not express 2031-03-04T23:50Z"
   label=$(status_pause_wait_label 'paused [key=vendor]: rate-limit reset until 00:10Z' "$now") \
     || fail "a pause naming a wake time across midnight produced no label"
-  [ "$label" = '00:10Z' ] \
+  [ "$label" = '00:10Z (20m remaining)' ] \
     || fail "an undated wake time across midnight was labelled '$label'"
+
+  now=$(date -u -d '2031-03-05 15:00:00' +%s) || fail "date(1) could not express 2031-03-05T15:00Z"
+  label=$(status_pause_wait_label 'paused [key=release]: upstream cut until 09:00Z' "$now") \
+    || fail "a pause naming tomorrow's wake time produced no label"
+  [ "$label" = '09:00Z (1080m remaining)' ] \
+    || fail "an undated wake time for tomorrow was labelled '$label'"
 
   now=$(date -u -d '2029-12-31 23:00:00' +%s) || fail "date(1) could not express 2029-12-31T23:00Z"
   label=$(status_pause_wait_label 'paused [key=release]: until 2030-01-01T00:00Z' "$now") \

@@ -46,11 +46,10 @@
 # here stops a lane.
 
 # The predicate must be the last field before expires=; these are the two markers
-# every reader looks for. Case-insensitive in the same character-class style the
-# status fold uses, and builtins-only, because the per-line fold calls the
+# every reader looks for. Builtins-only, because the per-line fold calls the
 # admission test below on a status log of ordinary width.
-FM_PAUSE_PREDICATE_RE='[Pp][Rr][Ee][Dd][Ii][Cc][Aa][Tt][Ee]=[^[:space:]]'
-FM_PAUSE_EXPIRES_RE='[Ee][Xx][Pp][Ii][Rr][Ee][Ss]=[0-9][0-9][0-9][0-9]-'
+FM_PAUSE_PREDICATE_RE='predicate=[^[:space:]]'
+FM_PAUSE_EXPIRES_RE='expires=[0-9][0-9][0-9][0-9]-'
 
 # The hard bound on one predicate run. A predicate is a shell command a crew
 # wrote by hand, so it can block on anything; a tick that waits on it would wedge
