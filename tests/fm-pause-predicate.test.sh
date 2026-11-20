@@ -253,6 +253,12 @@ test_wait_label_names_the_pauses_own_deadline() {
   [ "$label" = '2031-03-05T16:00:00Z (60m remaining)' ] \
     || fail "a predicate/expires deadline was labelled '$label'"
 
+  label=$(status_pause_wait_label 'paused [key=vendor]: waiting on vendor predicate= expires=2031-03-05T16:00:00Z' "$now")
+  [ -z "$label" ] || fail "a pause with an empty predicate was given the label '$label'"
+
+  label=$(status_pause_wait_label 'paused [key=v]: waiting predicate=probe expires=notadate' "$now")
+  [ -z "$label" ] || fail "a pause with an unreadable expiry was given the label '$label'"
+
   label=$(status_pause_wait_label 'paused [key=winback]: waiting for the next send window' "$now")
   [ -z "$label" ] || fail "a pause naming no wake time was given the label '$label'"
   if status_pause_wait_label 'paused [key=winback]: waiting for the next send window' "$now" >/dev/null; then

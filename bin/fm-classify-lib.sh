@@ -367,7 +367,7 @@ status_pause_wait_label() {  # <status-line-or-note> [<now-epoch>]
     fi
   else
     fm_pause_parse "$line" || return 1
-    [ -n "$FM_PAUSE_EXPIRES" ] || return 1
+    fm_pause_has_predicate_and_expires "$line" || return 1
     deadline=$FM_PAUSE_EXPIRES
     epoch=$(fm_pause_expires_epoch "$deadline")
   fi
