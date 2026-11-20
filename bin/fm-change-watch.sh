@@ -767,17 +767,10 @@ cw_watch_exists() {
   [ -d "$dir" ] && [ ! -L "$dir" ] && [ -f "$dir/watch.meta" ]
 }
 
-# Whether the resolved state root is a home that could own <task>: it holds the
-# task's own record, or at least one change watch, row, or claim. A lane
-# worktree's state/ holds neither, so finding no watch there is not a finding.
-cw_state_root_known() {  # <task-id>
-  local entry
-  [ -f "$STATE/$1.meta" ] && return 0
-  [ -d "$WATCH_ROOT" ] || return 1
-  for entry in "$WATCH_ROOT"/*/watch.meta "$WATCH_ROOT"/rows/*.json "$WATCH_ROOT"/claims/*; do
-    [ -e "$entry" ] && return 0
-  done
-  return 1
+# Whether the resolved state root holds <task>'s own record. A lane worktree's
+# state/ holds none, so finding no watch there is not a finding.
+cw_task_record_exists() {  # <task-id>
+  [ -f "$STATE/$1.meta" ]
 }
 
 # A named watch that is not there, stated with the root it was looked for in so
@@ -4582,11 +4575,10 @@ cmd_gate() {  # <task-id> [--terminal-gap]
     done
   fi
   if [ "$found" -eq 0 ]; then
-    # No watch for this task is a pass only where it is a finding: the root
-    # holds this home's watches and none is the task's, or it holds the task's
-    # own record. A root with neither is not the home that owns the task.
-    cw_state_root_known "$task" && return 0
-    printf 'change-watch: gate FAIL for %s: the state root at %s holds no change watch and no record of this task, so it could not be the home that owns it and no watch row was read; run the gate with FM_HOME set to the home that owns the task\n' \
+    # No watch for this task is a pass only where the root holds the task's own
+    # record: a pass must name what it read.
+    cw_task_record_exists "$task" && return 0
+    printf 'change-watch: gate FAIL for %s: the state root at %s holds no watch row and no record of this task, so nothing for it was read; run the gate with FM_HOME set to the home that owns the task\n' \
       "$task" "$STATE"
     return 1
   fi

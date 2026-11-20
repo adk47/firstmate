@@ -404,8 +404,12 @@ grep -q '"real_user_check": "observed"' "$ROW_D" \
 grep -q '"completed_epoch": [0-9]' "$ROW_D" || fail "the row has no completion epoch"
 run_cw "$HOME_D" 1790044000 gate d1 >/dev/null \
   || fail "the done-claim gate failed a proven watch"
-run_cw "$HOME_D" 1790044000 gate no-such-task >/dev/null \
-  || fail "the done-claim gate failed a task with no watch"
+out=$(run_cw "$HOME_D" 1790044000 gate no-such-task 2>&1) \
+  && fail "the done-claim gate passed a task its home holds no record of: $out"
+case "$out" in
+  *"gate FAIL for no-such-task"*"$HOME_D/state"*) ;;
+  *) fail "the gate did not name the task and state root it read: $out" ;;
+esac
 pass "a merge writes exactly one row with the +15m/+1h/+6h readings and a terminal state"
 
 # --- (f) an unmeasurable watch wakes and blocks the done claim ----------------
@@ -3422,7 +3426,7 @@ mkdir -p "$LANE/state"
 out=$(env -u FM_STATE_OVERRIDE FM_HOME="$LANE" FM_CW_NO_WIKI=1 "$CW" gate lane1 2>&1) \
   && fail "the gate passed from a state root that holds nothing: $out"
 case "$out" in
-  *"$LANE/state holds no change watch and no record of this task"*) ;;
+  *"$LANE/state holds no watch row and no record of this task"*) ;;
   *) fail "the gate did not say the state root it read holds nothing: $out" ;;
 esac
 pass "the gate fails when the state root it resolved holds no watch and no record of the task"
@@ -3446,6 +3450,20 @@ printf 'kind=ship\n' > "$HOME_RH/state/rh1.meta"
 out=$(run_cw "$HOME_RH" 1790000000 gate rh1 --terminal-gap 2>&1) \
   || fail "the gate refused a task its own home records with no watch: $out"
 pass "a task its own home records with no watch still passes the gate"
+
+# A home that holds other watches is still not a home that recorded this task,
+# so a pass there requires the task's own record.
+HOME_RI=$(new_world ri)
+seed_pr "$HOME_RI" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_RI" "$MANIFEST" "$FEED_LINE"
+run_cw "$HOME_RI" 1790000000 register ri1 "$PR_URL" >/dev/null || fail "register failed"
+out=$(run_cw "$HOME_RI" 1790044000 gate no-such-task 2>&1) \
+  && fail "the gate passed a task from a home that recorded only other tasks: $out"
+case "$out" in
+  *"gate FAIL for no-such-task"*"$HOME_RI/state"*) ;;
+  *) fail "the gate did not name the task and state root it read: $out" ;;
+esac
+pass "a home holding other watches does not pass a task it never recorded"
 
 # rescore_world <name> <pr> <baseline-value> seeds a hydra watch whose verdict an
 # older scorer stuck at regressed on a deploy_run reading of 0.
