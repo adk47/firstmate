@@ -800,7 +800,7 @@ The report refuses rather than defaults.
 A source that does not answer, answers with an error, or answers in a shape the report does not recognise prints `UNMEASURED: <source> (<reason>)`, and the run exits 1; nothing is printed as 0 that was not read as 0, and nothing is carried over from an earlier run.
 Every number line starts with `window:` or `total:` and carries its source and the statement that ran on the same line, so a windowed count is never subtracted from a standing one.
 A run that prints `INCOMPLETE` proves nothing about the goal, and a goal check that reads this report must treat exit 1 as unread rather than as a low number.
-Proof asks are three campaigns counted by name, and decisions are three decision values written in apply mode; reminders, status notes, holds, defers, and judge or shadow rows are printed on their own lines, named as excluded.
+Proof asks are three campaigns counted by name, and decisions are three decision values written in apply mode; reminders, status notes, holds, defers, rows that wrote no decision or no mode, and judge or shadow rows are printed on their own lines, named as excluded.
 The report prints rates as they were measured and judges nothing: it holds no target and no threshold.
 
 `config/verif-scale.env` is optional, local, gitignored, and not inherited by secondmate homes.

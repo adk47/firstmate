@@ -44,14 +44,16 @@
 #                     60 minutes and the last 24 hours, the excluded families
 #                     for the same windows, and the 7-day return rate: of the
 #                     asks sent in the last 7 days, the share that carry proof
-#                     (a proof tag or a proof attachment on the ask's row),
-#                     with the same read per send day so a reader can see
-#                     whether it is rising. Returns are counted up to the read
-#                     time, so the newest send days are still filling.
+#                     (a non-empty proof tag or a proof attachment on the
+#                     ask's row), with the same read per send day so a reader
+#                     can see whether it is rising. Returns are counted up to
+#                     the read time, so the newest send days are still filling.
 #                     A message's time is its sent_at, or created_at when
-#                     sent_at is empty, and the table holds two timestamp
-#                     shapes; both are normalised before comparing, and a
-#                     sent row in neither shape makes the source UNMEASURED.
+#                     sent_at is NULL or empty, and the table holds two
+#                     timestamp shapes; both are normalised before comparing,
+#                     and a sent row whose normalised time is NULL, empty, or
+#                     in neither shape makes the source UNMEASURED rather than
+#                     being dropped from the windows.
 #   decisions         the decide ledger, a table of the same file. A row is
 #                     counted as a decision only when it was written with mode
 #                     'apply' AND its decision is one of three BY NAME:
@@ -62,13 +64,15 @@
 #                     the ledger is appended on every pass. Every other row is
 #                     printed on its own line, named as excluded: hold (the
 #                     ledger's own schema calls it "no write, a human looks"),
-#                     defer, and close in apply mode, and every row of another
-#                     mode (judge, shadow). A request held on every pass
+#                     defer, and close in apply mode, every row of another mode
+#                     (judge, shadow, or none), and an apply row that wrote no
+#                     decision (decision-none). A request held on every pass
 #                     writes a hold row on every pass, so counting rows as
 #                     decisions overstates the rate by orders of magnitude.
 #   credit_requests   core's request table, read through the ledger host's
 #                     Trino wrapper. Open undecided is every request whose
-#                     status is neither approved nor rejected. Two lines, both
+#                     status is neither approved nor rejected, including a
+#                     request with no status at all. Two lines, both
 #                     labelled: GROSS includes soft-deleted rows, NET leaves
 #                     them out. The ledger's own request_state table is not
 #                     read: it is not the count of record.
