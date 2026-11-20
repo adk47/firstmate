@@ -1,0 +1,13 @@
+# Intent item (3): test-results/ is Playwright build output; nothing in it is tracked and it is now ignored
+
+$ git check-ignore -v test-results/.last-run.json
+.gitignore:20:test-results/	test-results/.last-run.json
+
+$ git ls-files | grep -c '^test-results/'
+0
+
+# A fresh Playwright last-run file planted in the worktree stays untracked:
+(no output above = ignored)
+
+$ git status --porcelain  # after removing the planted file
+(no output = worktree clean)

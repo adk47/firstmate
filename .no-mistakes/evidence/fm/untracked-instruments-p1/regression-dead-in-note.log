@@ -1,0 +1,15 @@
+# Regression check: a live crew whose own note contains the word 'dead'
+# Scenario: task 'live' status='working: removed the dead-letter retry path'.
+# Its real reader line is
+#   state: working · source: status-log · removed the dead-letter retry path
+
+## BEFORE the fix: bin/fm-unowned.sh at a54bf6e2 (substring case "$st" in *dead*)
+NO-LANE live its latest status says 'working' but the endpoint is dead
+exit=1
+
+## AFTER the fix: bin/fm-unowned.sh at 92fee6ef (parses the verdict field)
+exit=0
+
+## And the true alarm still fires when the verdict really is dead
+NO-LANE live its latest status says 'working' but the endpoint is dead
+exit=1

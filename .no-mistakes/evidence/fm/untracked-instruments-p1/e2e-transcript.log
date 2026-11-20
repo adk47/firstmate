@@ -1,0 +1,69 @@
+# bin/fm-unowned.sh - end-to-end run against a REAL backlog and the REAL fm-crew-state.sh
+# date: 2026-11-20T09:06:50Z  commit: 92fee6ef
+
+## The scratch home's real backlog (built with real tasks-axi add/hold)
+$ tasks-axi list --file $HOME/data/backlog.md --state in_flight
+count: 2
+tasks[2]{id,state,kind,repo,title}:
+  alpha,in_flight,ship,"-",owned in-flight work
+  ghost,in_flight,ship,"-",backlog item with no lane
+help[1]:
+  - Run `tasks-axi show <id> --file=backlog.md` for full notes on a task
+
+$ tasks-axi list --file $HOME/data/backlog.md --state held
+count: 1
+tasks[1]{id,state,kind,repo,title}:
+  held-one,queued,ship,"-",captain hold
+help[1]:
+  - Run `tasks-axi show <id> --file=backlog.md` for full notes on a task
+
+## Its task records
+$ cat $HOME/state/*.meta $HOME/state/*.status
+--- /tmp/fm-unowned-e2e/state/alpha.meta
+window=firstmate:fm-alpha
+worktree=/tmp/fm-unowned-e2e/wt-alpha
+harness=claude
+--- /tmp/fm-unowned-e2e/state/landed.meta
+window=firstmate:fm-landed
+pr=https://github.com/acme/widget/pull/42
+--- /tmp/fm-unowned-e2e/state/stale.meta
+window=firstmate:fm-stale
+pr=https://github.com/acme/widget/pull/41
+--- /tmp/fm-unowned-e2e/state/alpha.status
+working: half way through the fix
+--- /tmp/fm-unowned-e2e/state/landed.status
+done: PR https://github.com/acme/widget/pull/42 merged
+--- /tmp/fm-unowned-e2e/state/stale.status
+done: PR https://github.com/acme/widget/pull/41 checks green
+
+## The real reader's verdict for alpha (default reader, no override)
+$ FM_HOME=$HOME bin/fm-crew-state.sh alpha
+state: dead · source: process · no agent process in worktree · last event: working
+
+## run 1: default reader, real tasks-axi on PATH (no fixture overrides at all)
+$ FM_HOME=$HOME bin/fm-unowned.sh
+UNOWNED ghost backlog says in flight but no task record exists: nothing is building this and nothing will report on it
+NO-LANE alpha its latest status says 'working' but the endpoint is dead
+exit=1
+
+## run 2: same home, plus a forge that answers OPEN for pull/41 (fixture gh)
+$ FM_HOME=$HOME PATH=$HOME/fakebin:$PATH bin/fm-unowned.sh
+UNOWNED ghost backlog says in flight but no task record exists: nothing is building this and nothing will report on it
+NO-LANE alpha its latest status says 'working' but the endpoint is dead
+STALE-DONE stale claims done but https://github.com/acme/widget/pull/41 is still OPEN
+exit=1
+
+## run 3: same home, backlog unreadable to the tool (no tasks-axi on PATH)
+$ FM_HOME=$HOME PATH=/usr/bin:/bin bin/fm-unowned.sh
+fm-unowned: tasks-axi not on PATH
+exit=2
+
+## run 4: a fully owned home - one in-flight item, a record, a live crew
+$ tasks-axi list --file $HOME/data/backlog.md --state in_flight
+count: 1
+tasks[1]{id,state,kind,repo,title}:
+  shipped,in_flight,ship,"-",a task with a real lane
+help[1]:
+  - Run `tasks-axi show <id> --file=backlog.md` for full notes on a task
+$ FM_HOME=$HOME FM_CREW_STATE_BIN=$HOME/fakebin/crew-state bin/fm-unowned.sh  # live endpoint
+exit=0
