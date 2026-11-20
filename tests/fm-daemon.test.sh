@@ -390,6 +390,27 @@ EOF
   pass "classification failure retains the complete durable wake batch"
 }
 
+test_durable_wake_refusal_is_retained_not_failed() {
+  local dir state fakebin
+  dir=$(make_supercase durable-note-refusal); state="$dir/state"; fakebin="$dir/daemon-bin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then exit 3; fi
+printf '1\t1\tcheck\tinbox:note-1\tcheck: captain inbox note note-1\n'
+printf 'WAKE_ACK_REQUIRED: retry --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  (
+    FM_DAEMON_DIR="$fakebin"
+    handle_wake() { escalate_add "$state" "$1"; }
+    handle_durable_wakes fallback "$state"
+  ) || fail "a retained pending captain note was reported as a wake-handling failure"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+    || fail "the retained wake was not escalated exactly once"
+  pass "a refused acknowledgement is retained without being reported as a failure"
+}
+
 test_durable_batch_resolves_every_path_from_its_private_record() {
   local dir state fakebin reason attempts
   dir=$(make_supercase durable-record); state="$dir/state"; fakebin="$dir/daemon-bin"; attempts="$dir/attempts"
@@ -2761,6 +2782,7 @@ test_catchall_advances_routine_then_surfaces_append
 test_escalation_buffer_failure_retains_wake_and_position
 test_catchall_buffer_failure_preserves_position
 test_durable_wake_failure_retains_entire_batch
+test_durable_wake_refusal_is_retained_not_failed
 test_durable_batch_resolves_every_path_from_its_private_record
 test_durable_batch_resolves_oldest_queued_record_beyond_summary_paths
 test_durable_missing_signal_batch_record_escalates_without_advancing

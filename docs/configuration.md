@@ -1448,6 +1448,7 @@ Each is one line in a local, gitignored `config/` file, with an environment vari
 That configuration is the whole opt-in: an unconfigured home cannot start the relay and cannot run `fm-inbox.sh say` or `ask`, while `note`, `status`, `list` and `drain` need no configuration at all because they make no model call.
 The voice handover depends on `note`, so it keeps working in a home that has configured nothing.
 A note is filed under the class of the source that wrote it, and an automated source files into its own `state/inbox-auto/` queue so `list` and `drain` always present the captain's own notes first; `bin/fm-inbox.sh --help` owns the class list and the queue each one uses.
+A captain note and the wake that announced it are acknowledged together: `fm-inbox.sh drain --ack <id>` retires both, and `bin/fm-wake-drain.sh --ack-through` refuses while a captain note at or below its cutoff is still pending, so a queue acknowledgement can never step past an unread note (docs/watcher-continuity.md owns the acknowledgement contract).
 
 | File | Environment | Holds |
 | --- | --- | --- |

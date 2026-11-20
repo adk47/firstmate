@@ -1458,7 +1458,7 @@ signal_batch_record_paths() {  # <state> <batch-key>
 
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
-  local handled=0 failed=0 ack_through ack_generation batch_files
+  local handled=0 failed=0 ack_through ack_generation ack_rc batch_files
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
@@ -1503,6 +1503,18 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   fi
   "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
     --recovery-generation "$ack_generation"
+  ack_rc=$?
+  case "$ack_rc" in
+    0) return 0 ;;
+    3)
+      log "wake drain retained a pending captain note; its wakes stay queued until the note is acked"
+      return 0
+      ;;
+    *)
+      log "wake acknowledgement failed (rc=$ack_rc); retaining durable wakes"
+      return 1
+      ;;
+  esac
 }
 
 # --- log --------------------------------------------------------------------

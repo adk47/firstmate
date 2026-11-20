@@ -7,7 +7,7 @@
 #   note    Queue an idea for firstmate while firstmate is mid-turn and cannot
 #           answer. Writes a durable record and appends ONE `check` wake, so the
 #           note survives a crash and is presented at firstmate's next drain.
-#           This is the only subcommand that touches firstmate's wake queue.
+#           This is the only subcommand that appends to firstmate's wake queue.
 #   say     Same as `note`, but the body comes from spoken audio on stdin.
 #           Speech is an INPUT METHOD here, not an architecture: it transcribes
 #           and then takes exactly the `note` path.
@@ -46,6 +46,20 @@
 # never buried by machine output. Both queues append one wake - a page that never
 # wakes is a page nobody reads - and an automated wake names its class, so it is
 # recognizable as automated without opening the record.
+#
+# A note and the wake that announced it are TWO records of ONE obligation, so
+# they are settled together: `drain --ack <id>` moves the record into handled/ and
+# retires its `check: inbox:<id>` wake in the same command. In the other
+# direction bin/fm-wake-drain.sh refuses to acknowledge a wake whose captain note
+# is still unacknowledged, naming the ids, so the two records cannot drift apart
+# in either order. That pair is the core of the fix for the 2026-11 measurement of
+# three captain notes sitting 23h+ while newer ones were handled in the same
+# minute: the wake queue could be acknowledged without ever touching the note.
+# A wake that was already acknowledged before the coupling existed is the third
+# direction, so `list`, and `drain` when it is listing rather than acking, first
+# re-announce any pending captain note whose wake is no longer queued. That
+# self-heal is by key, so it never doubles a pending wake, and it stays out of
+# inbox-auto/: an orphaned machine record is not an obligation the captain owes.
 #
 # Configuration. A region, a model id and an AWS profile name somebody's account
 # and somebody's choices, so this file carries no default for any of them. Each is
@@ -439,6 +453,37 @@ print_auto_notes() {  # <show-all 0|1>
   fi
 }
 
+# Re-announce any captain note whose `check: inbox:<id>` wake is no longer
+# queued, so a wake acknowledged before its note cannot leave that note invisible
+# forever. The queue is the authority; a key that is already pending is left
+# alone, and state/inbox-auto is never touched because machine records are not
+# the captain's obligation.
+reannounce_orphaned_notes() {
+  local f id source summary lib="$FM_ROOT/bin/fm-wake-lib.sh"
+  [ -d "$INBOX" ] || return 0
+  [ -r "$lib" ] || return 0
+  # shellcheck source=/dev/null
+  FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" STATE="$STATE" . "$lib"
+  for f in "$INBOX"/*.note; do
+    [ -e "$f" ] || break
+    id=$(basename "$f" .note)
+    if fm_wake_queued_keys check | grep -qxF "inbox:$id"; then
+      continue
+    fi
+    source=$(sed -n 's/^source=//p' "$f" | head -1)
+    case " $CAPTAIN_CLASSES " in
+      *" $source "*) ;;
+      *) source=text ;;
+    esac
+    summary=$(sed -n '/^--$/,$p' "$f" | tail -n +2 | tr '\n\t' '  ' | cut -c1-100)
+    if wake_for "$source" "$id" "$summary"; then
+      printf 'fm-inbox: re-announced orphaned captain note %s\n' "$id" >&2
+    else
+      printf 'fm-inbox: captain note %s has no queued wake and could not be re-announced\n' "$id" >&2
+    fi
+  done
+}
+
 cmd_list() {
   local show_all=0 any=0 f
   case "${1:-}" in
@@ -446,7 +491,7 @@ cmd_list() {
     '') ;;
     *) die "usage: fm-inbox.sh list [--all]" ;;
   esac
-
+  reannounce_orphaned_notes
   for f in "$INBOX"/*.note; do
     [ -e "$f" ] || break
     any=1
@@ -454,6 +499,26 @@ cmd_list() {
   done
   [ "$any" -eq 1 ] || printf '(no captain notes waiting)\n'
   print_auto_notes "$show_all"
+}
+
+# Retire the wake that announced a note, so one command clears both records of
+# the one obligation. A failure here is reported and never rolls the ack back:
+# the note is already out of the queue, and a wake whose note is gone no longer
+# blocks the drain's own acknowledgement.
+retire_note_wake() {  # <id>
+  local id=$1 lib="$FM_ROOT/bin/fm-wake-lib.sh" removed
+  [ -r "$lib" ] || return 0
+  # shellcheck source=/dev/null
+  FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" STATE="$STATE" . "$lib"
+  removed=$(fm_wake_retire_key_rows "inbox:$id") || return 1
+  case "$removed" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$removed" -gt 0 ]; then
+    printf 'retired %s wake(s) for %s\n' "$removed" "$id"
+  else
+    # A note whose wake was already acknowledged is the state that hid for 23h
+    # behind a queue that read as clean, so name it instead of falling silent.
+    printf 'acked %s: no wake was still queued for it (its wake was acknowledged before the note)\n' "$id"
+  fi
 }
 
 cmd_drain() {
@@ -478,6 +543,8 @@ cmd_drain() {
         mkdir -p "$dir/handled"
         mv "$dir/$id.note" "$dir/handled/$id.note"
         printf 'acked %s\n' "$id"
+        retire_note_wake "$id" \
+          || printf 'fm-inbox: acked %s but its wake could not be retired; the next drain will acknowledge it\n' "$id" >&2
         acked=1
         break
       done
@@ -485,8 +552,10 @@ cmd_drain() {
     done
     return 0
   fi
+  reannounce_orphaned_notes
   if [ "$show_all" -eq 1 ]; then cmd_list --all; else cmd_list; fi
   printf '\nAck with: fm-inbox.sh drain --ack <id>...\n'
+  printf 'Acking a note retires the wake that announced it, so one command clears both.\n'
 }
 
 # ---------------------------------------------------------------- dispatch

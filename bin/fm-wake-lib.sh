@@ -1749,6 +1749,46 @@ fm_wake_append() {
   return "$status"
 }
 
+# fm_wake_retire_key_rows <key>
+# Remove every queued check row carrying <key> and echo how many were removed.
+# bin/fm-inbox.sh's `drain --ack` owns the one caller: a captain note and the
+# `check: inbox:<id>` wake that announced it are two records of one obligation,
+# so acking the note retires its wake too and a correct operator clears both with
+# one command. Scoped to check rows on purpose - a signal row is per-actor and a
+# branch may legitimately hold the same key, so nothing else may be removed here.
+# The durable queue stays the authority: a row is gone only after the rewrite
+# landed, and a caller that cannot rewrite the queue is told so.
+fm_wake_retire_key_rows() {
+  local key=$1 tmp removed=0
+  [ -n "$key" ] || return 2
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if [ ! -s "$FM_WAKE_QUEUE" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    printf '0\n'
+    return 0
+  fi
+  tmp=$(mktemp "$STATE/.wake-queue.retire.XXXXXX") || {
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  }
+  if ! chmod 0600 "$tmp" \
+    || ! awk -F '\t' -v k="$key" '
+         NF < 5 || $3 != "check" || $4 != k { print }
+       ' "$FM_WAKE_QUEUE" > "$tmp"; then
+    rm -f -- "$tmp"
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  fi
+  removed=$(( $(awk 'END { print NR }' "$FM_WAKE_QUEUE") - $(awk 'END { print NR }' "$tmp") ))
+  if ! _fm_atomic_replace "$tmp" "$FM_WAKE_QUEUE"; then
+    rm -f -- "$tmp"
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  printf '%s\n' "$removed"
+}
+
 # fm_wake_queued_keys <kind>
 # Print the distinct keys currently queued for <kind>, oldest first. Read under
 # the append lock so a concurrent append is never observed half-written. The
