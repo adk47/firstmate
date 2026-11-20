@@ -138,8 +138,10 @@
 # for an already-open expectation so a second record is not created. A plain
 # resend of the same body to the same secondmate inside the library's
 # duplicate window (FM_PENDING_REPLY_DEDUP_WINDOW_SECS) also reuses the open
-# record's corr instead of minting a sibling (fm_pending_reply_create exit 3),
-# and then follows the same resend rules as an explicit corr. Direct
+# record's corr instead of minting a sibling (fm_pending_reply_create exit 3);
+# when that reuse is confirmed delivered, the record's current turn is re-armed
+# (fm_pending_reply_rearm_turn) so the earlier delivery's completed turn cannot
+# draw a recovery repost over the request that was just re-delivered. Direct
 # unmarked captain input never creates one. A marked secondmate instruction
 # sent with --fire-and-forget <16-hex-delivery-id> uses the same inbox transport
 # without creating a reply expectation; its delivery id makes uncertain retries

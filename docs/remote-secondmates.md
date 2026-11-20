@@ -177,7 +177,7 @@ The [`fm-send.sh` header](../bin/fm-send.sh) owns the exact delivery-status cont
 A routed request is delivered as a durable record in the remote home's steering inbox plus a best-effort doorbell, never by typing the payload into the pane; exit 0 means the record durably exists.
 Every remote transport attempt is bounded by `FM_SEND_REMOTE_BUDGET`; that header owns the setting's default and validation contract.
 An unconfirmed SSH transport (exit 255) is retried identically once, while a budget expiry is not retried because completion is unknown; either outcome preserves this ordinary reply-bearing request's pending-reply expectation for the record that may have landed.
-If delivery remains unconfirmed, only the exact `FM_PENDING_REPLY_EXISTING_CORR=<id>` resend command printed by `fm-send` is safe to run later because it preserves the request body and lets the remote enqueue deduplicate onto the same record; a plain rerun mints a different correlation and is not idempotent.
+If delivery remains unconfirmed, the exact `FM_PENDING_REPLY_EXISTING_CORR=<id>` resend command printed by `fm-send` is always safe to run later because it preserves the request body and lets the remote enqueue deduplicate onto the same record; a plain rerun of the same body reuses the open correlation only inside `FM_PENDING_REPLY_DEDUP_WINDOW_SECS` and otherwise mints a different correlation, so it is not the idempotent resend to rely on.
 When deduplication finds that the worker already moved the matching record into `handled/`, the resend exits successfully without ringing the doorbell again.
 A record the worker deleted instead of acknowledging survives only as the inbox's hidden link; the same resend links it back into the inbox and reports the delivered record rather than publishing a duplicate, as `bin/fm-task-inbox-lib.sh` owns.
 The remote host runs no doorbell re-ring ladder of its own; a swallowed doorbell for an ordinary reply-bearing request surfaces through the parent's pending-reply recovery and escalation, whose recovery request rings the doorbell again when it is enqueued.
@@ -203,7 +203,7 @@ A shortened or changed prefix stops the relay and surfaces a continuity failure 
 
 An SSH exit status of 255 always means transport failure or unknown remote completion.
 The underlying `fm-on` transport never retries automatically, but `fm-send` retries its correlation-preserving steering-inbox leg exactly once.
-Semantic callers preserve the route or pending request; an operation that is not idempotent requires same-host reconciliation rather than a blind resend, while an unconfirmed steer may be retried only through the correlation-preserving command described above.
+Semantic callers preserve the route or pending request; an operation that is not idempotent requires same-host reconciliation rather than a blind resend, while an unconfirmed steer must be retried through a correlation-preserving path: the printed command, or an identical-body rerun still inside the duplicate window.
 An unavailable remote home is projected as unknown and is never replaced by a local second mate.
 
 ## Backlog handoff

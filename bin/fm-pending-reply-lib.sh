@@ -31,18 +31,26 @@
 #     reset and records sibling_resolved_corr/epoch. From then on only a genuine
 #     busy->idle transition observed AFTER that epoch completes the sibling's
 #     turn, so the idle that followed the answer to A can never draw a REPOST
-#     REQUIRED for B. A record already in recovery_sent keeps its recovery turn
-#     evidence and stays on the ordinary escalation path. A different request
-#     body is not a sibling: it keeps the ordinary one-repost-then-escalate
-#     path. B is still resolvable by its own correlated answer at any time, and
-#     by the age sweep below once it has aged out.
+#     REQUIRED for B. That evidence gates a turn only while
+#     sibling_resolved_epoch is at or after the delivered_epoch of the turn
+#     being judged, so a later re-delivery of the same body is judged on its own
+#     clock instead of inheriting an older sibling's reset. A record already in
+#     recovery_sent keeps its recovery turn evidence and stays on the ordinary
+#     escalation path. A different request body is not a sibling: it keeps the
+#     ordinary one-repost-then-escalate path. B is still resolvable by its own
+#     correlated answer at any time, and by the age sweep below once it has aged
+#     out.
 #   - No duplicate record for one request: a steer creator that passes the
 #     `dedup` flag to fm_pending_reply_create gets the existing open record's
 #     corr back (exit 3) when the same task already has an open record with
 #     the same request body created within FM_PENDING_REPLY_DEDUP_WINDOW_SECS,
 #     so a resend points at that corr instead of minting a sibling. fm-send is
 #     that creator; programmatic creators that need one delivery proof per
-#     operation (backlog handoff, secondmate restart) omit the flag.
+#     operation (backlog handoff, secondmate restart) omit the flag. Once a
+#     reused resend is confirmed delivered, fm-send re-arms that record's
+#     current turn (fm_pending_reply_rearm_turn), so the fresh delivery is not
+#     judged by the earlier delivery's completed turn and the tick cannot repost
+#     over a request that was just re-delivered.
 #   - Semantic busy state wins over the rendered tail: when the mate's
 #     state/<task_id>.busy-state (bin/fm-busy-lib.sh) is valid and its source is
 #     trusted for the recorded harness, that record is the observation.
@@ -66,7 +74,10 @@
 # sibling, a recovery in flight, and an escalated record all stay in the active
 # directory until a correlated answer or the captain closes them: "never
 # silently expire unresolved" still holds, and a retirement is never silent -
-# the record remains on disk stating why and when.
+# the record remains on disk stating why and when. A record already stamped
+# phase=retired but left in the active directory by an interrupted move is
+# finished by the next sweep, which moves it to .retired/<corr_id> without
+# re-stamping anything and never overwrites an existing retired copy.
 #
 # Record location (parent FM_HOME):
 #   state/pending-replies/<corr_id>
