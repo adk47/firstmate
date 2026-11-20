@@ -230,7 +230,8 @@ test_a_hanging_remote_read_is_bounded_and_reads_unmeasured() {
   healthy "$home" "$T0"
   cat > "$home/fakebin/fake-remote" <<'SH'
 #!/usr/bin/env bash
-exec sleep 30
+sleep 12
+wait
 SH
   chmod +x "$home/fakebin/fake-remote"
   start=$(date +%s)
@@ -238,7 +239,7 @@ SH
   elapsed=$(( $(date +%s) - start ))
   [ "$elapsed" -lt 10 ] || fail "a hanging remote read blocked for ${elapsed}s"
   assert_contains "$out" "would_send=unmeasured" "a hanging remote read did not read unmeasured"
-  pass "a hanging remote read is bounded and reads unmeasured"
+  pass "a hanging remote read whose survivor holds the pipe is bounded and reads unmeasured"
 }
 
 test_an_unconfigured_home_is_not_reported_as_inside_thresholds() {
@@ -427,6 +428,27 @@ SH
   pass "a partially read forge answer holds the crossing instead of resolving it"
 }
 
+test_a_stale_head_is_set_aside_without_poisoning_the_merges_reading() {
+  local home out
+  home=$(make_home stalehead)
+  configure "$home"
+  healthy "$home" "$T0"
+  green_prs "$home" 2 10800 "$T0"
+  run "$home" "$T0" check >/dev/null
+  assert_contains "$(cat "$home/state/overlord.status")" "blocked [key=overlord-merges-green-unmerged]" \
+    "a standing green backlog was not interjected"
+
+  healthy "$home" $((T0 + 600))
+  green_prs "$home" 1 10800 $((T0 + 600))
+  sed -i.bak 's/"oid": "h1"/"oid": "stale"/' "$home/gh.json"
+  run "$home" $((T0 + 600)) check >/dev/null
+  assert_contains "$(tail -1 "$home/state/overlord.status")" "resolved [key=overlord-merges-green-unmerged]" \
+    "a stale head kept the cleared backlog open"
+  out=$(run "$home" $((T0 + 600)) digest)
+  assert_contains "$out" "1 stale head(s) set aside: 1" "the digest did not name the stale head it set aside"
+  pass "a stale head is named and set aside without making the merges reading partial"
+}
+
 test_absent_and_stale_sources_are_unmeasured_and_two_ticks_interject() {
   local home out
   home=$(make_home unmeasured)
@@ -573,6 +595,7 @@ test_an_unconfigured_home_is_not_reported_as_inside_thresholds
 test_a_malformed_pr_scope_reads_unmeasured_instead_of_crashing
 test_users_told_flat_for_four_hours_is_wrong_but_a_shorter_flat_is_not
 test_green_unmerged_rises_goes_to_fable_and_an_unchanged_count_is_silent
+test_a_stale_head_is_set_aside_without_poisoning_the_merges_reading
 test_a_partial_merges_read_holds_the_crossing_instead_of_resolving_it
 test_absent_and_stale_sources_are_unmeasured_and_two_ticks_interject
 test_support_thresholds_and_a_late_tick

@@ -524,7 +524,10 @@ def finish_remote(proc):
     except subprocess.TimeoutExpired as error:
         out = error.output or b""
         proc.kill()
-        proc.communicate()
+        try:
+            proc.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
     except OSError:
         proc.kill()
     current, body = None, []
@@ -583,7 +586,7 @@ def read_merges():
         why = "FM_OVERLORD_PR_SCOPE names an org with no login"
         return [Reading("open", why=why), Reading("green_unmerged_2h", why=why)], []
     green_age = cfg_int("GREEN_AGE", 7200)
-    total, counted, stale_heads, unknown, urls, after, more = None, 0, 0, 0, [], None, False
+    total, counted, stale_heads, stale_numbers, unknown, urls, after, more = None, 0, 0, [], 0, [], None, False
     pages = 0
     for _ in range(max(1, cfg_int("PR_PAGES", 2))):
         data = gh(GH_QUERY, {"q": "%s is:pr is:open" % scope,
@@ -600,6 +603,7 @@ def read_merges():
             # A result attached to anything but the current head is not a reading.
             if not commit or commit.get("oid") != node.get("headRefOid"):
                 stale_heads += 1
+                stale_numbers.append(str(node.get("number")))
                 continue
             if node.get("mergeable") == "UNKNOWN":
                 unknown += 1
@@ -635,12 +639,12 @@ def read_merges():
     if unknown:
         bits.append("%d with mergeability not yet computed left out" % unknown)
     if stale_heads:
-        bits.append("%d whose result is not on the current head left out" % stale_heads)
+        bits.append("%d stale head(s) set aside: %s" % (stale_heads, ", ".join(stale_numbers)))
     # Newest first: a head that just passed the window is the one a lane is waiting on.
     urls.sort(reverse=True)
     return [Reading("open", total, src, NOW, note),
             Reading("green_unmerged_2h", counted, src, NOW, "; ".join(bits),
-                    partial=bool(more or unknown or stale_heads))], [u for _, u in urls[:5]]
+                    partial=bool(more or unknown))], [u for _, u in urls[:5]]
 
 
 PASS_RE = re.compile(r"sentinel: pass (\d+) (\S+)->(\S+) on \S+: (.*)")
@@ -776,6 +780,10 @@ def rises(key, domain, reading):
     episode = episodes.get("overlord-" + key)
     if reading.value is None:
         # Unmeasured is not evidence either way: keep the last reading and any open rise.
+        if before is not None:
+            new_values[name] = before
+        return False, before or 0
+    if reading.partial:
         if before is not None:
             new_values[name] = before
         return False, before or 0
