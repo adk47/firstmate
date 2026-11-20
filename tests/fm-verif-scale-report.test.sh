@@ -2,8 +2,9 @@
 # tests/fm-verif-scale-report.test.sh - the verification scale report must
 # refuse rather than default. A source it could not read prints UNMEASURED with
 # the reason and the run exits nonzero; it never prints 0 for a source it did
-# not read, never counts a reminder or a status note as a proof ask, and never
-# counts a hold as a decision. The incident this pins: three wrong ask rates in
+# not read, never counts a reminder or a status note as a proof ask, never
+# counts a hold as a decision, and never takes a measured run's number from the
+# run's own record or from a rehearsal. The incident this pins: three wrong ask rates in
 # one night, each from counting every sent message, and a goal check that read
 # an unread source as 0.
 #
@@ -143,6 +144,28 @@ build_template() {  # <path>
   dec "$db" r9 approve shadow '-10 minutes'
 }
 
+# run_record <path> <provider> <ledger> <shards> <start modifier> <end modifier> [extra line...]
+# A measured run record whose window is placed relative to now.
+run_record() {
+  local path=$1 provider=$2 ledger=$3 shards=$4 stamps
+  stamps=$(sqlite3 :memory: "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '$5') || ' ' || strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '$6');")
+  shift 6
+  {
+    printf '# a measured run\n'
+    printf 'provider=%s\n' "$provider"
+    printf 'ledger=%s  \n' "$ledger"
+    printf 'shards=%s\n' "$shards"
+    printf 'started_at=%s\n' "${stamps% *}"
+    printf 'ended_at=%s\n' "${stamps#* }"
+    [ "$#" -eq 0 ] || printf '%s\n' "$@"
+  } > "$path"
+}
+
+# A real run over the 40 minutes that hold the template's four asks and four
+# decisions of the last hour.
+RUN_OK="$TMP_ROOT/run-ok.env"
+run_record "$RUN_OK" live production 3 '-45 minutes' '-5 minutes'
+
 # report <ledger> [VAR=value...]: runs the report against the shim with an
 # empty config directory. Sets OUT (stdout and stderr together) and RC.
 report() {
@@ -154,6 +177,7 @@ report() {
     FM_VERIF_SCALE_HOST=ledger.invalid \
     FM_VERIF_SCALE_LEDGER="$db" \
     FM_VERIF_SCALE_TRINO="$FAKE_TRINO" \
+    FM_VERIF_SCALE_RUN_RECORD="$RUN_OK" \
     "$@" "$REPORT" 2>&1)
   RC=$?
 }
@@ -197,6 +221,12 @@ test_every_number_is_read_and_carries_its_window_source_and_query() {
   assert_contains "$l" '= 5, 0.2 per hour on average on 4 distinct requests (approve=2 approve_partial=2 support=1;' "decisions in the last 24 hours"
   l=$(line 'EXCLUDED from the decision line, window last 60 min')
   assert_contains "$l" '= 10 rows (close=1 defer=1 hold=5 mode-judge=2 mode-shadow=1)' "holds, defers, closes, and other modes are named as excluded"
+
+  assert_contains "$(line 'decisions written, window last 60 min')" 'a request approved in core by another writer is not in it' "the decision line says it is the decide ledger only"
+
+  l=$(line 'sustained throughput in the recorded sharded run')
+  assert_contains "$l" '(40.0 min, 3 shards, recorded as provider=live ledger=production) = 4 proof asks sent + 4 decisions written = 8, 0.2 per minute on average (asks sent in 4 of' "the measured run is counted in the live ledger over its recorded window"
+  assert_contains "$l" "| source: run window from $RUN_OK, counts from verify_messages and decisions in ledger.invalid:$db | query: SELECT " "the measured run line names the record and the ledger it counted"
 
   l=$(line 'queue depth GROSS')
   assert_contains "$l" 'INCLUDING soft-deleted rows, as of 2026-11-20 10:00:00Z = 120 ' "gross queue depth says it includes soft-deleted rows"
@@ -392,23 +422,123 @@ test_the_config_file_supplies_the_host_and_the_environment_wins() {
     printf 'FM_VERIF_SCALE_JUMP=jump.invalid\n'
     printf 'FM_VERIF_SCALE_LEDGER=%s\n' "$db"
     printf 'FM_VERIF_SCALE_TRINO=%s\n' "$FAKE_TRINO"
+    printf 'FM_VERIF_SCALE_RUN_RECORD=%s\n' "$RUN_OK"
   } > "$cfg/verif-scale.env"
   : > "$TMP_ROOT/config.calls"
-  OUT=$(env -u FM_VERIF_SCALE_HOST -u FM_VERIF_SCALE_JUMP -u FM_VERIF_SCALE_LEDGER -u FM_VERIF_SCALE_TRINO \
+  OUT=$(env -u FM_VERIF_SCALE_HOST -u FM_VERIF_SCALE_JUMP -u FM_VERIF_SCALE_LEDGER -u FM_VERIF_SCALE_TRINO -u FM_VERIF_SCALE_RUN_RECORD \
     FM_CONFIG_OVERRIDE="$cfg" FM_VERIF_SCALE_SSH="$FAKE_SSH" FAKE_SSH_LOG="$TMP_ROOT/config.calls" "$REPORT" 2>&1)
   RC=$?
   expect_code 0 "$RC" "a host from the config file"
+  assert_contains "$OUT" "source: run window from $RUN_OK, " "the file's measured run record is the one read"
   assert_contains "$OUT" "source: verify_messages in from-file.invalid:$db" "the file's host and ledger are the ones read"
   assert_grep '-J jump.invalid from-file.invalid ' "$TMP_ROOT/config.calls" "the file's jump host is used"
   assert_grep '-o BatchMode=yes' "$TMP_ROOT/config.calls" "the read never waits on a password prompt"
 
-  OUT=$(env -u FM_VERIF_SCALE_JUMP -u FM_VERIF_SCALE_LEDGER -u FM_VERIF_SCALE_TRINO \
+  OUT=$(env -u FM_VERIF_SCALE_JUMP -u FM_VERIF_SCALE_LEDGER -u FM_VERIF_SCALE_TRINO -u FM_VERIF_SCALE_RUN_RECORD \
     FM_VERIF_SCALE_HOST=from-env.invalid \
     FM_CONFIG_OVERRIDE="$cfg" FM_VERIF_SCALE_SSH="$FAKE_SSH" "$REPORT" 2>&1)
   RC=$?
   expect_code 0 "$RC" "a host from the environment"
   assert_contains "$OUT" "source: verify_messages in from-env.invalid:$db" "a set environment variable wins over the file"
   pass "the config file supplies the host, the jump host, and the paths, and the environment wins over it"
+}
+
+RUN_WHAT_PREFIX='UNMEASURED: measured sharded run recorded in '
+
+# run_unmeasured <ledger> <record> <reason text> <label>: the run line is
+# UNMEASURED for that reason, the run exits nonzero, and every other source is
+# still read.
+run_unmeasured() {
+  report "$1" FM_VERIF_SCALE_RUN_RECORD="$2"
+  expect_code 1 "$RC" "$4"
+  assert_contains "$OUT" "$RUN_WHAT_PREFIX$2 - sustained throughput ($3" "$4: the measured run is UNMEASURED with the reason"
+  assert_no_number_for 'sustained throughput' "$4"
+  assert_not_contains "$OUT" 'per minute' "$4: no per-minute rate is printed"
+  assert_contains "$(line 'proof asks sent, window last 60 min')" '= 4 per hour' "$4: the message ledger is still read"
+  assert_contains "$OUT" 'INCOMPLETE: at least one source is UNMEASURED' "$4: the run says it is incomplete"
+}
+
+test_a_run_nobody_recorded_is_unmeasured() {
+  local db="$TMP_ROOT/norecord.sqlite3" rec="$TMP_ROOT/absent/measured-run.env" data="$TMP_ROOT/data-home"
+  populated_ledger "$db"
+  run_unmeasured "$db" "$rec" 'no measured run is recorded: ' "no record"
+
+  # A record that is a link is not read, wherever it points.
+  ln -s "$RUN_OK" "$TMP_ROOT/linked.env"
+  run_unmeasured "$db" "$TMP_ROOT/linked.env" 'no measured run is recorded: ' "a linked record"
+
+  # A relative record path is taken from the home, not from where the report ran.
+  report "$db" FM_HOME="$TMP_ROOT/some-home" FM_VERIF_SCALE_RUN_RECORD=runs/measured-run.env
+  expect_code 1 "$RC" "a relative record path"
+  assert_contains "$OUT" "$RUN_WHAT_PREFIX$TMP_ROOT/some-home/runs/measured-run.env - sustained throughput (no measured run is recorded: " "a relative record path is taken from the home"
+
+  # With nothing configured the record is looked for under the home's data.
+  mkdir -p "$data"
+  OUT=$(env -u FM_VERIF_SCALE_JUMP -u FM_VERIF_SCALE_RUN_RECORD \
+    FM_CONFIG_OVERRIDE="$TMP_ROOT/no-config" FM_DATA_OVERRIDE="$data" \
+    FM_VERIF_SCALE_SSH="$FAKE_SSH" FM_VERIF_SCALE_HOST=ledger.invalid \
+    FM_VERIF_SCALE_LEDGER="$db" FM_VERIF_SCALE_TRINO="$FAKE_TRINO" "$REPORT" 2>&1)
+  RC=$?
+  expect_code 1 "$RC" "no record under the home's data"
+  assert_contains "$OUT" "$RUN_WHAT_PREFIX$data/verif-1000-per-min-r1/measured-run.env - sustained throughput (no measured run is recorded: " "the default record path is under the home's data"
+  pass "with no measured run on record the capability line is UNMEASURED, never a number"
+}
+
+test_a_rehearsal_is_unmeasured() {
+  local db="$TMP_ROOT/rehearsal.sqlite3" rec="$TMP_ROOT/rehearsal.env"
+  populated_ledger "$db"
+  run_record "$rec" fake copy 8 '-45 minutes' '-5 minutes'
+  run_unmeasured "$db" "$rec" 'the only recorded run is a rehearsal (provider=fake, ledger=copy), and a rehearsal proves nothing about real data)' "a rehearsal"
+  run_record "$rec" fake production 8 '-45 minutes' '-5 minutes'
+  run_unmeasured "$db" "$rec" 'the only recorded run is a rehearsal (provider=fake, ledger=production)' "a fake provider on the real ledger"
+  run_record "$rec" live copy 8 '-45 minutes' '-5 minutes'
+  run_unmeasured "$db" "$rec" 'the only recorded run is a rehearsal (provider=live, ledger=copy)' "a live provider on a ledger copy"
+  pass "a rehearsal against a fake provider or a ledger copy is UNMEASURED, though the ledger holds activity in its window"
+}
+
+test_a_record_cannot_claim_what_the_ledger_does_not_hold() {
+  local db="$TMP_ROOT/claim.sqlite3" rec="$TMP_ROOT/claim.env" l
+  populated_ledger "$db"
+  # The record claims 16,500 sent at 1,375 a minute over an hour in which the
+  # ledger holds nothing.
+  run_record "$rec" live production 8 '-3 hours' '-2 hours' 'sent=16500' 'per_minute=1375' 'asks=16500'
+  report "$db" FM_VERIF_SCALE_RUN_RECORD="$rec"
+  expect_code 0 "$RC" "a record over an empty window"
+  l=$(line 'sustained throughput in the recorded sharded run')
+  assert_contains "$l" '(60.0 min, 8 shards, recorded as provider=live ledger=production) = 0 proof asks sent + 0 decisions written = 0, 0.0 per minute on average (asks sent in 0 of' "the number is what the ledger holds for the window"
+  assert_not_contains "$OUT" '16500' "a count in the record is never printed"
+  assert_not_contains "$OUT" '1375' "a rate in the record is never printed"
+
+  # Only named asks and written decisions count inside the window: the same
+  # 40 minutes hold 6 reminders and status notes, 3 other sends, and 10 rows
+  # that wrote no decision, and none of them is in the total.
+  report "$db"
+  l=$(line 'sustained throughput in the recorded sharded run')
+  assert_contains "$l" '= 4 proof asks sent + 4 decisions written = 8, ' "reminders, status notes, holds, and judge rows are not throughput"
+  pass "the measured run's number comes from the live ledger, never from the record"
+}
+
+test_an_incomplete_or_unrecognised_record_is_unmeasured() {
+  local db="$TMP_ROOT/badrecord.sqlite3" rec="$TMP_ROOT/badrecord.env"
+  populated_ledger "$db"
+  run_record "$rec" live production 3 '-45 minutes' '-5 minutes'
+  grep -v '^ended_at=' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
+  run_unmeasured "$db" "$rec" 'the record names no ended_at)' "a record with no end"
+  run_record "$rec" staging production 3 '-45 minutes' '-5 minutes'
+  run_unmeasured "$db" "$rec" "the record's provider is 'staging', which is neither live nor fake)" "an unknown provider"
+  run_record "$rec" live 'prod; DROP' 3 '-45 minutes' '-5 minutes'
+  run_unmeasured "$db" "$rec" "the record's ledger is 'prod??DROP', which is neither production nor copy)" "an unknown ledger"
+  run_record "$rec" live production 0 '-45 minutes' '-5 minutes'
+  run_unmeasured "$db" "$rec" "the record's shards is '0', which is not a whole number above 0)" "no shards"
+  run_record "$rec" live production 3 '-45 minutes' '-5 minutes' 'started_at=yesterday'
+  run_unmeasured "$db" "$rec" 'the record gives no started_at and ended_at in the shape YYYY-MM-DDTHH:MM:SSZ)' "a start in no known shape"
+  run_record "$rec" live production 3 '-45 minutes' '-5 minutes' 'ended_at=2026-13-45T99:99:99Z'
+  run_unmeasured "$db" "$rec" "the record's window, " "an end that is not a real time"
+  run_record "$rec" live production 3 '-5 minutes' '-45 minutes'
+  run_unmeasured "$db" "$rec" "the record's window, " "a window that ends before it starts"
+  run_record "$rec" live production 3 '-45 minutes' '+1 hour'
+  run_unmeasured "$db" "$rec" 'the recorded run ends at ' "a run that has not ended"
+  pass "a record that is incomplete, unrecognised, or not a past span of time is UNMEASURED"
 }
 
 test_help_and_usage_errors() {
@@ -435,4 +565,8 @@ test_a_timestamp_in_an_unknown_shape_is_unmeasured
 test_null_or_empty_values_land_on_a_named_line_never_nowhere
 test_no_host_is_unmeasured_never_a_built_in_guess
 test_the_config_file_supplies_the_host_and_the_environment_wins
+test_a_run_nobody_recorded_is_unmeasured
+test_a_rehearsal_is_unmeasured
+test_a_record_cannot_claim_what_the_ledger_does_not_hold
+test_an_incomplete_or_unrecognised_record_is_unmeasured
 test_help_and_usage_errors

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # fm-verif-scale-report.sh - the live read behind the verification-throughput
 # goal: how many proof asks went out, how many decisions were written, how often
-# an ask comes back with proof, and how deep the queue is.
+# an ask comes back with proof, how deep the queue is, and what the live ledger
+# holds for a recorded measured sharded run.
 #
 # Usage:
 #   fm-verif-scale-report.sh           read every source live and print the report
@@ -36,7 +37,7 @@
 #
 # No number here comes from a plan, a config value, or a target.
 #
-# THE READS. Three sources, each read in one call over ssh to the ledger host,
+# THE READS. Four sources, each read in one call over ssh to the ledger host,
 # so one unreadable source costs only its own lines.
 #
 #   verify_messages   the message ledger, a table of the review ledger
@@ -69,6 +70,9 @@
 #                     decision (decision-none). A request held on every pass
 #                     writes a hold row on every pass, so counting rows as
 #                     decisions overstates the rate by orders of magnitude.
+#                     This is the decide ledger only: a request approved in
+#                     core by another writer never appears here, so this line
+#                     is not the rate at which requests are approved.
 #   credit_requests   core's request table, read through the ledger host's
 #                     Trino wrapper. Open undecided is every request whose
 #                     status is neither approved nor rejected, including a
@@ -76,8 +80,32 @@
 #                     labelled: GROSS includes soft-deleted rows, NET leaves
 #                     them out. The ledger's own request_state table is not
 #                     read: it is not the count of record.
+#   measured run      the capability half of the goal, sustained throughput in
+#                     a measured sharded run. Ordinary traffic cannot show it,
+#                     so a run leaves a record and the report counts that
+#                     run's window in the live ledger: proof asks sent plus
+#                     decisions written, by the same two rules as above, with
+#                     the average per minute and the number of clock minutes
+#                     that saw any. See THE MEASURED RUN RECORD.
 #
 # Window bounds and read times come from the source's own clock, in UTC.
+#
+# THE MEASURED RUN RECORD. A plain file of KEY=value lines, parsed line by line
+# and never sourced, written by whoever ran the measured run:
+#
+#   provider=live|fake                what the run sent through
+#   ledger=production|copy            which ledger the run wrote to
+#   shards=<whole number above 0>     how many shards ran
+#   started_at=YYYY-MM-DDTHH:MM:SSZ   UTC
+#   ended_at=YYYY-MM-DDTHH:MM:SSZ     UTC
+#
+# The record supplies the window and the kind of run, and nothing else. No
+# count and no rate is ever taken from it: the number printed is what the live
+# ledger holds for that window, so a record cannot claim a rate the ledger does
+# not show. The line is UNMEASURED when there is no record, when the record is
+# incomplete or names a value this report does not recognise, when its window
+# has not ended, and when the only recorded run is a rehearsal (provider=fake
+# or ledger=copy), because a rehearsal proves nothing about real data.
 #
 # CONFIGURATION. config/verif-scale.env is optional, local, gitignored, parsed
 # line by line and never sourced; a value is the rest of its line, so a comment
@@ -91,6 +119,9 @@
 #                                (default /var/lib/hydra/credit-review/ledger.sqlite3)
 #   FM_VERIF_SCALE_TRINO         core query wrapper on that host; takes one SQL argument
 #                                (default /opt/hydra/scripts/trino-query.sh)
+#   FM_VERIF_SCALE_RUN_RECORD    the measured run record on this machine; a relative
+#                                path is taken from the home
+#                                (default data/verif-1000-per-min-r1/measured-run.env)
 #   FM_VERIF_SCALE_LEDGER_SECS   bound on one ledger read, seconds (default 60)
 #   FM_VERIF_SCALE_CORE_SECS     bound on the core read, seconds (default 180)
 #   FM_VERIF_SCALE_CONNECT_SECS  ssh connect timeout, seconds (default 10)
@@ -101,6 +132,7 @@ set -u
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 FM_HOME=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd -P)}
 CONFIG_DIR=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+DATA_DIR=${FM_DATA_OVERRIDE:-$FM_HOME/data}
 ENV_FILE="$CONFIG_DIR/verif-scale.env"
 
 # shellcheck source=bin/fm-timeout-lib.sh
@@ -120,29 +152,32 @@ case "${1:-}" in
   *) printf 'fm-verif-scale-report: unknown argument: %s (try --help)\n' "$1" >&2; exit 2 ;;
 esac
 
+# file_value <file> <KEY>: the value of the last KEY= line of a regular file,
+# with trailing whitespace dropped. Fails when the file has no such line.
+file_value() {
+  local file=$1 key=$2 value='' found=1 line
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*)
+        value=${line#*=}
+        value=${value%"${value##*[![:space:]]}"}
+        found=0
+        ;;
+    esac
+  done < "$file"
+  [ "$found" -eq 0 ] || return 1
+  printf '%s\n' "$value"
+}
+
 # conf <KEY> <default>: the environment, then the config file, then the default.
 conf() {
-  local key=$1 default=$2 value='' found=0 line
+  local key=$1 default=$2
   if [ -n "${!key+x}" ]; then
     printf '%s\n' "${!key}"
     return 0
   fi
-  if [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        "$key="*)
-          value=${line#*=}
-          value=${value%"${value##*[![:space:]]}"}
-          found=1
-          ;;
-      esac
-    done < "$ENV_FILE"
-  fi
-  if [ "$found" = 1 ]; then
-    printf '%s\n' "$value"
-  else
-    printf '%s\n' "$default"
-  fi
+  file_value "$ENV_FILE" "$key" || printf '%s\n' "$default"
 }
 
 conf_secs() {  # <KEY> <default>: a positive whole number of seconds, else the default
@@ -158,6 +193,8 @@ HOST=$(conf FM_VERIF_SCALE_HOST '')
 JUMP=$(conf FM_VERIF_SCALE_JUMP '')
 LEDGER=$(conf FM_VERIF_SCALE_LEDGER /var/lib/hydra/credit-review/ledger.sqlite3)
 TRINO=$(conf FM_VERIF_SCALE_TRINO /opt/hydra/scripts/trino-query.sh)
+RUN_RECORD=$(conf FM_VERIF_SCALE_RUN_RECORD "$DATA_DIR/verif-1000-per-min-r1/measured-run.env")
+case "$RUN_RECORD" in /*) ;; *) RUN_RECORD="$FM_HOME/$RUN_RECORD" ;; esac
 LEDGER_SECS=$(conf_secs FM_VERIF_SCALE_LEDGER_SECS 60)
 CORE_SECS=$(conf_secs FM_VERIF_SCALE_CORE_SECS 180)
 CONNECT_SECS=$(conf_secs FM_VERIF_SCALE_CONNECT_SECS 10)
@@ -374,7 +411,7 @@ EOF
   else
     rate="$total, $(per_hour "$total" "$hours") per hour on average"
   fi
-  emit window "decisions written, $label to ${now}Z = $rate on $requests distinct requests (approve=$a approve_partial=$b support=$c; holds, defers, closes, and judge or shadow rows are not decisions written and are not counted)" "$DEC_SOURCE" "$query"
+  emit window "decisions written, $label to ${now}Z = $rate on $requests distinct requests (approve=$a approve_partial=$b support=$c; holds, defers, closes, and judge or shadow rows are not decisions written and are not counted; this is the decide ledger only, so a request approved in core by another writer is not in it)" "$DEC_SOURCE" "$query"
 }
 
 not_decision_line() {  # <label> <now> <row> <query>
@@ -445,9 +482,111 @@ EOF
   emit total "queue depth NET, open undecided with soft-deleted rows left out, as of ${now}Z = $net ($((gross - net)) soft-deleted)" "$QUEUE_SOURCE" "$Q_QUEUE"
 }
 
+# --- the measured sharded run: what the live ledger holds for its window -----
+
+RUN_WHAT="measured sharded run recorded in $RUN_RECORD - sustained throughput"
+
+clip() {  # <text>: a record value made safe to print in a reason
+  printf '%s' "$1" | tr -c '[:alnum:]_.:-' '?' | cut -c1-40
+}
+
+report_capability() {
+  local key provider ledger shards started ended s_sp e_sp q_span q_dshape q_asks q_decs
+  local out rc now secs clock ended_ok mshape dshape asks ask_min decs dec_min total minutes rate
+  if [ -L "$RUN_RECORD" ] || [ ! -f "$RUN_RECORD" ] || [ ! -r "$RUN_RECORD" ]; then
+    unmeasured "$RUN_WHAT" 'no measured run is recorded: the record is not a readable file'
+    return 0
+  fi
+  for key in provider ledger shards started_at ended_at; do
+    if ! file_value "$RUN_RECORD" "$key" >/dev/null; then
+      unmeasured "$RUN_WHAT" "the record names no $key"
+      return 0
+    fi
+  done
+  provider=$(file_value "$RUN_RECORD" provider)
+  ledger=$(file_value "$RUN_RECORD" ledger)
+  shards=$(file_value "$RUN_RECORD" shards)
+  started=$(file_value "$RUN_RECORD" started_at)
+  ended=$(file_value "$RUN_RECORD" ended_at)
+  case "$provider" in
+    live|fake) ;;
+    *) unmeasured "$RUN_WHAT" "the record's provider is '$(clip "$provider")', which is neither live nor fake"; return 0 ;;
+  esac
+  case "$ledger" in
+    production|copy) ;;
+    *) unmeasured "$RUN_WHAT" "the record's ledger is '$(clip "$ledger")', which is neither production nor copy"; return 0 ;;
+  esac
+  if [ "$provider" != live ] || [ "$ledger" != production ]; then
+    unmeasured "$RUN_WHAT" "the only recorded run is a rehearsal (provider=$provider, ledger=$ledger), and a rehearsal proves nothing about real data"
+    return 0
+  fi
+  if ! is_int "$shards" || [ "$shards" -eq 0 ]; then
+    unmeasured "$RUN_WHAT" "the record's shards is '$(clip "$shards")', which is not a whole number above 0"
+    return 0
+  fi
+  # Both bounds are digits in one fixed shape before they reach a statement.
+  # shellcheck disable=SC2254 # DEC_GLOB is a pattern on purpose.
+  case "$started" in $DEC_GLOB) ;; *) started='' ;; esac
+  # shellcheck disable=SC2254 # DEC_GLOB is a pattern on purpose.
+  case "$ended" in $DEC_GLOB) ;; *) ended='' ;; esac
+  if [ -z "$started" ] || [ -z "$ended" ]; then
+    unmeasured "$RUN_WHAT" 'the record gives no started_at and ended_at in the shape YYYY-MM-DDTHH:MM:SSZ'
+    return 0
+  fi
+  s_sp="${started:0:10} ${started:11:8}"
+  e_sp="${ended:0:10} ${ended:11:8}"
+  q_span="SELECT strftime('%s', '$ended') - strftime('%s', '$started'), (CAST(strftime('%s', '$ended') AS INTEGER) - 1) / 60 - CAST(strftime('%s', '$started') AS INTEGER) / 60 + 1, '$ended' <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+  q_dshape="SELECT count(*) FROM decisions WHERE decided_at >= '${started:0:10}' AND decided_at <= '$ended' AND decided_at NOT GLOB '$DEC_GLOB'"
+  q_asks="SELECT count(*), count(DISTINCT substr($SENT_AT, 1, 16)) FROM verify_messages WHERE $IS_ASK AND $SENT_AT >= '$s_sp' AND $SENT_AT < '$e_sp'"
+  q_decs="SELECT count(*), count(DISTINCT substr(decided_at, 1, 16)) FROM decisions WHERE $IS_DECISION AND decided_at >= '$started' AND decided_at < '$ended'"
+  out=$(ledger_read "$Q_MSG_NOW; $q_span; $Q_MSG_SHAPE; $q_dshape; $q_asks; $q_decs")
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    unmeasured "$RUN_WHAT" "$(why "$rc" "$LEDGER_SECS")"
+    return 0
+  fi
+  now=$(row 1 "$out")
+  IFS='|' read -r secs clock ended_ok <<EOF
+$(row 2 "$out")
+EOF
+  mshape=$(row 3 "$out")
+  dshape=$(row 4 "$out")
+  IFS='|' read -r asks ask_min <<EOF
+$(row 5 "$out")
+EOF
+  IFS='|' read -r decs dec_min <<EOF
+$(row 6 "$out")
+EOF
+  if ! is_stamp "$now" || [ "$(printf '%s\n' "$out" | wc -l)" -ne 6 ]; then
+    unmeasured "$RUN_WHAT" "the read answered in a shape this report does not recognise: $(printf '%s' "$out" | head -n 2 | tr '\n' ' ' | cut -c1-120)"
+    return 0
+  fi
+  if ! is_int "$secs" || ! is_int "$clock" || [ "$secs" -eq 0 ]; then
+    unmeasured "$RUN_WHAT" "the record's window, $started to $ended, is not a span of time: it must name two real times, the second after the first"
+    return 0
+  fi
+  if [ "$ended_ok" != 1 ]; then
+    unmeasured "$RUN_WHAT" "the recorded run ends at $ended, after the read time ${now}Z, so it has not been measured yet"
+    return 0
+  fi
+  if ! is_int "$mshape" || ! is_int "$dshape" || [ "$mshape" -ne 0 ] || [ "$dshape" -ne 0 ]; then
+    unmeasured "$RUN_WHAT" 'the ledger holds rows whose time this report cannot place, so a count over the run window would be wrong'
+    return 0
+  fi
+  if ! is_int "$asks" || ! is_int "$ask_min" || ! is_int "$decs" || ! is_int "$dec_min" || [ "$ask_min" -gt "$clock" ] || [ "$dec_min" -gt "$clock" ]; then
+    unmeasured "$RUN_WHAT" 'a count came back that is not a whole number, or covers more minutes than the window holds'
+    return 0
+  fi
+  total=$((asks + decs))
+  minutes=$(awk -v s="$secs" 'BEGIN { printf "%.1f", s / 60 }')
+  rate=$(awk -v n="$total" -v s="$secs" 'BEGIN { printf "%.1f", 60 * n / s }')
+  emit window "sustained throughput in the recorded sharded run, window $started to $ended ($minutes min, $shards shards, recorded as provider=live ledger=production) = $asks proof asks sent + $decs decisions written = $total, $rate per minute on average (asks sent in $ask_min of the window's $clock clock minutes, decisions written in $dec_min; counted in the live ledger, never taken from the record)" "run window from $RUN_RECORD, counts from verify_messages and decisions in $HOST:$LEDGER" "$q_asks; $q_decs"
+}
+
 report_messages
 report_decisions
 report_queue
+report_capability
 
 if [ "$FAILED" -ne 0 ]; then
   printf 'INCOMPLETE: at least one source is UNMEASURED; no number is implied for it, and this run proves nothing about the goal.\n'

@@ -732,7 +732,7 @@ tests/fm-trace-context-spawn.test.sh 47355
 tests/fm-turnend-guard.test.sh 42565
 tests/fm-update.test.sh 5212
 tests/fm-vendor-auth-probe.test.sh 44042
-tests/fm-verif-scale-report.test.sh 6662
+tests/fm-verif-scale-report.test.sh 8460
 tests/fm-voice-relay.test.sh 28812
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 7381
 tests/fm-wake-drain-fleet-cost.test.sh 20000
