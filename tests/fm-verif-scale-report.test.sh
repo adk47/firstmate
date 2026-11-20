@@ -537,6 +537,19 @@ test_a_record_cannot_claim_what_the_ledger_does_not_hold() {
   pass "the measured run's number comes from the live ledger, never from the record"
 }
 
+test_a_run_window_refuses_a_decision_it_cannot_place() {
+  local db="$TMP_ROOT/run-null-dec.sqlite3"
+  populated_ledger "$db"
+  sqlite3 "$db" "INSERT INTO decisions (request_id, decision, mode, decided_at) VALUES ('r20', 'approve', 'apply', NULL);"
+  run_unmeasured "$db" "$RUN_OK" 'the ledger holds rows whose time this report cannot place, so a count over the run window would be wrong)' "a NULL decided_at in the run window"
+
+  db="$TMP_ROOT/run-empty-dec.sqlite3"
+  populated_ledger "$db"
+  sqlite3 "$db" "INSERT INTO decisions (request_id, decision, mode, decided_at) VALUES ('r21', 'approve', 'apply', '');"
+  run_unmeasured "$db" "$RUN_OK" 'the ledger holds rows whose time this report cannot place, so a count over the run window would be wrong)' "an empty decided_at in the run window"
+  pass "a decision with no placeable decided_at refuses the capability line rather than undercounting it"
+}
+
 test_an_incomplete_or_unrecognised_record_is_unmeasured() {
   local db="$TMP_ROOT/badrecord.sqlite3" rec="$TMP_ROOT/badrecord.env"
   populated_ledger "$db"
@@ -588,5 +601,6 @@ test_the_config_file_supplies_the_host_and_the_environment_wins
 test_a_run_nobody_recorded_is_unmeasured
 test_a_rehearsal_is_unmeasured
 test_a_record_cannot_claim_what_the_ledger_does_not_hold
+test_a_run_window_refuses_a_decision_it_cannot_place
 test_an_incomplete_or_unrecognised_record_is_unmeasured
 test_help_and_usage_errors

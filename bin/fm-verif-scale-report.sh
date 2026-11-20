@@ -536,7 +536,7 @@ report_capability() {
   s_sp="${started:0:10} ${started:11:8}"
   e_sp="${ended:0:10} ${ended:11:8}"
   q_span="SELECT strftime('%s', '$ended') - strftime('%s', '$started'), (CAST(strftime('%s', '$ended') AS INTEGER) - 1) / 60 - CAST(strftime('%s', '$started') AS INTEGER) / 60 + 1, '$ended' <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
-  q_dshape="SELECT count(*) FROM decisions WHERE decided_at >= '${started:0:10}' AND decided_at <= '$ended' AND decided_at NOT GLOB '$DEC_GLOB'"
+  q_dshape="SELECT count(*) FROM decisions WHERE decided_at IS NULL OR decided_at = '' OR (decided_at >= '${started:0:10}' AND decided_at <= '$ended' AND decided_at NOT GLOB '$DEC_GLOB')"
   q_asks="SELECT count(*), count(DISTINCT substr($SENT_AT, 1, 16)) FROM verify_messages WHERE $IS_ASK AND $SENT_AT >= '$s_sp' AND $SENT_AT < '$e_sp'"
   q_decs="SELECT count(*), count(DISTINCT substr(decided_at, 1, 16)) FROM decisions WHERE $IS_DECISION AND decided_at >= '$started' AND decided_at < '$ended'"
   out=$(ledger_read "$Q_MSG_NOW; $q_span; $Q_MSG_SHAPE; $q_dshape; $q_asks; $q_decs")
