@@ -1,0 +1,16 @@
+=== 1. Classifier: a run whose conclusion is null has not answered yet ===
+status=in_progress  conclusion=null     -> pending
+status=queued       conclusion=null     -> pending
+status=completed    conclusion=null     -> pending
+status=completed    conclusion=failure  -> red
+status=completed    conclusion=success  -> green
+
+=== 2. Poll while the newest runs are in progress, last answers green ===
+stdout: <empty: no red reported>
+at=100000
+verdict=quiet
+
+=== 3. Next poll: verify-devops-agent-tests actually concluded failure ===
+stdout: ci-health: acme/widgets main red: verify-devops-agent-tests run 44632777885 conclusion=failure status=completed head a1ba56fdf created 2026-11-19T22:53:30Z (gh run view 44632777885 --repo acme/widgets) - route each red to the repo lane that owns it; fix-forward, never hand-apply
+at=100900
+verdict=ci-health: acme/widgets main red: verify-devops-agent-tests run 44632777885 conclusion=failure status=completed head a1ba56fdf created 2026-11-19T22:53:30Z (gh run view 44632777885 --repo acme/widgets) - route each red to the repo lane that owns it; fix-forward, never hand-apply
