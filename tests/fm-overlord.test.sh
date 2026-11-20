@@ -253,6 +253,19 @@ test_an_unconfigured_home_is_not_reported_as_inside_thresholds() {
   pass "an unconfigured home is not reported as inside thresholds"
 }
 
+test_an_empty_environment_value_overrides_the_config_file() {
+  local home out
+  home=$(make_home emptyenv)
+  configure "$home"
+  healthy "$home" "$T0"
+  out=$(run "$home" "$T0" digest FM_OVERLORD_PR_SCOPE=)
+  assert_contains "$out" "merges | open,green_unmerged_2h=unmeasured (not configured)" \
+    "an empty environment value did not override the configured PR scope"
+  assert_contains "$out" "| unmeasured (not configured): open, green_unmerged_2h" \
+    "the empty override was reported as a healthy merges reading"
+  pass "an explicitly empty environment value wins over the config file"
+}
+
 test_a_malformed_pr_scope_reads_unmeasured_instead_of_crashing() {
   local home out
   home=$(make_home scope)
@@ -614,6 +627,7 @@ test_a_deferred_rise_is_still_seen_on_the_next_check
 test_a_cut_short_remote_read_is_unmeasured_not_a_false_tick
 test_a_hanging_remote_read_is_bounded_and_reads_unmeasured
 test_an_unconfigured_home_is_not_reported_as_inside_thresholds
+test_an_empty_environment_value_overrides_the_config_file
 test_a_malformed_pr_scope_reads_unmeasured_instead_of_crashing
 test_users_told_flat_for_four_hours_is_wrong_but_a_shorter_flat_is_not
 test_green_unmerged_rises_goes_to_fable_and_an_unchanged_count_is_silent

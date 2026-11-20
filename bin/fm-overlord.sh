@@ -192,9 +192,10 @@ now_epoch() {
 # conf <KEY> <default>: the environment wins, then the last KEY= line of
 # config/overlord.env (parsed, never sourced), then the default.
 conf() {
-  local key=$1 default=$2 line value='' found=0
-  eval "value=\${$key:-}"
-  if [ -n "$value" ]; then
+  local key=$1 default=$2 line value='' found=0 set=''
+  eval "set=\${$key+x}"
+  if [ -n "$set" ]; then
+    eval "value=\${$key}"
     printf '%s\n' "$value"
     return 0
   fi
