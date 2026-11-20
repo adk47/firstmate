@@ -28,6 +28,14 @@
 # is bounded. The beta map is also exercised as a tab-separated line, as two
 # keys resolving to one target, and as two keys resolving to two targets.
 #
+# The gate passes only on rows it read: a state root that does not exist, one
+# that holds no watch and no record of the task, and an FM_STATE_OVERRIDE naming
+# no directory all fail with the resolved path named. rescore re-derives a stuck
+# verdict from a reading taken now: 0 against a baseline of 0 is unchanged and
+# never a regression, a baseline never read is unmeasured and never 0, the
+# deciding reading is stored beside the row, and a metric that cannot be re-read
+# is refused with the row untouched.
+#
 # Every cluster and forge read is stubbed through the script's own seams
 # (FM_CW_FORGE_DIR, FM_CW_CLUSTER_DIR, FM_CW_ARM_CMD, FM_CW_SEND_CMD) or a
 # kubectl/ssh PATH shim, so no case reaches a cluster, the network, or the wiki.
@@ -3377,3 +3385,155 @@ grep -q 'whether the .* run carries aaaa1111 could not be read' \
   "$HOME_TB/state/change-watch/tb1-1990/read-failures" \
   || fail "a truncated carrier read was not stated as unreadable: $(cat "$HOME_TB/state/change-watch/tb1-1990/read-failures" 2>/dev/null)"
 pass "a truncated carrier read cannot decide a deploy failure"
+
+# --- the gate reads rows or fails, and rescore re-derives a stuck verdict -----
+
+# A lane worktree carries no state/: git never tracks it, so a gate run there
+# resolved a root that does not exist and passed on nothing it had read.
+LANE="$TMP_ROOT/lane-worktree"
+mkdir -p "$LANE"
+out=$(env -u FM_STATE_OVERRIDE FM_HOME="$LANE" FM_CW_NO_WIKI=1 "$CW" gate lane1 --terminal-gap 2>&1) \
+  && fail "the gate passed from a home with no state root: $out"
+case "$out" in
+  *"state root could not be found at $LANE/state"*) ;;
+  *) fail "the gate did not name the missing state root it resolved: $out" ;;
+esac
+case "$out" in *"gate ok"*) fail "the gate said ok without reading a row: $out" ;; esac
+pass "the gate fails, naming the path, when the state root it resolved does not exist"
+
+# A state/ that exists but holds no watch and no record of the task is not the
+# home that owns the task either, so no watch there is not a finding.
+mkdir -p "$LANE/state"
+out=$(env -u FM_STATE_OVERRIDE FM_HOME="$LANE" FM_CW_NO_WIKI=1 "$CW" gate lane1 2>&1) \
+  && fail "the gate passed from a state root that holds nothing: $out"
+case "$out" in
+  *"$LANE/state holds no change watch and no record of this task"*) ;;
+  *) fail "the gate did not say the state root it read holds nothing: $out" ;;
+esac
+pass "the gate fails when the state root it resolved holds no watch and no record of the task"
+
+# FM_STATE_OVERRIDE is honoured only when it names an existing directory.
+out=$(env FM_HOME="$LANE" FM_STATE_OVERRIDE="$TMP_ROOT/no-such-state" FM_CW_NO_WIKI=1 "$CW" gate lane1 2>&1) \
+  && fail "the gate passed with FM_STATE_OVERRIDE naming a missing directory: $out"
+case "$out" in
+  *"FM_STATE_OVERRIDE names $TMP_ROOT/no-such-state, which is not an existing directory"*) ;;
+  *) fail "a missing FM_STATE_OVERRIDE was not refused with its own message: $out" ;;
+esac
+out=$(env FM_HOME="$LANE" FM_STATE_OVERRIDE="$TMP_ROOT/no-such-state" FM_CW_NO_WIKI=1 "$CW" status 2>&1) \
+  && fail "status ran against a missing FM_STATE_OVERRIDE: $out"
+[ ! -e "$TMP_ROOT/no-such-state" ] || fail "a refused FM_STATE_OVERRIDE was created"
+pass "FM_STATE_OVERRIDE naming a directory that does not exist is refused"
+
+# The real home keeps its behaviour: a task the home records but never watched
+# passes, and a home that holds watches passes a task it holds none for.
+HOME_RH=$(new_world rh)
+printf 'kind=ship\n' > "$HOME_RH/state/rh1.meta"
+out=$(run_cw "$HOME_RH" 1790000000 gate rh1 --terminal-gap 2>&1) \
+  || fail "the gate refused a task its own home records with no watch: $out"
+pass "a task its own home records with no watch still passes the gate"
+
+# rescore_world <name> <pr> <baseline-value> seeds a hydra watch whose verdict an
+# older scorer stuck at regressed on a deploy_run reading of 0.
+DEPLOY_KEY='deploy_run@run/Muso-AI/hydra#.github/workflows/deploy.yml'
+rescore_world() {  # <name> <task> <pr> <baseline-value>
+  local home dir
+  home=$(hydra_world "$1" "$MERGED")
+  run_hydra_cw "$home" 1790000000 register "$2" "https://github.com/Muso-AI/hydra/pull/$3" >/dev/null \
+    || fail "hydra register failed"
+  dir="$home/state/change-watch/$2-$3"
+  printf '%s\t%s\n' "$DEPLOY_KEY" "$4" > "$dir/baseline"
+  printf '1790000300\t300\t%s\t0\t%s\t1\t1\t0\n' "$DEPLOY_KEY" "$4" >> "$dir/samples.log"
+  printf 'metric=deploy_run\ntarget=run/Muso-AI/hydra#.github/workflows/deploy.yml\nvalue=0\nbaseline=%s\noffset=300\ntick=5\n' \
+    "$4" > "$dir/regression"
+  printf 'regressed at +5m on deploy_run (0 vs baseline %s)\n' "${4:-unmeasured}" > "$dir/verdict"
+  # The open row register wrote goes, so rederive rebuilds the row the way the
+  # older scorer left it: from the verdict and the flagged sample alone.
+  rm -f "$home/state/change-watch/rows/$2-$3.json"
+  run_hydra_cw "$home" 1790050000 rederive --apply >/dev/null || fail "rederive failed"
+  grep -q '"terminal_state": "regressed"' "$home/state/change-watch/rows/$2-$3.json" \
+    || fail "the stuck regressed row was not seeded: $(cat "$home/state/change-watch/rows/$2-$3.json" 2>/dev/null)"
+  printf '%s\n' "$home"
+}
+
+# A reading equal to its baseline did not move, so 0 against a baseline of 0 is
+# unchanged and never a regression; the failed run it reads is the change not
+# being in production, which is absent, not regressed.
+HOME_RZ=$(rescore_world rz rz1 2025 0)
+ROW_RZ="$HOME_RZ/state/change-watch/rows/rz1-2025.json"
+hydra_runs "$HOME_RZ" "[$(hydra_run 2026-09-21T15:30:00Z completed failure "$MERGED")]"
+before=$(cksum < "$ROW_RZ")
+out=$(run_hydra_cw "$HOME_RZ" 1790050000 rescore rz1-2025 2>&1) || fail "a dry-run rescore failed: $out"
+[ "$(cksum < "$ROW_RZ")" = "$before" ] || fail "a dry-run rescore rewrote the row"
+case "$out" in
+  *"re-read 0 vs baseline 0 (unchanged)"*) ;;
+  *) fail "0 against a baseline of 0 was not reported unchanged: $out" ;;
+esac
+case "$out" in *"-> regressed"*) fail "0 against a baseline of 0 was rescored a regression: $out" ;; esac
+out=$(run_hydra_cw "$HOME_RZ" 1790050000 rescore --apply rz1-2025 2>&1) || fail "rescore --apply failed: $out"
+grep -q '"terminal_state": "absent"' "$ROW_RZ" || fail "0 vs 0 on a failed deploy did not rescore absent: $(cat "$ROW_RZ")"
+grep -q '"rescore": {"epoch": 1790050000, "key": "deploy_run@run/Muso-AI/hydra#.github/workflows/deploy.yml", "value": "0", "baseline": "0", "comparison": "unchanged", "prior_state": "regressed"' "$ROW_RZ" \
+  || fail "the deciding reading was not stored beside the row: $(cat "$ROW_RZ")"
+pass "0 against a baseline of 0 rescores unchanged, never a regression, and stores the deciding reading"
+
+# A baseline that was never read is not 0: the comparison is unmeasured, and a
+# deploy run carrying the merge that succeeded proves the deploy-only watch.
+HOME_RU=$(rescore_world ru ru1 1939 '')
+ROW_RU="$HOME_RU/state/change-watch/rows/ru1-1939.json"
+hydra_runs "$HOME_RU" "[$(hydra_run 2026-09-21T15:00:00Z completed failure "$MERGED"),$(hydra_run 2026-09-21T15:30:00Z completed success "$MERGED")]"
+out=$(run_hydra_cw "$HOME_RU" 1790050000 rescore --apply ru1-1939 2>&1) || fail "rescore --apply failed: $out"
+case "$out" in
+  *"re-read 1 vs baseline unmeasured (unmeasured)"*) ;;
+  *) fail "an unmeasured baseline was not reported unmeasured: $out" ;;
+esac
+case "$out" in *"vs baseline 0"*|*"-> regressed"*) fail "an unmeasured baseline was read as 0 or scored a regression: $out" ;; esac
+grep -q '"terminal_state": "proven"' "$ROW_RU" || fail "a succeeded deploy carrying the merge did not prove the row: $(cat "$ROW_RU")"
+grep -q '"baseline": null, "comparison": "unmeasured"' "$ROW_RU" \
+  || fail "the unmeasured baseline was not stored as null beside the row: $(cat "$ROW_RU")"
+out=$(run_hydra_cw "$HOME_RU" 1790050000 gate ru1) || fail "the gate refused a rescored proven row: $out"
+out=$(run_hydra_cw "$HOME_RU" 1790060000 rederive --apply 2>&1) || fail "rederive failed: $out"
+grep -q '"terminal_state": "proven"' "$ROW_RU" || fail "rederive restored the verdict rescore replaced: $(cat "$ROW_RU")"
+pass "an unmeasured baseline rescores unmeasured, never 0 or regressed, and the rescored row stands"
+
+# No reading is no verdict: a metric that cannot be re-read now is refused and
+# the row is left exactly as it was.
+HOME_RN=$(rescore_world rn rn1 2026 0)
+ROW_RN="$HOME_RN/state/change-watch/rows/rn1-2026.json"
+before=$(cksum < "$ROW_RN")
+out=$(run_hydra_cw "$HOME_RN" 1790050000 rescore --apply rn1-2026 2>&1) \
+  && fail "rescore gave a verdict with no reading: $out"
+case "$out" in
+  *"refused rn1-2026: $DEPLOY_KEY cannot be re-read now"*) ;;
+  *) fail "rescore did not refuse naming the metric it could not re-read: $out" ;;
+esac
+[ "$(cksum < "$ROW_RN")" = "$before" ] || fail "a refused rescore rewrote the row"
+out=$(run_hydra_cw "$HOME_RN" 1790050000 rescore no-such-watch 2>&1) && fail "rescore of an unknown watch passed: $out"
+pass "a metric that cannot be re-read now is refused and leaves the row untouched"
+
+# The latest carrier decides without a containment read on every older run.
+HOME_NF=$(hydra_world nf "$MERGED")
+mkdir -p "$HOME_NF/bin"
+cat > "$HOME_NF/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+if [ "$1" = run ] && [ "$2" = list ]; then
+  printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-21T15:00:00Z","databaseId":1,"headSha":"oldcarrier","url":"https://example.invalid/1"},{"conclusion":"success","status":"completed","createdAt":"2026-09-21T15:30:00Z","databaseId":2,"headSha":"newcarrier","url":"https://example.invalid/2"}]'
+  exit 0
+fi
+if [ "$1" = api ]; then
+  printf '%s\n' "$2" >> "${0%/*}/api.log"
+  case "$2" in
+    *newcarrier*) printf 'ahead\n'; exit 0 ;;
+  esac
+fi
+exit 1
+STUB
+chmod +x "$HOME_NF/bin/gh"
+out=$(CW_CLUSTER_DIR='' FM_CW_GH="$HOME_NF/bin/gh" run_cw "$HOME_NF" 1790000000 register nf1 \
+  'https://github.com/Muso-AI/hydra/pull/1991') || fail "hydra register failed: $out"
+: > "$HOME_NF/bin/api.log"
+CW_CLUSTER_DIR='' FM_CW_GH="$HOME_NF/bin/gh" run_cw "$HOME_NF" 1790000900 sample nf1-1991 900 >/dev/null \
+  || fail "sample failed"
+[ "$(deploy_run_value "$HOME_NF" nf1-1991 900)" = 1 ] \
+  || fail "the latest carrier did not decide when an older run's containment could not be read: $(cat "$HOME_NF/state/change-watch/nf1-1991/samples.log" "$HOME_NF/state/change-watch/nf1-1991/read-failures" 2>/dev/null)"
+! grep -q oldcarrier "$HOME_NF/bin/api.log" \
+  || fail "the latest carrier was found only after a containment read of every older run: $(cat "$HOME_NF/bin/api.log")"
+pass "the latest carrier decides without a containment read of every older run"

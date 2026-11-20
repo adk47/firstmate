@@ -18,6 +18,7 @@
 #   fm-change-watch.sh audit [<days>]
 #   fm-change-watch.sh status [<watch-id>]
 #   fm-change-watch.sh rederive [--apply] [<watch-id>...]
+#   fm-change-watch.sh rescore [--apply] <watch-id>
 #   fm-change-watch.sh doctor [<watch-id>]
 #   fm-change-watch.sh claim <task-id> <probe-path> [<pr-url>]
 #   fm-change-watch.sh acceptance <watch-id> <offset-seconds>
@@ -167,6 +168,10 @@
 #           regression fails the done-claim gate, and --terminal-gap passes it
 #           only after the follow-up work item is recorded with
 #           followup <watch-id> <work-item>.
+#           A pass requires having read the home's watches: a state root that
+#           does not exist, or one that holds no watch at all and no record of
+#           the task (a lane worktree's own state/, which git never carries),
+#           fails with the resolved path named instead of passing on nothing.
 # followup  Record the follow-up work item a regressed watch's regression was
 #           handed to. Writes work_item, recorded_epoch and the reason to
 #           <watch dir>/followup; refuses a watch with no recorded regression
@@ -194,7 +199,27 @@
 #           the sweep ran wins, and a directory whose drive has not finished is
 #           left alone. Dry run unless --apply: it prints the rule, a census of
 #           the no-row watches, how many rows would change, and the first ten of
-#           them, and rewrites nothing.
+#           them, and rewrites nothing. A row rescore rewrote is left alone,
+#           because its verdict rests on a reading newer than the samples.
+# rescore   Re-derive one regressed or absent row's terminal verdict from the
+#           readings it recorded plus the deciding metric read again now with
+#           the current reader, and store that deciding reading in the row's
+#           "rescore" field. It is the repair for a verdict an earlier scoring
+#           rule reached from one reading. The comparison against the recorded
+#           baseline is: an unmeasured baseline is "unmeasured" (never 0 and
+#           never a regression) for every metric whose bar is relative to it or
+#           is deploy_run; a reading equal to its baseline is "unchanged", so 0
+#           against 0 is never a regression; otherwise the metric's own bar
+#           decides "regressed" or "within-bar". A deploy_run re-read below 1 is
+#           absent; a watch whose only metric is the deciding one is proven by a
+#           re-read taken after +6h, which for deploy_run is the run carrying
+#           the merge succeeding (its bar never reads the baseline) and for any
+#           other metric must not be unmeasured; anything else falls back to the
+#           readings-only rule rederive applies, ignoring the stale regression
+#           flags. It refuses (exit 1, row untouched) an open row, a row whose
+#           state rests on no single reading, a row with no watch directory,
+#           and a metric the current reader cannot read now: no reading is no
+#           verdict. Dry run unless --apply.
 # doctor    Live self-test of the read path. It prints the kubeconfig in use,
 #           proves the cluster answers, and with a watch id reads every target
 #           live: a Deployment target must return its pods and its pod images, a
@@ -431,6 +456,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+# An override that names no directory is a caller pointing at a home that does
+# not exist. Reading there finds no watch, and "no watch" must never be how a
+# missing home reports itself, so every subcommand refuses it up front.
+if [ -n "${FM_STATE_OVERRIDE:-}" ] && [ ! -d "$FM_STATE_OVERRIDE" ]; then
+  case "${1:-}" in
+    ''|-h|--help|help) ;;
+    *)
+      printf 'error: FM_STATE_OVERRIDE names %s, which is not an existing directory, so no change watch can be read or written there\n' \
+        "$FM_STATE_OVERRIDE" >&2
+      exit 1
+      ;;
+  esac
+fi
+# Whether the state root existed before anything ran: sourcing fm-wake-lib.sh
+# creates it, so a later -d test cannot tell a real home from a lane worktree
+# whose state/ was just made empty.
+CW_STATE_FOUND=0
+[ ! -d "$STATE" ] || CW_STATE_FOUND=1
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -719,6 +763,33 @@ cw_watch_exists() {
   local dir
   dir=$(cw_watch_dir "$1")
   [ -d "$dir" ] && [ ! -L "$dir" ] && [ -f "$dir/watch.meta" ]
+}
+
+# Whether the resolved state root is a home that could own <task>: it holds the
+# task's own record, or at least one change watch, row, or claim. A lane
+# worktree's state/ holds neither, so finding no watch there is not a finding.
+cw_state_root_known() {  # <task-id>
+  local entry
+  [ -f "$STATE/$1.meta" ] && return 0
+  [ -d "$WATCH_ROOT" ] || return 1
+  for entry in "$WATCH_ROOT"/*/watch.meta "$WATCH_ROOT"/rows/*.json "$WATCH_ROOT"/claims/*; do
+    [ -e "$entry" ] && return 0
+  done
+  return 1
+}
+
+# A named watch that is not there, stated with the root it was looked for in so
+# a missing home is never mistaken for a missing watch.
+cw_die_unknown_watch() {  # <watch-id>
+  if [ "$CW_STATE_FOUND" -eq 0 ]; then
+    die "unknown watch: $1 (the state root could not be found at $STATE)"
+  fi
+  die "unknown watch: $1 (no watch directory under $WATCH_ROOT)"
+}
+
+# Whether a durable row carries a rescore's deciding reading.
+cw_row_rescored() {  # <watch-id>
+  grep -q '"rescore": {' "$(cw_row_path "$1")" 2>/dev/null
 }
 
 # atomic private write from stdin
@@ -2323,7 +2394,9 @@ for run in runs:
         continue
     if int(t.replace(tzinfo=datetime.timezone.utc).timestamp()) >= since:
         candidates.append(run)
-candidates.sort(key=lambda r: r.get("createdAt") or "")
+# Newest first: the latest carrier decides, so the walk stops at the first
+# carrier it meets instead of spending a containment read on every older run.
+candidates.sort(key=lambda r: r.get("createdAt") or "", reverse=True)
 for run in candidates:
     print("\t".join([
         run.get("createdAt") or "-",
@@ -2353,17 +2426,19 @@ for run in candidates:
       case "$crc" in
         0) ;;
         1) continue ;;
+        # A newer run whose containment could not be read may be the latest
+        # carrier, so no older carrier can be the one that decides.
         *) unreadable=1
-           continue ;;
+           break ;;
       esac
     fi
-    # Cands are sorted oldest first, so the last carrier seen is the latest one and
-    # it is the one that decides; an earlier failure stays visible in the history
-    # without becoming the verdict.
+    # Cands are sorted newest first, so the first carrier seen is the latest one
+    # and it is the one that decides; an older failure stays visible in the
+    # history without becoming the verdict.
     carried=1
     carried_status=$status
     carried_conclusion=$conclusion
-    unreadable=''
+    break
   done <<CANDIDATES
 $cands
 CANDIDATES
@@ -3275,6 +3350,10 @@ cw_progress_label() {  # <watch-id>
 #   completed_epoch    when the terminal state was first written, or null while
 #                      open; preserved when rederive rewrites the row
 #   derived_epoch      when rederive reconstructed the row, absent for a live row
+#   rescore            present only on a row rescore rewrote: {"epoch", "key",
+#                      "value", "baseline" (null when unmeasured),
+#                      "comparison", "prior_state", "prior_reason"}, the
+#                      deciding reading and the verdict it replaced
 #   readings           one key per scheduled offset (SCHEDULE_OFFSETS for a
 #                      merge, CLAIM_OFFSETS for a claim): <reading>|null
 #   acceptance         null for a merge row; for a claim row {"probe_path",
@@ -3418,8 +3497,8 @@ cw_real_user_check() {  # <watch-id> -> "<state>\t<reason>"
 # which is the not-applicable case: a merge that touched no deployable surface
 # still gets its row, because "every merge writes one durable row" is the
 # contract and a row saying why nothing was measurable is the honest record.
-cw_row_write() {  # <watch-id> <terminal-state> <reason> [<task>] [<url>] [<merge-epoch>] [<registered-epoch>] [<completed-epoch>] [<derived-epoch>] [<deploy-expected>]
-  local id=$1 state=$2 reason=$3 task=${4:-} url=${5:-} t0=${6:-} created=${7:-} completed_at=${8:-} derived=${9:-} deploy=${10:-}
+cw_row_write() {  # <watch-id> <terminal-state> <reason> [<task>] [<url>] [<merge-epoch>] [<registered-epoch>] [<completed-epoch>] [<derived-epoch>] [<deploy-expected>] [<rescore-json>]
+  local id=$1 state=$2 reason=$3 task=${4:-} url=${5:-} t0=${6:-} created=${7:-} completed_at=${8:-} derived=${9:-} deploy=${10:-} rescore=${11:-}
   local completed readings offset ru ru_reason gaps unproven beta carried
   if cw_watch_exists "$id"; then
     task=$(cw_meta_get "$id" task || true)
@@ -3494,6 +3573,8 @@ cw_row_write() {  # <watch-id> <terminal-state> <reason> [<task>] [<url>] [<merg
     # held says so, with the epoch it was reconstructed at, so a later reader can
     # tell a live row from a derived one without consulting anything else.
     [ -n "$derived" ] && printf ', "derived_epoch": %s' "$derived"
+    # The reading a rescore decided from travels with the verdict it produced.
+    [ -n "$rescore" ] && printf ', "rescore": %s' "$rescore"
     printf ', "reason": %s}\n' "$(cw_json_string "$reason")"
   } | cw_write "$(cw_row_path "$id")" \
     || notice "change-watch: could not write the durable row for $id"
@@ -3542,8 +3623,8 @@ cw_unread_deployments() {  # <watch-id>
 #
 # <note> explains a schedule that was cut short (an interrupted drive). It is
 # carried into the reason so a proof taken by a stopped drive says so.
-cw_terminal_state() {  # <watch-id> [<note>]
-  local id=$1 note=${2:-} r json final='' empty='' prior_empty='' empties=0 missing=''
+cw_terminal_state() {  # <watch-id> [<note>] [<ignore-regression-flags>]
+  local id=$1 note=${2:-} ignore_flags=${3:-} r json final='' empty='' prior_empty='' empties=0 missing=''
   local unread gaps why='' superseded='' plural='s' recorded=0 seen=''
   local all_awaiting=''
   # A regression a reading actually recorded is proof of a bad change, and it
@@ -3551,8 +3632,9 @@ cw_terminal_state() {  # <watch-id> [<note>]
   # reporting it as a measurement gap would state the opposite of what the
   # readings found. The flag is the samples' regressed column, so a directory
   # whose drive detected a regression but wrote no row still carries the verdict
-  # it earned instead of losing it to the row it never got.
-  seen=$(awk -F'\t' '
+  # it earned instead of losing it to the row it never got. A rescore, which has
+  # already re-scored those flags under the current rule, asks for them ignored.
+  [ -n "$ignore_flags" ] || seen=$(awk -F'\t' '
     $6 == 1 {
       printf "regressed at +%dm on %s", $2 / 60, $3
       if ($4 != "") printf " (%s", $4
@@ -4228,7 +4310,7 @@ cmd_due() {
 
 cmd_sample() {
   local id=$1 offset=${2:-} now t0 first metric target value baseline
-  cw_watch_exists "$id" || die "unknown watch: $id"
+  cw_watch_exists "$id" || cw_die_unknown_watch "$id"
   now=$(cw_now)
   t0=$(cw_meta_get "$id" t0 || true)
   [ -n "$t0" ] || die "watch $id has no rollout epoch"
@@ -4272,7 +4354,7 @@ cw_drive_interrupted() {
 
 cmd_drive() {
   local id=$1 sleep_cmd offset epoch now remaining identity
-  cw_watch_exists "$id" || die "unknown watch: $id"
+  cw_watch_exists "$id" || cw_die_unknown_watch "$id"
   sleep_cmd=${FM_CW_SLEEP_CMD:-sleep}
   cw_meta_get "$id" t0 >/dev/null || die "watch $id has no rollout epoch"
   identity=$(fm_pid_identity "$$") || die "cannot read the drive's own process identity"
@@ -4317,7 +4399,7 @@ cmd_drive() {
 cmd_verdict() {
   local id=$1 line state derived dstate dreason
   if ! cw_watch_exists "$id"; then
-    cw_claim_exists "$id" || die "unknown watch: $id"
+    cw_claim_exists "$id" || cw_die_unknown_watch "$id"
     state=$(cw_claim_state "$id")
     printf 'change-watch %s\n' "${state#*$'\t'}"
     case "${state%%$'\t'*}" in
@@ -4472,7 +4554,14 @@ cw_gate_row() {  # <watch-id> <mode>
 
 cmd_gate() {  # <task-id> [--terminal-gap]
   local task=$1 mode=${2:-} meta id rc=0 found=0 rows row
-  [ -d "$WATCH_ROOT" ] || return 0
+  # A pass is a statement about rows this run read. A state root that is not
+  # there has no rows to read, and a lane worktree's state/ is exactly that:
+  # git never carries it, so the gate run there found nothing and said ok.
+  if [ "$CW_STATE_FOUND" -eq 0 ]; then
+    printf 'change-watch: gate FAIL for %s: the state root could not be found at %s, so no watch row was read; run the gate with FM_HOME set to the home that owns the task\n' \
+      "$task" "$STATE"
+    return 1
+  fi
   for meta in "$WATCH_ROOT"/*/watch.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$(dirname "$meta")")
@@ -4494,7 +4583,15 @@ cmd_gate() {  # <task-id> [--terminal-gap]
       cw_gate_row "$id" "$mode" || rc=1
     done
   fi
-  [ "$found" -eq 1 ] || return 0
+  if [ "$found" -eq 0 ]; then
+    # No watch for this task is a pass only where it is a finding: the root
+    # holds this home's watches and none is the task's, or it holds the task's
+    # own record. A root with neither is not the home that owns the task.
+    cw_state_root_known "$task" && return 0
+    printf 'change-watch: gate FAIL for %s: the state root at %s holds no change watch and no record of this task, so it could not be the home that owns it and no watch row was read; run the gate with FM_HOME set to the home that owns the task\n' \
+      "$task" "$STATE"
+    return 1
+  fi
   [ "$rc" -ne 0 ] || printf 'change-watch: gate ok for %s\n' "$task"
   return "$rc"
 }
@@ -4505,7 +4602,7 @@ cmd_followup() {  # <watch-id> <work-item>
   case "$item" in
     ''|-*|*[!A-Za-z0-9._#/:@+~?=\&%-]*) die "invalid work item: $item" ;;
   esac
-  cw_watch_exists "$id" || die "unknown watch: $id"
+  cw_watch_exists "$id" || cw_die_unknown_watch "$id"
   cw_reconcile_drive "$id"
   state=$(cw_row_state "$id")
   if [ -n "$state" ]; then
@@ -4537,6 +4634,11 @@ cmd_audit() {  # [<days>]
   now=$(cw_now)
   since=$(( now - days * 86400 ))
   printf 'change-watch audit: window %s day(s) from %s\n' "$days" "$since"
+  # An audit of a root that is not there read nothing, which is not a pass.
+  if [ "$CW_STATE_FOUND" -eq 0 ]; then
+    printf 'change-watch audit: FAIL the state root could not be found at %s, so nothing was read\n' "$STATE"
+    return 1
+  fi
   if [ -d "$STATE" ]; then
     hits=$(grep -hc 'change-watch completed unmeasured' "$STATE"/*.status 2>/dev/null \
       | awk '{ n += $1 } END { print n + 0 }')
@@ -4584,9 +4686,11 @@ cw_status_line() {  # <watch-id>
 
 cmd_status() {
   local id=${1:-} meta count=0
+  [ "$CW_STATE_FOUND" -eq 1 ] || die "the state root could not be found at $STATE, so no watch was read"
+  [ -z "$id" ] || cw_watch_exists "$id" || cw_die_unknown_watch "$id"
   [ -d "$WATCH_ROOT" ] || { printf 'change-watch: no watches registered\n'; return 0; }
   if [ -n "$id" ]; then
-    cw_watch_exists "$id" || die "unknown watch: $id"
+    cw_watch_exists "$id" || cw_die_unknown_watch "$id"
     cw_reconcile_drive "$id"
     cw_status_line "$id"
     return 0
@@ -4659,6 +4763,9 @@ cmd_rederive() {
   for id in ${ids[@]+"${ids[@]}"}; do
     if [ -f "$(cw_row_path "$id")" ]; then
       total=$((total + 1))
+      # A rescored row decided from a reading newer than these samples, whose
+      # stale regression flags would only restore the verdict it replaced.
+      cw_row_rescored "$id" && continue
       state=$(cw_row_state "$id")
       # A row the old rule called unmeasurable is re-derived, and so is a proven
       # one: the old rule accepted an all-awaiting +6h reading, so a false clean
@@ -4742,6 +4849,191 @@ cmd_rederive() {
   fi
 }
 
+# One reading against its recorded baseline, under the rule rescore applies:
+# "unmeasured" when the baseline was never read and the bar is relative to it
+# (or is deploy_run), "unchanged" when the reading equals the baseline, and
+# otherwise the metric's own bar decides "regressed" or "within-bar". A
+# baseline that was never read is not 0, and a reading that did not move did not
+# regress, so neither can ever be scored as a regression here.
+cw_rescore_compare() {  # <metric> <value> <baseline> <previous>
+  local metric=$1 value=$2 baseline=$3 previous=$4
+  if [ -z "$baseline" ]; then
+    case "$metric" in
+      # Absolute bars never read the baseline, so its absence decides nothing.
+      oomkilled|rss_ratio|pgbouncer_cl_waiting) ;;
+      *) printf 'unmeasured\n'; return 0 ;;
+    esac
+  elif awk -v v="$value" -v b="$baseline" 'BEGIN { exit !((v + 0) == (b + 0)) }'; then
+    printf 'unchanged\n'
+    return 0
+  fi
+  if cw_metric_regressed "$metric" "$value" "$baseline" "$previous"; then
+    printf 'regressed\n'
+  else
+    printf 'within-bar\n'
+  fi
+}
+
+# The metric key a regressed or absent row's verdict rests on: the one a prior
+# rescore recorded, else the regression record's, else the failed deploy run an
+# absent row was decided by. Prints nothing when the row names none.
+cw_rescore_key() {  # <watch-id>
+  local id=$1 key metric target
+  key=$(sed -n 's/.*"rescore": {"epoch": [0-9]*, "key": "\([^"]*\)".*/\1/p' "$(cw_row_path "$id")" 2>/dev/null | tail -1)
+  if [ -z "$key" ]; then
+    metric=$(cw_regression_field "$id" metric)
+    target=$(cw_regression_field "$id" target)
+    [ -z "$metric" ] || [ -z "$target" ] || key="$metric@$target"
+  fi
+  if [ -z "$key" ]; then
+    key=$(awk -F'\t' '$3 ~ /^deploy_run@/ && $7 == 1 && $4 != "" && ($4 + 0) < 1 { k = $3 } END { if (k != "") print k }' \
+      "$(cw_samples_path "$id")" 2>/dev/null)
+  fi
+  [ -z "$key" ] || printf '%s\n' "$key"
+}
+
+cw_rescore_refuse() {  # <watch-id> <reason>
+  printf 'change-watch rescore: refused %s: %s\n' "$1" "$2" >&2
+  exit 1
+}
+
+# The deciding metric read again now, with the reader a live sample uses.
+# Prints the numeric value, or fails with the reason it could not be read.
+cw_rescore_read() {  # <watch-id> <metric> <target> <t0>
+  local id=$1 metric=$2 target=$3 t0=$4 cluster='' value='' reason='' err rc=0
+  cw_budget_start
+  case "$metric" in
+    sentry_new_issues|deploy_run) ;;
+    *) cluster=$(cw_cluster_probe || true) ;;
+  esac
+  cw_prime_merge_sha "$id"
+  CW_SAMPLE_BLOCKER_REASON=''
+  cw_sample_blocker "$id" "$metric" "$target" "$cluster" || true
+  reason=$CW_SAMPLE_BLOCKER_REASON
+  if [ -z "$reason" ]; then
+    err=$(mktemp "${TMPDIR:-/tmp}/fm-cw-rescore.XXXXXX" 2>/dev/null) || err=/dev/null
+    value=$(cw_metric_read "$id" "$metric" "$target" sample "$t0" 2>"$err") || rc=$?
+    if [ "$rc" -ne 0 ] || ! printf '%s' "$value" | grep -qE '^-?[0-9]+([.][0-9]+)?$'; then
+      if [ -n "$value" ] && ! printf '%s' "$value" | grep -qE '^-?[0-9]+([.][0-9]+)?$'; then
+        reason=$value
+      else
+        reason=$(tail -1 "$err" 2>/dev/null | cut -c1-200)
+        [ -n "$reason" ] || reason="read exited $rc with no value"
+      fi
+      value=''
+    fi
+    [ "$err" = /dev/null ] || rm -f -- "$err" 2>/dev/null || true
+  fi
+  cw_pool_memo_clear
+  if [ -z "$value" ]; then
+    printf '%s\n' "$reason"
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
+cmd_rescore() {  # [--apply] <watch-id>
+  local apply=0 id='' arg state prior key metric target baseline previous value
+  local t0 now cmp desc other='' new derived reason completed rj keys
+  local s_offset s_key s_value s_baseline s_scored s_prev prevs=''
+  for arg in "$@"; do
+    case "$arg" in
+      --apply) apply=1 ;;
+      -h|--help) usage ;;
+      -*) die "unknown option: $arg" ;;
+      *) [ -z "$id" ] || usage; id=$arg ;;
+    esac
+  done
+  [ -n "$id" ] || usage
+  case "$id" in *[!A-Za-z0-9._-]*) die "invalid watch id: $id" ;; esac
+  [ "$CW_STATE_FOUND" -eq 1 ] || cw_rescore_refuse "$id" "the state root could not be found at $STATE"
+  [ -f "$(cw_row_path "$id")" ] \
+    || cw_rescore_refuse "$id" "no durable row at $(cw_row_path "$id")"
+  state=$(cw_row_state "$id")
+  case "$state" in
+    regressed|absent) ;;
+    open) cw_rescore_refuse "$id" "the row is still open: its drive has not finished" ;;
+    *) cw_rescore_refuse "$id" "the row records ${state:-no terminal state}, which rests on no single reading (rederive owns a readings-only repair)" ;;
+  esac
+  cw_watch_exists "$id" \
+    || cw_rescore_refuse "$id" "no watch directory under $WATCH_ROOT, so the metric cannot be re-read"
+  key=$(cw_rescore_key "$id")
+  [ -n "$key" ] || cw_rescore_refuse "$id" "the row names no deciding metric"
+  metric=$(cw_key_metric "$key")
+  target=$(cw_key_target "$key")
+  t0=$(cw_meta_get "$id" t0 || true)
+  [ -n "$t0" ] || cw_rescore_refuse "$id" "the watch has no rollout epoch"
+  prior=$(cw_row_reason "$id" | sed 's/\\"/"/g; s/\\\\/\\/g')
+  baseline=$(cw_baseline_value "$id" "$key" 2>/dev/null || true)
+  # The same carried-baseline rule a live sample applies (cw_take_sample).
+  case "$metric" in
+    restarts|http_5xx_per_min)
+      if awk -F'\t' -v t="$target" '$1 == t { found = 1 } END { exit(found ? 0 : 1) }' \
+        "$(cw_carried_path "$id")" 2>/dev/null; then
+        baseline=0
+      fi
+      ;;
+  esac
+  previous=$(awk -F'\t' -v k="$key" '$3 == k && $4 != "" { v = $4 } END { print v }' \
+    "$(cw_samples_path "$id")" 2>/dev/null)
+  if ! value=$(cw_rescore_read "$id" "$metric" "$target" "$t0"); then
+    cw_rescore_refuse "$id" "$key cannot be re-read now: ${value:-no reason given}; no reading is no verdict"
+  fi
+  now=$(cw_now)
+  cmp=$(cw_rescore_compare "$metric" "$value" "$baseline" "$previous")
+  desc="$key re-read $value vs baseline ${baseline:-unmeasured} ($cmp) at $now"
+  # Every other recorded reading is re-scored under the same comparison, so a
+  # real regression elsewhere in the watch is never lost with the stale one.
+  while IFS=$'\t' read -r _ s_offset s_key s_value s_baseline _ s_scored _; do
+    [ -n "${s_key:-}" ] && [ "$s_key" != "$key" ] || continue
+    s_prev=$(printf '%s' "$prevs" | awk -F'\t' -v k="$s_key" '$1 == k { v = $2 } END { print v }')
+    if [ "${s_scored:-0}" = 1 ] && [ -n "$s_value" ] \
+      && [ "$(cw_rescore_compare "$(cw_key_metric "$s_key")" "$s_value" "$s_baseline" "$s_prev")" = regressed ]; then
+      other="regressed at +$((s_offset / 60))m on $s_key ($s_value vs baseline ${s_baseline:-unmeasured})"
+      break
+    fi
+    [ -z "$s_value" ] || prevs="$prevs$s_key"$'\t'"$s_value"$'\n'
+  done < <(cat "$(cw_samples_path "$id")" 2>/dev/null)
+  keys=$(cw_metric_keys "$id" | sort -u)
+  if [ "$cmp" = regressed ]; then
+    new=regressed
+    reason="regressed on rescore: $desc"
+  elif [ -n "$other" ]; then
+    new=regressed
+    reason="$other; rescored: $desc"
+  elif cw_metric_absent "$metric" "$value"; then
+    new=absent
+    reason="absent on rescore: the deploy run carrying the merge failed on $target ($desc), so the change is not in production"
+  elif [ "$metric" = deploy_run ] && [ "$keys" = "$key" ] && [ "$now" -ge $((t0 + 21600)) ]; then
+    # deploy_run's bar is the run's own conclusion and never reads the
+    # baseline, so an unmeasured baseline decides nothing here.
+    new=proven
+    reason="rescored: $desc, the watch's only metric, read after +6h: the deploy run carrying the merge succeeded"
+  elif [ "$cmp" != unmeasured ] && [ "$keys" = "$key" ] && [ "$now" -ge $((t0 + 21600)) ]; then
+    new=proven
+    reason="rescored: $desc, the watch's only metric, read after +6h"
+  else
+    derived=$(cw_terminal_state "$id" "$(cw_row_interruption "$id")" 1)
+    new=$(printf '%s' "$derived" | cut -f1)
+    reason="rescored: $desc; $(printf '%s' "$derived" | cut -f2-)"
+  fi
+  printf 'change-watch rescore: %s\n' \
+    "$( [ "$apply" -eq 1 ] && printf 'applying' || printf 'dry run, nothing is rewritten (pass --apply to rewrite the row)' )"
+  printf 'rescore: %s: %s -> %s (%s)\n' "$id" "$state" "$new" "$reason"
+  [ "$apply" -eq 1 ] || return 0
+  rj=$(printf '{"epoch": %s, "key": %s, "value": %s, "baseline": %s, "comparison": %s, "prior_state": %s, "prior_reason": %s}' \
+    "$now" "$(cw_json_string "$key")" "$(cw_json_string "$value")" "$(cw_json_or_null "$baseline")" \
+    "$(cw_json_string "$cmp")" "$(cw_json_string "$state")" "$(cw_json_string "$prior")")
+  completed=$(sed -n 's/.*"completed_epoch": \([0-9]*\).*/\1/p' "$(cw_row_path "$id")" | tail -1)
+  cw_row_write "$id" "$new" "$reason" "$(cw_row_task "$id")" "$(cw_row_url "$id")" "" "" "$completed" "" "" "$rj"
+  case "$new" in
+    proven) printf 'clean\n' | cw_write "$(cw_verdict_path "$id")" ;;
+    regressed|absent) printf '%s\n' "$reason" | cw_write "$(cw_verdict_path "$id")" ;;
+    *) printf '%s: %s\n' "$new" "$reason" | cw_write "$(cw_verdict_path "$id")" ;;
+  esac
+  printf 'change-watch rescore: %s rewritten %s -> %s\n' "$id" "$state" "$new"
+}
+
 # One pool console read for the doctor: a stated ok or FAIL line, never silence.
 cw_doctor_pool() {  # <label> <host> <port> <database>
   local label=$1 host=$2 port=$3 db=$4 where err out rc reason rows
@@ -4814,7 +5106,7 @@ cmd_doctor() {
     cw_doctor_pool '' "$POOLER_DEFAULT_HOST" "$POOLER_DEFAULT_PORT" '' || failed=1
     return "$failed"
   fi
-  cw_watch_exists "$id" || die "unknown watch: $id"
+  cw_watch_exists "$id" || cw_die_unknown_watch "$id"
   cw_budget_start
   if [ -f "$(cw_targets_path "$id")" ]; then
     while IFS=$'\t' read -r ns deploy; do
@@ -5096,6 +5388,7 @@ case "${1:-}" in
   audit) [ "$#" -le 2 ] || usage; shift; cmd_audit "$@" ;;
   status) [ "$#" -le 2 ] || usage; shift; cmd_status "$@" ;;
   rederive) shift; cmd_rederive "$@" ;;
+  rescore) [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; shift; cmd_rescore "$@" ;;
   doctor) [ "$#" -le 2 ] || usage; shift; cmd_doctor "$@" ;;
   claim) [ "$#" -eq 3 ] || [ "$#" -eq 4 ] || usage; shift; cmd_claim "$@" ;;
   acceptance) [ "$#" -eq 3 ] || usage; shift; cmd_acceptance "$@" ;;
