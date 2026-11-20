@@ -659,6 +659,7 @@ tests/fm-no-mistakes-required.test.sh 370
 tests/fm-on.test.sh 17663
 tests/fm-opencode-primary-live-e2e.test.sh 21
 tests/fm-operational-input.test.sh 283
+tests/fm-pause-predicate.test.sh 2000
 tests/fm-peek-remote.test.sh 1054
 tests/fm-pending-reply.test.sh 34953
 tests/fm-pi-branch-extension.test.sh 64255
