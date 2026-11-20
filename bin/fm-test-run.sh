@@ -730,7 +730,7 @@ tests/fm-tool-update-check.test.sh 24858
 tests/fm-trace-context-lib.test.sh 289
 tests/fm-trace-context-spawn.test.sh 47355
 tests/fm-turnend-guard.test.sh 42565
-tests/fm-unowned.test.sh 354
+tests/fm-unowned.test.sh 2200
 tests/fm-update.test.sh 5212
 tests/fm-vendor-auth-probe.test.sh 44042
 tests/fm-voice-relay.test.sh 28812

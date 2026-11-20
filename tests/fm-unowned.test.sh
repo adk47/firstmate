@@ -42,6 +42,7 @@ done
 [ -f "$FM_FAKE_HOME/refuse" ] && { echo 'error: "--state must be one of queued, in_flight, done, held"'; echo 'code: VALIDATION_ERROR'; exit 1; }
 f="$FM_FAKE_HOME/backlog.$state"
 n=0; [ -f "$f" ] && n=$(grep -c . "$f")
+[ -f "$FM_FAKE_HOME/lie-count" ] && n=$((n + 1))
 printf 'count: %s\n' "$n"
 printf 'tasks[%s]{id,state,kind,repo,title}:\n' "$n"
 [ -f "$f" ] && while IFS= read -r id; do
@@ -102,13 +103,28 @@ test_owned_fleet_is_silent() {
 test_in_flight_without_record_is_unowned() {
   local home out
   home=$(make_home unowned)
-  printf 'ghost\nalpha\n' > "$home/backlog.in_flight"
+  printf 'ghost\nghost_item.v2\nUPPER.Case_1\nalpha\n' > "$home/backlog.in_flight"
   add_task "$home" alpha "working: on it" "alpha run-step=working alive"
   run_unowned "$home"; out=$OUT
   [ "$RC" = 1 ] || fail "an unowned item exits 1, got $RC"
   printf '%s\n' "$out" | grep -q '^UNOWNED ghost ' || fail "ghost must be UNOWNED, got: $out"
+  printf '%s\n' "$out" | grep -q '^UNOWNED ghost_item\.v2 ' \
+    || fail "an id with _ and . is still read and UNOWNED, got: $out"
+  printf '%s\n' "$out" | grep -q '^UNOWNED UPPER\.Case_1 ' \
+    || fail "an id with uppercase is still read and UNOWNED, got: $out"
   ! printf '%s\n' "$out" | grep -q 'alpha' || fail "alpha has a record and must not be reported: $out"
-  pass "an in-flight backlog item with no task record is UNOWNED"
+  pass "an in-flight backlog item with no task record is UNOWNED, whatever legal id charset it uses"
+}
+
+test_held_in_flight_item_is_not_unowned() {
+  local home out
+  home=$(make_home heldinflight)
+  printf 'held-inflight\n' > "$home/backlog.in_flight"
+  printf 'held-inflight\n' > "$home/backlog.held"
+  run_unowned "$home"; out=$OUT
+  [ -z "$out" ] || fail "a held item has no missing lane, got: $out"
+  [ "$RC" = 0 ] || fail "exit 0 expected, got $RC"
+  pass "a held in-flight item with no task record is the captain's, not UNOWNED"
 }
 
 test_queued_and_held_are_not_alarms() {
@@ -126,16 +142,16 @@ test_dead_endpoint_under_working_claim_is_no_lane() {
   local home out
   home=$(make_home nolane)
   add_task "$home" dead-one "working: half way" "dead-one dead"
-  add_task "$home" dead-two "spawned: brief delivered" "dead-two no window"
+  add_task "$home" dead-two "working: still going" "dead-two dead no agent process in worktree"
   add_task "$home" alive "working: fine" "alive run-step=working"
   add_task "$home" finished "done: shipped" "finished dead"
   run_unowned "$home"; out=$OUT
   [ "$RC" = 1 ] || fail "a dead lane exits 1, got $RC"
   printf '%s\n' "$out" | grep -q "^NO-LANE dead-one its status says 'working'" || fail "dead-one must be NO-LANE: $out"
-  printf '%s\n' "$out" | grep -q "^NO-LANE dead-two its status says 'spawned'" || fail "dead-two must be NO-LANE: $out"
+  printf '%s\n' "$out" | grep -q "^NO-LANE dead-two its status says 'working'" || fail "dead-two must be NO-LANE: $out"
   ! printf '%s\n' "$out" | grep -q 'alive' || fail "a live endpoint is not reported: $out"
   ! printf '%s\n' "$out" | grep -q 'finished' || fail "a finished task with no working claim is not a missing lane: $out"
-  pass "a dead endpoint under a working or spawned claim is NO-LANE"
+  pass "a dead endpoint under a working claim is NO-LANE"
 }
 
 test_stopped_task_and_unreadable_state_are_skipped() {
@@ -160,6 +176,9 @@ test_done_claim_with_open_pr_is_stale_done() {
   add_task "$home" closed-task "done: PR https://github.com/acme/widget/pull/43"
   printf 'CLOSED\n' > "$home/pr.43"
   add_task "$home" no-url "done: report at data/no-url/report.md"
+  add_task "$home" meta-url "done: report at data/meta-url/report.md"
+  printf 'window=firstmate:fm-meta-url\npr=https://github.com/acme/widget/pull/47\n' > "$home/state/meta-url.meta"
+  printf 'OPEN\n' > "$home/pr.47"
   add_task "$home" forge-down "done: PR https://github.com/acme/widget/pull/44"
   add_task "$home" latest-url "done: PR https://github.com/acme/widget/pull/45 superseded"
   printf 'done: PR https://github.com/acme/widget/pull/46 checks green\n' >> "$home/state/latest-url.status"
@@ -169,7 +188,10 @@ test_done_claim_with_open_pr_is_stale_done() {
   [ "$RC" = 1 ] || fail "a stale done exits 1, got $RC"
   printf '%s\n' "$out" | grep -q '^STALE-DONE claimed claims done but https://github.com/acme/widget/pull/41 is still OPEN$' \
     || fail "claimed must be STALE-DONE: $out"
-  [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] || fail "only the open PR is reported, got: $out"
+  printf '%s\n' "$out" | grep -q '^STALE-DONE meta-url claims done but https://github.com/acme/widget/pull/47 is still OPEN$' \
+    || fail "a PR recorded only in the meta pr= field must still be STALE-DONE: $out"
+  [ "$(printf '%s\n' "$out" | grep -c .)" = 2 ] || fail "only the open PRs are reported, got: $out"
+  grep -q '^pr view 47 --repo acme/widget ' "$home/gh.log" || fail "the meta-recorded PR is asked about: $(cat "$home/gh.log")"
   grep -q '^pr view 41 --repo acme/widget ' "$home/gh.log" || fail "the forge is asked about the recorded repo and number: $(cat "$home/gh.log")"
   ! grep -q 'pr view 45 ' "$home/gh.log" || fail "the last recorded URL wins, the earlier one is not asked"
   pass "a done or landed claim whose PR is still OPEN is STALE-DONE; merged, closed, no-URL, and unanswerable forges are not"
@@ -188,6 +210,34 @@ test_refused_backlog_listing_is_exit_2_not_silence() {
   pass "a backlog listing the tool refuses is reported as exit 2, never swallowed as an empty state"
 }
 
+test_hung_forge_is_skipped() {
+  local home out
+  home=$(make_home hung)
+  cat > "$home/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+printf 'OPEN\n'
+SH
+  chmod 700 "$home/fakebin/gh"
+  add_task "$home" hung-pr "done: PR https://github.com/acme/widget/pull/51"
+  FM_UNOWNED_TIMEOUT=1 run_unowned "$home"; out=$OUT
+  [ -z "$out" ] || fail "a forge that does not answer in time is skipped, got: $out"
+  [ "$RC" = 0 ] || fail "exit 0 expected when the forge cannot answer, got $RC"
+  pass "a hung forge is bounded and skipped rather than hanging every remaining task"
+}
+
+test_listing_count_mismatch_is_exit_2() {
+  local home out
+  home=$(make_home liedcount)
+  printf 'ghost\n' > "$home/backlog.in_flight"
+  : > "$home/lie-count"
+  run_unowned "$home"; out=$OUT
+  [ "$RC" = 2 ] || fail "a listing whose rows disagree with its count exits 2, got $RC"
+  [ -z "$out" ] || fail "a count mismatch prints no alarms, got: $out"
+  grep -q 'disagree with count' "$home/err" || fail "the count mismatch is named on stderr: $(cat "$home/err")"
+  pass "a listing whose rows disagree with its own count is a read failure, never silence"
+}
+
 test_missing_backlog_is_exit_2() {
   local home out
   home=$(make_home nobacklog)
@@ -200,10 +250,13 @@ test_missing_backlog_is_exit_2() {
 
 test_owned_fleet_is_silent
 test_in_flight_without_record_is_unowned
+test_held_in_flight_item_is_not_unowned
 test_queued_and_held_are_not_alarms
 test_dead_endpoint_under_working_claim_is_no_lane
 test_stopped_task_and_unreadable_state_are_skipped
 test_done_claim_with_open_pr_is_stale_done
 test_refused_backlog_listing_is_exit_2_not_silence
+test_hung_forge_is_skipped
+test_listing_count_mismatch_is_exit_2
 test_missing_backlog_is_exit_2
 printf 'ok - all fm-unowned tests passed\n'
