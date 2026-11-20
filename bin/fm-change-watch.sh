@@ -168,10 +168,12 @@
 #           regression fails the done-claim gate, and --terminal-gap passes it
 #           only after the follow-up work item is recorded with
 #           followup <watch-id> <work-item>.
-#           A pass requires having read the home's watches: a state root that
-#           does not exist, or one that holds no watch at all and no record of
-#           the task (a lane worktree's own state/, which git never carries),
-#           fails with the resolved path named instead of passing on nothing.
+#           A pass requires having read the named task's OWN evidence: a state
+#           root that does not exist fails, naming the resolved path, and so
+#           does a root that holds no watch row and no <task>.meta record of
+#           the task - even one that holds other watches, which are not this
+#           task's evidence (a lane worktree's own state/, which git never
+#           carries). Only that record makes a watch-less task a pass.
 # followup  Record the follow-up work item a regressed watch's regression was
 #           handed to. Writes work_item, recorded_epoch and the reason to
 #           <watch dir>/followup; refuses a watch with no recorded regression
@@ -423,6 +425,14 @@
 #                          images comma- or space-separated
 #   FM_CW_SENTRY_VAULT     Sentry credential file (default ~/.config/muso/sentry-vault.json)
 #   FM_CW_SENTRY_DIR       directory of stubbed Sentry responses: issues-<project>.json
+#   FM_STATE_OVERRIDE      state root to read and write (default $FM_HOME/state).
+#                          It is used only when it names an existing directory,
+#                          and every subcommand that reads a watch, row, or claim
+#                          refuses a state root that is not there instead of
+#                          reporting nothing, naming the path: a state root that
+#                          does not exist is a wrong home, not a home with no
+#                          watches, and a lane worktree's own state/ is exactly
+#                          that case, since git never carries it.
 #   FM_CW_GH               gh command used for the deploy-run target (default gh)
 #   FM_CW_GH_DIR           directory of stubbed gh responses:
 #                          runs-<owner>-<repo>-<workflow-path with / and space as _>.json,
@@ -4845,10 +4855,12 @@ cmd_rederive() {
 
 # One reading against its recorded baseline, under the rule rescore applies:
 # "unmeasured" when the baseline was never read and the bar is relative to it
-# (or is deploy_run), "unchanged" when the reading equals the baseline, and
-# otherwise the metric's own bar decides "regressed" or "within-bar". A
-# baseline that was never read is not 0, and a reading that did not move did not
-# regress, so neither can ever be scored as a regression here.
+# (or is deploy_run), "unchanged" when the reading equals a baseline whose bar
+# reads it (or is deploy_run), and otherwise the metric's own bar decides
+# "regressed" or "within-bar" - so an absolute metric re-read equal to its
+# baseline is still judged by its bar. A baseline that was never read is not 0,
+# and a reading that did not move did not regress, so neither can ever be scored
+# as a regression here.
 cw_rescore_compare() {  # <metric> <value> <baseline> <previous>
   local metric=$1 value=$2 baseline=$3 previous=$4
   if [ -z "$baseline" ]; then
