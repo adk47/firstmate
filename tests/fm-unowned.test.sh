@@ -166,6 +166,11 @@ test_grades_off_the_latest_status_line() {
   add_task "$home" resumed-dead "done: PR https://github.com/acme/widget/pull/62" "resumed-dead dead"
   printf 'OPEN\n' > "$home/pr.62"
   printf 'working: resumed and then the pane died\n' >> "$home/state/resumed-dead.status"
+  add_task "$home" swept-dead "working: implementing" "swept-dead dead"
+  printf 'resolved [key=k]: auto-closed by sweep (no-process-48h)\n' >> "$home/state/swept-dead.status"
+  add_task "$home" swept-done "done: PR https://github.com/acme/widget/pull/63" "swept-done dead"
+  printf 'OPEN\n' > "$home/pr.63"
+  printf 'resolved [key=k]: auto-closed by sweep (no-process-48h)\n' >> "$home/state/swept-done.status"
   run_unowned "$home"; out=$OUT
   [ "$RC" = 1 ] || fail "the still-working dead lane exits 1, got $RC"
   ! printf '%s\n' "$out" | grep -q 'worked-then-done' \
@@ -176,8 +181,30 @@ test_grades_off_the_latest_status_line() {
     || fail "a resumed task's old PR is not reported, its live claim is: $out"
   printf '%s\n' "$out" | grep -q "^NO-LANE resumed-dead its latest status says 'working'" \
     || fail "a resumed task whose endpoint then died is NO-LANE: $out"
-  [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] || fail "only the still-working dead lane is reported, got: $out"
-  pass "every task is graded off its latest status line, never a historical verb"
+  printf '%s\n' "$out" | grep -q "^NO-LANE swept-dead its latest status says 'working'" \
+    || fail "a working claim closed by the decisions sweep is still NO-LANE when the endpoint is dead: $out"
+  ! printf '%s\n' "$out" | grep -q 'NO-LANE swept-done' \
+    || fail "a done line behind the sweep close is not NO-LANE: $out"
+  printf '%s\n' "$out" | grep -q '^STALE-DONE swept-done claims done but https://github.com/acme/widget/pull/63 is still OPEN$' \
+    || fail "a done claim behind the sweep close still grades done: $out"
+  [ "$(printf '%s\n' "$out" | grep -c .)" = 3 ] || fail "only the live claims are reported, got: $out"
+  pass "every task is graded off its latest claim line, never a historical verb or a sweep close"
+}
+
+test_bounded_reads_do_not_need_a_timeout_binary() {
+  local home out
+  home=$(make_home notimeout)
+  add_task "$home" dead-one "working: half way" "dead-one dead"
+  add_task "$home" claimed "done: PR https://github.com/acme/widget/pull/71"
+  printf 'OPEN\n' > "$home/pr.71"
+  RC=0
+  FM_HOME="$home" FM_FAKE_HOME="$home" FM_TIMEOUT_MECHANISM_OVERRIDE=bash PATH="$home/fakebin:$PATH" \
+    "$UNOWNED" > "$home/out" 2> "$home/err" || RC=$?
+  out=$(cat "$home/out")
+  [ "$RC" = 1 ] || fail "the alarms still fire without a timeout binary, got $RC: $(cat "$home/err")"
+  printf '%s\n' "$out" | grep -q "^NO-LANE dead-one " || fail "a dead working lane is still NO-LANE: $out"
+  printf '%s\n' "$out" | grep -q '^STALE-DONE claimed ' || fail "an open PR is still STALE-DONE: $out"
+  pass "both bounded reads degrade to a working mechanism, never to a false-clean"
 }
 
 test_stopped_task_and_unreadable_state_are_skipped() {
@@ -281,6 +308,7 @@ test_queued_and_held_are_not_alarms
 test_dead_endpoint_under_working_claim_is_no_lane
 test_stopped_task_and_unreadable_state_are_skipped
 test_grades_off_the_latest_status_line
+test_bounded_reads_do_not_need_a_timeout_binary
 test_done_claim_with_open_pr_is_stale_done
 test_refused_backlog_listing_is_exit_2_not_silence
 test_hung_forge_is_skipped

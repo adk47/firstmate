@@ -37,6 +37,9 @@ export FM_HOME
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-classify-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
 STATE="$FM_HOME/state"
 BACKLOG="$FM_HOME/data/backlog.md"
 TIMEOUT="${FM_UNOWNED_TIMEOUT:-20}"
@@ -71,6 +74,22 @@ backlog_ids() {  # <state>
   [ -z "$rows" ] || printf '%s\n' "$rows"
 }
 
+# The line a task's latest claim is graded from: its last status line, looking
+# behind a trailing run of decisions-sweep closes to the claim they closed.
+claimed_status_line() {  # <status-file>
+  local f=$1 last line
+  last=$(last_status_line "$f")
+  status_line_is_sweep_close "$last" || { printf '%s\n' "$last"; return 0; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    status_line_is_sweep_close "$line" && continue
+    last=$line
+  done <<EOF
+$(tail -n "${FM_STATUS_SWEEP_LOOKBACK_LINES:-400}" "$f" 2>/dev/null)
+EOF
+  printf '%s\n' "$last"
+}
+
 # 1. Items the backlog says are in flight with no task record behind them. A
 #    held item also lists as in_flight, and the captain owns it, so it is not a
 #    missing lane.
@@ -92,11 +111,11 @@ for m in "$STATE"/*.meta; do
   [ -f "$m" ] || continue
   id="$(basename "$m" .meta)"
   [ -f "$STATE/$id.stopped" ] && continue
-  last="$(last_status_line_behind_sweep "$STATE/$id.status")"
+  last="$(claimed_status_line "$STATE/$id.status")"
   status_line_verb_core "$last"
   verb=$_FM_STATUS_VERB
   [ "$verb" = working ] || continue
-  st="$(timeout "$TIMEOUT" "$FM_HOME/bin/fm-crew-state.sh" "$id" 2>/dev/null | head -1)"
+  st="$(fm_run_timed "$TIMEOUT" "$FM_HOME/bin/fm-crew-state.sh" "$id" 2>/dev/null | head -1)"
   case "$st" in
     *dead*) echo "NO-LANE $id its latest status says '$verb' but the endpoint is dead"; fail=1 ;;
   esac
@@ -109,7 +128,7 @@ done
 for m in "$STATE"/*.meta; do
   [ -f "$m" ] || continue
   id="$(basename "$m" .meta)"
-  last="$(last_status_line_behind_sweep "$STATE/$id.status")"
+  last="$(claimed_status_line "$STATE/$id.status")"
   status_line_verb_core "$last"
   case "$_FM_STATUS_VERB" in
     done|landed) ;;
@@ -120,7 +139,7 @@ for m in "$STATE"/*.meta; do
   printf '%s' "$url" | grep -qE '^https://github\.com/[^/]+/[^/]+/pull/[0-9]+$' || continue
   repo="$(printf '%s' "$url" | sed -E 's#https://github.com/([^/]+/[^/]+)/pull/.*#\1#')"
   num="$(printf '%s' "$url" | grep -oE '[0-9]+$')"
-  pr_state="$(timeout "$TIMEOUT" gh pr view "$num" --repo "$repo" --json state --jq .state 2>/dev/null)"
+  pr_state="$(fm_run_timed "$TIMEOUT" gh pr view "$num" --repo "$repo" --json state --jq .state 2>/dev/null)"
   [ "$pr_state" = "OPEN" ] && { echo "STALE-DONE $id claims done but $url is still OPEN"; fail=1; }
 done
 
