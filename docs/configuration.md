@@ -825,7 +825,7 @@ FM_VERIF_SCALE_CONNECT_SECS=10
 ```
 
 The report is read-only: it opens the ledger read-only, runs one counting statement against core, writes nothing on either side, and keeps no record of its own.
-It makes three ssh calls, one per source, so one unreadable source costs only its own lines, and a full run takes about as long as the core read, around twenty seconds.
+It makes three ssh calls, one per source, so one unreadable source costs only its own lines, and a full run waits on its slowest read, the core read, whose bound is `FM_VERIF_SCALE_CORE_SECS`.
 Run it by hand with `bin/fm-verif-scale-report.sh`; it is not a registered watcher check.
 
 ## Board loop (data/board.md)
