@@ -360,6 +360,24 @@ fm-doc-audience-check: ok surfaces=61 local_links=174
 FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=102585
 ```
 
+The Pi hand-off ownership correction (the turn-end guard accepts the calling extension's own identity and both loaded builds, and an extension-owned arm child or due retry covers a successor that has claimed the lock but not yet published its identity) was verified on 2026-11-06 with the installed ShellCheck 0.11.0 and the whole behavior suites, including the two extension-evidence cases in `tests/fm-pi-watch-extension.test.sh`.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-turnend-guard.test.sh tests/fm-guard-stale-banner.test.sh tests/fm-pi-watch-extension.test.sh
+```
+
+Observed output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+fm-doc-audience-check: ok surfaces=105 local_links=380
+FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=144146
+```
+
 The model-aware pull-guard predicate correction (`bin/fm-guard.sh` no longer reports a false watcher-down mid-turn under the Claude Stop auto-arm model, where the watcher runs only between turns) was verified on 2026-08-04 with the installed ShellCheck 0.11.0 and the same isolated behavior suites.
 
 ```sh
