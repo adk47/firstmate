@@ -1525,7 +1525,7 @@ sibling_fixture() {  # <name> -> prints "home\tcorrA\tcorrB"
   fm_pending_reply_mark_delivered "$state" "$a"
   # shellcheck disable=SC2030,SC2031
   export FM_PENDING_REPLY_NOW=20008
-  b=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix (resend)")
+  b=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix")
   fm_pending_reply_mark_delivered "$state" "$b"
   fm_write_secondmate_meta "$state/lights.meta" "$home/lights" "firstmate:fm-lights" "" pi
   printf '%s\t%s\t%s\n' "$home" "$a" "$b"
@@ -1657,6 +1657,64 @@ test_sibling_still_gets_one_repost_after_a_fresh_turn() {
   pass "a sibling earns its one repost only from a turn observed after the answer"
 }
 
+test_distinct_request_is_not_a_sibling() {
+  (
+    local home state a b rec hook_log out
+    home=$(setup_parent distinct-request)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=10
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20000
+    a=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix")
+    fm_pending_reply_mark_delivered "$state" "$a"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20008
+    b=$(fm_pending_reply_create "$home" "$state" lights "ruling: pause the credit-trust fix")
+    fm_pending_reply_mark_delivered "$state" "$b"
+    # A and B are two different requests to the same mate. A's answer must not
+    # erase B's turn evidence or brand B a superseded sibling.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    printf 'done [corr=%s]: shipped\n' "$a" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$a" || fail "A should resolve"
+    [ "$(phase_of "$state" "$b")" = awaiting_report ] \
+      || fail "a distinct request must stay open, got $(phase_of "$state" "$b")"
+    rec=$(fm_pending_reply_path "$state" "$b")
+    [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_corr)" ] \
+      || fail "a distinct request must not record a resolving sibling"
+    [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_epoch)" ] \
+      || fail "a distinct request must not record a sibling resolution epoch"
+    # Its ordinary turn evidence is untouched: the idle observation completes B.
+    fm_pending_reply_observe_busy "$state" "$b" idle
+    [ -n "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "a distinct request must keep the ordinary idle completion path"
+    # It must never be retired as superseded-by-sibling.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=106409
+    out=$(fm_pending_reply_sweep "$state")
+    case "$out" in
+      *"$b"*) fail "a distinct request must not be retired as a superseded sibling:"$'\n'"$out" ;;
+    esac
+    [ "$(phase_of "$state" "$b")" = awaiting_report ] \
+      || fail "a distinct request must stay open after the sweep"
+    # And it keeps its single ordinary repost.
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    fm_pending_reply_send_recovery "$state" "$b" \
+      || fail "a distinct request must earn its ordinary repost"
+    [ "$(phase_of "$state" "$b")" = recovery_sent ] \
+      || fail "B should be recovery_sent, got $(phase_of "$state" "$b")"
+    [ "$(wc -l < "$hook_log" | tr -d ' ')" = 1 ] || fail "expected exactly one repost"
+  ) || fail "distinct-request sibling regression failed"
+  pass "a distinct request body is not a sibling and keeps its own repost path"
+}
+
 test_resolved_corr_never_reposts() {
   (
     local home state a b hook_log rec
@@ -1724,9 +1782,9 @@ test_age_sweep_retires_with_recorded_reason() {
     elsewhere=$(fm_pending_reply_create "$home" "$state" lights "answered anyway")
     printf 'done [corr=%s]: answered through another copy\n' "$elsewhere" >> "$state/lights.status"
     # Delivered, recovery withheld because a sibling answered.
-    superseded=$(fm_pending_reply_create "$home" "$state" lights "the duplicate")
+    superseded=$(fm_pending_reply_create "$home" "$state" lights "the duplicated steer")
     fm_pending_reply_mark_delivered "$state" "$superseded"
-    resolved_rec=$(fm_pending_reply_create "$home" "$state" lights "the original")
+    resolved_rec=$(fm_pending_reply_create "$home" "$state" lights "the duplicated steer")
     fm_pending_reply_mark_delivered "$state" "$resolved_rec"
     printf 'done [corr=%s]: original answered\n' "$resolved_rec" >> "$state/lights.status"
     fm_pending_reply_try_resolve "$state" "$resolved_rec" || fail "original should resolve"
@@ -1996,6 +2054,7 @@ test_local_parent_replies_is_wrong_home_evidence
 test_one_answer_resolves_exactly_one_record
 test_sibling_answer_order_within_one_tick_is_irrelevant
 test_sibling_still_gets_one_repost_after_a_fresh_turn
+test_distinct_request_is_not_a_sibling
 test_resolved_corr_never_reposts
 test_age_sweep_retires_with_recorded_reason
 test_sweep_runs_from_tick_on_its_interval

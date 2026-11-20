@@ -25,13 +25,16 @@
 #     resolves A and nothing else. Resolution is terminal for that corr: a
 #     resolved or retired record never sends a recovery and never escalates.
 #   - A sibling answer is not a missed report. When A resolves, every still-open
-#     sibling record for the same task (delivered, recovery not yet attempted,
-#     or recovery sent and its turn not yet judged) has its turn evidence reset
-#     and records sibling_resolved_corr/epoch. From then on only a genuine
-#     busy->idle transition observed AFTER that epoch completes the sibling's
-#     turn, so the idle that followed the answer to A can never draw a REPOST
-#     REQUIRED for B. B is still resolvable by its own correlated answer at any
-#     time, and by the age sweep below once it has aged out.
+#     record for the same task AND the same request body (same request_digest;
+#     an empty digest on either side is never a sibling) that is delivered,
+#     recovery not yet attempted, or recovery sent with its turn not yet judged,
+#     has its turn evidence reset and records sibling_resolved_corr/epoch. From
+#     then on only a genuine busy->idle transition observed AFTER that epoch
+#     completes the sibling's turn, so the idle that followed the answer to A can
+#     never draw a REPOST REQUIRED for B. A different request body is not a
+#     sibling: it keeps the ordinary one-repost-then-escalate path. B is still
+#     resolvable by its own correlated answer at any time, and by the age sweep
+#     below once it has aged out.
 #   - No duplicate record for one request: a steer creator that passes the
 #     `dedup` flag to fm_pending_reply_create gets the existing open record's
 #     corr back (exit 3) when the same task already has an open record with
@@ -54,8 +57,9 @@
 #     (default 86400) after creation: a corr already seen resolved on the parent
 #     channel retires as retired_reason=resolved-elsewhere with the line's via;
 #     otherwise retired_reason=expired-undelivered, resolved_via=expired-undelivered.
-#   - delivered records whose recovery was withheld because a sibling resolved
-#     retire after the same horizon: retired_reason=superseded-by-sibling:<corr>,
+#   - delivered records whose recovery was withheld because a same-request
+#     sibling resolved retire after the same horizon:
+#     retired_reason=superseded-by-sibling:<corr>,
 #     resolved_via=superseded-by-sibling.
 # Nothing else ages out. A delivered record with no answer and no resolved
 # sibling, a recovery in flight, and an escalated record all stay in the active
@@ -78,7 +82,8 @@
 #   parent_status_scan_signature=
 #   request_summary=        short sanitized summary (no secrets by design)
 #   request_digest=         cksum of the request body (marker and corr stripped)
-#                           used only for same-task duplicate detection
+#                           used for same-task duplicate detection and to scope
+#                           sibling-evidence reset to the same request
 #   created_epoch=          when the expectation was created
 #   delivered_epoch=        when the marked request was confirmed delivered
 #                           (empty until delivery; delivery never resolves)
@@ -102,8 +107,9 @@
 #   resolved_epoch=
 #   resolved_via=           status | document | helper | empty, or a terminal
 #                           sweep value: expired-undelivered | superseded-by-sibling
-#   sibling_resolved_corr=  corr of the same-task sibling whose resolution reset
-#                           this record's turn evidence (empty until then)
+#   sibling_resolved_corr=  corr of the same-task, same-request sibling whose
+#                           resolution reset this record's turn evidence (empty
+#                           until then)
 #   sibling_resolved_epoch=
 #   retired_epoch=          when the sweep moved the record to .retired/
 #   retired_reason=         resolved-closed | resolved-elsewhere |
@@ -818,16 +824,21 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
 }
 
 # One answer resolves exactly one record. Called once when <resolved-corr>
-# resolves: every other open record for <task_id> that is still waiting on a
-# turn judgement has that evidence reset and the sibling resolution recorded,
-# so fm_pending_reply_observe_busy demands a fresh busy->idle transition after
-# <epoch> before the sibling's turn counts as completed. A record whose
+# resolves: every other open record for <task_id> carrying the same request body
+# (same request_digest) that is still waiting on a turn judgement has that
+# evidence reset and the sibling resolution recorded, so
+# fm_pending_reply_observe_busy demands a fresh busy->idle transition after
+# <epoch> before the sibling's turn counts as completed. A distinct request body
+# is never a sibling and keeps its ordinary recovery path. A record whose
 # recovery is already in flight (recovery_sending) or already judged
 # (recovery_failed/unknown, escalated) is left alone: nothing pending there can
 # be triggered by this idle.
 fm_pending_reply_note_sibling_resolved() {  # <state-dir> <task_id> <resolved-corr> <epoch>
-  local state=$1 task_id=$2 resolved_corr=$3 epoch=$4 dir rec corr phase
+  local state=$1 task_id=$2 resolved_corr=$3 epoch=$4 dir rec corr phase digest resolved_digest
   [ -n "$task_id" ] && [ -n "$resolved_corr" ] || return 1
+  resolved_digest=$(fm_pending_reply_get \
+    "$(fm_pending_reply_path "$state" "$resolved_corr")" request_digest)
+  [ -n "$resolved_digest" ] || return 0
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
@@ -836,6 +847,8 @@ fm_pending_reply_note_sibling_resolved() {  # <state-dir> <task_id> <resolved-co
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] && [ "$corr" != "$resolved_corr" ] || continue
     [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || continue
+    digest=$(fm_pending_reply_get "$rec" request_digest)
+    [ -n "$digest" ] && [ "$digest" = "$resolved_digest" ] || continue
     [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ] || continue
     phase=$(fm_pending_reply_get "$rec" phase)
     case "$phase" in
@@ -956,14 +969,16 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
 # fm_pending_reply_backend_observation: one busy/idle observation of a
 # SECONDMATE endpoint, without ever reading its conversation.
 #
-# Deliberately NOT the semantic busy-state contract (bin/fm-busy-lib.sh).
-# That contract covers ordinary task workers, whose turn lifecycle firstmate
-# wires at spawn; a secondmate has no such wiring because an idle secondmate
-# pane is healthy and it runs no supervised turn sequence of its own. This
-# observation exists only to notice a busy-then-idle transition around one
-# delivered request, so it is a delivery-confirmation signal in the same
-# category as the submit acknowledgement matcher in bin/fm-composer-lib.sh - never task
-# state, and never a source consumers can confuse with semantic state.
+# This is the fallback, not the primary source. fm_pending_reply_tick consults
+# fm_pending_reply_semantic_observation (the semantic busy-state contract in
+# bin/fm-busy-lib.sh) first and calls this function only when that record is
+# missing, stale, untrusted, or unknown. A converted secondmate writes that
+# semantic record through its per-task adapter, and it is authoritative for the
+# turn; the rendered tail below exists only for a secondmate whose semantic
+# record is unavailable, so it remains a delivery-confirmation signal in the
+# same category as the submit acknowledgement matcher in bin/fm-composer-lib.sh -
+# never task state on its own, and never a source consumers can confuse with
+# semantic state.
 #
 # It stays harness-scoped (fm_busy_lines_match with the recorded harness, no
 # global OR of every vendor signature), so one harness's output cannot make
