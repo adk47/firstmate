@@ -70,6 +70,10 @@
 #                     decision (decision-none). A request held on every pass
 #                     writes a hold row on every pass, so counting rows as
 #                     decisions overstates the rate by orders of magnitude.
+#                     A row whose decided_at is NULL, empty, or in no known
+#                     shape makes the source UNMEASURED rather than being
+#                     dropped from every window, since a row whose time
+#                     cannot be placed belongs to no window a reader can trust.
 #                     This is the decide ledger only: a request approved in
 #                     core by another writer never appears here, so this line
 #                     is not the rate at which requests are approved.
@@ -104,8 +108,10 @@
 # ledger holds for that window, so a record cannot claim a rate the ledger does
 # not show. The line is UNMEASURED when there is no record, when the record is
 # incomplete or names a value this report does not recognise, when its window
-# has not ended, and when the only recorded run is a rehearsal (provider=fake
-# or ledger=copy), because a rehearsal proves nothing about real data.
+# has not ended, when the ledger holds a sent ask or a decision whose time this
+# report cannot place, and when the only recorded run is a rehearsal
+# (provider=fake or ledger=copy), because a rehearsal proves nothing about real
+# data.
 #
 # CONFIGURATION. config/verif-scale.env is optional, local, gitignored, parsed
 # line by line and never sourced; a value is the rest of its line, so a comment

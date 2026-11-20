@@ -807,7 +807,8 @@ The report prints rates as they were measured and judges nothing: it holds no ta
 The capability half of the goal, sustained throughput in a measured sharded run, is read from a measured run record and then counted live.
 The record is a small `KEY=value` file that whoever ran the measured run writes on this machine, and the report's header owns its exact keys.
 It supplies only the run's window and the kind of run; the printed number is what the live ledger holds for that window, so a count or a rate written into the record is never printed.
-The line is `UNMEASURED` when no record exists, when the record is incomplete or unrecognised, when its window has not ended, and when the only recorded run is a rehearsal against a fake provider or a copy of the ledger.
+The record alone can make the line `UNMEASURED`: when no record exists, when the record is incomplete or unrecognised, when its window has not ended, and when the only recorded run is a rehearsal against a fake provider or a copy of the ledger.
+A read that cannot be trusted refuses the line the same way every other number does, including when the ledger holds a row whose time the report cannot place inside the run window.
 A home with no real measured run on record therefore gets exit 1 on every run, and that is the intended reading: the capability is unproven, not assumed.
 
 `config/verif-scale.env` is optional, local, gitignored, and not inherited by secondmate homes.
