@@ -9,8 +9,9 @@
 # tool refuses is exit 2 on stderr rather than silence, and a fully owned
 # fleet prints nothing and exits 0.
 #
-# Everything is a fixture: a throwaway home with its own bin/fm-crew-state.sh,
-# and fake `tasks-axi` and `gh` on PATH.
+# Everything is a fixture: a throwaway home with its own fake fm-crew-state.sh
+# (handed to the script as FM_CREW_STATE_BIN), and fake `tasks-axi` and `gh` on
+# PATH.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -31,6 +32,7 @@ make_home() {  # <name>
 #!/usr/bin/env bash
 # tasks-axi list --file <path> --state <state>
 [ "$1" = list ] || { echo "fake tasks-axi: unexpected $*" >&2; exit 9; }
+printf '%s\n' "$*" >> "$FM_FAKE_HOME/tasks.log"
 shift
 state=
 while [ $# -gt 0 ]; do
@@ -73,7 +75,8 @@ SH
 run_unowned() {  # <home> -> sets $RC and $OUT; stderr in $home/err
   local home=$1
   RC=0
-  FM_HOME="$home" FM_FAKE_HOME="$home" PATH="$home/fakebin:$PATH" \
+  FM_HOME="$home" FM_FAKE_HOME="$home" FM_CREW_STATE_BIN="$home/bin/fm-crew-state.sh" \
+    PATH="$home/fakebin:$PATH" \
     "$UNOWNED" > "$home/out" 2> "$home/err" || RC=$?
   OUT=$(cat "$home/out")
 }
@@ -155,6 +158,29 @@ test_dead_endpoint_under_working_claim_is_no_lane() {
   pass "a dead endpoint under a working claim is NO-LANE"
 }
 
+test_state_and_data_overrides_are_honoured() {
+  local home out altstate altdata
+  home=$(make_home overrides)
+  altstate="$home/altstate"
+  altdata="$home/altdata"
+  mkdir -p "$altstate" "$altdata"
+  : > "$altdata/backlog.md"
+  printf 'ghost_override.v1\n' > "$home/backlog.in_flight"
+  printf 'window=firstmate:fm-override\n' > "$altstate/override.meta"
+  printf 'working: implementing\n' > "$altstate/override.status"
+  printf 'override dead\n' > "$home/crew.override"
+  RC=0
+  FM_HOME="$home" FM_FAKE_HOME="$home" FM_CREW_STATE_BIN="$home/bin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$altstate" FM_DATA_OVERRIDE="$altdata" PATH="$home/fakebin:$PATH" \
+    "$UNOWNED" > "$home/out" 2> "$home/err" || RC=$?
+  out=$(cat "$home/out")
+  [ "$RC" = 1 ] || fail "the override directories are read, got $RC: $(cat "$home/err")"
+  printf '%s\n' "$out" | grep -q '^UNOWNED ghost_override.v1 ' || fail "the override backlog is read: $out"
+  printf '%s\n' "$out" | grep -q "^NO-LANE override its latest status says 'working'" || fail "the override state directory is read: $out"
+  grep -qF -- "--file $altdata/backlog.md" "$home/tasks.log" || fail "the override data directory is read: $(cat "$home/tasks.log")"
+  pass "FM_STATE_OVERRIDE and FM_DATA_OVERRIDE are honoured"
+}
+
 test_grades_off_the_latest_status_line() {
   local home out
   home=$(make_home graded)
@@ -198,7 +224,8 @@ test_bounded_reads_do_not_need_a_timeout_binary() {
   add_task "$home" claimed "done: PR https://github.com/acme/widget/pull/71"
   printf 'OPEN\n' > "$home/pr.71"
   RC=0
-  FM_HOME="$home" FM_FAKE_HOME="$home" FM_TIMEOUT_MECHANISM_OVERRIDE=bash PATH="$home/fakebin:$PATH" \
+  FM_HOME="$home" FM_FAKE_HOME="$home" FM_CREW_STATE_BIN="$home/bin/fm-crew-state.sh" \
+    FM_TIMEOUT_MECHANISM_OVERRIDE=bash PATH="$home/fakebin:$PATH" \
     "$UNOWNED" > "$home/out" 2> "$home/err" || RC=$?
   out=$(cat "$home/out")
   [ "$RC" = 1 ] || fail "the alarms still fire without a timeout binary, got $RC: $(cat "$home/err")"
@@ -307,6 +334,7 @@ test_held_in_flight_item_is_not_unowned
 test_queued_and_held_are_not_alarms
 test_dead_endpoint_under_working_claim_is_no_lane
 test_stopped_task_and_unreadable_state_are_skipped
+test_state_and_data_overrides_are_honoured
 test_grades_off_the_latest_status_line
 test_bounded_reads_do_not_need_a_timeout_binary
 test_done_claim_with_open_pr_is_stale_done

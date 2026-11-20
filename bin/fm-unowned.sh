@@ -30,6 +30,9 @@
 #
 # Usage: bin/fm-unowned.sh
 #   FM_HOME            the home to read (default: this script's repo root)
+#   FM_STATE_OVERRIDE  the task-record directory to read (default: $FM_HOME/state)
+#   FM_DATA_OVERRIDE   the data directory holding backlog.md (default: $FM_HOME/data)
+#   FM_CREW_STATE_BIN  the endpoint-state reader (default: this script's sibling)
 #   FM_UNOWNED_TIMEOUT seconds allowed per endpoint-state and PR-state read (default 20)
 set -uo pipefail
 FM_HOME="${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -40,8 +43,10 @@ export FM_HOME
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
-STATE="$FM_HOME/state"
-BACKLOG="$FM_HOME/data/backlog.md"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+BACKLOG="$DATA/backlog.md"
+export FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA"
 TIMEOUT="${FM_UNOWNED_TIMEOUT:-20}"
 [ -f "$BACKLOG" ] || { echo "fm-unowned: no backlog at $BACKLOG" >&2; exit 2; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "fm-unowned: tasks-axi not on PATH" >&2; exit 2; }
@@ -115,7 +120,7 @@ for m in "$STATE"/*.meta; do
   status_line_verb_core "$last"
   verb=$_FM_STATUS_VERB
   [ "$verb" = working ] || continue
-  st="$(fm_run_timed "$TIMEOUT" "$FM_HOME/bin/fm-crew-state.sh" "$id" 2>/dev/null | head -1)"
+  st="$(fm_run_timed "$TIMEOUT" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null | head -1)"
   case "$st" in
     *dead*) echo "NO-LANE $id its latest status says '$verb' but the endpoint is dead"; fail=1 ;;
   esac
