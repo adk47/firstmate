@@ -388,6 +388,30 @@ test_unreadable_workflow_reads_are_counted_but_stay_silent() {
   pass "unreadable per-workflow reads are counted in the verdict and stay silent"
 }
 
+test_a_repository_skipped_at_the_poll_deadline_is_counted() {
+  local home out
+  home=$(make_home repo-sweep-skipped)
+  queued_fixture "$home" acme/widgets 0
+  cat > "$home/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$home/gh.calls"
+[ "\$1" = api ] || exit 1
+case "\$2" in
+  rate_limit) sleep 1.5 ;;
+  *status=queued*) sleep 10 ;;
+esac
+f="$home/api/\$(printf '%s' "\$2" | tr '/?&=' '____')"
+[ -f "\$f" ] || exit 1
+cat "\$f"
+SH
+  chmod +x "$home/fakebin/gh"
+  out=$(poll "$home" 100000 FM_CHECK_TIMEOUT=6)
+  [ -z "$out" ] || fail "a repository skipped at the poll deadline printed: $out"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CHECK" status)
+  assert_contains "$out" "repository acme/widgets not read: poll budget spent" "a repository skipped at the poll deadline was recorded as plainly quiet"
+  pass "a repository abandoned at the poll deadline is named in the verdict and stays silent"
+}
+
 # A config file is the operator interface the docs describe: a multi-value line
 # and numeric lines, with their comments on their own lines.
 test_an_empty_repository_list_polls_quietly_without_a_scratch_dir() {
@@ -575,6 +599,7 @@ test_poll_is_throttled_and_stands_down_on_a_thin_rate_budget
 test_an_unreadable_rate_limit_is_not_reported_as_a_stand_down
 test_an_unreadable_answer_is_silent_not_red
 test_unreadable_workflow_reads_are_counted_but_stay_silent
+test_a_repository_skipped_at_the_poll_deadline_is_counted
 test_an_empty_repository_list_polls_quietly_without_a_scratch_dir
 test_a_workflow_on_the_second_list_page_is_read
 test_a_partial_workflow_list_is_recorded_but_stays_silent

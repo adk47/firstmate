@@ -372,13 +372,13 @@ repo_job() {
   esac
   [ -n "$branch" ] || branch=main
   case "$bar" in *[!0-9]*) bar='' ;; esac
-  poll_has_budget || return 0
+  poll_has_budget || { printf 'sweep %s\n' "$repo" >> "$partial"; return 0; }
   if [ -n "$bar" ]; then
     queued=$(gh_api "repos/$repo/actions/runs?status=queued&per_page=1" | jq -r '.total_count // 0' 2>/dev/null)
     case "$queued" in ''|*[!0-9]*) queued=0 ;; esac
     [ "$queued" -le "$bar" ] || out="$repo queued=$queued (>$bar)"
   fi
-  poll_has_budget || { printf '%s' "$out"; return 0; }
+  poll_has_budget || { printf 'sweep %s\n' "$repo" >> "$partial"; printf '%s' "$out"; return 0; }
   rows=$(workflow_rows "$repo" "$branch" "$per_page" "$parallel" "$partial")
   part=$(repo_red "$repo" "$branch" "$rows")
   [ -z "$part" ] || out="${out}${out:+; }$part"
@@ -445,6 +445,7 @@ action_check() {
           case "$pkind" in
             list) notes="${notes}${notes:+; }workflow list read only partially: $prepo" ;;
             skipped) notes="${notes}${notes:+; }$pcount workflow reads in $prepo were skipped or unreadable" ;;
+            sweep) notes="${notes}${notes:+; }repository $prepo not read: poll budget spent" ;;
           esac
         done < "$scratch/$i.partial"
       fi
