@@ -2671,8 +2671,10 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
   statusf="$state/held.status"
   # A DECLARED pause (not captain-relevant), .seen-* primed so the signal scan does
-  # not pre-empt the stale path.
-  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  # not pre-empt the stale path. The pause names its own wake time, so the
+  # re-surface below must show that deadline rather than a bare age.
+  printf 'paused: holding for the upstream tool release until %sZ\n' \
+    "$(date -u -d '+90 minutes' +%Y-%m-%dT%H:%M 2>/dev/null || date -u -v+90M +%Y-%m-%dT%H:%M)" > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle, holding for upstream")
@@ -2716,6 +2718,10 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   wait_for_exit "$pid" 100 || fail "watcher did not re-surface a declared pause past the threshold"
   grep -F "stale: $window" "$out" >/dev/null || fail "re-surface did not print a stale wake"
   grep -F "awaiting external" "$out" >/dev/null || fail "re-surface was not labeled a paused/awaiting-external recheck"
+  # The recheck shows the wait's OWN deadline and how long is left: a wait with
+  # minutes to run and one nobody will ever end must not read identically.
+  grep -F "declared wait until" "$out" >/dev/null || fail "the paused re-surface did not name the pause's declared wake time"
+  grep -E "\([0-9]+m remaining\)" "$out" >/dev/null || fail "the paused re-surface did not say how long the declared wait has left"
   grep -F "possible wedge" "$out" >/dev/null && fail "a declared pause was mislabeled a possible wedge"
   [ -e "$state/.paused-resurfaced-$key" ] || fail "the paused re-surface throttle marker was not recorded"
   [ ! -e "$state/.stale-since-$key" ] || fail "a paused re-surface must not use the wedge timer"

@@ -113,7 +113,10 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # time-less pause, or an ordinary resolved answer, closes it. The watcher and
 # away-mode daemon still treat it as a declared pause for wedge suppression;
 # the drain is where it can no longer wait silently.
-FM_CLASSIFY_PAUSE_UNTIL_RE='[Uu][Nn][Tt][Ii][Ll][[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2}[T[:space:]])?[0-2][0-9]:[0-5][0-9][[:space:]]*(Z|UTC)'
+# The time group and the optional date group are captured because
+# status_pause_wait_label below renders the SAME match as the wait's own deadline;
+# one pattern keeps the recognition and the rendering from drifting apart.
+FM_CLASSIFY_PAUSE_UNTIL_RE='[Uu][Nn][Tt][Ii][Ll][[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2}[T[:space:]])?([0-2][0-9]:[0-5][0-9])[[:space:]]*(Z|UTC)'
 FM_CLASSIFY_TIMELESS_PAUSE_PREFIX='paused without a wake time (needs until HH:MMZ): '
 
 # One declared wait is exempt from needing a wake time: firstmate's own gateway
@@ -332,6 +335,41 @@ status_is_paused() {  # <status-line>
 # only, so the per-line folds stay fork-free.
 status_pause_has_wake_time() {  # <status-line-or-note>
   [[ "$1" =~ $FM_CLASSIFY_PAUSE_UNTIL_RE ]]
+}
+
+# Render the wake time that pause names as `HH:MMZ (Nm remaining)`, the label a
+# supervisor prints so a declared wait shows its own deadline instead of a bare
+# age that reads the same whether the wait ends in a minute or never.
+# Prints nothing when the line names no wake time, so a caller can tell a
+# declared wait from an unendorsed pause without a second parse; when the clock
+# cannot be compared the bare time is printed rather than an invented countdown,
+# and a wake time already behind us reads `(due now)` because the wait is
+# overdue. Builtins plus one date(1) conversion, no per-line subshells beyond it.
+status_pause_wait_label() {  # <status-line-or-note> [<now-epoch>]
+  local line=$1 now=${2:-} date_part time_part epoch diff mins
+  [ -n "$line" ] || return 1
+  [[ "$line" =~ $FM_CLASSIFY_PAUSE_UNTIL_RE ]] || return 1
+  date_part=${BASH_REMATCH[1]}
+  time_part=${BASH_REMATCH[2]}
+  date_part=${date_part%%[[:space:]T]*}
+  case "$now" in ''|*[!0-9]*) now=$(date -u +%s) ;; esac
+  if [ -n "$date_part" ]; then
+    epoch=$(fm_pause_expires_epoch "${date_part}T${time_part}:00Z")
+  else
+    epoch=$(fm_pause_expires_epoch "$(date -u +%Y-%m-%d)T${time_part}:00Z")
+  fi
+  if [ -z "$epoch" ]; then
+    printf '%sZ' "$time_part"
+    return 0
+  fi
+  diff=$(( epoch - now ))
+  if [ "$diff" -le 0 ]; then
+    printf '%sZ (due now)' "$time_part"
+    return 0
+  fi
+  # Round up: a wait with 40 seconds left is a minute away, never "0m".
+  mins=$(( (diff + 59) / 60 ))
+  printf '%sZ (%dm remaining)' "$time_part" "$mins"
 }
 
 

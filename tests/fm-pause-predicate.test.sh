@@ -208,6 +208,41 @@ test_a_pause_without_evidence_is_still_not_a_declared_wait() {
   pass "a pause with no predicate and no documented admission is still surfaced as blocked"
 }
 
+# The watcher labels an absorbed declared wait with the pause's OWN deadline
+# (`declared wait until HH:MMZ (Nm remaining)`), which is why the label is a pure
+# function of the line and a wall-clock epoch rather than prose assembled at the
+# call site. Both the clock and its absence are pinned here: a future wait counts
+# down, a stale one reads as due, and a pause naming no time yields no label at
+# all so no countdown is ever invented.
+test_wait_label_names_the_pauses_own_deadline() {
+  local label now
+  now=$(date -u -d "$(date -u +%Y-%m-%d) 05:00:00" +%s) \
+    || fail "date(1) could not express today's 05:00Z"
+  label=$(status_pause_wait_label 'paused [key=vendor]: rate-limit reset until 05:30Z' "$now") \
+    || fail "a pause naming its wake time produced no label"
+  [ "$label" = '05:30Z (30m remaining)' ] \
+    || fail "a wait 30 minutes out was labelled '$label'"
+
+  now=$(( now + 31 * 60 ))
+  label=$(status_pause_wait_label 'paused [key=vendor]: rate-limit reset until 05:30Z' "$now") \
+    || fail "a pause whose wake time passed produced no label"
+  [ "$label" = '05:30Z (due now)' ] \
+    || fail "a wake time already behind us was labelled '$label'"
+
+  now=$(date -u -d '2029-12-31 23:00:00' +%s) || fail "date(1) could not express 2029-12-31T23:00Z"
+  label=$(status_pause_wait_label 'paused [key=release]: until 2030-01-01T00:00Z' "$now") \
+    || fail "a paused line with a dated wake time produced no label"
+  [ "$label" = '00:00Z (60m remaining)' ] \
+    || fail "a dated wake time was labelled '$label'"
+
+  label=$(status_pause_wait_label 'paused [key=winback]: waiting for the next send window' "$now")
+  [ -z "$label" ] || fail "a pause naming no wake time was given the label '$label'"
+  if status_pause_wait_label 'paused [key=winback]: waiting for the next send window' "$now" >/dev/null; then
+    fail "a pause naming no wake time reported a label status"
+  fi
+  pass "the wait label names the pause's own deadline, reads a passed one as due, and invents nothing without one"
+}
+
 # A sweep case: <name> <task> <status-content>, then run the sweep over it.
 sweep_case() {  # <name> <task> <line> [<extra-line>...]
   local name=$1 task=$2 line=$3 dir
@@ -309,6 +344,7 @@ test_the_default_bound_is_a_real_bound
 test_check_verdicts
 test_expiry_clock
 test_a_predicate_pause_is_a_declared_wait
+test_wait_label_names_the_pauses_own_deadline
 test_a_pause_without_evidence_is_still_not_a_declared_wait
 test_sweep_reports_a_resolved_pause
 test_sweep_reports_an_unreadable_predicate

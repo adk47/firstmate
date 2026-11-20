@@ -397,7 +397,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state> [<span-record> <span-status>]
-  local win=$1 state=$2 record=${3-} rc=${4-} task last event rest
+  local win=$1 state=$2 record=${3-} rc=${4-} task last event rest label
   task=$(window_to_task "$win" "$state")
   if [ -z "$rc" ]; then
     record=$(status_span_first_actionable_record "$state/$task.status" \
@@ -422,7 +422,14 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
     # re-surface cadence in housekeeping) rather than a wedge stale marker. Cheap:
     # reuses the status line already read, no fm-crew-state.sh call, mirroring the
     # daemon's existing status-log classification.
-    printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    # The digest names the wait's own deadline when the line declares one, so a
+    # wait with minutes to run reads differently from one nobody will ever end.
+    label=$(status_pause_wait_label "$last" || true)
+    if [ -n "$label" ]; then
+      printf 'pause|declared wait until %s (awaiting external), rechecked on a long cadence: %s' "$label" "$last"
+    else
+      printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    fi
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
@@ -1011,7 +1018,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs label
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1121,7 +1128,12 @@ housekeeping() {  # <state>
             _now > "$marker"
           fi
         elif [ -n "$last" ] && status_is_paused "$last"; then
-          if escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"; then
+          label=$(status_pause_wait_label "$last" || true)
+          if [ -n "$label" ]; then
+            if escalate_add "$state" "paused ${age}s (declared wait until ${label}, awaiting external, recheck whether the wait still holds): $win"; then
+              _now > "$marker"
+            fi
+          elif escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"; then
             _now > "$marker"
           fi
         else
