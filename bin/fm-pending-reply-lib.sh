@@ -1839,6 +1839,12 @@ fm_pending_reply_tick() {  # <state-dir>
           found=1
           break
         done
+        if [ "$found" = 1 ] \
+          && [ "$phase" = awaiting_report ] \
+          && [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" != 1 ] \
+          && fm_pending_reply_sibling_outranks_delivery "$rec"; then
+          found=0
+        fi
         if [ "$found" = 0 ]; then
           if [ -n "$remote_host" ]; then
             observation=$("$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
@@ -1847,8 +1853,12 @@ fm_pending_reply_tick() {  # <state-dir>
           elif ! observation=$(fm_pending_reply_semantic_observation "$state" "$task_id" "$harness"); then
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
           fi
-          observation_tasks+=("$task_id")
-          observation_values+=("$observation")
+          if [ "$i" -lt "${#observation_tasks[@]}" ]; then
+            observation_values[$i]=$observation
+          else
+            observation_tasks+=("$task_id")
+            observation_values+=("$observation")
+          fi
         fi
         busy=$(fm_pending_reply_busy_state_from_observation "$rec" "$observation")
       fi

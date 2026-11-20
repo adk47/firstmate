@@ -1085,6 +1085,62 @@ test_tick_skips_terminal_and_reuses_target_observation() {
   pass "tick skips terminal records and reuses target observations"
 }
 
+test_tick_ignores_pre_resolution_cached_busy() {
+  (
+    local home state hook_log rec_a rec_b a b c1 c2 phase
+    home=$(setup_parent pre-resolution-cache)
+    state="$home/state"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=10
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20000
+    c1=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix")
+    c2=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix")
+    if [[ "$c1" < "$c2" ]]; then a=$c1; b=$c2; else a=$c2; b=$c1; fi
+    fm_pending_reply_mark_delivered "$state" "$a" || fail "fixture should deliver A"
+    fm_pending_reply_mark_delivered "$state" "$b" || fail "fixture should deliver B"
+    fm_write_secondmate_meta "$state/lights.meta" "$home/lights" "sess:fm-lights"
+    printf 'state=idle\nlatest=done [corr=%s]: answered\n' "$a" > "$state/lights.status"
+    # The A record sorts first and resolves during this tick, resetting B's
+    # evidence after the shared busy observation was already taken. The re-probe
+    # then reports idle, so B must not inherit the earlier busy.
+    fm_backend_busy_state() {
+      local n
+      n=$(cat "$home/probes" 2>/dev/null || printf 0)
+      n=$((n + 1))
+      printf '%s\n' "$n" > "$home/probes"
+      if [ "$n" -le 1 ]; then printf 'busy'; else printf 'idle'; fi
+    }
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20030
+    fm_pending_reply_tick "$state"
+    rec_a=$(fm_pending_reply_path "$state" "$a")
+    rec_b=$(fm_pending_reply_path "$state" "$b")
+    [ "$(fm_pending_reply_get "$rec_a" phase)" = resolved ] || fail "A should resolve"
+    [ "$(fm_pending_reply_get "$rec_b" sibling_resolved_epoch)" = 20030 ] \
+      || fail "B should be reset by A's resolution"
+    [ "$(fm_pending_reply_get "$rec_b" turn_seen_busy)" != 1 ] \
+      || fail "a busy observed before the sibling resolution must not count for B"
+    [ -z "$(fm_pending_reply_get "$rec_b" request_turn_completed_epoch)" ] \
+      || fail "B must not complete without a post-resolution busy"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    fm_pending_reply_tick "$state"
+    phase=$(fm_pending_reply_get "$rec_b" phase)
+    [ "$phase" = awaiting_report ] \
+      || fail "B must not repost over the sibling's answer, got $phase"
+    [ ! -s "$hook_log" ] || fail "no repost may be sent for the sibling's answer"
+  ) || fail "pre-resolution observation-cache regression failed"
+  pass "a cached busy taken before a sibling resolution never counts for the sibling"
+}
+
 test_correlations_reuse_only_for_matching_open_task() {
   local dir fb log home state got corr1 corr2 corr3 rec
   dir="$TMP_ROOT/corr-reuse"; mkdir -p "$dir"
@@ -2588,6 +2644,7 @@ test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
+test_tick_ignores_pre_resolution_cached_busy
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
