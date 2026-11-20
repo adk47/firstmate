@@ -791,6 +791,43 @@ A poll the budget cuts short records the skipped reads in its verdict - a workfl
 The wake line is capped at 1,500 characters; `status` prints the full verdict, every red with its evidence plus any partial-read note.
 `bin/fm-ci-health-check.sh status` prints the last recorded verdict, `bin/fm-ci-health-check.sh classify <status> <conclusion>` prints the class the check would assign, and `bin/fm-ci-health-check.sh disarm` removes the shim, its trust binding, the throttle stamp `state/.ci-health.last`, and the verdict record `state/.ci-health.verdict`.
 
+## Verification scale report (config/verif-scale.env)
+
+[`bin/fm-verif-scale-report.sh`](../bin/fm-verif-scale-report.sh) is the live read behind the verification-throughput goal: proof asks sent, decisions written, the ask to proof return rate over seven days, and the open undecided queue.
+Its header owns the exact reads, what each line counts and leaves out, and the exit codes; this section owns the configuration and the operator contract.
+
+The report refuses rather than defaults.
+A source that does not answer, answers with an error, or answers in a shape the report does not recognise prints `UNMEASURED: <source> (<reason>)`, and the run exits 1; nothing is printed as 0 that was not read as 0, and nothing is carried over from an earlier run.
+Every number line starts with `window:` or `total:` and carries its source and the statement that ran on the same line, so a windowed count is never subtracted from a standing one.
+A run that prints `INCOMPLETE` proves nothing about the goal, and a goal check that reads this report must treat exit 1 as unread rather than as a low number.
+Proof asks are three campaigns counted by name, and decisions are three decision values written in apply mode; reminders, status notes, holds, defers, and judge or shadow rows are printed on their own lines, named as excluded.
+The report prints rates as they were measured and judges nothing: it holds no target and no threshold.
+
+`config/verif-scale.env` is optional, local, gitignored, and not inherited by secondmate homes.
+It holds `KEY=value` lines, it is parsed rather than sourced, a set environment variable of the same name wins, and a value is the rest of its line, so a comment belongs on its own line above it.
+The ledger host has no built-in default, so a home with none configured gets an `UNMEASURED` report rather than a read of some other machine.
+
+```sh
+# ssh destination of the ledger host (required)
+FM_VERIF_SCALE_HOST=user@ledger-host
+# ssh jump host, when the ledger host is reached through one
+FM_VERIF_SCALE_JUMP=
+# ledger file on that host
+FM_VERIF_SCALE_LEDGER=/var/lib/hydra/credit-review/ledger.sqlite3
+# core query wrapper on that host; takes one SQL argument
+FM_VERIF_SCALE_TRINO=/opt/hydra/scripts/trino-query.sh
+# bound on one ledger read, seconds
+FM_VERIF_SCALE_LEDGER_SECS=60
+# bound on the core read, seconds
+FM_VERIF_SCALE_CORE_SECS=180
+# ssh connect timeout, seconds
+FM_VERIF_SCALE_CONNECT_SECS=10
+```
+
+The report is read-only: it opens the ledger read-only, runs one counting statement against core, writes nothing on either side, and keeps no record of its own.
+It makes three ssh calls, one per source, so one unreadable source costs only its own lines, and a full run takes about as long as the core read, around twenty seconds.
+Run it by hand with `bin/fm-verif-scale-report.sh`; it is not a registered watcher check.
+
 ## Board loop (data/board.md)
 
 The board is a home's one agenda, and the board loop is what keeps firstmate working toward it instead of answering notifications and stopping.
