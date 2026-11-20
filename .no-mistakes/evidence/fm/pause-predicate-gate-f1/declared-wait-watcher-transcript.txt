@@ -1,0 +1,11 @@
+=== Scenario A: worker whose status declares a future wait (until 2026-11-20T11:19Z) ===
+--- first sight of the declared wait (should print nothing: absorbed) ---
+(no wake output)
+--- pause recheck after the re-surface threshold (should name the deadline, not a wedge) ---
+stale: test:fm-held (paused 500s, awaiting external - declared wait until 2026-11-20T11:19Z (90m remaining), rechecked on a long cadence not a wedge; confirm the wait still holds)
+
+=== Scenario B: worker gone quiet with NO declared wait ===
+stale: test:fm-stopped
+
+=== Scenario C (contrast): provably-working quiet worker with NO declared wait, past the wedge timer ===
+stale: test:fm-quiet (idle 500s, possible wedge, escalation 1)
