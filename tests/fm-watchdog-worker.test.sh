@@ -214,17 +214,26 @@ steer() {  # <home> <id> <seconds-ago>
 }
 
 # backlog_bin <home> <id...>: a stand-in for tasks-axi that reports exactly the
-# given ids as in flight, in its own list shape.
+# given ids as in flight, in its own list shape. A held query answers with an
+# empty list, so a test that only cares about in-flight items never accidentally
+# parks one.
 backlog_bin() {  # <home> <id...>
   local home=$1
   shift
   {
     printf '#!/usr/bin/env bash\n'
-    printf 'printf "count: 2\\ntasks[2]{id,state,kind,repo,title}:\\n"\n'
+    printf 'case "$*" in\n'
+    printf '  *--state\\ held*)\n'
+    printf '    printf "count: 0\\ntasks[0]{id,state,kind,repo,title}:\\n"\n'
+    printf '    ;;\n'
+    printf '  *)\n'
+    printf '    printf "count: 2\\ntasks[2]{id,state,kind,repo,title}:\\n"\n'
     local id
     for id in "$@"; do
-      printf 'printf "  %s,in_flight,ship,p,t\\n"\n' "$id"
+      printf '    printf "  %s,in_flight,ship,p,t\\n"\n' "$id"
     done
+    printf '    ;;\n'
+    printf 'esac\n'
   } > "$home/fakebin/tasks-axi"
   chmod +x "$home/fakebin/tasks-axi"
 }
@@ -239,6 +248,41 @@ held_backlog_bin() {  # <home> <id...>: a tasks-axi stand-in that reports held i
     for id in "$@"; do
       printf 'printf "  %s,held,ship,p,t\\n"\n' "$id"
     done
+  } > "$home/fakebin/tasks-axi"
+  chmod +x "$home/fakebin/tasks-axi"
+}
+
+# backlog_bin_split <home> <in-flight ids...> -- <held ids...>: a tasks-axi
+# stand-in that answers each state with its own list, so one pass can see both
+# an in-flight item and the held set at the same time.
+backlog_bin_split() {  # <home> <in-flight...> -- <held...>
+  local home=$1
+  shift
+  local target=in_flight id
+  local -a in_flight=() held=()
+  for id in "$@"; do
+    if [ "$id" = -- ]; then
+      target=held
+      continue
+    fi
+    if [ "$target" = in_flight ]; then in_flight+=("$id"); else held+=("$id"); fi
+  done
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'case "$*" in\n'
+    printf '  *--state\\ held*)\n'
+    printf '    printf "count: 2\\ntasks[2]{id,state,kind,repo,title}:\\n"\n'
+    for id in ${held[@]+"${held[@]}"}; do
+      printf '    printf "  %s,held,ship,p,t\\n"\n' "$id"
+    done
+    printf '    ;;\n'
+    printf '  *)\n'
+    printf '    printf "count: 2\\ntasks[2]{id,state,kind,repo,title}:\\n"\n'
+    for id in ${in_flight[@]+"${in_flight[@]}"}; do
+      printf '    printf "  %s,in_flight,ship,p,t\\n"\n' "$id"
+    done
+    printf '    ;;\n'
+    printf 'esac\n'
   } > "$home/fakebin/tasks-axi"
   chmod +x "$home/fakebin/tasks-axi"
 }
@@ -982,6 +1026,33 @@ test_in_flight_backlog_items_without_a_record_are_reported_once() {
   pass "in-flight backlog items with no task record are reported once per change, never silently"
 }
 
+test_a_held_in_flight_item_is_not_reported_as_an_orphan() {
+  local home now out
+  home=$(make_home held-orphan); fake_tools "$home"
+  worker "$home" w1 alive
+  pane "$home" w1 idle 'fine'
+  # One unservable item the captain never touched, and one he parked: only the
+  # first is a record firstmate must adopt or close.
+  backlog_bin_split "$home" w1 ghost-lane parked-lane -- parked-lane
+  now=$(start_clock)
+  out=$(tick "$home" "$now" FM_WATCHDOG_BACKLOG=on FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+  assert_contains "$out" "1 in-flight backlog item(s) with no task record" \
+    "a held in-flight item was counted as an orphan"
+  assert_contains "$out" "ghost-lane" "the report did not name the unservable item"
+  assert_not_contains "$out" "parked-lane" "a held in-flight item was reported as an orphan"
+  assert_not_contains "$(wakes "$home")" "parked-lane" "a held in-flight item reached firstmate"
+  assert_eq "$(wakes "$home" | grep -c 'no task record')" "1" \
+    "the unservable item was not reported exactly once"
+
+  # The captain releases the item: it is an orphan again on the next pass.
+  backlog_bin_split "$home" w1 ghost-lane parked-lane --
+  out=$(tick "$home" "$((now + 300))" FM_WATCHDOG_BACKLOG=on FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+  assert_contains "$out" "2 in-flight backlog item(s) with no task record" \
+    "a released item did not return to ordinary treatment"
+  assert_contains "$out" "parked-lane" "the released item was not named"
+  pass "a held in-flight item is never reported as an orphan, and returns once released"
+}
+
 test_a_dry_run_reports_every_lane_and_changes_nothing() {
   local home now out
   home=$(make_home dry); fake_tools "$home"
@@ -1573,6 +1644,7 @@ test_a_connection_relaunch_failure_is_charged_against_the_budget
 test_a_pi_lane_is_never_asked_to_move_to_a_model_it_cannot_reach
 test_a_review_seat_keeps_its_model_and_a_permanent_error_is_never_retried
 test_in_flight_backlog_items_without_a_record_are_reported_once
+test_a_held_in_flight_item_is_not_reported_as_an_orphan
 test_a_dry_run_reports_every_lane_and_changes_nothing
 test_the_watchdog_exports_its_home_to_every_command_it_runs
 test_a_finished_lane_is_left_alone_and_an_unfinished_one_is_recovered

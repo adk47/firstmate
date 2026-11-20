@@ -1889,7 +1889,8 @@ inbox_pass() {
 # and live lanes whose record went missing, once per change of either set. The
 # watchdog never writes a task record: a wrong endpoint binding is worse than a
 # lane that is visibly unowned, so this only names what firstmate must adopt or
-# close.
+# close. A held item is never one of them: the captain parked it, so having no
+# live lane is the state he chose rather than a record to adopt or close.
 backlog_pass() {
   local ids orphans unresolved hash flagged count line
   BACKLOG_JSON='{}'
@@ -1905,6 +1906,7 @@ backlog_pass() {
     | grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*$' | sort -u) || ids=''
   [ -n "$ids" ] || return 0
   orphans=$(printf '%s\n' "$ids" | while IFS= read -r line; do
+      task_is_held "$line" && continue
       [ -f "$STATE/$line.meta" ] || printf '%s\n' "$line"
     done)
   unresolved=$(live_lanes_without_meta)

@@ -885,6 +885,7 @@ The 2026-11-14 evidence: ten Orca lanes whose terminals an operator had closed w
 Fifth, it walks each live but frozen worker up a stall ladder: one re-ring through `bin/fm-send.sh`, then a relaunch, then a reassign, then one wake for firstmate - one rung per pass, never sooner than the grace interval after the previous rung, and the ladder resets the moment the worker writes a new status line.
 A worker that is alive and idle rather than frozen is nudged at most once an hour, and only while `bin/fm-crew-state.sh` still reads `working` from a source the worker itself owns.
 Sixth, it reports in-flight backlog items that no task record can serve, and live lanes whose record went missing, once per change of that set.
+A held item is never in that report: the captain parked it, so having no live lane is the state he chose rather than a record to adopt or close, and it returns to ordinary treatment once he releases it.
 Such a lane cannot be steered at all - `bin/fm-send.sh` resolves targets from the record - so the report names every id for firstmate to adopt or close instead of leaving it unowned.
 The watchdog never writes a task record: a wrong endpoint binding is worse than a lane that is visibly unowned.
 
