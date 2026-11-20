@@ -1,0 +1,6 @@
+== state/.wake-queue after one eligible wake was absorbed by main ==
+1	1	signal	task-a.status	signal: task-a.status done
+1795184168	1	check	inbox:1795184168-Dz5N8Q	check: automated inbox note 1795184168-Dz5N8Q (watch) - supervision branch SILENT - an eligible wake went to main; last branch work never recorded; no branc
+
+== state/.branch-silence-alarm (unix epoch throttle) ==
+1795184168

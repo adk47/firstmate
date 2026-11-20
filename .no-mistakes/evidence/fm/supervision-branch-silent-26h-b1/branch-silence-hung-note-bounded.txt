@@ -1,0 +1,11 @@
+== hung note simulation: first fm-inbox.sh call execs sleep 60, second is real ==
+-- inbox-calls (2 = first call was killed by the bound and the second ran)
+2
+-- .branch-silence-alarm
+1795184196
+-- note filed by the second (post-timeout) wake:
+id=1795184196-nEolwE
+at=2026-11-20T14:16:36Z
+source=watch
+--
+supervision branch SILENT - an eligible wake went to main; last branch work never recorded; no branch latch recorded; the branch extension never marked this session loaded. Nothing else reports this: state/.branch-latch names the reason, and the branch is re-armed by restarting this Pi session or changing the supervision model.

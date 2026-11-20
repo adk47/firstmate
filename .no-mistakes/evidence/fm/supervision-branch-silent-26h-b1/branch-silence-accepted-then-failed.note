@@ -1,0 +1,5 @@
+id=1795184168-aRijUP
+at=2026-11-20T14:16:08Z
+source=watch
+--
+supervision branch SILENT - an eligible wake went to main; last branch work never recorded; no branch latch recorded; the branch extension never marked this session loaded. Nothing else reports this: state/.branch-latch names the reason, and the branch is re-armed by restarting this Pi session or changing the supervision model.

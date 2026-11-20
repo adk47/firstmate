@@ -1,0 +1,26 @@
+== dead session latch: .branch-latch pid-vs-lock mismatch means NOT this session's fault ==
+-- .lock
+1416289
+-- .pi-branch-extension-loaded
+999999
+-- .branch-latch
+1	provider error
+-- .branch-silence-alarm (absent = no false alarm)
+(absent)
+
+== current session latch: marker pid matches .lock, so it IS a fault ==
+-- .lock
+1417073
+-- .pi-branch-extension-loaded
+1417073
+-- .branch-latch
+1	provider error
+-- .branch-silence-alarm
+1795184195
+
+-- note filed:
+id=1795184195-BNyrMl
+at=2026-11-20T14:16:35Z
+source=watch
+--
+supervision branch SILENT - main took this wake while the branch stayed silent; last branch work 29919737 min ago; branch latch: provider error, 29919737 min. Nothing else reports this: state/.branch-latch names the reason, and the branch re-probes on its own cooldown.

@@ -1,0 +1,6 @@
+ok - every main-only check class still reaches main, never the supervision branch
+ok - a dead branch files exactly one throttled silence note and stays quiet when a decline is ordinary
+ok - a dead session's latch is not this session's fault, but a current latch still alarms
+ok - a hung silence note is bounded and a later wake still files the alarm
+ok - a dead branch files exactly one throttled silence note and stays quiet when a decline is ordinary
+ok - a hung silence note is bounded and a later wake still files the alarm
