@@ -57,17 +57,26 @@ make_ledger() {
   "
 }
 
-# msg <ledger> <campaign> <status> <sqlite age modifier> <shape T|space|unsent> [tagged] [attachments]
+# msg <ledger> <campaign> <status> <sqlite age modifier> <shape T|space|unsent|empty|none> [tagged] [attachments]
 # 'unsent' leaves sent_at empty, which the live table does on 1,407 sent rows.
+# 'empty' sets sent_at to the empty string; 'none' leaves both timestamps unset.
+# 'tagged' is 1 for a proof tag at the read time, 0 for none, and 'empty' for
+# a proof_tagged_at that was written as an empty string.
 msg() {
-  local db=$1 campaign=$2 status=$3 age=$4 shape=$5 tagged=${6:-0} attachments=${7:-0} fmt sent tag=NULL
+  local db=$1 campaign=$2 status=$3 age=$4 shape=$5 tagged=${6:-0} attachments=${7:-0} fmt sent tag=NULL created
   case "$shape" in
-    T) fmt='%Y-%m-%dT%H:%M:%SZ'; sent="strftime('$fmt', 'now', '$age')" ;;
-    space) fmt='%Y-%m-%d %H:%M:%S'; sent="strftime('$fmt', 'now', '$age')" ;;
-    unsent) fmt='%Y-%m-%dT%H:%M:%SZ'; sent=NULL ;;
+    T) fmt='%Y-%m-%dT%H:%M:%SZ'; sent="strftime('$fmt', 'now', '$age')"; created="strftime('$fmt', 'now', '$age')" ;;
+    space) fmt='%Y-%m-%d %H:%M:%S'; sent="strftime('$fmt', 'now', '$age')"; created="strftime('$fmt', 'now', '$age')" ;;
+    unsent) fmt='%Y-%m-%dT%H:%M:%SZ'; sent=NULL; created="strftime('$fmt', 'now', '$age')" ;;
+    empty) fmt='%Y-%m-%dT%H:%M:%SZ'; sent="''"; created="strftime('$fmt', 'now', '$age')" ;;
+    none) sent=NULL; created=NULL ;;
   esac
-  [ "$tagged" = 0 ] || tag="strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
-  sqlite3 "$db" "INSERT INTO verify_messages (campaign, status, created_at, sent_at, proof_tagged_at, proof_attachments) VALUES ('$campaign', '$status', strftime('$fmt', 'now', '$age'), $sent, $tag, $attachments);"
+  case "$tagged" in
+    0) tag=NULL ;;
+    empty) tag="''" ;;
+    *) tag="strftime('%Y-%m-%dT%H:%M:%SZ', 'now')" ;;
+  esac
+  sqlite3 "$db" "INSERT INTO verify_messages (campaign, status, created_at, sent_at, proof_tagged_at, proof_attachments) VALUES ('$campaign', '$status', $created, $sent, $tag, $attachments);"
 }
 
 # dec <ledger> <request> <decision> <mode> <sqlite age modifier>
@@ -322,6 +331,46 @@ test_a_timestamp_in_an_unknown_shape_is_unmeasured() {
   pass "a row whose time cannot be placed in a window makes its source UNMEASURED rather than silently missed"
 }
 
+test_null_or_empty_values_land_on_a_named_line_never_nowhere() {
+  local db="$TMP_ROOT/nulls.sqlite3" l
+  make_ledger "$db"
+  # sent_at is the empty string: the row's time is its created_at, so the ask
+  # is placed in its window instead of being called unplaceable.
+  msg "$db" proof-need-ask sent '-10 minutes' empty
+  # proof_tagged_at is the empty string: that is no proof tag at all, so the
+  # ask sent in the window has not come back with proof.
+  msg "$db" proof-need-ask sent '-20 minutes' T empty
+  # campaign NULL: still a sent message, so it is named with the other
+  # campaigns rather than vanishing from every line.
+  sqlite3 "$db" "INSERT INTO verify_messages (campaign, status, created_at, sent_at) VALUES (NULL, 'sent', strftime('%Y-%m-%d %H:%M:%S', 'now', '-30 minutes'), NULL);"
+  # An apply-mode row whose decision is NULL, and a row whose mode is NULL:
+  # neither wrote a decision, so both are named on the excluded line.
+  sqlite3 "$db" "INSERT INTO decisions (request_id, decision, mode, decided_at) VALUES ('r10', NULL, 'apply', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-10 minutes'));"
+  sqlite3 "$db" "INSERT INTO decisions (request_id, decision, mode, decided_at) VALUES ('r11', 'approve', NULL, strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-11 minutes'));"
+  report "$db"
+  expect_code 0 "$RC" "a ledger with NULL and empty values"
+
+  assert_contains "$(line 'proof asks sent, window last 60 min')" '= 2 per hour (proof-need-ask=2 claim-proof-ask=0 uvn-new-rows=0;' "an empty sent_at falls back to created_at and the ask is counted"
+  l=$(line 'other campaigns sent')
+  assert_contains "$l" '= null=1' "a sent row with no campaign is named with the other campaigns"
+  assert_contains "$(line 'ask to proof return rate')" '= 0.00% (0 of 2 proof asks sent in the window carry proof;' "an empty proof tag is not proof of a return"
+  assert_contains "$(line 'decisions written, window last 60 min')" '= 0 per hour on 0 distinct requests' "a row with no decision or no mode is not counted as a decision"
+  assert_contains "$(line 'EXCLUDED from the decision line, window last 60 min')" '= 2 rows (decision-none=1 mode-none=1)' "a row with a NULL decision and a row with a NULL mode are both named, not dropped"
+
+  # Both timestamps absent: nothing can place the row in a window, so the
+  # source refuses rather than dropping it.
+  db="$TMP_ROOT/nulls-unplaceable.sqlite3"
+  make_ledger "$db"
+  msg "$db" proof-need-ask sent '-10 minutes' T
+  sqlite3 "$db" "INSERT INTO verify_messages (campaign, status, created_at, sent_at) VALUES ('proof-need-ask', 'sent', NULL, NULL);"
+  sqlite3 "$db" "INSERT INTO verify_messages (campaign, status, created_at, sent_at) VALUES ('proof-need-ask', 'sent', '', '');"
+  report "$db"
+  expect_code 1 "$RC" "a sent row with neither timestamp"
+  assert_contains "$OUT" '- proof asks and return rate (2 sent rows carry a timestamp in neither known shape' "a sent row with no time at all makes the source UNMEASURED, never silently dropped"
+  assert_no_number_for 'proof asks' "a sent row with no timestamp"
+  pass "NULL and empty timestamps, campaigns, decisions, and modes are placed on a named line or refuse the source, never counted nowhere"
+}
+
 test_no_host_is_unmeasured_never_a_built_in_guess() {
   : > "$TMP_ROOT/nohost.calls"
   OUT=$(env -u FM_VERIF_SCALE_HOST -u FM_VERIF_SCALE_JUMP FM_CONFIG_OVERRIDE="$TMP_ROOT/no-config" \
@@ -383,6 +432,7 @@ test_a_source_that_does_not_answer_in_time_is_unmeasured
 test_an_unreadable_core_answer_is_unmeasured
 test_a_rate_over_zero_asks_is_unmeasured_not_zero_percent
 test_a_timestamp_in_an_unknown_shape_is_unmeasured
+test_null_or_empty_values_land_on_a_named_line_never_nowhere
 test_no_host_is_unmeasured_never_a_built_in_guess
 test_the_config_file_supplies_the_host_and_the_environment_wins
 test_help_and_usage_errors

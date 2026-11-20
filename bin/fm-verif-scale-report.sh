@@ -232,11 +232,11 @@ per_hour() {  # <count> <hours>
 # --- the message ledger: proof asks and the return rate -----------------------
 
 ASK_NAMES="'proof-need-ask', 'claim-proof-ask', 'uvn-new-rows'"
-SENT_AT="replace(substr(coalesce(sent_at, created_at), 1, 19), 'T', ' ')"
+SENT_AT="replace(substr(coalesce(nullif(sent_at, ''), created_at), 1, 19), 'T', ' ')"
 IS_ASK="status = 'sent' AND campaign IN ($ASK_NAMES)"
 IS_EXCLUDED="status = 'sent' AND (campaign LIKE 'uvn-reminder-%' OR campaign IN ('uvn-status', 'claim-status'))"
-IS_OTHER="status = 'sent' AND campaign NOT IN ($ASK_NAMES, 'uvn-status', 'claim-status') AND campaign NOT LIKE 'uvn-reminder-%'"
-HAS_PROOF="(proof_tagged_at IS NOT NULL OR coalesce(proof_attachments, 0) > 0)"
+IS_OTHER="status = 'sent' AND coalesce(campaign NOT IN ($ASK_NAMES, 'uvn-status', 'claim-status') AND campaign NOT LIKE 'uvn-reminder-%', 1)"
+HAS_PROOF="(nullif(proof_tagged_at, '') IS NOT NULL OR coalesce(proof_attachments, 0) > 0)"
 STAMP_GLOB='[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
 
 q_asks() {  # <sqlite modifier>
@@ -249,12 +249,12 @@ q_excluded() {  # <sqlite modifier>
 
 MSG_SOURCE="verify_messages in $HOST:$LEDGER"
 Q_MSG_NOW="SELECT datetime('now')"
-Q_MSG_SHAPE="SELECT count(*) FROM verify_messages WHERE status = 'sent' AND $SENT_AT NOT GLOB '$STAMP_GLOB'"
+Q_MSG_SHAPE="SELECT count(*) FROM verify_messages WHERE status = 'sent' AND coalesce($SENT_AT NOT GLOB '$STAMP_GLOB', 1)"
 Q_ASKS_1H=$(q_asks '-1 hour')
 Q_EXCL_1H=$(q_excluded '-1 hour')
 Q_ASKS_24H=$(q_asks '-24 hours')
 Q_EXCL_24H=$(q_excluded '-24 hours')
-Q_OTHER_24H="SELECT coalesce(group_concat(campaign || '=' || n, ' '), 'none') FROM (SELECT campaign, count(*) AS n FROM verify_messages WHERE $IS_OTHER AND $SENT_AT >= datetime('now', '-24 hours') GROUP BY campaign ORDER BY campaign)"
+Q_OTHER_24H="SELECT coalesce(group_concat(coalesce(campaign, 'null') || '=' || n, ' '), 'none') FROM (SELECT campaign, count(*) AS n FROM verify_messages WHERE $IS_OTHER AND $SENT_AT >= datetime('now', '-24 hours') GROUP BY campaign ORDER BY campaign)"
 Q_RETURN_7D="SELECT count(*), coalesce(sum($HAS_PROOF), 0) FROM verify_messages WHERE $IS_ASK AND $SENT_AT >= datetime('now', '-7 days')"
 Q_RETURN_DAYS="SELECT coalesce(group_concat(d || ' ' || p || '/' || n || ' ' || round(100.0 * p / n, 1) || '%', ', '), 'none') FROM (SELECT substr($SENT_AT, 1, 10) AS d, count(*) AS n, sum($HAS_PROOF) AS p FROM verify_messages WHERE $IS_ASK AND $SENT_AT >= datetime('now', '-7 days') GROUP BY d ORDER BY d)"
 
@@ -348,7 +348,7 @@ q_decisions() {  # <sqlite modifier>
 }
 
 q_not_decisions() {  # <sqlite modifier>
-  printf "SELECT coalesce(sum(n), 0), coalesce(group_concat(k || '=' || n, ' '), 'none') FROM (SELECT CASE WHEN mode = 'apply' THEN decision ELSE 'mode-' || mode END AS k, count(*) AS n FROM decisions WHERE NOT (%s) AND %s GROUP BY k ORDER BY k)" "$IS_DECISION" "$(dec_since "$1")"
+  printf "SELECT coalesce(sum(n), 0), coalesce(group_concat(k || '=' || n, ' '), 'none') FROM (SELECT CASE WHEN coalesce(mode = 'apply', 0) THEN coalesce(decision, 'decision-none') ELSE 'mode-' || coalesce(mode, 'none') END AS k, count(*) AS n FROM decisions WHERE NOT coalesce(%s, 0) AND %s GROUP BY k ORDER BY k)" "$IS_DECISION" "$(dec_since "$1")"
 }
 
 Q_DEC_NOW="SELECT datetime('now')"
@@ -415,7 +415,7 @@ report_decisions() {
 # --- core: queue depth ----------------------------------------------------------
 
 QUEUE_SOURCE="core credit_requests through $HOST:$TRINO"
-Q_QUEUE="SELECT count(*), count_if(deletedat IS NULL), format_datetime(current_timestamp AT TIME ZONE 'UTC', 'yyyy-MM-dd HH:mm:ss') FROM postgresql_core.public.credit_requests WHERE status NOT IN ('approved', 'rejected')"
+Q_QUEUE="SELECT count(*), count_if(deletedat IS NULL), format_datetime(current_timestamp AT TIME ZONE 'UTC', 'yyyy-MM-dd HH:mm:ss') FROM postgresql_core.public.credit_requests WHERE (status IS NULL OR status NOT IN ('approved', 'rejected'))"
 
 report_queue() {
   local out rc rows gross net now
