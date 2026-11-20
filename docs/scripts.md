@@ -104,6 +104,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew, falling back to whether an agent process is alive in its worktree, and report a status log with no task record as unowned |
 | `fm-agent-proc-lib.sh`   | Single owner of agent liveness read from the OS process table: the agent processes in a task's worktree, the alive/dead/unknown rule, and the processes holding a file open for writing |
 | `fm-decisions-sweep.sh`  | List the open decision records whose task finished, shipped, or died and then went quiet (dry run by default), and close them with `--apply` |
+| `fm-pause-lib.sh`        | Single owner of the machine-checkable pause declaration: its `predicate=`/`expires=` fields, the writer, the hard-bounded predicate verdicts, and the expiry clock |
+| `fm-pause-sweep.sh`      | Report the pauses whose predicate no longer holds, whose predicate cannot be read, or whose expiry passed, plus the pauses that declare no checkable evidence at all (writes and stops nothing) |
 | `fm-nm-run-lib.sh`       | Single owner of shared no-mistakes run-attribution primitives and rules             |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-timeout-lib.sh`      | Single owner of hard-bounded command execution and its fallback watchdog |

@@ -64,6 +64,14 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
+# The machine-checkable pause declaration (predicate=/expires=). A pause that
+# carries its own evidence is the third declared-wait admission below, and its
+# field shape is owned there, so this library sources it rather than re-deriving
+# a field syntax of its own.
+# shellcheck source=bin/fm-pause-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_CLASSIFY_LIB_DIR/fm-pause-lib.sh"
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
@@ -90,17 +98,25 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# A pause is a declared wait only when it names when it ends: its note must carry
-# `until HH:MMZ` (or `until YYYY-MM-DDTHH:MMZ`, `until YYYY-MM-DD HH:MMZ`, with
-# UTC accepted for Z), the time the lane will look again or has armed a wake for.
-# A `paused:` line without one waits for a wake nobody set, so the open-decision
+# A pause is a declared wait when it names when it ends. Two shapes qualify on
+# their own. The first is `until HH:MMZ` (`until YYYY-MM-DDTHH:MMZ`,
+# `until YYYY-MM-DD HH:MMZ`, with UTC accepted for Z), the time the lane will
+# look again or has armed a wake for. The second is the machine-checkable
+# declaration `predicate=<shell command> expires=<ISO8601 UTC>`
+# (bin/fm-pause-lib.sh owns that field shape and its predicates): a pause with
+# its own evidence and its own expiry needs no separate wake, because a reader
+# can settle it.
+# A `paused:` line with neither waits for a wake nobody set, so the open-decision
 # fold treats it as `blocked:` (guard G15): it opens a red OPEN DECISIONS entry
 # under its key that every wake drain prints, noted "paused without a wake
 # time", until the lane's next line for that key that is not itself a
 # time-less pause, or an ordinary resolved answer, closes it. The watcher and
 # away-mode daemon still treat it as a declared pause for wedge suppression;
 # the drain is where it can no longer wait silently.
-FM_CLASSIFY_PAUSE_UNTIL_RE='[Uu][Nn][Tt][Ii][Ll][[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2}[T[:space:]])?[0-2][0-9]:[0-5][0-9][[:space:]]*(Z|UTC)'
+# The time group and the optional date group are captured because
+# status_pause_wait_label below renders the SAME match as the wait's own deadline;
+# one pattern keeps the recognition and the rendering from drifting apart.
+FM_CLASSIFY_PAUSE_UNTIL_RE='[Uu][Nn][Tt][Ii][Ll][[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2}[T[:space:]])?([0-2][0-9]:[0-5][0-9])[[:space:]]*(Z|UTC)'
 FM_CLASSIFY_TIMELESS_PAUSE_PREFIX='paused without a wake time (needs until HH:MMZ): '
 
 # One declared wait is exempt from needing a wake time: firstmate's own gateway
@@ -108,7 +124,7 @@ FM_CLASSIFY_TIMELESS_PAUSE_PREFIX='paused without a wake time (needs until HH:MM
 # no wake time, because the wait ends when the account pool recovers and the
 # ladder's own `resolved [key=gateway-503]` closes it. docs/gateway-keepalive.md
 # owns that shape, so that exact key stays a declared wait; every other
-# time-less pause still folds as blocked.
+# time-less pause that carries no predicate=/expires= pair still folds as blocked.
 FM_CLASSIFY_PAUSED_DECLARED_WAIT_KEY='gateway-503'
 
 # Bounded re-surface cadence for a declared pause or a verified captain hold.
@@ -319,6 +335,69 @@ status_is_paused() {  # <status-line>
 # only, so the per-line folds stay fork-free.
 status_pause_has_wake_time() {  # <status-line-or-note>
   [[ "$1" =~ $FM_CLASSIFY_PAUSE_UNTIL_RE ]]
+}
+
+# Render the deadline a pause declares as `<deadline> (Nm remaining)`, the label
+# a supervisor prints so a declared wait shows its own deadline instead of a
+# bare age that reads the same whether the wait ends in a minute or never. Both
+# declaration shapes are labelled: `until HH:MMZ` (with or without a date) and
+# the machine-checkable `predicate=... expires=<ISO8601>`.
+# Prints nothing when the line declares no deadline, so a caller can tell a
+# declared wait from an unendorsed pause without a second parse; when the clock
+# cannot be compared the bare deadline is printed rather than an invented
+# countdown. A dated deadline already behind us reads `(due now)`; an undated
+# `HH:MMZ` is anchored to the UTC day of the supplied clock and rolls to its next
+# occurrence when that time is already behind, so a wait crossing midnight keeps
+# its countdown instead of reading as already due. Builtins plus one date(1)
+# conversion, no per-line subshells beyond it.
+status_pause_wait_label() {  # <status-line-or-note> [<now-epoch>]
+  local line=$1 now=${2:-} date_part time_part day deadline epoch diff mins days hours undated=no
+  [ -n "$line" ] || return 1
+  case "$now" in ''|*[!0-9]*) now=$(date -u +%s) ;; esac
+  if [[ "$line" =~ $FM_CLASSIFY_PAUSE_UNTIL_RE ]]; then
+    date_part=${BASH_REMATCH[1]}
+    time_part=${BASH_REMATCH[2]}
+    date_part=${date_part%%[[:space:]T]*}
+    if [ -n "$date_part" ]; then
+      deadline="${date_part}T${time_part}Z"
+      epoch=$(fm_pause_expires_epoch "${date_part}T${time_part}:00Z")
+    else
+      undated=yes
+      deadline="${time_part}Z"
+      day=$(date -u -d "@$now" +%Y-%m-%d 2>/dev/null || date -u -r "$now" +%Y-%m-%d 2>/dev/null) || day=
+      epoch=$(fm_pause_expires_epoch "${day}T${time_part}:00Z")
+      if [ -n "$epoch" ] && [ "$epoch" -lt "$now" ]; then
+        epoch=$(( epoch + 86400 ))
+      fi
+    fi
+  else
+    fm_pause_parse "$line" || return 1
+    fm_pause_has_predicate_and_expires "$line" || return 1
+    deadline=$FM_PAUSE_EXPIRES
+    epoch=$(fm_pause_expires_epoch "$deadline")
+  fi
+  if [ -z "$epoch" ]; then
+    printf '%s' "$deadline"
+    return 0
+  fi
+  diff=$(( epoch - now ))
+  if [ "$diff" -le 0 ]; then
+    if [ "$undated" = yes ]; then
+      printf '%s' "$deadline"
+    else
+      printf '%s (due now)' "$deadline"
+    fi
+    return 0
+  fi
+  # Round up: a wait with 40 seconds left is a minute away, never "0m".
+  mins=$(( (diff + 59) / 60 ))
+  if [ "$mins" -ge 1440 ]; then
+    days=$(( mins / 1440 ))
+    hours=$(( (mins % 1440) / 60 ))
+    printf '%s (%dd %dh remaining)' "$deadline" "$days" "$hours"
+    return 0
+  fi
+  printf '%s (%dm remaining)' "$deadline" "$mins"
 }
 
 
@@ -687,12 +766,14 @@ _fm_fold_line_state() {  # <open-set> <status-line> <resolve-verb> <held-verb>
   note=$_FM_STATUS_NOTE
   _fm_decision_key_transition_allowed "$key" "$note" || { _FM_FOLD_OPEN=$open; return 0; }
   _FM_FOLD_KEY=$key
-  # A time-less pause opens like blocked: (FM_CLASSIFY_PAUSE_UNTIL_RE), and the
-  # entry it opened closes on the key's next line that is not itself one. The one
-  # exception is the documented gateway keep-alive declaration, which names no
-  # wake time by design (docs/gateway-keepalive.md).
+  # A pause is a declared wait when its note names a wake time
+  # (FM_CLASSIFY_PAUSE_UNTIL_RE) or carries the machine-checkable
+  # predicate=/expires= pair. A time-less, evidence-less pause opens like
+  # blocked:, and the entry it opened closes on the key's next line that is not
+  # itself one. The exception is the documented gateway keep-alive declaration,
+  # which names no wake time by design (docs/gateway-keepalive.md).
   if [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]; then
-    if status_pause_has_wake_time "$note" || [ "$key" = "$FM_CLASSIFY_PAUSED_DECLARED_WAIT_KEY" ]; then
+    if status_pause_has_wake_time "$note" || [ "$key" = "$FM_CLASSIFY_PAUSED_DECLARED_WAIT_KEY" ] || fm_pause_has_predicate_and_expires "$note"; then
       verb=working
     else
       # A time-less pause is a weaker statement than the blocked: or

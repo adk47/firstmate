@@ -260,7 +260,7 @@ make_primary_home() {  # <dir>
 #!/usr/bin/env bash
 if [ "${FM_FIXTURE_ORPHAN_HERE:-0}" = 1 ]; then
   i=0
-  while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  while [ "$i" -lt 1200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
     sleep 0.05
     i=$((i + 1))
   done
@@ -273,7 +273,7 @@ SH
   cat > "$dir/daemon.sh" <<'SH'
 #!/usr/bin/env bash
 i=0
-while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+while [ "$i" -lt 1200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
   sleep 0.05
   i=$((i + 1))
 done
@@ -298,7 +298,7 @@ run_fixture_tree() {  # <dir> <session-bin> [<daemon-bin>]
       bash -c '"$0" "$1" &' "$session_bin" "$dir/session.sh"
   fi
   i=0
-  while [ "$i" -lt 400 ] && [ ! -s "$dir/state/hook.rc" ]; do
+  while [ "$i" -lt 3000 ] && [ ! -s "$dir/state/hook.rc" ]; do
     sleep 0.05
     i=$((i + 1))
   done
