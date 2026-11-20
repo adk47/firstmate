@@ -231,7 +231,7 @@ run_evidence() {
 }
 
 # repo_red <repo> <branch> <runs-json>: "; "-joined evidence for every workflow
-# whose newest push run is red, empty otherwise.
+# whose newest non-pull-request run is red, empty otherwise.
 repo_red() {
   local repo=$1 branch=$2 runs=$3 out='' name id status conclusion head created class
   while IFS=$FS read -r name id status conclusion head created; do

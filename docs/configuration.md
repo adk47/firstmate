@@ -780,7 +780,7 @@ FM_CI_HEALTH_TRAILER=route each red to the repo lane that owns it; fix-forward, 
 ```
 
 Arm the check once per home with `bin/fm-ci-health-check.sh arm`, which writes `state/ci-health.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
-Every API call is bounded at a third of `FM_CHECK_TIMEOUT`, between three and twenty seconds, and the poll abandons its remaining signals once half that timeout has passed, so a slow forge cannot hold the watcher's sweep.
+Every API call is bounded at a third of `FM_CHECK_TIMEOUT`, between three and twenty seconds, and the poll abandons its remaining signals once half that timeout has passed, at most 15 seconds, so a slow forge cannot hold the watcher's sweep.
 `bin/fm-ci-health-check.sh status` prints the last recorded verdict, `bin/fm-ci-health-check.sh classify <status> <conclusion>` prints the class the check would assign, and `bin/fm-ci-health-check.sh disarm` removes the shim, its trust binding, the throttle stamp `state/.ci-health.last`, and the verdict record `state/.ci-health.verdict`.
 
 ## Board loop (data/board.md)
