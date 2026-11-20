@@ -9,6 +9,8 @@
 #   fm-ci-health-check.sh classify-run <owner/repo> <run-id>
 #                                                       read one run live and print its class with its evidence
 #   fm-ci-health-check.sh status                        print the last recorded poll verdict (no network)
+#   fm-ci-health-check.sh read-workflow <owner/repo> <branch> <workflow-id> <per-page>
+#                                                       (internal) print the newest completed branch run of one workflow
 #   fm-ci-health-check.sh arm                           write state/ci-health.check.sh and bind its bytes
 #   fm-ci-health-check.sh disarm                        remove the shim, its trust binding, the stamp, and the record
 #   fm-ci-health-check.sh --help                        print this help
@@ -22,26 +24,33 @@
 # read, so the reader could not tell a genuine red from a misread in-progress
 # run. The same day main carried three real failures the check could not see
 # at all, because the scheduled smoke and the dispatched deploy that failed
-# were not push runs and it read only push runs. Three things fix that for
+# were not push runs and it read only push runs. And a single page of the
+# branch's runs, however long, hides a workflow that runs rarely behind the
+# ones that run often: H-DevOps has a hundred active workflows and its newest
+# hundred runs on main cover forty-four of them. Four things fix that for
 # good: every run answer goes through ONE classifier (bin/fm-ci-run-lib.sh),
-# every red names the run it read, and the poll reads every run on the branch
-# whatever started it.
+# every red names the run it read, the poll reads runs of every event, and it
+# reads them PER WORKFLOW, so no window can hide a red.
 #
 # THE SIGNALS, per watched repository:
-#   red      the newest run on the watched branch of some workflow, whatever
-#            event started it except a pull_request or pull_request_target run
-#            (GitHub keys those to the base branch, so they describe a pull
-#            request, not the branch tip), concluded red (failure or timed_out).
-#            The line names the workflow, the run id, the conclusion it read,
-#            the head commit, the run's creation time, and the exact `gh run
-#            view` that confirms it. A pending run (conclusion null: queued, in_progress,
-#            waiting, requested) is never red; a cancelled run is work that
-#            never ran, not work that broke, and is never red; an unknown
-#            conclusion is never red either, because a new GitHub state must
-#            not silently become "red". Two runs created in the same second
-#            are ordered by run id, so a same-second retry wins over the run
-#            it replaced. A red is not suppressed, delayed, or retried: while
-#            the newest run of a workflow stays red, every poll says so.
+#   red      for each active workflow, its newest COMPLETED run on the watched
+#            branch, whatever event started it except a pull_request or
+#            pull_request_target run (GitHub keys those to the base branch, so
+#            they describe a pull request, not the branch tip), concluded red:
+#            failure, timed_out, or startup_failure. The line names the
+#            workflow, the run id, the conclusion it read, the head commit, the
+#            run's creation time, and the exact `gh run view` that confirms it.
+#            A run that has not answered yet (conclusion null: queued,
+#            in_progress, waiting, requested) is never red and never chosen;
+#            the workflow's last answer stands until a newer one completes, so
+#            a standing failure cannot hide behind a run that is always in
+#            progress. A cancelled run is work that never ran, not work that
+#            broke, and is never red; an unknown conclusion is never red
+#            either, because a new GitHub state must not silently become
+#            "red". Two runs created in the same second are ordered by run
+#            id, so a same-second retry wins over the run it replaced. A red
+#            is not suppressed, delayed, or retried: while a workflow's newest
+#            completed run stays red, every poll says so.
 #   queued   more queued runs than the repository's bar.
 #   cadence  a scheduled workflow (FM_CI_HEALTH_SCHEDULED) has not succeeded
 #            inside its allowed age. Judged only when the workflow file
@@ -53,8 +62,13 @@
 # an unreadable answer is silent, never red. The poll self-throttles through
 # state/.ci-health.last (FM_CI_HEALTH_INTERVAL_SECS, default 900) and stands
 # down when the GitHub core rate budget is below FM_CI_HEALTH_RATE_FLOOR
-# (default 1500), so the shared token budget stays small (about two calls per
-# repository per poll).
+# (default 1500). A poll costs one call per active workflow plus two or three
+# per repository, about 460 for the default set (H-DevOps alone has about 400
+# active workflows), which four polls an hour keep well inside the floor. The
+# repositories are read concurrently and, within each, the per-workflow reads
+# run FM_CI_HEALTH_PARALLEL at a time, each one bounded and each one skipped
+# once the poll's deadline has passed, so the sweep finishes inside the
+# watcher's budget.
 #
 # CONFIGURATION. config/ci-health.env is optional, local, gitignored, parsed
 # line by line and never sourced; a value is the rest of its line, so a comment
@@ -67,7 +81,12 @@
 #                                (default: Muso-AI/H-DevOps:reconcile-prod-manifests.yaml:7200)
 #   FM_CI_HEALTH_INTERVAL_SECS   seconds between polls (default 900)
 #   FM_CI_HEALTH_RATE_FLOOR      stand down below this many remaining core calls (default 1500)
-#   FM_CI_HEALTH_PER_PAGE        runs read per repository, newest first (default 100, the API's most)
+#   FM_CI_HEALTH_PER_PAGE        completed runs read per workflow, newest first (default 10: enough
+#                                that a few pull-request-context runs cannot crowd out the branch's own)
+#   FM_CI_HEALTH_PARALLEL        per-workflow reads in flight at once, per repository, the
+#                                repositories themselves being read concurrently (default 32: the
+#                                default set, about 450 active workflows, then sweeps in about nine
+#                                seconds; each read is one short-lived gh process)
 #   FM_CI_HEALTH_TOKEN_ENV       an installer-managed env file to source for GH_TOKEN
 #                                (default ~/.config/muso/gh-app-token.env; "none" skips it)
 #   FM_CI_HEALTH_TRAILER         the routing reminder appended to a wake line
@@ -79,6 +98,7 @@
 set -u
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+SCRIPT_BIN="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 FM_HOME=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd -P)}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 CONFIG_DIR=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
@@ -103,16 +123,17 @@ REPOS_DEFAULT='Muso-AI/H-DevOps:main:150 Muso-AI/hydra:main:40 Muso-AI/core-back
 SCHEDULED_DEFAULT='Muso-AI/H-DevOps:reconcile-prod-manifests.yaml:7200'
 TRAILER_DEFAULT='route each red to the repo lane that owns it; fix-forward, never hand-apply'
 MAX_LINE=1500
-# Each API call is bounded on its own, and the poll abandons its remaining
-# signals once its budget is spent, so a slow or absent GitHub cannot hold the
-# watcher's whole sweep.
+# Each API call is bounded on its own, and the poll starts no new read once
+# its budget is spent, so a slow or absent GitHub cannot hold the watcher's
+# whole sweep: the budget plus one call's bound, plus a margin, fits inside the
+# watcher's timeout for the check.
 CHECK_TIMEOUT_SECS=${FM_CHECK_TIMEOUT:-30}
 case "$CHECK_TIMEOUT_SECS" in ''|*[!0-9]*) CHECK_TIMEOUT_SECS=30 ;; esac
 CALL_TIMEOUT_SECS=$((CHECK_TIMEOUT_SECS / 3))
 [ "$CALL_TIMEOUT_SECS" -ge 3 ] || CALL_TIMEOUT_SECS=3
 [ "$CALL_TIMEOUT_SECS" -le 20 ] || CALL_TIMEOUT_SECS=20
-POLL_BUDGET_SECS=$((CHECK_TIMEOUT_SECS / 2))
-[ "$POLL_BUDGET_SECS" -le 15 ] || POLL_BUDGET_SECS=15
+POLL_BUDGET_SECS=$((CHECK_TIMEOUT_SECS - CALL_TIMEOUT_SECS - 2))
+[ "$POLL_BUDGET_SECS" -le 18 ] || POLL_BUDGET_SECS=18
 [ "$POLL_BUDGET_SECS" -ge 3 ] || POLL_BUDGET_SECS=3
 POLL_START=0
 
@@ -207,19 +228,64 @@ gh_api() {
 # and the head commit would be read as the conclusion.
 FS=$'\x1f'
 
-# newest_runs <runs-json>: one row per workflow name for the newest run of that
-# name: name, id, status, conclusion, short head, created. Pull-request-context
-# runs are not runs of the branch, so they never take part.
-newest_runs() {
+# newest_completed_run <runs-json>: one row for the newest completed run in
+# the answer: name, id, status, conclusion, short head, created; nothing when
+# the answer holds no such run. Pull-request-context runs are not runs of the
+# branch, so they never take part, and a run that has not completed has not
+# answered, so it never takes part either.
+newest_completed_run() {
   printf '%s\n' "$1" | jq -r '
-    [.workflow_runs // []
-     | map(select((.event // "") as $e
-         | $e != "pull_request" and $e != "pull_request_target"))
-     | group_by(.name)[] | max_by([.created_at, .id])]
-    | sort_by(.name)[]
+    (.workflow_runs // [])
+    | map(select((.event // "") as $e
+        | $e != "pull_request" and $e != "pull_request_target"))
+    | map(select((.status // "") == "completed"))
+    | if length == 0 then empty else max_by([.created_at, .id]) end
     | [ (.name // ""), (.id // "" | tostring), (.status // ""), (.conclusion // ""),
         ((.head_sha // "")[0:9]), (.created_at // "") ]
     | map(gsub("[\u001f\r\n]"; " ")) | join("\u001f")' 2>/dev/null
+}
+
+# active_workflow_ids <repo>: the ids of the repository's active workflows,
+# one per line, read a page at a time; a page that cannot be read ends the
+# list (and the caller is silent for what it did not see, never red).
+active_workflow_ids() {
+  local repo=$1 page=1 answer count
+  while [ "$page" -le 5 ]; do
+    poll_has_budget || return 0
+    answer=$(gh_api "repos/$repo/actions/workflows?per_page=100&page=$page") || return 0
+    printf '%s\n' "$answer" | jq -r '.workflows // [] | map(select((.state // "") == "active")) | .[].id' 2>/dev/null
+    count=$(printf '%s\n' "$answer" | jq -r '.workflows // [] | length' 2>/dev/null)
+    case "$count" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$count" -ge 100 ] || return 0
+    page=$((page + 1))
+  done
+}
+
+# The worker behind `read-workflow`: one bounded read of one workflow's newest
+# completed runs on the branch, printed as a row, or nothing. It is run as a
+# separate process so a repository's workflows can be read several at a time,
+# and it skips the read when the poll's deadline (FM_CI_HEALTH_DEADLINE, an
+# epoch) has already passed.
+action_read_workflow() {
+  [ "$#" -eq 4 ] || usage
+  local repo=$1 branch=$2 wf=$3 per_page=$4 deadline runs
+  deadline=${FM_CI_HEALTH_DEADLINE:-}
+  case "$deadline" in
+    ''|*[!0-9]*) ;;
+    *) [ "$(date -u +%s)" -lt "$deadline" ] || return 0 ;;
+  esac
+  runs=$(gh_api "repos/$repo/actions/workflows/$wf/runs?branch=$branch&status=completed&per_page=$per_page") || return 0
+  newest_completed_run "$runs"
+}
+
+# workflow_rows <repo> <branch> <per-page> <parallel>: one row per active
+# workflow that has a completed run on the branch, read in parallel.
+workflow_rows() {
+  local repo=$1 branch=$2 per_page=$3 parallel=$4 ids
+  ids=$(active_workflow_ids "$repo")
+  [ -n "$ids" ] || return 0
+  printf '%s\n' "$ids" | FM_CI_HEALTH_DEADLINE=$((POLL_EPOCH_START + POLL_BUDGET_SECS)) \
+    xargs -P "$parallel" -I '{}' "$SCRIPT_BIN" read-workflow "$repo" "$branch" '{}' "$per_page" 2>/dev/null
 }
 
 # run_evidence <repo> <name> <id> <status> <conclusion> <head> <created>: the
@@ -230,17 +296,18 @@ run_evidence() {
     "$name" "$id" "${conclusion:-null}" "${status:-?}" "${head:-?}" "${created:-?}" "$id" "$repo"
 }
 
-# repo_red <repo> <branch> <runs-json>: "; "-joined evidence for every workflow
-# whose newest non-pull-request run is red, empty otherwise.
+# repo_red <repo> <branch> <rows>: "; "-joined evidence, in workflow-name
+# order, for every workflow whose newest completed non-pull-request run on the
+# branch is red, empty otherwise.
 repo_red() {
-  local repo=$1 branch=$2 runs=$3 out='' name id status conclusion head created class
+  local repo=$1 branch=$2 rows=$3 out='' name id status conclusion head created class
   while IFS=$FS read -r name id status conclusion head created; do
     [ -n "$id" ] || continue
     class=$(fm_ci_run_class "$status" "$conclusion")
     [ "$class" = red ] || continue
     out="${out}${out:+; }$(run_evidence "$repo" "$name" "$id" "$status" "$conclusion" "$head" "$created")"
   done <<EOF
-$(newest_runs "$runs")
+$(printf '%s\n' "$rows" | sort -t "$FS" -k1,1)
 EOF
   [ -z "$out" ] || printf '%s %s red: %s' "$repo" "$branch" "$out"
 }
@@ -271,10 +338,35 @@ record_verdict() {  # <now> <line-or-empty>
 
 poll_has_budget() { [ $((SECONDS - POLL_START)) -lt "$POLL_BUDGET_SECS" ]; }
 
+# repo_job <spec> <per-page> <parallel>: one repository's queued and red
+# findings, "; "-joined, for a spec of the form owner/repo[:branch[:bar]].
+repo_job() {
+  local spec=$1 per_page=$2 parallel=$3 repo branch=main bar='' queued rows part out=''
+  repo=${spec%%:*}
+  case "$spec" in
+    *:*:*) bar=${spec##*:}; branch=${spec#*:}; branch=${branch%%:*} ;;
+    *:*) branch=${spec#*:} ;;
+  esac
+  [ -n "$branch" ] || branch=main
+  case "$bar" in *[!0-9]*) bar='' ;; esac
+  poll_has_budget || return 0
+  if [ -n "$bar" ]; then
+    queued=$(gh_api "repos/$repo/actions/runs?status=queued&per_page=1" | jq -r '.total_count // 0' 2>/dev/null)
+    case "$queued" in ''|*[!0-9]*) queued=0 ;; esac
+    [ "$queued" -le "$bar" ] || out="$repo queued=$queued (>$bar)"
+  fi
+  poll_has_budget || { printf '%s' "$out"; return 0; }
+  rows=$(workflow_rows "$repo" "$branch" "$per_page" "$parallel")
+  part=$(repo_red "$repo" "$branch" "$rows")
+  [ -z "$part" ] || out="${out}${out:+; }$part"
+  printf '%s' "$out"
+}
+
 action_check() {
-  local now interval floor per_page rem spec repo branch bar queued runs line='' part msg='' trailer
+  local now interval floor per_page parallel rem spec line='' part msg='' trailer
   now=$(now_epoch)
   POLL_START=$SECONDS
+  POLL_EPOCH_START=$(date -u +%s)
   interval=$(conf_int FM_CI_HEALTH_INTERVAL_SECS 900)
   if [ -f "$STAMP" ]; then
     local last
@@ -288,38 +380,34 @@ action_check() {
   printf '%s\n' "$now" > "$STAMP" 2>/dev/null || return 0
   load_token_env
   floor=$(conf_int FM_CI_HEALTH_RATE_FLOOR 1500)
-  per_page=$(conf_int FM_CI_HEALTH_PER_PAGE 100)
+  per_page=$(conf_int FM_CI_HEALTH_PER_PAGE 10)
+  parallel=$(conf_int FM_CI_HEALTH_PARALLEL 32)
+  [ "$parallel" -ge 1 ] || parallel=1
   rem=$(gh_api rate_limit | jq -r '.resources.core.remaining // 0' 2>/dev/null)
   case "$rem" in ''|*[!0-9]*) rem=0 ;; esac
   if [ "$rem" -lt "$floor" ]; then
     record_verdict "$now" "stood down: $rem core calls remaining (< $floor)"
     return 0
   fi
+  # Each repository is read as its own job, writing its queued and red
+  # findings to one scratch file, so the small repositories' round trips
+  # overlap the big one's sweep; the findings are assembled in configured
+  # order once every job has returned or given up at the deadline.
+  local scratch i=0 specs=()
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/fm-ci-health.XXXXXX") || return 0
   for spec in $(conf FM_CI_HEALTH_REPOS "$REPOS_DEFAULT"); do
-    repo=${spec%%:*}
-    branch=main
-    bar=''
-    case "$spec" in
-      *:*:*) bar=${spec##*:}; branch=${spec#*:}; branch=${branch%%:*} ;;
-      *:*) branch=${spec#*:} ;;
-    esac
-    [ -n "$branch" ] || branch=main
-    poll_has_budget || break
-    if [ -n "$bar" ]; then
-      case "$bar" in
-        *[!0-9]*) bar='' ;;
-      esac
-    fi
-    if [ -n "$bar" ]; then
-      queued=$(gh_api "repos/$repo/actions/runs?status=queued&per_page=1" | jq -r '.total_count // 0' 2>/dev/null)
-      case "$queued" in ''|*[!0-9]*) queued=0 ;; esac
-      [ "$queued" -le "$bar" ] || msg="${msg}${msg:+; }$repo queued=$queued (>$bar)"
-    fi
-    poll_has_budget || break
-    runs=$(gh_api "repos/$repo/actions/runs?branch=$branch&per_page=$per_page") || continue
-    part=$(repo_red "$repo" "$branch" "$runs")
-    [ -z "$part" ] || msg="${msg}${msg:+; }$part"
+    specs+=("$spec")
+    repo_job "$spec" "$per_page" "$parallel" > "$scratch/$i" 2>/dev/null &
+    i=$((i + 1))
   done
+  wait
+  i=0
+  for spec in "${specs[@]}"; do
+    part=$(cat "$scratch/$i" 2>/dev/null)
+    [ -z "$part" ] || msg="${msg}${msg:+; }$part"
+    i=$((i + 1))
+  done
+  rm -rf "$scratch"
   for spec in $(conf FM_CI_HEALTH_SCHEDULED "$SCHEDULED_DEFAULT"); do
     poll_has_budget || break
     repo=${spec%%:*}
@@ -409,6 +497,7 @@ case "${1:-check}" in
   check) action_check ;;
   classify) shift; action_classify "$@" ;;
   classify-run) shift; action_classify_run "$@" ;;
+  read-workflow) shift; action_read_workflow "$@" ;;
   status) action_status ;;
   arm) action_arm ;;
   disarm) action_disarm ;;

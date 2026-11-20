@@ -20,7 +20,10 @@
 # because GitHub leaves the conclusion null until the run has completed and a
 # completed run with no conclusion is a state this code cannot vouch for.
 #
-#   red        failure, timed_out: the run ran and did not pass.
+#   red        failure, timed_out: the run ran and did not pass; and
+#              startup_failure: the workflow tried to start and could not,
+#              which is the one failure a reader can least afford to miss,
+#              because a workflow that never starts produces no other signal.
 #   green      success, plus skipped and neutral: the run ended without failing.
 #   pending    an empty or null conclusion: the run has not answered yet,
 #              whatever its status says (queued, in_progress, waiting,
@@ -28,8 +31,8 @@
 #   cancelled  cancelled: the run was stopped before it answered, by a newer
 #              push, a concurrency group, or a person. Work that never ran is
 #              not work that broke, so cancelled never pages.
-#   unknown    any other string, including stale, action_required,
-#              startup_failure, and whatever GitHub adds next. Unknown never
+#   unknown    any other string, including stale, action_required, and
+#              whatever GitHub adds next. Unknown never
 #              pages: a new upstream state must not silently become "red".
 #
 # Only red pages.
@@ -50,7 +53,7 @@ fm_ci_run_class() {
   local conclusion
   conclusion=$(fm_ci_run_normalize "${2:-}")
   case "$conclusion" in
-    failure|timed_out) printf 'red\n' ;;
+    failure|timed_out|startup_failure) printf 'red\n' ;;
     success|skipped|neutral) printf 'green\n' ;;
     ''|null) printf 'pending\n' ;;
     cancelled) printf 'cancelled\n' ;;
