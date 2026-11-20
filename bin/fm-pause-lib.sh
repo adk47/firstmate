@@ -45,11 +45,9 @@
 # writes a status log except the caller's own fm_pause_record call, and nothing
 # here stops a lane.
 
-# The predicate must be the last field before expires=; these are the two markers
-# every reader looks for. Builtins-only, because the per-line fold calls the
-# admission test below on a status log of ordinary width.
-FM_PAUSE_PREDICATE_RE='predicate=[^[:space:]]'
-FM_PAUSE_EXPIRES_RE='expires=[0-9][0-9][0-9][0-9]-'
+# The predicate must be the last field before expires=; this is the one shape
+# the reader below parses, and builtins-only keeps the per-line fold fork-free.
+FM_PAUSE_DECLARATION_RE='predicate=[^[:space:]].*expires=[0-9][0-9][0-9][0-9]-'
 
 # The hard bound on one predicate run. A predicate is a shell command a crew
 # wrote by hand, so it can block on anything; a tick that waits on it would wedge
@@ -85,7 +83,7 @@ _fm_pause_trim() {  # <text>
 # 0 when the line (or note) carries both fields of the predicate admission.
 # Builtins only, so the status fold stays fork-free.
 fm_pause_has_predicate_and_expires() {  # <status-line-or-note>
-  [[ "$1" =~ $FM_PAUSE_PREDICATE_RE ]] && [[ "$1" =~ $FM_PAUSE_EXPIRES_RE ]]
+  [[ "$1" =~ $FM_PAUSE_DECLARATION_RE ]]
 }
 
 # 0 when the line's leading verb is the pause verb. Classifier owns the verb, so

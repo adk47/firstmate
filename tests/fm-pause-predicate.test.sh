@@ -207,6 +207,15 @@ test_a_pause_without_evidence_is_still_not_a_declared_wait() {
     *) fail "a pause with a case-variant predicate= was treated as a declared wait: $open" ;;
   esac
 
+  # The predicate is the last field before expires=; a line with the fields the
+  # other way round is not admitted, so no admitted pause has unreadable fields.
+  printf 'paused [key=vendor]: waiting expires=2020-01-01T00:00:00Z predicate=exit 0\n' > "$statusf"
+  open=$(status_open_decisions "$statusf")
+  case "$open" in
+    *vendor*blocked*) ;;
+    *) fail "a pause with expires= before predicate= was treated as a declared wait: $open" ;;
+  esac
+
   # The two documented admissions keep their shape and need no fields.
   printf 'paused [key=vendor]: rate-limit reset until 05:30Z\n' > "$statusf"
   [ -z "$(status_open_decisions "$statusf")" ] \
