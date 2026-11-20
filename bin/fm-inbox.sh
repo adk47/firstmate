@@ -24,7 +24,19 @@
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
 #   fm-inbox.sh list  [--all]
-#   fm-inbox.sh drain [--ack <id>...] [--all]
+#   fm-inbox.sh drain [--all]
+#   fm-inbox.sh drain --filed <task-id>[,...] --ack <id>...
+#   fm-inbox.sh drain --no-actions --ack <id>...
+#
+# Acknowledging. `--ack` retires a record into its handled/ directory. A
+# captain note (the state/inbox/ queue) may only be retired by naming the backlog
+# rows its work became (`--filed`), or by stating on the record that it needs no
+# work (`--no-actions`); either is appended to the handled copy as a `filed=`
+# line, so "was this note laned?" is answerable from disk forever. The measured
+# failure behind that gate: of six captain notes, one became a backlog row and
+# five disappeared through a bare ack, because a bare ack is an `mv` that cannot
+# fail and asks nothing. Automated notes keep the bare ack - a polling record is
+# telemetry, not an assignment.
 #
 # Source classes. Every note is filed under the class of the thing that wrote it,
 # and the class decides which queue it lands in. Separating the two is what keeps
@@ -456,27 +468,112 @@ cmd_list() {
   print_auto_notes "$show_all"
 }
 
+# validate_filed <value>: the backlog row ids a note produced, comma-separated.
+# Rejects an empty, flag-shaped, malformed, or multi-line value, so a forgotten
+# id can never be recorded as an empty filing and a crafted value can never
+# forge a line in the handled copy.
+validate_filed() {
+  # Pin the collation so the character class below means the same thing under
+  # every locale a home might have configured.
+  local LC_ALL=C value=$1
+  case "$value" in
+    ''|-*) die "--filed needs at least one backlog task id" ;;
+  esac
+  case "$value" in
+    *,|,*|*,,*) die "--filed takes comma-separated backlog task ids, no empty entry: '$value'" ;;
+    *[!-A-Za-z0-9._,]*) die "--filed takes comma-separated backlog task ids: '$value'" ;;
+  esac
+}
+
+# stamp_record <queue-path> <stamp> <handled-path>: retire a captain record into
+# handled/ with its filing line appended. The stamped copy is written beside it
+# first and renamed into place, so a failed write can never leave a handled
+# record that does not answer the question, and a retry can never stack a second
+# line onto one that already does.
+stamp_record() {
+  local src=$1 stamp=$2 dest=$3 staged
+  staged="$dest.staging.$$"
+  # Private from its first byte: a record can carry the captain's own words.
+  # A leftover staging file from a killed run could carry an old, looser mode:
+  # umask only shapes a file being created, so remove it before writing.
+  ( umask 077; rm -f "$staged"; cat "$src" >"$staged" ) || { rm -f "$staged"; die "cannot stage $src"; }
+  # A file whose last byte is not a newline would glue the stamp onto its final
+  # body line, so the stamp would answer nothing and read as body text.
+  if [ -s "$src" ] && [ -n "$(tail -c 1 "$src")" ]; then
+    printf '\n' >>"$staged" || { rm -f "$staged"; die "cannot stage $src"; }
+  fi
+  printf '%s\n' "$stamp" >>"$staged" || { rm -f "$staged"; die "cannot stage $src"; }
+  mv "$staged" "$dest" || { rm -f "$staged"; die "cannot file $dest"; }
+  rm -f "$src" || die "cannot retire $src"
+}
+
 cmd_drain() {
   local show_all=0
   if [ "${1:-}" = "--all" ]; then
     show_all=1
     shift
   fi
+  # The gate's flags are read before --ack, so a caller writes flags first and
+  # ids last.
+  local filed="" no_actions=0 seen_filed=0 id dir acked stamp
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --filed)
+        [ "$#" -ge 2 ] || die "--filed needs at least one backlog task id"
+        [ "$seen_filed" -eq 0 ] || die "--filed given more than once; pass one comma-separated list"
+        seen_filed=1
+        filed=$2
+        validate_filed "$filed"
+        shift 2 ;;
+      --no-actions) no_actions=1; shift ;;
+      *) break ;;
+    esac
+  done
+  # One ack cannot both name rows and say the note produced none.
+  if [ -n "$filed" ] && [ "$no_actions" -eq 1 ]; then
+    die "--filed and --no-actions are exclusive: name the rows, or say the note needed no work"
+  fi
   if [ "${1:-}" = "--ack" ]; then
     shift
-    [ "$#" -gt 0 ] || die "usage: fm-inbox.sh drain --ack <id>..."
-    local id dir acked
+    [ "$#" -gt 0 ] || die "usage: fm-inbox.sh drain [--filed <task-id>[,...] | --no-actions] --ack <id>..."
+    # Every id's shape is checked before any record moves and before the gate
+    # reads a queue, so one bad id in a batch can never leave that batch
+    # half-applied, and a flag written after --ack is reported as an ordering
+    # mistake rather than as the captain's note refusing.
     for id in "$@"; do
       # An id is a bare file name in one of the two queues; a path would let a
-      # typo reach outside them.
+      # typo reach outside them, and a flag here means the caller put the ids
+      # before the flags this parser owns.
       case "$id" in
         ''|*/*|*..*) die "not a note id: $id" ;;
+        -*) die "flags go before --ack: '$id' is not a note id" ;;
       esac
+    done
+    for id in "$@"; do
+      # Everything in the captain queue was written by the captain or by the
+      # captain's own voice, so closing one must name what its work became.
+      if [ -f "$INBOX/$id.note" ] && [ -z "$filed" ] && [ "$no_actions" -eq 0 ]; then
+        die "note $id is a captain note: file its work first, then ack with --filed <task-id>[,...], or state --no-actions if it needs no work"
+      fi
+    done
+    stamp=""
+    if [ -n "$filed" ]; then
+      stamp="filed=$filed"
+    elif [ "$no_actions" -eq 1 ]; then
+      stamp="filed=none:--no-actions"
+    fi
+    for id in "$@"; do
       acked=0
       for dir in "$INBOX" "$INBOX_AUTO"; do
         [ -f "$dir/$id.note" ] || continue
-        mkdir -p "$dir/handled"
-        mv "$dir/$id.note" "$dir/handled/$id.note"
+        mkdir -p "$dir/handled" || die "cannot create $dir/handled"
+        # Only the captain's queue is stamped: an automated record is telemetry,
+        # so it retires exactly as it did before this gate existed.
+        if [ -n "$stamp" ] && [ "$dir" = "$INBOX" ]; then
+          stamp_record "$dir/$id.note" "$stamp" "$dir/handled/$id.note"
+        else
+          mv "$dir/$id.note" "$dir/handled/$id.note" || die "cannot file $id"
+        fi
         printf 'acked %s\n' "$id"
         acked=1
         break
@@ -485,8 +582,14 @@ cmd_drain() {
     done
     return 0
   fi
+  # A filing flag with no --ack describes nothing: reporting success for the
+  # listing that follows would tell the caller the note was closed.
+  if [ -n "$filed" ] || [ "$no_actions" -eq 1 ]; then
+    die "--filed and --no-actions describe an ack: write them before --ack"
+  fi
   if [ "$show_all" -eq 1 ]; then cmd_list --all; else cmd_list; fi
-  printf '\nAck with: fm-inbox.sh drain --ack <id>...\n'
+  printf '\nAck a captain note with: fm-inbox.sh drain --filed <task-id>[,...] --ack <id>...  (or --no-actions)\n'
+  printf 'Ack an automated note with: fm-inbox.sh drain --ack <id>...\n'
 }
 
 # ---------------------------------------------------------------- dispatch

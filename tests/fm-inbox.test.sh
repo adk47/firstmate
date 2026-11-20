@@ -16,6 +16,11 @@
 #   5. drain --ack retires a record from whichever queue holds it, and refuses a
 #      path-shaped id.
 #   6. status counts the two queues separately.
+#   7. A captain note cannot be closed without naming the work it produced: the
+#      ack refuses until it carries --filed (the backlog rows) or --no-actions,
+#      and either one is written into the handled copy as a filed= line. The
+#      2026-11 measurement behind that gate: six captain notes, one laned, five
+#      gone through a bare ack. Automated notes keep the bare ack.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -181,8 +186,10 @@ for id in $oldest; do
 done
 
 drain_out=$(inbox "$home" drain) || fail "drain failed"
-assert_contains "$drain_out" 'Ack with: fm-inbox.sh drain --ack <id>...' \
-  "drain should keep telling the reader how to acknowledge"
+assert_contains "$drain_out" 'Ack a captain note with: fm-inbox.sh drain --filed <task-id>[,...] --ack <id>...  (or --no-actions)' \
+  "drain should tell the reader how to acknowledge a captain note"
+assert_contains "$drain_out" 'Ack an automated note with: fm-inbox.sh drain --ack <id>...' \
+  "drain should keep telling the reader how to acknowledge an automated note"
 [ "$(ids_of "$drain_out" | grep -c .)" -eq 21 ] \
   || fail "drain should be bounded exactly like list, got: $drain_out"
 pass "list and drain print the captain's notes first and bound the automated tail"
@@ -195,7 +202,7 @@ inbox "$home" note --source sentry "automated body" >/dev/null || fail "automate
 captain_id=$(only_note "$home/state/inbox")
 auto_id=$(only_note "$home/state/inbox-auto")
 
-out=$(inbox "$home" drain --ack "$captain_id" "$auto_id") || fail "ack failed"
+out=$(inbox "$home" drain --no-actions --ack "$captain_id" "$auto_id") || fail "ack failed"
 assert_contains "$out" "acked $captain_id" "the captain record should acknowledge"
 assert_contains "$out" "acked $auto_id" "the automated record should acknowledge"
 assert_present "$home/state/inbox/handled/$captain_id.note" \
@@ -235,5 +242,232 @@ assert_contains "$out" '1 note(s) waiting for firstmate' \
 assert_contains "$out" '1 automated note(s) waiting, none of it the captain' \
   "status should count the automated record separately"
 pass "status counts the captain and automated queues separately"
+
+# --- 7. a captain note cannot be closed without naming its work -------------
+#
+# The failure this pins: a bare ack is a `mv` that cannot fail and asks nothing,
+# so a note can be retired while its work never becomes a backlog row. Measured
+# 2026-11-18: six captain notes, one became a task, five evaporated.
+
+last_line() { tail -n 1 "$1"; }
+
+# Drive the command through a helper: `out=$(cmd)` then `code=$?` needs `set +e`
+# around it, and `set -e` in a file that never set it switches errexit on for
+# every case after this one, so a later failure would exit with no case name.
+run_inbox() {  # <home> <args...> -> RUN_OUT, RUN_CODE
+  RUN_OUT=$(inbox "$@" 2>&1) && RUN_CODE=0 || RUN_CODE=$?
+}
+
+home=$(make_home laning)
+inbox "$home" note "ship the laning gate" >/dev/null || fail "captain note should queue"
+captain_id=$(only_note "$home/state/inbox")
+cp "$home/state/inbox/$captain_id.note" "$TMP_ROOT/refused-before.note"
+
+# 1. A bare ack cannot close a captain note, must leave it in the queue, and
+#    must leave its bytes exactly as the captain's system wrote them.
+run_inbox "$home" drain --ack "$captain_id"
+[ "$RUN_CODE" -ne 0 ] || fail "a bare ack of a captain note should refuse"
+assert_contains "$RUN_OUT" '--filed' "the refusal should name --filed"
+assert_contains "$RUN_OUT" '--no-actions' "the refusal should name --no-actions"
+assert_present "$home/state/inbox/$captain_id.note" \
+  "a refused ack must leave the captain note in the queue"
+assert_absent "$home/state/inbox/handled/$captain_id.note" \
+  "a refused ack must not file the captain note as handled"
+cmp -s "$TMP_ROOT/refused-before.note" "$home/state/inbox/$captain_id.note" \
+  || fail "a refused ack must not rewrite the record it refused"
+pass "a captain note refuses a bare ack and stays in the queue unchanged"
+
+# The captain's own voice reaches the same queue through `say`, so the spoken
+# path is gated too: a spoken order is an assignment, not telemetry.
+voice_home=$(make_home laning-voice)
+inbox "$voice_home" note --source voice "spoken order" >/dev/null || fail "voice note should queue"
+voice_id=$(only_note "$voice_home/state/inbox")
+run_inbox "$voice_home" drain --ack "$voice_id"
+[ "$RUN_CODE" -ne 0 ] || fail "a bare ack of the captain's voice note should refuse"
+assert_present "$voice_home/state/inbox/$voice_id.note" \
+  "a refused ack must leave the voice note in the queue"
+run_inbox "$voice_home" drain --filed voice-row-1 --ack "$voice_id"
+[ "$RUN_CODE" -eq 0 ] || fail "a voice note should ack once it names its row: $RUN_OUT"
+[ "$(last_line "$voice_home/state/inbox/handled/$voice_id.note")" = 'filed=voice-row-1' ] \
+  || fail "a filed voice note should record the row it produced"
+pass "the captain's spoken note is gated, and a filed ack closes it with its row"
+
+# 2. --filed closes it and records the rows it produced.
+run_inbox "$home" drain --filed abc123 --ack "$captain_id"
+[ "$RUN_CODE" -eq 0 ] || fail "a filed ack should succeed: $RUN_OUT"
+assert_contains "$RUN_OUT" "acked $captain_id" "a filed ack should acknowledge the note"
+assert_present "$home/state/inbox/handled/$captain_id.note" \
+  "a filed ack should move the note into handled/"
+assert_absent "$home/state/inbox/$captain_id.note" \
+  "a filed ack should leave the captain queue"
+[ "$(last_line "$home/state/inbox/handled/$captain_id.note")" = 'filed=abc123' ] \
+  || fail "the handled copy should end with the rows the note produced, got: $(last_line "$home/state/inbox/handled/$captain_id.note")"
+pass "a captain note acks with --filed and records the backlog rows it produced"
+
+# 3. --no-actions closes it and records that decision, with several ids named.
+home=$(make_home laning-none)
+inbox "$home" note "no work here" >/dev/null || fail "captain note should queue"
+none_id=$(only_note "$home/state/inbox")
+run_inbox "$home" drain --no-actions --ack "$none_id"
+[ "$RUN_CODE" -eq 0 ] || fail "a --no-actions ack should succeed: $RUN_OUT"
+assert_contains "$RUN_OUT" "acked $none_id" "a --no-actions ack should acknowledge the note"
+[ "$(last_line "$home/state/inbox/handled/$none_id.note")" = 'filed=none:--no-actions' ] \
+  || fail "a --no-actions ack should record that the note needed no work"
+pass "a captain note acks with --no-actions and records that it needed no work"
+
+home=$(make_home laning-many)
+inbox "$home" note "two rows" >/dev/null || fail "captain note should queue"
+many_id=$(only_note "$home/state/inbox")
+run_inbox "$home" drain --filed abc123,def456 --ack "$many_id"
+[ "$RUN_CODE" -eq 0 ] || fail "a multi-row ack should succeed: $RUN_OUT"
+[ "$(last_line "$home/state/inbox/handled/$many_id.note")" = 'filed=abc123,def456' ] \
+  || fail "a multi-row ack should record every id it named"
+
+# 4. Every automated class is telemetry and keeps the bare ack. All five are
+#    exercised, so a class that ever starts routing into the captain queue is
+#    caught here rather than by a captain note vanishing.
+home=$(make_home laning-auto)
+for class in sentry lane-tick ci watch health; do
+  inbox "$home" note --source "$class" "poll for $class" >/dev/null \
+    || fail "an automated note for $class should queue"
+  record=$(grep -lF "poll for $class" "$home/state/inbox-auto/"*.note | head -1)
+  [ -n "$record" ] || fail "a $class note should land in the automated queue"
+  [ "$(notes_in "$home/state/inbox")" = 0 ] \
+    || fail "a $class note must never reach the captain queue"
+  auto_id=$(basename "$record" .note)
+  run_inbox "$home" drain --ack "$auto_id"
+  [ "$RUN_CODE" -eq 0 ] || fail "an automated $class note should still ack with no flags: $RUN_OUT"
+  assert_contains "$RUN_OUT" "acked $auto_id" "an automated $class note should acknowledge"
+  assert_present "$home/state/inbox-auto/handled/$auto_id.note" \
+    "an acknowledged automated note belongs in its handled/ directory"
+  assert_no_grep 'filed=' "$home/state/inbox-auto/handled/$auto_id.note" \
+    "an automated note must not gain a filing stamp: telemetry is not an assignment"
+done
+pass "every automated class still acks with no flags and gains no filing stamp"
+
+# 5. One ack naming both a captain and an automated record treats them
+#    independently: the captain record is stamped, the automated one is not.
+home=$(make_home laning-mixed)
+inbox "$home" note "captain body" >/dev/null || fail "captain note should queue"
+inbox "$home" note --source lane-tick "automated body" >/dev/null || fail "automated note should queue"
+mixed_captain=$(only_note "$home/state/inbox")
+mixed_auto=$(only_note "$home/state/inbox-auto")
+run_inbox "$home" drain --filed abc123 --ack "$mixed_captain" "$mixed_auto"
+[ "$RUN_CODE" -eq 0 ] || fail "a mixed ack should succeed: $RUN_OUT"
+assert_contains "$RUN_OUT" "acked $mixed_captain" "the captain record should acknowledge"
+assert_contains "$RUN_OUT" "acked $mixed_auto" "the automated record should acknowledge"
+[ "$(last_line "$home/state/inbox/handled/$mixed_captain.note")" = 'filed=abc123' ] \
+  || fail "a mixed ack should stamp the captain record"
+assert_no_grep 'filed=' "$home/state/inbox-auto/handled/$mixed_auto.note" \
+  "a mixed ack must not stamp the automated record"
+pass "a mixed ack stamps the captain record and leaves the automated one alone"
+
+# 6. --filed without a usable value is refused rather than recorded as a
+#    meaningless or forged filing line.
+home=$(make_home laning-empty)
+inbox "$home" note "needs a row" >/dev/null || fail "captain note should queue"
+empty_id=$(only_note "$home/state/inbox")
+run_inbox "$home" drain --filed --ack "$empty_id"
+[ "$RUN_CODE" -ne 0 ] || fail "--filed with no value at all should refuse"
+assert_contains "$RUN_OUT" '--filed needs at least one backlog task id' \
+  "the refusal should say --filed needs a task id, not name the next flag as one"
+run_inbox "$home" drain --filed "" --ack "$empty_id"
+[ "$RUN_CODE" -ne 0 ] || fail "--filed with an empty value should refuse"
+assert_present "$home/state/inbox/$empty_id.note" \
+  "a refused empty filing must leave the captain note in the queue"
+pass "--filed with an empty value is refused and files nothing"
+
+# 7. A malformed or repeated --filed is refused: an id list is what answers
+#    which rows the note produced, so it may not be blank-entry, repeated, or
+#    carry anything that could pass for a second line of the record.
+for bad_list in "," ",abc" "abc," "abc,,def" "abc def" "abc=def" "abc;rm -rf /"; do
+  run_inbox "$home" drain --filed "$bad_list" --ack "$empty_id"
+  [ "$RUN_CODE" -ne 0 ] || fail "--filed '$bad_list' should refuse"
+  assert_contains "$RUN_OUT" 'backlog task id' "the refusal should say what --filed takes"
+  assert_present "$home/state/inbox/$empty_id.note" \
+    "a refused --filed '$bad_list' must leave the captain note in the queue"
+done
+forged=$(printf 'abc\nfiled=forged')
+run_inbox "$home" drain --filed "$forged" --ack "$empty_id"
+[ "$RUN_CODE" -ne 0 ] || fail "a multi-line --filed value should refuse"
+assert_present "$home/state/inbox/$empty_id.note" \
+  "a multi-line --filed value must not close the note"
+run_inbox "$home" drain --filed abc --filed def --ack "$empty_id"
+[ "$RUN_CODE" -ne 0 ] || fail "a repeated --filed should refuse rather than overwrite the first"
+assert_contains "$RUN_OUT" 'more than once' "the refusal should say --filed was repeated"
+assert_present "$home/state/inbox/$empty_id.note" \
+  "a repeated --filed must leave the captain note in the queue"
+pass "a malformed, multi-line, or repeated --filed refuses and files nothing"
+
+# 8. A filing flag with no --ack describes nothing, so reporting success for the
+#    listing that follows would tell the caller the note was closed.
+for dangling in "--filed abc123" "--no-actions"; do
+  # shellcheck disable=SC2086 # the flag under test must reach the script whole
+  run_inbox "$home" drain $dangling
+  [ "$RUN_CODE" -ne 0 ] || fail "drain $dangling without --ack should refuse"
+  assert_present "$home/state/inbox/$empty_id.note" \
+    "drain $dangling without --ack must not touch the captain note"
+done
+pass "a filing flag without --ack refuses instead of reporting a listing as success"
+
+# 9. One bad id in a batch leaves the whole batch alone: a half-applied ack would
+#    retire some records while reporting failure for all of them.
+home=$(make_home laning-batch)
+inbox "$home" note "batch captain" >/dev/null || fail "captain note should queue"
+inbox "$home" note --source ci "batch auto" >/dev/null || fail "automated note should queue"
+batch_captain=$(only_note "$home/state/inbox")
+batch_auto=$(only_note "$home/state/inbox-auto")
+run_inbox "$home" drain --filed abc123 --ack "$batch_auto" ../escape
+[ "$RUN_CODE" -ne 0 ] || fail "an id that is a path should refuse"
+assert_present "$home/state/inbox-auto/$batch_auto.note" \
+  "a refused batch must not retire the valid automated record before it"
+run_inbox "$home" drain --filed abc123 --ack "$batch_captain" "$batch_auto" "bad/id"
+[ "$RUN_CODE" -ne 0 ] || fail "a path-shaped id later in the batch should refuse"
+assert_present "$home/state/inbox/$batch_captain.note" \
+  "a refused batch must not file the captain note before the bad id"
+assert_absent "$home/state/inbox/handled/$batch_captain.note" \
+  "a refused batch must not stamp the captain note"
+pass "a refused batch files nothing at all"
+
+# 10. Naming rows and saying the note produced none are contradictory answers,
+#     so one ack cannot carry both.
+run_inbox "$home" drain --filed abc123 --no-actions --ack "$batch_captain"
+[ "$RUN_CODE" -ne 0 ] || fail "--filed with --no-actions should refuse"
+assert_contains "$RUN_OUT" 'exclusive' "the refusal should call the two answers exclusive"
+assert_present "$home/state/inbox/$batch_captain.note" \
+  "a contradictory ack must leave the captain note in the queue"
+pass "--filed and --no-actions together are refused as contradictory"
+
+# 11. A record whose last byte is not a newline must not get its stamp glued
+#     onto the body's final line, where the stamp would read as body text.
+home=$(make_home laning-noeol)
+inbox "$home" note "a body with no trailing newline" >/dev/null || fail "captain note should queue"
+noeol_id=$(only_note "$home/state/inbox")
+noeol_note="$home/state/inbox/$noeol_id.note"
+# Build the fixture portably: a `truncate` that is missing or fails would leave
+# the newline in place and let this case pass without exercising the branch.
+printf '%s' "$(cat "$noeol_note")" >"$noeol_note.strip"
+mv "$noeol_note.strip" "$noeol_note"
+[ -n "$(tail -c 1 "$noeol_note")" ] || fail "fixture should end without a newline"
+run_inbox "$home" drain --filed abc123 --ack "$noeol_id"
+[ "$RUN_CODE" -eq 0 ] || fail "a record with no trailing newline should still ack: $RUN_OUT"
+[ "$(last_line "$home/state/inbox/handled/$noeol_id.note")" = 'filed=abc123' ] \
+  || fail "a record with no trailing newline should still end with its filing line"
+[ "$(tail -n 2 "$home/state/inbox/handled/$noeol_id.note" | head -1)" = 'a body with no trailing newline' ] \
+  || fail "the stamp must not be glued onto the body's last line"
+pass "a record with no trailing newline keeps its body line and gains its own filing line"
+
+# 12. A flag written after --ack is read as an id, so the refusal must say where
+#     the flags belong instead of telling the caller to pass what they passed.
+home=$(make_home laning-order)
+inbox "$home" note "flags after ids" >/dev/null || fail "captain note should queue"
+order_id=$(only_note "$home/state/inbox")
+run_inbox "$home" drain --ack "$order_id" --filed abc123
+[ "$RUN_CODE" -ne 0 ] || fail "a flag after --ack should refuse"
+assert_contains "$RUN_OUT" 'flags go before --ack' \
+  "the refusal should say the flags belong before --ack"
+assert_present "$home/state/inbox/$order_id.note" \
+  "a flag after --ack must leave the captain note in the queue"
+pass "a flag written after --ack refuses and points at the right order"
 
 printf 'all fm-inbox source-class cases passed\n'
