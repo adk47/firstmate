@@ -1,0 +1,65 @@
+$ tasks-axi add/start/hold  # the home's real markdown backlog
+-- in_flight rows (ghost-fix has no task record; captain-call is held):
+count: 1
+tasks[1]{id,state,kind,repo,title}:
+  ghost-fix,in_flight,task,"-",Longhorn alert fix filed as an item only
+help[1]:
+  - Run `tasks-axi show <id> --file=/tmp/tmp.zsdvw9myZH/data/backlog.md` for full notes on a task
+-- held rows:
+count: 1
+tasks[1]{id,state,kind,repo,title}:
+  captain-call,queued,task,"-","A captain decision, not a missing lane"
+help[1]:
+  - Run `tasks-axi show <id> --file=/tmp/tmp.zsdvw9myZH/data/backlog.md` for full notes on a task
+
+$ FM_HOME=<home> FM_CREW_STATE_BIN=<fake reader> PATH=<fake gh>:$PATH bin/fm-unowned.sh
+  alpha: latest claim 'working', endpoint dead  -> expect NO-LANE
+  beta : live, note says 'dead-letter'           -> expect silence
+  gamma: latest claim 'done', meta pr= OPEN      -> expect STALE-DONE
+  ghost-fix: in flight, no state record          -> expect UNOWNED
+  captain-call: held, no state record            -> expect silence
+UNOWNED ghost-fix backlog says in flight but no task record exists: nothing is building this and nothing will report on it
+NO-LANE alpha its latest status says 'working' but the endpoint is dead
+STALE-DONE gamma claims done but https://github.com/acme/widget/pull/7 is still OPEN
+exit=1
+
+$ cat <home>/gh.log   # exactly one bounded forge read, for the done claim only
+gh pr view 7 --repo acme/widget --json state --jq .state
+
+--- FM_UNOWNED_TIMEOUT=0 falls back to a real bound instead of disabling it ---
+UNOWNED ghost-fix backlog says in flight but no task record exists: nothing is building this and nothing will report on it
+NO-LANE alpha its latest status says 'working' but the endpoint is dead
+STALE-DONE gamma claims done but https://github.com/acme/widget/pull/7 is still OPEN
+exit=1
+
+--- FM_STATE_OVERRIDE / FM_DATA_OVERRIDE are honoured ---
+NO-LANE alpha its latest status says 'working' but the endpoint is dead
+exit=1
+
+--- a home whose markdown backlog file is absent refuses named instead of reading it as owned-empty ---
+fm-unowned: no backlog at /tmp/tmp.zsdvw9myZH/nobacklog/data/backlog.md
+exit=2
+--- 3.1 legal ids are not dropped by a narrow charset (dotted / underscored / uppercase) ---
+  Cache.Rebuild_1,in_flight,task,"-",underscored uppercase id
+  relay.poll_v2,in_flight,task,"-",dotted id
+  - Run `tasks-axi show <id> --file=/tmp/tmp.HR94ngCiPk/data/backlog.md` for full notes on a task
+UNOWNED Cache.Rebuild_1 backlog says in flight but no task record exists: nothing is building this and nothing will report on it
+UNOWNED relay.poll_v2 backlog says in flight but no task record exists: nothing is building this and nothing will report on it
+exit=1
+
+--- 3.2 a done claim with NO url in its status log is graded from the meta pr= record ---
+STALE-DONE delta claims done but https://github.com/acme/widget/pull/11 is still OPEN
+exit=1
+-- silent (0 lines) once the forge reports the recorded PR MERGED:
+0
+
+--- 3.3 a hung forge read is bounded and skipped (FM_UNOWNED_TIMEOUT=2), never a hang ---
+printed delta lines: 0
+elapsed=2s exit=1
+
+--- 3.4 a claim answered then dead is NO-LANE (resolved is still a work claim) ---
+NO-LANE eps its latest status says 'resolved' but the endpoint is dead
+exit=1
+
+--- 3.5 a LIVE crew whose note merely contains the word 'dead' is NOT NO-LANE ---
+0

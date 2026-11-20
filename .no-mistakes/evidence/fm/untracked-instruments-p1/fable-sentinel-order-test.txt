@@ -1,0 +1,31 @@
+$ bash tests/fable-sentinel-order.test.sh   # in this worktree (subject operator-local, absent)
+skip - bin/fable-sentinel.py is not in this checkout (operator-local, see .git/info/exclude)
+exit=0
+
+$ bash tests/fable-sentinel-order.test.sh   # same test with ROOT resolving to /home/aaron/Projects/firstmate (the real subject)
+fable-sentinel order check
+  ok   bin/fable-sentinel.py parses
+  ok   no account_id is UNKNOWN
+  ok   absent from the paid set is a real False
+  ok   present in the paid set is True
+  ok   unreadable replica is UNKNOWN, not unpaid
+  ok   sentinel is on cron
+  ok   window queries carry an upper bound
+  ok   every send timestamp is normalised before comparison
+  ok   before the fix the replica rule reports an inversion (the false alarm)
+  ok   the owing-uvn list is not consulted for proof-need-ask
+  ok   after the fix the list's own key shows no inversion
+  ok   after the fix every recipient is on the need-ask list
+  ok   a genuine paid-after-unpaid inversion still fails
+  ok   an unreadable need list falls back to the replica rule
+  ok   an unreadable need list with an unreadable replica is UNKNOWN
+  ok   no counter lacks a scope prefix
+  ok   the old unlabelled bare names are gone
+  ok   every printed counter matches scope:name=value
+  ok   no counter name is printed twice
+  ok   approved-this-window and approvals are one field
+  ok   the window numbers and the cumulative number are both still there
+  ok   a scope outside window/total/now/today raises
+
+pass=22 fail=0
+exit=0
