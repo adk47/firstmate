@@ -26,8 +26,9 @@
 # at all, because the scheduled smoke and the dispatched deploy that failed
 # were not push runs and it read only push runs. And a single page of the
 # branch's runs, however long, hides a workflow that runs rarely behind the
-# ones that run often: H-DevOps has a hundred active workflows and its newest
-# hundred runs on main cover forty-four of them. Four things fix that for
+# ones that run often: H-DevOps has about 400 active workflows (406 at the time
+# of writing), and its newest hundred runs on main covered forty-four of them.
+# Four things fix that for
 # good: every run answer goes through ONE classifier (bin/fm-ci-run-lib.sh),
 # every red names the run it read, the poll reads runs of every event, and it
 # reads them PER WORKFLOW, so no window can hide a red.
@@ -247,16 +248,17 @@ newest_completed_run() {
 }
 
 # active_workflow_ids <repo>: the ids of the repository's active workflows,
-# one per line, read a page at a time; a page that cannot be read ends the
-# list (and the caller is silent for what it did not see, never red).
+# one per line, read a page at a time until a short page. It returns non-zero
+# when the poll's deadline or an unreadable page stopped the list early, so the
+# caller can note that the list was only partly read (still silent, never red).
 active_workflow_ids() {
   local repo=$1 page=1 answer count
-  while [ "$page" -le 5 ]; do
-    poll_has_budget || return 0
-    answer=$(gh_api "repos/$repo/actions/workflows?per_page=100&page=$page") || return 0
+  while :; do
+    poll_has_budget || return 2
+    answer=$(gh_api "repos/$repo/actions/workflows?per_page=100&page=$page") || return 2
     printf '%s\n' "$answer" | jq -r '.workflows // [] | map(select((.state // "") == "active")) | .[].id' 2>/dev/null
     count=$(printf '%s\n' "$answer" | jq -r '.workflows // [] | length' 2>/dev/null)
-    case "$count" in ''|*[!0-9]*) return 0 ;; esac
+    case "$count" in ''|*[!0-9]*) return 2 ;; esac
     [ "$count" -ge 100 ] || return 0
     page=$((page + 1))
   done
@@ -279,11 +281,15 @@ action_read_workflow() {
   newest_completed_run "$runs"
 }
 
-# workflow_rows <repo> <branch> <per-page> <parallel>: one row per active
-# workflow that has a completed run on the branch, read in parallel.
+# workflow_rows <repo> <branch> <per-page> <parallel> <partial-file>: one row
+# per active workflow that has a completed run on the branch, read in parallel;
+# appends the repository to <partial-file> when its workflow list was not read
+# to the end.
 workflow_rows() {
-  local repo=$1 branch=$2 per_page=$3 parallel=$4 ids
+  local repo=$1 branch=$2 per_page=$3 parallel=$4 partial=$5 ids rc
   ids=$(active_workflow_ids "$repo")
+  rc=$?
+  [ "$rc" -eq 0 ] || printf '%s\n' "$repo" >> "$partial"
   [ -n "$ids" ] || return 0
   printf '%s\n' "$ids" | FM_CI_HEALTH_DEADLINE=$((POLL_EPOCH_START + POLL_BUDGET_SECS)) \
     xargs -P "$parallel" -I '{}' "$SCRIPT_BIN" read-workflow "$repo" "$branch" '{}' "$per_page" 2>/dev/null
@@ -339,10 +345,11 @@ record_verdict() {  # <now> <line-or-empty>
 
 poll_has_budget() { [ $((SECONDS - POLL_START)) -lt "$POLL_BUDGET_SECS" ]; }
 
-# repo_job <spec> <per-page> <parallel>: one repository's queued and red
-# findings, "; "-joined, for a spec of the form owner/repo[:branch[:bar]].
+# repo_job <spec> <per-page> <parallel> <partial-file>: one repository's queued
+# and red findings, "; "-joined, for a spec of the form
+# owner/repo[:branch[:bar]].
 repo_job() {
-  local spec=$1 per_page=$2 parallel=$3 repo branch=main bar='' queued rows part out=''
+  local spec=$1 per_page=$2 parallel=$3 partial=$4 repo branch=main bar='' queued rows part out=''
   repo=${spec%%:*}
   case "$spec" in
     *:*:*) bar=${spec##*:}; branch=${spec#*:}; branch=${branch%%:*} ;;
@@ -357,7 +364,7 @@ repo_job() {
     [ "$queued" -le "$bar" ] || out="$repo queued=$queued (>$bar)"
   fi
   poll_has_budget || { printf '%s' "$out"; return 0; }
-  rows=$(workflow_rows "$repo" "$branch" "$per_page" "$parallel")
+  rows=$(workflow_rows "$repo" "$branch" "$per_page" "$parallel" "$partial")
   part=$(repo_red "$repo" "$branch" "$rows")
   [ -z "$part" ] || out="${out}${out:+; }$part"
   printf '%s' "$out"
@@ -403,21 +410,31 @@ action_check() {
   # findings to one scratch file, so the small repositories' round trips
   # overlap the big one's sweep; the findings are assembled in configured
   # order once every job has returned or given up at the deadline.
-  local scratch i=0 specs=()
-  scratch=$(mktemp -d "${TMPDIR:-/tmp}/fm-ci-health.XXXXXX") || return 0
+  local scratch='' i=0 specs=() partial_note='' pfile
   for spec in $(conf FM_CI_HEALTH_REPOS "$REPOS_DEFAULT"); do
     specs+=("$spec")
-    repo_job "$spec" "$per_page" "$parallel" > "$scratch/$i" 2>/dev/null &
-    i=$((i + 1))
   done
-  wait
-  i=0
-  for spec in "${specs[@]}"; do
-    part=$(cat "$scratch/$i" 2>/dev/null)
-    [ -z "$part" ] || msg="${msg}${msg:+; }$part"
-    i=$((i + 1))
-  done
-  rm -rf "$scratch"
+  if [ "${#specs[@]}" -gt 0 ]; then
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/fm-ci-health.XXXXXX") || return 0
+    for spec in "${specs[@]+"${specs[@]}"}"; do
+      repo_job "$spec" "$per_page" "$parallel" "$scratch/$i.partial" > "$scratch/$i" 2>/dev/null &
+      i=$((i + 1))
+    done
+    wait
+    i=0
+    for spec in "${specs[@]+"${specs[@]}"}"; do
+      part=$(cat "$scratch/$i" 2>/dev/null)
+      [ -z "$part" ] || msg="${msg}${msg:+; }$part"
+      if [ -f "$scratch/$i.partial" ]; then
+        while IFS= read -r pfile; do
+          [ -n "$pfile" ] || continue
+          partial_note="${partial_note}${partial_note:+, }$pfile"
+        done < "$scratch/$i.partial"
+      fi
+      i=$((i + 1))
+    done
+    rm -rf "$scratch"
+  fi
   for spec in $(conf FM_CI_HEALTH_SCHEDULED "$SCHEDULED_DEFAULT"); do
     poll_has_budget || break
     repo=${spec%%:*}
@@ -436,10 +453,12 @@ action_check() {
   if [ -n "$msg" ]; then
     trailer=$(conf FM_CI_HEALTH_TRAILER "$TRAILER_DEFAULT")
     line="ci-health: $msg - $trailer"
-    record_verdict "$now" "$line"
+    [ -z "$partial_note" ] || partial_note="; workflow list read only partially: $partial_note"
+    record_verdict "$now" "$line$partial_note"
     fm_cap_line "$line" "$MAX_LINE"
   else
-    record_verdict "$now" ''
+    [ -z "$partial_note" ] || partial_note="workflow list read only partially: $partial_note"
+    record_verdict "$now" "$partial_note"
   fi
   return 0
 }

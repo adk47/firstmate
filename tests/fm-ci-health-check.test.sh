@@ -373,6 +373,54 @@ test_an_unreadable_answer_is_silent_not_red() {
 
 # A config file is the operator interface the docs describe: a multi-value line
 # and numeric lines, with their comments on their own lines.
+test_an_empty_repository_list_polls_quietly_without_a_scratch_dir() {
+  local home out rc tmp
+  home=$(make_home empty-repos)
+  tmp="$home/tmp"
+  mkdir -p "$tmp"
+  out=$(poll "$home" 100000 FM_CI_HEALTH_REPOS= TMPDIR="$tmp")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "an empty repository list exited $rc: $out"
+  [ -z "$out" ] || fail "an empty repository list printed: $out"
+  find "$tmp" -maxdepth 1 -name 'fm-ci-health.*' | grep -q . && fail "an empty repository list left a scratch dir behind"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CHECK" status)
+  assert_contains "$out" "quiet" "an empty repository list was not recorded as a quiet poll"
+  pass "an empty repository list polls quietly, exits zero, and leaves no scratch dir"
+}
+
+test_a_workflow_on_the_second_list_page_is_read() {
+  local home out
+  home=$(make_home pagination)
+  queued_fixture "$home" acme/widgets 0
+  jq -n '{ total_count: 101,
+    workflows: [ range(0; 100) as $i
+      | { id: (1001 + $i), name: ("bulk-" + ($i | tostring)), state: "active" } ] }' \
+    > "$(fixture_path "$home" 'repos/acme/widgets/actions/workflows?per_page=100&page=1')"
+  jq -n '{ total_count: 101,
+    workflows: [ { id: 1101, name: "rare-on-page-two", state: "active" } ] }' \
+    > "$(fixture_path "$home" 'repos/acme/widgets/actions/workflows?per_page=100&page=2')"
+  printf '%s\n' '{"workflow_runs":[{"name":"rare-on-page-two","id":9001,"status":"completed","conclusion":"failure","head_sha":"abc12345678","created_at":"2026-11-19T22:53:30Z","event":"push"}]}' \
+    > "$(fixture_path "$home" 'repos/acme/widgets/actions/workflows/1101/runs?branch=main&status=completed&per_page=10')"
+  out=$(poll "$home" 100000)
+  assert_contains "$out" "rare-on-page-two run 9001 conclusion=failure" "a workflow on the workflow list's second page was not read"
+  pass "the workflow list is paged until a short page, so a later page's workflow is still read"
+}
+
+test_a_partial_workflow_list_is_recorded_but_stays_silent() {
+  local home out
+  home=$(make_home partial-list)
+  queued_fixture "$home" acme/widgets 0
+  jq -n '{ total_count: 200,
+    workflows: [ range(0; 100) as $i
+      | { id: (1001 + $i), name: ("bulk-" + ($i | tostring)), state: "active" } ] }' \
+    > "$(fixture_path "$home" 'repos/acme/widgets/actions/workflows?per_page=100&page=1')"
+  out=$(poll "$home" 100000)
+  [ -z "$out" ] || fail "a partial workflow list printed: $out"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CHECK" status)
+  assert_contains "$out" "workflow list read only partially: acme/widgets" "a partial workflow list was not recorded"
+  pass "a workflow list cut short by an unreadable page is recorded as partial and stays silent"
+}
+
 test_a_config_file_written_as_documented_is_parsed() {  # <home>
   local home=$1
   cat > "$home/config/ci-health.env" <<'ENV'
@@ -509,6 +557,9 @@ test_queued_backlog_over_the_bar_pages_with_the_count
 test_poll_is_throttled_and_stands_down_on_a_thin_rate_budget
 test_an_unreadable_rate_limit_is_not_reported_as_a_stand_down
 test_an_unreadable_answer_is_silent_not_red
+test_an_empty_repository_list_polls_quietly_without_a_scratch_dir
+test_a_workflow_on_the_second_list_page_is_read
+test_a_partial_workflow_list_is_recorded_but_stays_silent
 test_a_scheduled_workflow_is_judged_only_when_it_declares_a_schedule
 test_the_documented_config_file_shape_drives_the_poll
 test_a_tilde_token_env_path_is_expanded
