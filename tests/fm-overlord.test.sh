@@ -230,6 +230,7 @@ test_a_hanging_remote_read_is_bounded_and_reads_unmeasured() {
   healthy "$home" "$T0"
   cat > "$home/fakebin/fake-remote" <<'SH'
 #!/usr/bin/env bash
+sleep 20 &
 sleep 12
 wait
 SH
@@ -472,6 +473,27 @@ test_absent_and_stale_sources_are_unmeasured_and_two_ticks_interject() {
   pass "absent and stale sources read unmeasured, and two unmeasured ticks interject to the owning lane"
 }
 
+test_a_growing_unmeasured_count_interjects_again() {
+  local home count
+  home=$(make_home unmeasuredgrow)
+  configure "$home"
+  healthy "$home" "$T0"
+  backlog "$home/remote/support.json" $((T0 - 60)) \
+    '"waiting_on_us": 0, "promised_a_person_24h": 7, "promises_broken_24h": 0'
+  run "$home" "$T0" check >/dev/null
+  assert_absent "$home/state/overlord.status" "one unmeasured reading already interjected"
+  backlog "$home/remote/support.json" $((T0 + 540)) \
+    '"waiting_on_us": 0, "promised_a_person_24h": 7, "promises_broken_24h": 0'
+  run "$home" $((T0 + 600)) check >/dev/null
+  assert_contains "$(cat "$home/state/overlord.status")" "blocked [key=overlord-meter-unmeasured-support]" \
+    "two unmeasured checks did not interject"
+  rm -f "$home/remote/support.json"
+  run "$home" $((T0 + 15060)) check >/dev/null
+  count=$(grep -c "blocked \[key=overlord-meter-unmeasured-support\]" "$home/state/overlord.status" || true)
+  [ "$count" -eq 2 ] || fail "a growing unmeasured count did not interject again (saw $count)"
+  pass "a growing unmeasured count interjects again after the reminder window"
+}
+
 test_support_thresholds_and_a_late_tick() {
   local home status
   home=$(make_home support)
@@ -598,6 +620,7 @@ test_green_unmerged_rises_goes_to_fable_and_an_unchanged_count_is_silent
 test_a_stale_head_is_set_aside_without_poisoning_the_merges_reading
 test_a_partial_merges_read_holds_the_crossing_instead_of_resolving_it
 test_absent_and_stale_sources_are_unmeasured_and_two_ticks_interject
+test_a_growing_unmeasured_count_interjects_again
 test_support_thresholds_and_a_late_tick
 test_a_refused_steer_is_recorded_on_the_same_key
 test_adjudicate_names_windows_and_never_averages

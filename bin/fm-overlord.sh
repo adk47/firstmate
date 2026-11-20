@@ -964,6 +964,7 @@ for domain, items in sorted(unmeasured.items()):
         crossings.append({"key": "meter-unmeasured-%s" % domain, "domain": "meter",
                           "threshold": "%s unmeasured on two consecutive checks" % domain,
                           "number": "unmeasured=%d" % len(items), "source": holder.source, "at": NOW, "fable": False,
+                          "value": len(items), "baseline": 0,
                           "owner": cfg("OWNER_" + domain.upper()) or cfg("OWNER_METER"),
                           "reads": ["%s.%s" % (domain, r.name) for r in readings[domain]
                                     if r.value is None and r.why != "not configured"],
