@@ -67,7 +67,7 @@
 #     channel retires as retired_reason=resolved-elsewhere with the line's via;
 #     otherwise retired_reason=expired-undelivered, resolved_via=expired-undelivered.
 #   - delivered records whose recovery was withheld because a same-request
-#     sibling resolved retire after the same horizon:
+#     sibling resolved at or after that delivery retire after the same horizon:
 #     retired_reason=superseded-by-sibling:<corr>,
 #     resolved_via=superseded-by-sibling.
 # Nothing else ages out. A delivered record with no answer and no resolved
@@ -2005,6 +2005,7 @@ fm_pending_reply_sweep() {  # <state-dir>
           [ "$phase" = awaiting_report ] || continue
           sibling=$(fm_pending_reply_get "$rec" sibling_resolved_corr)
           [ -n "$sibling" ] || continue
+          fm_pending_reply_sibling_outranks_delivery "$rec" || continue
           [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || continue
           # Its own answer still wins over retirement.
           if fm_pending_reply_try_resolve "$state" "$corr" >/dev/null 2>&1; then
