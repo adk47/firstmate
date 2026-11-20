@@ -33,38 +33,53 @@
 # answer for is skipped.
 #
 # Usage: bin/fm-unowned.sh
-#   FM_HOME            the home to read (default: this script's repo root)
+#   FM_HOME            the home to read (default: $FM_ROOT_OVERRIDE, else this script's repo root)
+#   FM_ROOT_OVERRIDE   the repo root when FM_HOME is unset
 #   FM_STATE_OVERRIDE  the task-record directory to read (default: $FM_HOME/state)
-#   FM_DATA_OVERRIDE   the data directory holding backlog.md (default: $FM_HOME/data)
+#   FM_DATA_OVERRIDE   the data directory whose configured backlog backend is read (default: $FM_HOME/data)
 #   FM_CREW_STATE_BIN  the endpoint-state reader (default: this script's sibling)
 #   FM_UNOWNED_TIMEOUT seconds allowed per endpoint-state and PR-state read (default 20)
 set -uo pipefail
-FM_HOME="${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 export FM_HOME
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-classify-lib.sh"
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-BACKLOG="$DATA/backlog.md"
 export FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA"
 TIMEOUT="${FM_UNOWNED_TIMEOUT:-20}"
-[ -f "$BACKLOG" ] || { echo "fm-unowned: no backlog at $BACKLOG" >&2; exit 2; }
+case "$TIMEOUT" in ''|*[!0-9]*) TIMEOUT=20 ;; esac
+[ "$TIMEOUT" -gt 0 ] || TIMEOUT=20
 command -v tasks-axi >/dev/null 2>&1 || { echo "fm-unowned: tasks-axi not on PATH" >&2; exit 2; }
 
 fail=0
 
-# One backlog state as a list of ids. tasks-axi prints a TOON table whose rows
-# are `  <id>,<state>,...`; the id is the first field, and the id charset is the
-# one the backlog library and wake lib already accept. A listing the tool
-# refuses, or whose rows disagree with its stated count, is a read failure, not
-# an empty state.
+# One backlog state as a list of ids, addressed through the shared backlog
+# owner: the markdown backend gets its explicit --file, every other configured
+# backend is listed from the addressing root with no file override. tasks-axi
+# prints a TOON table whose rows are `  <id>,<state>,...`; the id is the first
+# field, and the id charset is the one the backlog library and wake lib already
+# accept. A listing the tool refuses, or whose rows disagree with its stated
+# count, is a read failure, not an empty state.
 backlog_ids() {  # <state>
-  local out count rows
-  out=$(tasks-axi list --file "$BACKLOG" --state "$1" 2>&1) || {
+  local data out count rows
+  data=$(fm_backlog_data_absolute "$DATA") || {
+    echo "fm-unowned: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    return 1
+  }
+  out=$(fm_backlog_row_list "$data" --state "$1") || {
     echo "fm-unowned: tasks-axi list --state $1 failed: $out" >&2
     return 1
   }

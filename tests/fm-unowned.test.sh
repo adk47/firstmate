@@ -35,13 +35,15 @@ make_home() {  # <name>
 printf '%s\n' "$*" >> "$FM_FAKE_HOME/tasks.log"
 shift
 state=
+file=
 while [ $# -gt 0 ]; do
   case "$1" in
     --state) state=$2; shift 2 ;;
-    --file) shift 2 ;;
+    --file) file=$2; shift 2 ;;
     *) shift ;;
   esac
 done
+[ -z "$file" ] || [ -f "$file" ] || { echo "error: backlog file not found at $file"; echo 'code: NOT_FOUND'; exit 1; }
 [ -f "$FM_FAKE_HOME/refuse" ] && { echo 'error: "--state must be one of queued, in_flight, done, held"'; echo 'code: VALIDATION_ERROR'; exit 1; }
 f="$FM_FAKE_HOME/backlog.$state"
 n=0; [ -f "$f" ] && n=$(grep -c . "$f")
@@ -339,9 +341,60 @@ test_missing_backlog_is_exit_2() {
   home=$(make_home nobacklog)
   rm -f "$home/data/backlog.md"
   run_unowned "$home"; out=$OUT
-  [ "$RC" = 2 ] || fail "a missing backlog exits 2, got $RC"
-  grep -q 'no backlog at' "$home/err" || fail "the missing backlog is named: $(cat "$home/err")"
-  pass "a home with no backlog exits 2 and says so"
+  [ "$RC" = 2 ] || fail "a markdown home with no backlog exits 2, got $RC"
+  grep -q 'backlog file not found' "$home/err" || fail "the missing backlog is named by the tool: $(cat "$home/err")"
+  pass "a markdown home with no backlog exits 2 and carries the tool's own reason"
+}
+
+test_non_markdown_backend_needs_no_backlog_file() {
+  local home out
+  home=$(make_home beads)
+  rm -f "$home/data/backlog.md"
+  printf 'backend = "beads"\n' > "$home/.tasks.toml"
+  printf 'ghost-bead\n' > "$home/backlog.in_flight"
+  run_unowned "$home"; out=$OUT
+  [ "$RC" = 1 ] || fail "a non-markdown home lists its own backend, got $RC: $(cat "$home/err")"
+  printf '%s\n' "$out" | grep -q '^UNOWNED ghost-bead ' || fail "the non-markdown backlog is read: $out"
+  ! grep -q -- '--file' "$home/tasks.log" || fail "a non-markdown backend is not addressed with a markdown file: $(cat "$home/tasks.log")"
+  pass "a non-markdown home needs no markdown backlog file and is listed without --file"
+}
+
+test_zero_timeout_still_bounds_the_read() {
+  local home out shim
+  home=$(make_home zerotimeout)
+  shim="$home/shim"
+  mkdir -p "$shim"
+  cat > "$shim/timeout" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_HOME/timeout.log"
+exit 124
+SH
+  chmod 700 "$shim/timeout"
+  add_task "$home" claimed "done: PR https://github.com/acme/widget/pull/72"
+  printf 'OPEN\n' > "$home/pr.72"
+  RC=0
+  FM_HOME="$home" FM_FAKE_HOME="$home" FM_UNOWNED_TIMEOUT=0 \
+    PATH="$shim:$home/fakebin:$PATH" \
+    "$UNOWNED" > "$home/out" 2> "$home/err" || RC=$?
+  out=$(cat "$home/out")
+  [ "$RC" = 0 ] || fail "a zero timeout must not disable the bound, got $RC: $(cat "$home/err")"
+  [ -z "$out" ] || fail "the bounded forge read is skipped, got: $out"
+  grep -q -- '-k 1 20 ' "$home/timeout.log" || fail "zero falls back to a positive bound: $(cat "$home/timeout.log" 2>/dev/null)"
+  pass "FM_UNOWNED_TIMEOUT=0 falls back to a positive bound instead of disabling it"
+}
+
+test_root_override_selects_the_home() {
+  local home out
+  home=$(make_home rootoverride)
+  printf 'ghost-root\n' > "$home/backlog.in_flight"
+  RC=0
+  FM_ROOT_OVERRIDE="$home" FM_FAKE_HOME="$home" FM_CREW_STATE_BIN="$home/bin/fm-crew-state.sh" \
+    PATH="$home/fakebin:$PATH" \
+    "$UNOWNED" > "$home/out" 2> "$home/err" || RC=$?
+  out=$(cat "$home/out")
+  [ "$RC" = 1 ] || fail "FM_ROOT_OVERRIDE selects the home when FM_HOME is unset, got $RC: $(cat "$home/err")"
+  printf '%s\n' "$out" | grep -q '^UNOWNED ghost-root ' || fail "the override home's backlog is read: $out"
+  pass "FM_ROOT_OVERRIDE selects the home when FM_HOME is unset"
 }
 
 test_owned_fleet_is_silent
@@ -358,4 +411,7 @@ test_refused_backlog_listing_is_exit_2_not_silence
 test_hung_forge_is_skipped
 test_listing_count_mismatch_is_exit_2
 test_missing_backlog_is_exit_2
+test_non_markdown_backend_needs_no_backlog_file
+test_zero_timeout_still_bounds_the_read
+test_root_override_selects_the_home
 printf 'ok - all fm-unowned tests passed\n'

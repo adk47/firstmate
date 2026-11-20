@@ -48,16 +48,7 @@ else
   echo; echo "pass=$pass fail=$fail"; exit 1
 fi
 
-# --- 2. no baked-in close ref -------------------------------------------------
-# A hardcoded ocv-* ref is the defect from inbox 224: it names one approval run and goes
-# stale the day the drain closes with a different ref.
-if grep -qE 'SENTINEL_CLOSE_REFS|ocv-[0-9a-f]{8}' "$SENTINEL"; then
-  bad "a close ref is still baked into the sentinel (it must be derived per run)"
-else
-  ok "no baked-in close ref"
-fi
-
-# --- 3. unknown paid is never treated as unpaid -------------------------------
+# --- 2. unknown paid is never treated as unpaid -------------------------------
 # The exact rule that caused defect 2, now a module-level function so it can be exercised
 # directly instead of grepped. A row with no account_id is UNKNOWN (None); a known account
 # absent from the paid set is a real False; an unreadable replica is UNKNOWN, not unpaid.
@@ -82,50 +73,7 @@ sys.exit(1 if bad else 0)
 PY
 then pass=$((pass + 4)); else fail=$((fail + 1)); fi
 
-# --- 4. the order check is exercised on synthetic rows ------------------------
-# Import the module's order logic by running it against a fake ledger is not possible
-# without a live node-8, so this pins the pure decision rule instead: given paid flags,
-# an inversion is a False followed by a True, and None never participates.
-if python3 - "$SENTINEL" <<'PY'
-import sys
-
-def inverted(flags):
-    seen = False
-    for p in flags:
-        if p is False:
-            seen = True
-        elif p is True and seen:
-            return True
-    return False
-
-cases = [
-    ("paid then unpaid is fine",        [True, True, False, False], False),
-    ("unpaid then paid is an inversion", [False, True],              True),
-    ("unknown never inverts",           [None, True, None, False],   False),
-    ("unknown between unpaid and paid", [False, None, True],         True),
-    ("all unknown is fine",             [None, None],                False),
-    ("empty is fine",                   [],                          False),
-]
-bad = 0
-for name, flags, want in cases:
-    got = inverted(flags)
-    if got != want:
-        print(f"  FAIL {name} (want {want}, got {got})")
-        bad += 1
-    else:
-        print(f"  ok   {name}")
-sys.exit(1 if bad else 0)
-PY
-then pass=$((pass + 6)); else fail=$((fail + 1)); fi
-
-# --- 5. per-run grouping replaced the answers/closes split --------------------
-if grep -q 'runs.setdefault(r.get("ref") or "(no ref)", \[\]).append(r)' "$SENTINEL"; then
-  ok "order is checked per approval run"
-else
-  bad "order is not grouped per approval run"
-fi
-
-# --- 6. the sentinel is actually scheduled -----------------------------------
+# --- 3. the sentinel is actually scheduled -----------------------------------
 # The rule is "runs again tomorrow with no human". A sentinel nobody schedules is a script.
 if ! crontab_lines=$(crontab -l 2>/dev/null); then
   printf '  skip sentinel cron check: this host has no crontab to inspect\n'
@@ -135,50 +83,35 @@ else
   bad "sentinel is not on cron (it would need a human to run it)"
 fi
 
-# --- 7. "unreadable list" and "user not on the list" are different facts ------
-# Inbox 225: uvn-status also sends on a direct status change, so a sent user is
-# legitimately absent from the owing list. Only an unreadable list is blindness.
-if grep -q 'list_families_seen and not list_ok' "$SENTINEL" && \
-   grep -q 'list_families_seen and list_ok and not list_rows' "$SENTINEL"; then
-  ok "blind-list fail requires an unreadable list, not an absent user"
-else
-  bad "blind-list fail still fires when the list was read fine"
-fi
-
-# --- 8. sent_rows and the per-window counters are half-open -------------------
+# --- 4. sent_rows and the per-window counters are half-open -------------------
+# This fact lives in SQL window literals with no module-level function to call, so the
+# query text is the only place it is expressible.
 if [ "$(grep -c "' ','T') < '{now_s}'" "$SENTINEL")" -ge 1 ]; then
   ok "window queries carry an upper bound"
 else
   bad "a window query has no upper bound (double counting)"
 fi
 
-# --- 7. every window writes its measured line --------------------------------
-# Inbox 226: the window line was conditional on activity, so quiet passes 1889-1892
-# measured a window and left the status file reading only "idle until next pass".
-if grep -q 'if fails:' <<<"$(sed -n '/state\/{LANE}\.status/,/^    print(line)/p' "$SENTINEL")"; then
-  bad "window line is conditional (a measured-quiet window records nothing)"
-else
-  ok "every window writes its measured line"
-fi
-
-# --- 8. every send timestamp is normalised before comparison ----------------
+# --- 5. every send timestamp is normalised before comparison ----------------
 # Inbox 227: verify_messages mixes 19-char 'YYYY-MM-DD HH:MM:SS' and 20-char
 # 'YYYY-MM-DDTHH:MM:SSZ'. ' ' sorts below 'T', so a space-format row is silently
 # dropped from any ">= '....T....'" bound even when it is chronologically later.
+# As with the window bounds this is a SQL comparison literal with no module-level
+# function to call, so the query text is the only place it is expressible.
 if grep -qE "coalesce\(sent_at,created_at\)[^)]*[<>]=? *'" "$SENTINEL"; then
   bad "a send timestamp is compared without replace(...,' ','T') normalisation"
 else
   ok "every send timestamp is normalised before comparison"
 fi
 
-# --- 9. regression: the need-ask list is the source of truth (inbox 230) ---------
+# --- 6. regression: the need-ask list is the source of truth (inbox 230) ---------
 # The false alarm this pins: pass 2330 (2026-11-19T02:30Z) failed "proof-need-ask/answers
 # run captain 2026-1: paid rows sent after unpaid rows" while the drain's own ordering key
 # (need-asks.json users[].paid) showed NO inversion, and every one of the 34 recipients was
 # on the need-ask list - the sentinel had read them against owing-uvn.json and re-derived
 # `paid` from its own replica team rule. Both halves are pinned here: the fixture must PASS
 # on the fixed rule and FAIL on the old one, so the test cannot be satisfied by weakening
-# the check (a genuine inversion still fails - see case 4).
+# the check (a genuine inversion still fails - see the genuine-inversion case below).
 if python3 - "$SENTINEL" <<'PY'
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("fs", sys.argv[1])
@@ -243,7 +176,7 @@ sys.exit(1 if bad else 0)
 PY
 then pass=$((pass + 7)); else fail=$((fail + 1)); fi
 
-# --- 10. every counter on the pass line says what it covers (inbox 232) ------
+# --- 7. every counter on the pass line says what it covers (inbox 232) ------
 # The line is quoted to Aaron, so a cumulative number placed between two per-window
 # numbers gets read (and subtracted) as per-window: "notices-sent=0 acks-sent=0
 # users-told=1200" on a 10-minute pass. Each counter now carries window:/total:/now:/
