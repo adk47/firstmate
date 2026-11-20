@@ -1,0 +1,49 @@
+=== 1. healthy digest: one line per domain (real CLI) ===
+credit | users_told_today=140 [pass 2 window 2026-11-11T11:40:00Z->2026-11-11T11:50:00Z; source state/watch-lane.status; age 10m] would_send=4,3 [last two completed ticks, done 09:40Z and 11:40Z; cap=0; source /tmp/overlord-evidence.RYBHGl/remote/tick.log; age 20m] | inside thresholds
+claims | stuck_over_7d_no_step=0 [source /tmp/overlord-evidence.RYBHGl/remote/claims.json; age 1m] reason_loss=0 [source /tmp/overlord-evidence.RYBHGl/remote/claims.json; age 1m] | inside thresholds
+support | waiting_on_us=0 [source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 1m] promised_a_person_24h=7 [source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 1m] promises_broken_24h=0 [source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 1m] commitments_overdue=0 [source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 1m] | inside thresholds
+merges | open=40 [source forge search org:o; age 0m] green_unmerged_2h=0 [green and mergeable on the current head, head older than 2h00m; source forge search org:o; age 0m] | inside thresholds
+meter | tick=started 30m ago [ran 10m; cadence 2h00m; source /tmp/overlord-evidence.RYBHGl/remote/tick.log; age 30m] unmeasured=0 [source this check's own reads + state/watch-lane.status; age 0m] stopped_lanes=unmeasured (not configured) | inside thresholds
+
+=== 2. THE INCIDENT: cap held every paid ask (would_send=0 on two ticks), 5 green PRs orphaned, 2 commitments overdue ===
+--- digest after the check ---
+credit | users_told_today=140 [pass 2 window 2026-11-11T11:40:00Z->2026-11-11T11:50:00Z; source state/watch-lane.status; age 20m] would_send=0,0 [last two completed ticks, done 09:40Z and 11:40Z; cap=0; source /tmp/overlord-evidence.RYBHGl/remote/tick.log; age 30m] | WRONG: would_send=0 on two consecutive ticks
+claims | stuck_over_7d_no_step=0 [source /tmp/overlord-evidence.RYBHGl/remote/claims.json; age 11m] reason_loss=0 [source /tmp/overlord-evidence.RYBHGl/remote/claims.json; age 11m] | inside thresholds
+support | waiting_on_us=0 [source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 1m] promised_a_person_24h=7 [source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 1m] promises_broken_24h=0 [source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 1m] commitments_overdue=2 [source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 1m] | WRONG: a commitment passed its due time with no sent message
+merges | open=40 [source forge search org:o; age 0m] green_unmerged_2h=5 [green and mergeable on the current head, head older than 2h00m; source forge search org:o; age 0m] | WRONG: green_unmerged_2h rises
+meter | tick=started 40m ago [ran 10m; cadence 2h00m; source /tmp/overlord-evidence.RYBHGl/remote/tick.log; age 40m] unmeasured=0 [source this check's own reads + state/watch-lane.status; age 0m] stopped_lanes=unmeasured (not configured) | inside thresholds
+--- state/overlord.status (what firstmate wakes on) ---
+blocked [key=overlord-credit-would-send]: OVERLORD credit: would_send=0 on two consecutive ticks; would_send=0,0; source /tmp/overlord-evidence.RYBHGl/remote/tick.log; age 30m; owner credit-lane; correction: would_send was 0 on the ticks done 2026-11-11T09:40Z and 2026-11-11T11:40Z (cap=0, 0 family reads failed, 2 families read). Find what removed every candidate - the failed family reads first, then the gate that filtered the rest - fix that read path, and prove it with one tick line showing would_send above 0 and sent above 0.
+blocked [key=overlord-support-overdue]: OVERLORD support: a commitment passed its due time with no sent message; commitments_overdue=2; source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 1m; owner support-lane; correction: 2 commitments are past their due time with no sent message. For each, send the promised message or tell the customer the new time, then report commitments_overdue=0.
+blocked [key=overlord-merges-green-unmerged]: OVERLORD merges: green_unmerged_2h rises; green_unmerged_2h=5; source forge search org:o; age 0m; owner merge-lane; correction: 5 pull requests are green and mergeable on their current head, that head older than 2h00m, and nobody merged them (was 0). Most recent: https://example.test/o/r/pull/5 https://example.test/o/r/pull/4 https://example.test/o/r/pull/3 https://example.test/o/r/pull/2 https://example.test/o/r/pull/1. Review each on its current head and send a GO or NO-GO naming that head to merge-lane; only a GO on the head that is still current may be merged, through the guarded merge path.
+--- page delivered ---
+OVERLORD credit: would_send=0 on two consecutive ticks; would_send=0,0; source /tmp/overlord-evidence.RYBHGl/remote/tick.log; age 30m
+OVERLORD support: a commitment passed its due time with no sent message; commitments_overdue=2; source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 1m
+OVERLORD merges: green_unmerged_2h rises; green_unmerged_2h=5; source forge search org:o; age 0m
+--- steers delivered (lane + correction) ---
+credit-lane --fire-and-forget 48ba5172e74e6738 OVERLORD credit: would_send=0 on two consecutive ticks; would_send=0,0; source /tmp/overlord-evidence.RYBHGl/remote/tick.log; age 30m. would_send was 0 on the ticks done 2026-11-11T09:40Z and 2026-11-11T11:40Z (cap=0, 0 family reads failed, 2 families read). Find what removed every candidate - the failed family reads first, then the gate that filtered the rest - fix that read path, and prove it with one tick line showing would_send above 0 and sent above 0. Anything destructive or irreversible this leads to needs a Fable review on the current head first.
+support-lane --fire-and-forget 33fcd0936f2338f6 OVERLORD support: a commitment passed its due time with no sent message; commitments_overdue=2; source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 1m. 2 commitments are past their due time with no sent message. For each, send the promised message or tell the customer the new time, then report commitments_overdue=0. Anything destructive or irreversible this leads to needs a Fable review on the current head first.
+fable-lane --fire-and-forget c2f5f365b082d668 OVERLORD merges: green_unmerged_2h rises; green_unmerged_2h=5; source forge search org:o; age 0m. This needs a review before anyone acts, because the correction is irreversible (owning lane: merge-lane). 5 pull requests are green and mergeable on their current head, that head older than 2h00m, and nobody merged them (was 0). Most recent: https://example.test/o/r/pull/5 https://example.test/o/r/pull/4 https://example.test/o/r/pull/3 https://example.test/o/r/pull/2 https://example.test/o/r/pull/1. Review each on its current head and send a GO or NO-GO naming that head to merge-lane; only a GO on the head that is still current may be merged, through the guarded merge path.
+
+=== 3. one stale head must not make the fleet-wide merges metric partial ===
+merges | open=40 [source forge search org:o; age 0m] green_unmerged_2h=0 [green and mergeable on the current head, head older than 2h00m; 1 stale head(s) set aside: 5; source forge search org:o; age 0m] | inside thresholds
+
+=== 4. a cut-short forge read is partial: the open crossing is held, NOT resolved with a false all-clear ===
+recorded 2026-11-11T12:40Z (0m ago)
+credit | users_told_today=140 [pass 2 window 2026-11-11T11:40:00Z->2026-11-11T11:50:00Z; source state/watch-lane.status; age 50m] would_send=0,0 [last two completed ticks, done 09:40Z and 11:40Z; cap=0; source /tmp/overlord-evidence.RYBHGl/remote/tick.log; age 1h00m] | WRONG: would_send=0 on two consecutive ticks
+claims | stuck_over_7d_no_step=0 [source /tmp/overlord-evidence.RYBHGl/remote/claims.json; age 41m] reason_loss=0 [source /tmp/overlord-evidence.RYBHGl/remote/claims.json; age 41m] | inside thresholds
+support | waiting_on_us=0 [source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 31m] promised_a_person_24h=7 [source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 31m] promises_broken_24h=0 [source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 31m] commitments_overdue=2 [source /tmp/overlord-evidence.RYBHGl/remote/support.json; age 31m] | WRONG: a commitment passed its due time with no sent message
+merges | open=40 [source forge search org:o; age 0m] green_unmerged_2h=0 [green and mergeable on the current head, head older than 2h00m; a lower bound: first 100 green pull requests read; source forge search org:o; age 0m] | inside thresholds
+meter | tick=started 1h10m ago [ran 10m; cadence 2h00m; source /tmp/overlord-evidence.RYBHGl/remote/tick.log; age 1h10m] unmeasured=0 [source this check's own reads + state/watch-lane.status; age 0m] stopped_lanes=unmeasured (not configured) | inside thresholds
+open: overlord-credit-would-send since 2026-11-11T12:10Z
+open: overlord-merges-green-unmerged since 2026-11-11T12:10Z
+open: overlord-support-overdue since 2026-11-11T12:10Z
+--- any false all-clear line? ---
+0
+
+=== 5. every source absent (fresh home, no config): the monitor says unmeasured, never 'inside thresholds' ===
+credit | users_told_today,would_send=unmeasured (not configured) | unmeasured (not configured): users_told_today, would_send
+claims | stuck_over_7d_no_step,reason_loss=unmeasured (not configured) | unmeasured (not configured): stuck_over_7d_no_step, reason_loss
+support | waiting_on_us,promised_a_person_24h,promises_broken_24h,commitments_overdue=unmeasured (not configured) | unmeasured (not configured): waiting_on_us, promised_a_person_24h, promises_broken_24h, commitments_overdue
+merges | open,green_unmerged_2h=unmeasured (not configured) | unmeasured (not configured): open, green_unmerged_2h
+meter | tick,stopped_lanes=unmeasured (not configured) unmeasured=0 [source this check's own reads; age 0m] | unmeasured (not configured): tick
