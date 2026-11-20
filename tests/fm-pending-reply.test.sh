@@ -2195,6 +2195,141 @@ test_retire_never_overwrites_a_race_resolution() {
   pass "retire never overwrites a resolution that raced it"
 }
 
+test_sweep_reclaims_crash_mid_retire() {
+  (
+    local home state corr rec retired dest other rec2 out
+    home=$(setup_parent crash-mid-retire)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=50000
+    corr=$(fm_pending_reply_create "$home" "$state" lights "half-retired steer")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_set "$rec" retired_reason expired-undelivered \
+      || fail "fixture should stamp the retirement reason"
+    fm_pending_reply_set "$rec" retired_epoch 49000 \
+      || fail "fixture should stamp the retirement epoch"
+    fm_pending_reply_set "$rec" phase retired \
+      || fail "fixture should stamp the terminal phase"
+    retired=$(fm_pending_reply_retired_dir "$state")
+    dest="$retired/$corr"
+    out=$(fm_pending_reply_sweep "$state")
+    [ ! -e "$rec" ] || fail "the sweep must finish a crashed retirement"
+    [ -f "$dest" ] || fail "the reclaimed record must land in .retired/"
+    [ "$out" = "$corr"$'\t'retired-reclaimed ] \
+      || fail "the sweep must account for the reclaimed record, got: $out"
+    [ "$(fm_pending_reply_get "$dest" retired_reason)" = expired-undelivered ] \
+      || fail "reclaim must not re-stamp the retirement reason"
+    [ "$(fm_pending_reply_get "$dest" retired_epoch)" = 49000 ] \
+      || fail "reclaim must not re-stamp the retirement epoch"
+    [ "$(fm_pending_reply_get "$dest" phase)" = retired ] \
+      || fail "reclaim must not re-stamp the terminal phase"
+    # An existing archive entry is never overwritten by a second leftover.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=60000
+    other=$(fm_pending_reply_create "$home" "$state" lights "another half-retired steer")
+    fm_pending_reply_mark_delivered "$state" "$other"
+    rec2=$(fm_pending_reply_path "$state" "$other")
+    fm_pending_reply_set "$rec2" retired_reason expired-undelivered \
+      || fail "second fixture should stamp the retirement reason"
+    fm_pending_reply_set "$rec2" retired_epoch 59000 \
+      || fail "second fixture should stamp the retirement epoch"
+    fm_pending_reply_set "$rec2" phase retired \
+      || fail "second fixture should stamp the terminal phase"
+    mkdir -p "$retired"
+    printf 'keep me\n' > "$retired/$other"
+    fm_pending_reply_sweep "$state" >/dev/null
+    [ -f "$rec2" ] || fail "an occupied archive path must leave the active record alone"
+    [ "$(cat "$retired/$other")" = 'keep me' ] \
+      || fail "an existing archive record must never be overwritten"
+  ) || fail "crash-mid-retire reclaim regression failed"
+  pass "the sweep reclaims a record left mid-retire without overwriting archives"
+}
+
+test_recovery_sent_sibling_still_escalates() {
+  (
+    local home state a b rec_b
+    IFS=$'\t' read -r home a b <<< "$(sibling_fixture recovery-sent-sibling)"
+    state="$home/state"
+    rec_b=$(fm_pending_reply_path "$state" "$b")
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20020
+    fm_pending_reply_set "$rec_b" recovery_attempted_epoch 20005 \
+      || fail "fixture should record the recovery attempt"
+    fm_pending_reply_set "$rec_b" recovery_sent_epoch 20010 \
+      || fail "fixture should record the recovery send"
+    fm_pending_reply_set "$rec_b" recovery_turn_seen_busy 1 \
+      || fail "fixture should record the recovery turn"
+    fm_pending_reply_set "$rec_b" recovery_turn_completed_epoch 20030 \
+      || fail "fixture should complete the recovery turn"
+    fm_pending_reply_set "$rec_b" phase recovery_sent \
+      || fail "fixture should put B in recovery_sent"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    printf 'done [corr=%s]: shipped\n' "$a" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$a" || fail "A should resolve"
+    [ "$(phase_of "$state" "$b")" = recovery_sent ] \
+      || fail "a recovery_sent sibling must stay on its own path, got $(phase_of "$state" "$b")"
+    [ "$(fm_pending_reply_get "$rec_b" recovery_turn_completed_epoch)" = 20030 ] \
+      || fail "a sibling answer must not erase the recovery turn completion"
+    [ -z "$(fm_pending_reply_get "$rec_b" sibling_resolved_corr)" ] \
+      || fail "a recovery_sent record is not sibling-reset"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20100
+    fm_pending_reply_maybe_escalate "$state" "$b" \
+      || fail "the unanswered recovery must still escalate"
+    [ "$(phase_of "$state" "$b")" = escalated ] \
+      || fail "B should escalate rather than stay recovery_sent forever"
+    grep -q 'pending-reply-missed' "$state/lights.status" \
+      || fail "the escalation must reach the parent channel"
+  ) || fail "recovery_sent sibling escalation regression failed"
+  pass "a recovery_sent sibling keeps its completed turn and still escalates"
+}
+
+test_nested_sibling_note_keeps_outer_lock() {
+  (
+    local home state a b rec_a lock_b pid
+    IFS=$'\t' read -r home a b <<< "$(sibling_fixture nested-lock)"
+    state="$home/state"
+    rec_a=$(fm_pending_reply_path "$state" "$a")
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20020
+    fm_pending_reply_set "$rec_a" recovery_attempted_epoch 20005 \
+      || fail "fixture should record the recovery attempt"
+    fm_pending_reply_set "$rec_a" recovery_sent_epoch 20010 \
+      || fail "fixture should record the recovery send"
+    fm_pending_reply_set "$rec_a" recovery_turn_seen_busy 1 \
+      || fail "fixture should record the recovery turn"
+    fm_pending_reply_set "$rec_a" recovery_turn_completed_epoch 20030 \
+      || fail "fixture should complete the recovery turn"
+    fm_pending_reply_set "$rec_a" phase recovery_sent \
+      || fail "fixture should put A in recovery_sent"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    printf 'done [corr=%s]: shipped\n' "$b" >> "$state/lights.status"
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$ROOT/bin/fm-wake-lib.sh"
+    # shellcheck disable=SC2034
+    local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+    # shellcheck disable=SC2034
+    STATE=$state
+    lock_b="$state/.pending-reply-$b.lock"
+    fm_lock_acquire_wait "$lock_b" || fail "fixture should hold B's lock"
+    fm_pending_reply_maybe_escalate "$state" "$a" >/dev/null 2>&1 &
+    pid=$!
+    sleep 0.2
+    [ ! -e "$state/.pending-reply-$a.lock" ] \
+      || fail "A's lock must not be taken while another correlation lock is held"
+    fm_lock_release "$lock_b"
+    wait "$pid" || true
+    [ "$(phase_of "$state" "$b")" = resolved ] \
+      || fail "B should resolve once its lock is free"
+    [ ! -e "$state/.pending-reply-$a.lock" ] \
+      || fail "the outer frame must release A's lock after escalation"
+  ) || fail "nested sibling lock regression failed"
+  pass "a sibling note never takes a correlation lock under another correlation lock"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -2249,5 +2384,8 @@ test_fm_send_resend_of_same_body_points_at_existing_corr
 test_semantic_busy_record_beats_rendered_tail
 test_semantic_idle_waits_for_the_grace_gate
 test_retire_never_overwrites_a_race_resolution
+test_sweep_reclaims_crash_mid_retire
+test_recovery_sent_sibling_still_escalates
+test_nested_sibling_note_keeps_outer_lock
 
 printf 'ok - all pending-reply tests passed\n'

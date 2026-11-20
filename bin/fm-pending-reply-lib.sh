@@ -24,17 +24,18 @@
 #   - One answer resolves exactly one record: a correlated line carrying corr A
 #     resolves A and nothing else. Resolution is terminal for that corr: a
 #     resolved or retired record never sends a recovery and never escalates.
-#   - A sibling answer is not a missed report. When A resolves, every still-open
-#     record for the same task AND the same request body (same request_digest;
-#     an empty digest on either side is never a sibling) that is delivered,
-#     recovery not yet attempted, or recovery sent with its turn not yet judged,
-#     has its turn evidence reset and records sibling_resolved_corr/epoch. From
-#     then on only a genuine busy->idle transition observed AFTER that epoch
-#     completes the sibling's turn, so the idle that followed the answer to A can
-#     never draw a REPOST REQUIRED for B. A different request body is not a
-#     sibling: it keeps the ordinary one-repost-then-escalate path. B is still
-#     resolvable by its own correlated answer at any time, and by the age sweep
-#     below once it has aged out.
+#   - A sibling answer is not a missed report. When A resolves, every
+#     awaiting_report record for the same task AND the same request body (same
+#     request_digest; an empty digest on either side is never a sibling) that is
+#     delivered and whose recovery is not yet attempted has its turn evidence
+#     reset and records sibling_resolved_corr/epoch. From then on only a genuine
+#     busy->idle transition observed AFTER that epoch completes the sibling's
+#     turn, so the idle that followed the answer to A can never draw a REPOST
+#     REQUIRED for B. A record already in recovery_sent keeps its recovery turn
+#     evidence and stays on the ordinary escalation path. A different request
+#     body is not a sibling: it keeps the ordinary one-repost-then-escalate
+#     path. B is still resolvable by its own correlated answer at any time, and
+#     by the age sweep below once it has aged out.
 #   - No duplicate record for one request: a steer creator that passes the
 #     `dedup` flag to fm_pending_reply_create gets the existing open record's
 #     corr back (exit 3) when the same task already has an open record with
@@ -108,8 +109,8 @@
 #   resolved_via=           status | document | helper | empty, or a terminal
 #                           sweep value: expired-undelivered | superseded-by-sibling
 #   sibling_resolved_corr=  corr of the same-task, same-request sibling whose
-#                           resolution reset this record's turn evidence (empty
-#                           until then)
+#                           resolution reset an awaiting_report record's turn
+#                           evidence (empty until then)
 #   sibling_resolved_epoch=
 #   retired_epoch=          when the sweep moved the record to .retired/
 #   retired_reason=         resolved-closed | resolved-elsewhere |
@@ -761,7 +762,7 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   # subshell that would make every later use of them read as a lost write.
   # The lock is released explicitly rather than from an EXIT trap, because a trap
   # in a plain function would clobber the caller's own.
-  local state=$1 corr=$2 lock rc=0
+  local state=$1 corr=$2 lock rc=0 rec task_id resolved_epoch
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
@@ -770,6 +771,13 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_try_resolve_locked "$@" || rc=$?
   fm_lock_release "$lock"
+  if [ "$rc" -eq 3 ]; then
+    rc=0
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    task_id=$(fm_pending_reply_get "$rec" task_id)
+    resolved_epoch=$(fm_pending_reply_get "$rec" resolved_epoch)
+    fm_pending_reply_note_sibling_resolved "$state" "$task_id" "$corr" "$resolved_epoch" || true
+  fi
   return "$rc"
 }
 
@@ -818,23 +826,20 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   # The record is resolved either way; a failed close stays retryable from the
   # watcher tick rather than turning a settled request back into a failure.
   _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
-  # The mate just reported through the parent channel: the idle that follows is
-  # the end of THIS answer's turn, not proof that a sibling request was missed.
-  fm_pending_reply_note_sibling_resolved "$state" \
-    "$(fm_pending_reply_get "$rec" task_id)" "$corr" "$now" || true
-  return 0
+  return 3
 }
 
 # One answer resolves exactly one record. Called once when <resolved-corr>
-# resolves: every other open record for <task_id> carrying the same request body
-# (same request_digest) that is still waiting on a turn judgement has that
-# evidence reset and the sibling resolution recorded, so
-# fm_pending_reply_observe_busy demands a fresh busy->idle transition after
-# <epoch> before the sibling's turn counts as completed. A distinct request body
-# is never a sibling and keeps its ordinary recovery path. A record whose
-# recovery is already in flight (recovery_sending) or already judged
-# (recovery_failed/unknown, escalated) is left alone: nothing pending there can
-# be triggered by this idle.
+# resolves: every other open awaiting_report record for <task_id> carrying the
+# same request body (same request_digest) has its turn evidence reset and the
+# sibling resolution recorded, so fm_pending_reply_observe_busy demands a fresh
+# busy->idle transition after <epoch> before the sibling's turn counts as
+# completed. A distinct request body is never a sibling and keeps its ordinary
+# recovery path. A record already in recovery_sent keeps its recovery turn
+# evidence and stays on the ordinary escalation path; records in
+# recovery_sending or already judged (recovery_failed/unknown, escalated) are
+# left alone too. Called with no per-correlation lock held, because it takes
+# each sibling's own lock.
 fm_pending_reply_note_sibling_resolved() {  # <state-dir> <task_id> <resolved-corr> <epoch>
   local state=$1 task_id=$2 resolved_corr=$3 epoch=$4 dir rec corr digest resolved_digest lock
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
@@ -881,10 +886,6 @@ _fm_pending_reply_note_sibling_locked() {  # <state-dir> <task_id> <resolved-cor
       fm_pending_reply_set "$rec" turn_seen_busy 0 || return 1
       fm_pending_reply_set "$rec" request_turn_completed_epoch "" || return 1
       ;;
-    recovery_sent)
-      fm_pending_reply_set "$rec" recovery_turn_seen_busy 0 || return 1
-      fm_pending_reply_set "$rec" recovery_turn_completed_epoch "" || return 1
-      ;;
     *) return 1 ;;
   esac
   fm_pending_reply_set "$rec" sibling_resolved_corr "$resolved_corr" || return 1
@@ -895,6 +896,8 @@ _fm_pending_reply_note_sibling_locked() {  # <state-dir> <task_id> <resolved-cor
 # channel before <corr> acts on its own turn evidence. Record order inside one
 # tick is arbitrary, so without this a sibling's fresh answer could sit unread
 # in the status file while this record sends a repost that answer makes wrong.
+# The full-directory scan per call is known to be expensive if
+# state/pending-replies grows large and is deliberately left as is.
 fm_pending_reply_resolve_siblings() {  # <state-dir> <task_id> <corr>
   local state=$1 task_id=$2 own=$3 dir rec corr phase
   dir=$(fm_pending_reply_dir "$state")
@@ -1429,15 +1432,28 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   # subshell that would make every later use of them read as a lost write.
   # The lock is released explicitly rather than from an EXIT trap, because a trap
   # in a plain function would clobber the caller's own.
-  local state=$1 corr=$2 lock rc=0
+  local state=$1 corr=$2 lock rc=0 phase rec task_id resolved_epoch
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  phase=$(fm_pending_reply_get "$rec" phase)
+  if [ "$phase" = recovery_sent ]; then
+    fm_pending_reply_resolve_siblings "$state" \
+      "$(fm_pending_reply_get "$rec" task_id)" "$corr"
+  fi
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_maybe_escalate_locked "$@" || rc=$?
   fm_lock_release "$lock"
+  if [ "$rc" -eq 3 ]; then
+    rc=0
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    task_id=$(fm_pending_reply_get "$rec" task_id)
+    resolved_epoch=$(fm_pending_reply_get "$rec" resolved_epoch)
+    fm_pending_reply_note_sibling_resolved "$state" "$task_id" "$corr" "$resolved_epoch" || true
+  fi
   return "$rc"
 }
 
@@ -1455,9 +1471,6 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   fi
   case "$phase" in
     recovery_sent)
-      # A sibling's answer already on the channel resets this record's turn
-      # evidence (fm_pending_reply_note_sibling_resolved); read it first.
-      fm_pending_reply_resolve_siblings "$state" "$(fm_pending_reply_get "$rec" task_id)" "$corr"
       completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)
       [ -n "$completed" ] || return 1
       # Same reply-channel evidence rule the recovery repost obeys: a missing
@@ -1480,9 +1493,12 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
     fi
   fi
   # Resolve wins if a late report arrived between completion and this call.
-  if _fm_pending_reply_try_resolve_locked "$state" "$corr"; then
-    return 0
-  fi
+  local late_resolve=0
+  _fm_pending_reply_try_resolve_locked "$state" "$corr" || late_resolve=$?
+  case "$late_resolve" in
+    0) return 0 ;;
+    3) return 3 ;;
+  esac
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   case "$phase" in
     delivery_unknown) kind=delivery-unknown ;;
@@ -1882,7 +1898,7 @@ _fm_pending_reply_retire_locked() {  # <state-dir> <corr_id> <reason> [terminal-
 # "<corr>\t<reason>" line per retired record so a caller can account for them.
 fm_pending_reply_sweep() {  # <state-dir>
   local state=$1 dir rec corr phase now created resolved delivered age
-  local retain horizon escalated closed line via sibling reason
+  local retain horizon escalated closed line via sibling reason dest marker
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   now=$(fm_pending_reply_now)
@@ -1941,6 +1957,18 @@ fm_pending_reply_sweep() {  # <state-dir>
           reason="superseded-by-sibling:$sibling"
           via=superseded-by-sibling
         fi
+        ;;
+      retired)
+        dest=$(fm_pending_reply_retired_path "$state" "$corr")
+        [ ! -e "$dest" ] || continue
+        mkdir -p "$(dirname "$dest")" || continue
+        chmod 700 "$(dirname "$dest")" 2>/dev/null || true
+        marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+        rm -f "$marker" 2>/dev/null || true
+        if mv -f "$rec" "$dest"; then
+          printf '%s\t%s\n' "$corr" retired-reclaimed
+        fi
+        continue
         ;;
       *) continue ;;
     esac
