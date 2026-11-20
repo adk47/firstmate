@@ -412,6 +412,29 @@ SH
   pass "a repository abandoned at the poll deadline is named in the verdict and stays silent"
 }
 
+test_a_cadence_check_skipped_at_the_poll_deadline_is_counted() {
+  local home out
+  home=$(make_home cadence-skipped)
+  cat > "$home/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$home/gh.calls"
+[ "\$1" = api ] || exit 1
+case "\$2" in
+  *contents*) sleep 10 ;;
+esac
+f="$home/api/\$(printf '%s' "\$2" | tr '/?&=' '____')"
+[ -f "\$f" ] || exit 1
+cat "\$f"
+SH
+  chmod +x "$home/fakebin/gh"
+  out=$(poll "$home" 100000 FM_CHECK_TIMEOUT=6 FM_CI_HEALTH_REPOS= \
+    FM_CI_HEALTH_SCHEDULED='acme/widgets:smoke.yaml:7200')
+  [ -z "$out" ] || fail "a cadence read skipped at the poll deadline printed: $out"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CHECK" status)
+  assert_contains "$out" "cadence acme/widgets/smoke.yaml not judged: poll budget spent" "a cadence read skipped at the poll deadline was recorded as plainly quiet"
+  pass "a cadence check abandoned at the poll deadline is named in the verdict and stays silent"
+}
+
 # A config file is the operator interface the docs describe: a multi-value line
 # and numeric lines, with their comments on their own lines.
 test_an_empty_repository_list_polls_quietly_without_a_scratch_dir() {
@@ -600,6 +623,7 @@ test_an_unreadable_rate_limit_is_not_reported_as_a_stand_down
 test_an_unreadable_answer_is_silent_not_red
 test_unreadable_workflow_reads_are_counted_but_stay_silent
 test_a_repository_skipped_at_the_poll_deadline_is_counted
+test_a_cadence_check_skipped_at_the_poll_deadline_is_counted
 test_an_empty_repository_list_polls_quietly_without_a_scratch_dir
 test_a_workflow_on_the_second_list_page_is_read
 test_a_partial_workflow_list_is_recorded_but_stays_silent

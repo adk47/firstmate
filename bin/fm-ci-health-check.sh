@@ -338,13 +338,15 @@ EOF
 # empty when the workflow declares no schedule or is inside its allowance.
 scheduled_late() {
   local repo=$1 wf=$2 max_age=$3 now=$4 content has_schedule runs last last_epoch age
-  poll_has_budget || return 0
-  content=$(gh_api "repos/$repo/contents/.github/workflows/$wf") || return 0
+  poll_has_budget || return 2
+  content=$(gh_api "repos/$repo/contents/.github/workflows/$wf") \
+    || { poll_has_budget && return 0; return 2; }
   has_schedule=$(printf '%s\n' "$content" | jq -r '.content // ""' | base64 -d 2>/dev/null \
     | grep -cE '^[[:space:]]+schedule:' || true)
   [ "${has_schedule:-0}" -gt 0 ] || return 0
-  poll_has_budget || return 0
-  runs=$(gh_api "repos/$repo/actions/workflows/$wf/runs?status=success&per_page=1") || return 0
+  poll_has_budget || return 2
+  runs=$(gh_api "repos/$repo/actions/workflows/$wf/runs?status=success&per_page=1") \
+    || { poll_has_budget && return 0; return 2; }
   last=$(printf '%s\n' "$runs" | jq -r '.workflow_runs[0].updated_at // ""' 2>/dev/null)
   [ -n "$last" ] || return 0
   last_epoch=$(date -u -d "$last" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$last" +%s 2>/dev/null) || return 0
@@ -425,7 +427,7 @@ action_check() {
   # findings to one scratch file, so the small repositories' round trips
   # overlap the big one's sweep; the findings are assembled in configured
   # order once every job has returned or given up at the deadline.
-  local scratch='' i=0 specs=() notes='' pkind prepo pcount
+  local scratch='' i=0 specs=() notes='' pkind prepo pcount rc
   for spec in $(conf FM_CI_HEALTH_REPOS "$REPOS_DEFAULT"); do
     specs+=("$spec")
   done
@@ -454,7 +456,11 @@ action_check() {
     rm -rf "$scratch"
   fi
   for spec in $(conf FM_CI_HEALTH_SCHEDULED "$SCHEDULED_DEFAULT"); do
-    poll_has_budget || break
+    poll_has_budget || {
+      part=${spec#*:}
+      notes="${notes}${notes:+; }cadence ${spec%%:*}/${part%%:*} not judged: poll budget spent"
+      break
+    }
     repo=${spec%%:*}
     part=${spec#*:}
     local wf max_age
@@ -466,7 +472,12 @@ action_check() {
     case "$max_age" in ''|*[!0-9]*) max_age=7200 ;; esac
     [ -n "$wf" ] && [ "$wf" != "$spec" ] || continue
     part=$(scheduled_late "$repo" "$wf" "$max_age" "$now")
-    [ -z "$part" ] || msg="${msg}${msg:+; }$part"
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      notes="${notes}${notes:+; }cadence $repo/$wf not judged: poll budget spent"
+    else
+      [ -z "$part" ] || msg="${msg}${msg:+; }$part"
+    fi
   done
   if [ -n "$msg" ]; then
     trailer=$(conf FM_CI_HEALTH_TRAILER "$TRAILER_DEFAULT")
