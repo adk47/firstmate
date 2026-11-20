@@ -580,6 +580,7 @@ portable_serial_weight_hints() {
   cat <<'EOF'
 tests/ak47-agent-reclaim.test.sh 26121
 tests/ak47-takedown.test.sh 4017
+tests/fable-sentinel-order.test.sh 700
 tests/fm-afk-inject-e2e.test.sh 35792
 tests/fm-afk-pi-herdr-return-e2e.test.sh 100
 tests/fm-afk-return.test.sh 2316
