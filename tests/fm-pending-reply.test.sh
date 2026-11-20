@@ -2149,6 +2149,69 @@ test_dedup_resend_restarts_turn_clock() {
   pass "an identical resend restarts the turn clock and earns one later repost"
 }
 
+test_rearmed_sibling_record_completes_from_idle() {
+  (
+    local home state dir fb log body a b rec_b hook_log lines
+    dir="$TMP_ROOT/rearmed-sibling-idle"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); log="$dir/send.log"
+    home=$(setup_parent rearmed-sibling-idle)
+    state="$home/state"
+    fm_write_secondmate_meta "$state/lights.meta" "$home/lights" "sess:fm-lights"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=10
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20000
+    b=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix") \
+      || fail "fixture should create the first record"
+    fm_pending_reply_mark_delivered "$state" "$b" || fail "fixture should deliver the first record"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20008
+    a=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix") \
+      || fail "fixture should create the sibling record"
+    fm_pending_reply_mark_delivered "$state" "$a" || fail "fixture should deliver the sibling"
+    printf 'state=idle\nlatest=done [corr=%s]\n' "$a" > "$state/lights.status"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20030
+    fm_pending_reply_try_resolve "$state" "$a" || true
+    [ "$(phase_of "$state" "$a")" = resolved ] || fail "the sibling should resolve"
+    rec_b=$(fm_pending_reply_path "$state" "$b")
+    [ "$(fm_pending_reply_get "$rec_b" sibling_resolved_corr)" = "$a" ] \
+      || fail "the open record should be marked by its sibling"
+    [ "$(fm_pending_reply_get "$rec_b" sibling_resolved_epoch)" = 20030 ] \
+      || fail "the sibling mark should record its epoch"
+    # The captain resends the identical body after the sibling answered; the
+    # resend rides the surviving record and restarts its turn clock.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    run_send "$fb" "$home" "$log" lights "ruling: ship the credit-trust fix" \
+      || fail "identical resend failed"
+    body=$(latest_record_body "$home" lights) || fail "resend body missing"
+    [ "$(fm_pending_reply_extract_corr "$body")" = "$b" ] \
+      || fail "the resend must reuse the surviving record"
+    [ "$(fm_pending_reply_get "$rec_b" delivered_epoch)" = 20060 ] \
+      || fail "the resend must restart the turn clock"
+    [ "$(fm_pending_reply_get "$rec_b" sibling_resolved_epoch)" = 20030 ] \
+      || fail "the resend must keep the sibling audit record"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20100
+    fm_pending_reply_tick_one "$state" "$b" idle || fail "idle tick failed"
+    [ "$(fm_pending_reply_get "$rec_b" request_turn_completed_epoch)" = 20100 ] \
+      || fail "the rearmed turn should complete from a pure idle"
+    [ "$(phase_of "$state" "$b")" = recovery_sent ] \
+      || fail "the rearmed record must earn its one repost"
+    lines=$(wc -l < "$hook_log" | tr -d ' ')
+    [ "$lines" = 1 ] || fail "expected exactly one repost, got $lines"
+  ) || fail "rearmed sibling idle regression failed"
+  pass "a rearmed sibling record completes from idle and earns one repost"
+}
+
 test_semantic_busy_record_beats_rendered_tail() {
   (
     local home state corr gen hook_log
@@ -2494,6 +2557,7 @@ test_sweep_runs_from_tick_on_its_interval
 test_same_request_within_window_reuses_corr
 test_fm_send_resend_of_same_body_points_at_existing_corr
 test_dedup_resend_restarts_turn_clock
+test_rearmed_sibling_record_completes_from_idle
 test_semantic_busy_record_beats_rendered_tail
 test_semantic_idle_waits_for_the_grace_gate
 test_retire_never_overwrites_a_race_resolution

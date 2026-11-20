@@ -949,6 +949,16 @@ fm_pending_reply_resolve_siblings() {  # <state-dir> <task_id> <corr>
   return 0
 }
 
+fm_pending_reply_sibling_outranks_delivery() {  # <record-path>
+  local rec=$1 sibling delivered
+  sibling=$(fm_pending_reply_get "$rec" sibling_resolved_epoch)
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  case "$sibling:$delivered" in
+    *[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  [ "$sibling" -ge "$delivered" ]
+}
+
 # Observe backend busy/idle evidence for the active turn without reading chat.
 # busy_state must be one of: busy | idle | unknown.
 fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
@@ -987,7 +997,7 @@ fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
         if [ "$seen" = 1 ] \
           || { [ "$seen" = 0 ] \
             && { [ "$field_completed" != request_turn_completed_epoch ] \
-              || [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_epoch)" ]; }; }; then
+              || ! fm_pending_reply_sibling_outranks_delivery "$rec"; }; }; then
           now=$(fm_pending_reply_now)
           fm_pending_reply_set "$rec" "$field_completed" "$now" || return 1
         fi
@@ -1210,7 +1220,7 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
   [ -n "$completed" ] || return 1
   sibling_epoch=$(fm_pending_reply_get "$rec" sibling_resolved_epoch)
-  if [ -n "$sibling_epoch" ]; then
+  if fm_pending_reply_sibling_outranks_delivery "$rec"; then
     # After a sibling resolved, only a busy->idle transition observed since
     # then is evidence, and the grace restarts from that resolution.
     [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] || return 1
