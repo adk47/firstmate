@@ -16,7 +16,7 @@ The queue is opt-in per home and off until its file exists.
 mkdir -p data
 cat > data/go-queue.txt <<'EOF'
 # owner: <github-login>
-widgets 1580 e672a82e encore-t1 squash
+widgets 1580 e672a82e encore-t1 squash # fable-go=ok
 EOF
 
 # 2. check the decisions it would make, then install the timer
@@ -40,7 +40,7 @@ To stop it, `systemctl --user disable --now fm-merge-queue.timer`; the queue fil
 One row per pull request, whitespace separated:
 
 ```
-<repo> <number> <expected-head> <task-id> <squash|merge|rebase>
+<repo> <number> <expected-head> <task-id> <squash|merge|rebase> [# provenance]
 ```
 
 - `<repo>` is `owner/repo`, or a bare repository name that uses the owner from a `# owner: <login>` directive in the same file, or `FM_MERGE_QUEUE_OWNER`.
@@ -48,6 +48,7 @@ One row per pull request, whitespace separated:
 - `<expected-head>` is the head commit the row was written against, at least seven hex characters.
 - `<task-id>` is the firstmate task the merge is recorded against, which keeps the merge metadata and the landed-work check working.
 - `<method>` is the merge method handed to the forge.
+- `[# provenance]` is an optional trailing comment, kept exactly as written. It is where the row records its own history, including the Fable GO that authorizes the merge (below). Any other sixth field makes the row unusable, because a row this home cannot read must never be guessed at.
 
 A row is identified by its owner, repository, number, and expected head, so `acme/widgets 12` and `beta/widgets 12` are two independent rows and so are two heads of one pull request.
 When one pull request appears twice, the newest row supersedes the older-head row: the superseded row is recorded in the ledger and the daily detail file with its own verdict rather than dropped, and the newest row is the one that decides.
@@ -65,9 +66,28 @@ Two `qa-review` checks may exist; a failing instance holds the row.
 Four things keep a change away from an unattended timer and with a decider instead: a fence label naming money, credentials, a vendor console, customer copy, or irreversible work; a title or body that mentions production DDL; a draft; and a red head.
 None of those rows merges, and a fenced one leaves the queue with its reason.
 
-The one exempted check is `credit-approval-guard`, which is red by design on a credit-impact change because the credit review itself is the gate.
-A failing instance of that check is the waiver, and a guard that has not finished holds the row.
-A merge that relied on that exemption says `credit-guard waived` on its own line, in the ledger, in the daily detail file, and in the daily count, so the waiver is never silent.
+## The admin bypass is proven, not assumed
+
+The merge is handed to `bin/fm-pr-merge.sh` with `--admin`, which bypasses the forge's own review and required-check gates.
+That is deliberate: the account cannot approve its own pull requests, so the queue proves the three things that replace a human approval before it uses the bypass, and records what it bypassed.
+
+1. A `qa-review` check passing on the exact head, with no configuration switch.
+2. A Fable GO recorded on the row for this head, written `fable-go=ok`, `fable-go@<sha>`, or `fable-go=<sha>` in the row's trailing comment.
+   The marker is read case-insensitively with `-`, `_`, or a single space as the separator, so `Fable GO=ok` and `FABLE_GO@<sha>` are the same forms.
+   A bound GO's sha must prefix this head, so a GO written for an older head does not carry over a push.
+   A bare `Fable GO` phrase is provenance prose, not a GO, and the queue does not interpret any other trailing text.
+3. Every required status check the base branch registers, present and passing, from both classic branch protection and repository rulesets.
+
+Anything unproven keeps the row queued and spends no attempt budget, because an unproven gate is not a refused merge.
+An unprotected base branch is a successful read of "nothing required"; a registration the forge cannot answer for is unproven, not empty.
+
+One check is exempt from the required-check proof because it is red or absent by design on the changes it guards, and it is named in the bypass record of every merge that relied on it:
+
+- `credit-approval-guard` - red by design on a credit-impact change, where the credit review itself is the gate.
+  A failing instance is the waiver, and a guard that has not finished holds the row.
+
+Every admin merge records the protections it bypassed on its own line, in the ledger, and in the daily detail file, as `admin bypassed: <list>`, where the list names `review-required` or `changes-requested` when the forge still wanted a review and each by-design check that was not passing.
+A merge that relied on the credit-guard exemption also says `credit-guard waived` in the same places, so neither the waiver nor the bypass is ever silent.
 
 A row leaves the queue only on a terminal verdict: merged, already merged, closed, fenced, a moved head, superseded by a newer row for the same pull request, or `FM_MERGE_QUEUE_MAX_ATTEMPTS` consecutive refused merge attempts (default 6), which retires it as abandoned.
 A row that is merely not ready stays queued and is retried on the next tick.
@@ -81,7 +101,7 @@ Records live under `<FM_HOME>/state/merge-queue/`:
 
 - `ledger.tsv` - one line per verdict: `<epoch> <row> <verdict> <reason> <url>`, where a row is named by its pull request and the head it was queued at, as in `acme/widgets#12@e672a82e`, and a row with no usable head is named by its pull request alone.
 - `daily-<YYYY-MM-DD>.txt` - every merged and retired row of the summary window, one per line, with its time, row, verdict, reason, and full pull request URL.
-- `last-run` - the verdict counts of the most recent run, which is what `status` prints.
+- `last-run` - the verdict counts of the most recent run, including how many rows were held for a missing Fable GO, which is what `status` prints.
 - `.summary` - the day of the last daily line and the epoch it covered from.
 - `.lock/` - single-instance lock, so two ticks never merge at once.
 
@@ -90,6 +110,7 @@ The summary window starts strictly after the epoch of the previous summary, so a
 The first run of each UTC day appends one durable check wake giving the counts and the path of that day's detail file, which is how the queue reaches firstmate's chat as one line a day instead of a wake per merge.
 No row list is truncated into the line itself, so nothing disappears off the end of a busy day.
 That line also says how many rows need the queue file fixed, and how many merges relied on the credit-guard exemption.
+`status` additionally reports how many rows the last run held for a missing Fable GO, so a queue that is waiting on a decision is never mistaken for a queue that is waiting on the forge.
 No run pages anyone directly; every other verdict is a journal line.
 
 ## Limits

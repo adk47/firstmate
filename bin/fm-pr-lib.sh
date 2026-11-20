@@ -1014,3 +1014,24 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   rm -f -- "$marker"
 }
+
+# github_urlencode_path_segment <segment>: percent-encode one path segment for a
+# GitHub REST path, so a branch name containing a slash addresses the branch
+# rather than a deeper path.
+github_urlencode_path_segment() {
+  local LC_ALL=C input=$1 encoded='' char octet hex
+  while [ -n "$input" ]; do
+    char=${input%"${input#?}"}
+    input=${input#?}
+    case "$char" in
+      [-._~a-zA-Z0-9]) encoded=$encoded$char ;;
+      *)
+        printf -v octet '%d' "'$char"
+        [ "$octet" -ge 0 ] || octet=$((octet + 256))
+        printf -v hex '%02X' "$octet"
+        encoded=$encoded%$hex
+        ;;
+    esac
+  done
+  printf '%s' "$encoded"
+}
