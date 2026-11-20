@@ -16,3 +16,5 @@ config/
 .pi/acp.json
 archive/
 bin/*.DISABLED-*
+# Playwright last-run output (test-results/.last-run.json): build output, never a source of truth
+test-results/

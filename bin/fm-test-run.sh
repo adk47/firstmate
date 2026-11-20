@@ -580,6 +580,7 @@ portable_serial_weight_hints() {
   cat <<'EOF'
 tests/ak47-agent-reclaim.test.sh 26121
 tests/ak47-takedown.test.sh 4017
+tests/fable-sentinel-order.test.sh 700
 tests/fm-afk-inject-e2e.test.sh 35792
 tests/fm-afk-pi-herdr-return-e2e.test.sh 100
 tests/fm-afk-return.test.sh 2316
@@ -730,6 +731,7 @@ tests/fm-tool-update-check.test.sh 24858
 tests/fm-trace-context-lib.test.sh 289
 tests/fm-trace-context-spawn.test.sh 47355
 tests/fm-turnend-guard.test.sh 42565
+tests/fm-unowned.test.sh 3000
 tests/fm-update.test.sh 5212
 tests/fm-vendor-auth-probe.test.sh 44042
 tests/fm-voice-relay.test.sh 28812
