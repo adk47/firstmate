@@ -284,9 +284,7 @@ $INBOX_SECTION
 
 # Escalation to main firstmate
 Handle routine work yourself.
-Report only true captain-relevant outcomes or a declared external wait by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+Report only true captain-relevant outcomes or a declared external wait by appending one line, choosing its verb from working, needs-decision, blocked, $PAUSED_VERB, done, failed - for example \`echo "working: root cause found, fix under way" >> $STATUS_FILE\` for a phase change or \`echo "done: fix landed and the stalled lane is running" >> $STATUS_FILE\` for a finished result.
 Use \`$PAUSED_VERB: {why} until HH:MMZ\` (distinct from \`blocked:\`; a pause naming no UTC wake time is treated as blocked) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, work ready for review, or work you landed.
 Work you landed includes a merge you performed yourself under standing merge authority and one the captain merged on the forge: under that authority nothing is ever \"ready for review\", so a landed merge that goes unreported reaches the captain as silence.
@@ -392,9 +390,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+4. Report status by appending one line, choosing its verb from working, needs-decision, blocked, $PAUSED_VERB, done, failed - for example \`echo "working: reproduced the classifier gap, now bisecting" >> $STATUS_FILE\` for a phase change or \`echo "done: report written to data/$ID/report.md" >> $STATUS_FILE\` for a finished result.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
@@ -472,9 +468,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+4. Report status by appending one line, choosing its verb from working, needs-decision, blocked, $PAUSED_VERB, done, failed - for example \`echo "working: fix implemented, running the suite" >> $STATUS_FILE\` for a phase change or \`echo "done: PR https://github.com/acme/widgets/pull/412 checks green" >> $STATUS_FILE\` for a finished result.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
