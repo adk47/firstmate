@@ -20,7 +20,7 @@
 #   1. Refuse unless the target is reachable. `to-grok` requires SuperGrok above
 #      its safety floor; `to-pi-fable` requires a green Fable source in
 #      `fm-chair-runway.sh` and launches Pi against that source only: the 8317
-#      token pool (`token-pool/claude-fable-5-1`) when it is green, otherwise
+#      token pool (`token-pool/claude-fable-5-2`) when it is green, otherwise
 #      the 8080 better-ccflare gateway (the `anthropic` provider with
 #      ANTHROPIC_BASE_URL=http://127.0.0.1:8080). A target reading `unknown` is
 #      never flipped toward, and Pi is never pointed at a source that is not
@@ -200,10 +200,10 @@ case "$TO" in
     TITLE='π - firstmate'
     if [ "$POOL8317" = green ]; then
       SOURCE=8317
-      LAUNCH='pi --model token-pool/claude-fable-5-1 --thinking high'
+      LAUNCH='pi --model token-pool/claude-fable-5-2 --thinking high'
     elif [ "$CCFLARE" = green ]; then
       SOURCE=8080
-      LAUNCH='ANTHROPIC_BASE_URL=http://127.0.0.1:8080 pi --model anthropic/claude-fable-5-1 --thinking high'
+      LAUNCH='ANTHROPIC_BASE_URL=http://127.0.0.1:8080 pi --model anthropic/claude-fable-5-2 --thinking high'
     else
       SOURCE=none
       LAUNCH=''
