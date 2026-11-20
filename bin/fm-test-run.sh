@@ -650,6 +650,7 @@ tests/fm-home-summary-refresh.test.sh 50699
 tests/fm-inactive-reconcile.test.sh 54465
 tests/fm-instrument-sweep.test.sh 13200
 tests/fm-kimi-harness.test.sh 18015
+tests/fm-landing-claim.test.sh 2000
 tests/fm-lane-model-switch.test.sh 25902
 tests/fm-lint-workflows.test.sh 1459
 tests/fm-lock-reap.test.sh 18900
