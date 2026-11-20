@@ -393,7 +393,7 @@ q_not_decisions() {  # <sqlite modifier>
 }
 
 Q_DEC_NOW="SELECT datetime('now')"
-Q_DEC_SHAPE="SELECT count(*) FROM decisions WHERE decided_at >= strftime('%Y-%m-%d', 'now', '-2 days') AND decided_at NOT GLOB '$DEC_GLOB'"
+Q_DEC_SHAPE="SELECT count(*) FROM decisions WHERE decided_at IS NULL OR decided_at = '' OR (decided_at >= strftime('%Y-%m-%d', 'now', '-2 days') AND decided_at NOT GLOB '$DEC_GLOB')"
 Q_DEC_1H=$(q_decisions '-1 hour')
 Q_DEC_24H=$(q_decisions '-24 hours')
 Q_DEC_OFF_1H=$(q_not_decisions '-1 hour')
@@ -438,7 +438,7 @@ report_decisions() {
     return 0
   fi
   if [ "$shape" -ne 0 ]; then
-    unmeasured "$DEC_SOURCE - decisions" "$shape recent rows carry a decided_at this report cannot place in a window"
+    unmeasured "$DEC_SOURCE - decisions" "$shape rows carry a decided_at this report cannot place in a window"
     return 0
   fi
   lines=$(

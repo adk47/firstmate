@@ -356,9 +356,28 @@ test_a_timestamp_in_an_unknown_shape_is_unmeasured() {
   sqlite3 "$db" "INSERT INTO decisions (request_id, decision, mode, decided_at) VALUES ('r1', 'approve', 'apply', strftime('%Y-%m-%d %H:%M:%S', 'now'));"
   report "$db"
   expect_code 1 "$RC" "a decision in an unknown timestamp shape"
-  assert_contains "$OUT" '- decisions (1 recent rows carry a decided_at this report cannot place in a window)' "an unplaceable decision makes the source UNMEASURED"
+  assert_contains "$OUT" '- decisions (1 rows carry a decided_at this report cannot place in a window)' "an unplaceable decision makes the source UNMEASURED"
   assert_no_number_for 'decisions written' "an unplaceable decision"
   pass "a row whose time cannot be placed in a window makes its source UNMEASURED rather than silently missed"
+}
+
+test_a_decision_with_no_time_refuses_the_source() {
+  local db="$TMP_ROOT/dec-null.sqlite3"
+  populated_ledger "$db"
+  sqlite3 "$db" "INSERT INTO decisions (request_id, decision, mode, decided_at) VALUES ('r20', 'approve', 'apply', NULL);"
+  report "$db"
+  expect_code 1 "$RC" "a decision with a NULL decided_at"
+  assert_contains "$OUT" '- decisions (1 rows carry a decided_at this report cannot place in a window)' "a decision with no decided_at makes the source UNMEASURED"
+  assert_no_number_for 'decisions written, window last 60 min' "a decision with no decided_at"
+
+  db="$TMP_ROOT/dec-empty-time.sqlite3"
+  populated_ledger "$db"
+  sqlite3 "$db" "INSERT INTO decisions (request_id, decision, mode, decided_at) VALUES ('r21', 'approve', 'apply', '');"
+  report "$db"
+  expect_code 1 "$RC" "a decision with an empty decided_at"
+  assert_contains "$OUT" '- decisions (1 rows carry a decided_at this report cannot place in a window)' "a decision with an empty decided_at makes the source UNMEASURED"
+  assert_no_number_for 'decisions written, window last 60 min' "a decision with an empty decided_at"
+  pass "a decision whose decided_at is NULL or empty refuses the source rather than vanishing from every line"
 }
 
 test_null_or_empty_values_land_on_a_named_line_never_nowhere() {
@@ -562,6 +581,7 @@ test_a_source_that_does_not_answer_in_time_is_unmeasured
 test_an_unreadable_core_answer_is_unmeasured
 test_a_rate_over_zero_asks_is_unmeasured_not_zero_percent
 test_a_timestamp_in_an_unknown_shape_is_unmeasured
+test_a_decision_with_no_time_refuses_the_source
 test_null_or_empty_values_land_on_a_named_line_never_nowhere
 test_no_host_is_unmeasured_never_a_built_in_guess
 test_the_config_file_supplies_the_host_and_the_environment_wins
