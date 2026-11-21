@@ -78,6 +78,8 @@
 # phase=retired but left in the active directory by an interrupted move is
 # finished by the next sweep, which moves it to .retired/<corr_id> without
 # re-stamping anything and never overwrites an existing retired copy.
+# tests/fm-pending-reply.test.sh is the regression suite for these matcher,
+# turn-clock, and sweep rules.
 #
 # Record location (parent FM_HOME):
 #   state/pending-replies/<corr_id>
