@@ -1611,6 +1611,10 @@ FM_SEND_RETRIES=3       # fm-send typed-plane Enter-retry attempts after typing 
 FM_SEND_SLEEP=0.4       # seconds between fm-send typed-plane submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful typed-plane submit; 0 disables
 FM_PENDING_REPLY_GRACE_SECS=120   # seconds after marked-request delivery before a completed turn without a correlated parent report is eligible for its one recovery repost
+FM_PENDING_REPLY_DEDUP_WINDOW_SECS=300    # fm-send resend of the same body to the same secondmate inside this window reuses the open record's correlation instead of minting a sibling, only when that record's full body compares equal and its delivery attempt is not unresolved; legacy summary-only records never match
+FM_PENDING_REPLY_RESOLVED_RETAIN_SECS=3600 # seconds a resolved record stays in state/pending-replies/ before the sweep archives it to .retired/ (resolved-closed)
+FM_PENDING_REPLY_RETIRE_HORIZON_SECS=86400 # age at which a never-delivered record, or one superseded by a same-request sibling's answer, retires to .retired/ with its reason; delivered-unanswered and escalated records never age out
+FM_PENDING_REPLY_SWEEP_INTERVAL_SECS=600   # minimum seconds between two age sweeps run from the pending-reply tick; 0 sweeps on every tick
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
 FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>, otherwise auto-detected

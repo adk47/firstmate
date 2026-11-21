@@ -2285,7 +2285,11 @@ while :; do
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
-  # No conversation scraping; unresolved records are never silently expired.
+  # The same tick also runs the library's audited age sweep at most once per
+  # FM_PENDING_REPLY_SWEEP_INTERVAL_SECS. No conversation scraping; the
+  # bin/fm-pending-reply-lib.sh header owns the resolution, retention, and
+  # retirement contract, including what may age out and why a retirement is
+  # never silent.
   fm_pending_reply_tick "$STATE" || true
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.

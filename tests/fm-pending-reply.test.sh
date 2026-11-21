@@ -942,6 +942,7 @@ test_unknown_backend_state_uses_capture_fallback() {
       state="$home/state"
       sm_home="$home/sm"
       mkdir -p "$sm_home/state"
+      # shellcheck disable=SC2030,SC2031
       export FM_PENDING_REPLY_GRACE_SECS=10
       # These fixture overrides are intentionally scoped to the isolated subshell.
       # shellcheck disable=SC2030,SC2031
@@ -1082,6 +1083,62 @@ test_tick_skips_terminal_and_reuses_target_observation() {
       || fail "unchanged wrong-home logs should retain their scan signature"
   ) || fail "terminal-skip and observation-cache regression failed"
   pass "tick skips terminal records and reuses target observations"
+}
+
+test_tick_ignores_pre_resolution_cached_busy() {
+  (
+    local home state hook_log rec_a rec_b a b c1 c2 phase
+    home=$(setup_parent pre-resolution-cache)
+    state="$home/state"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=10
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20000
+    c1=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix")
+    c2=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix")
+    if [[ "$c1" < "$c2" ]]; then a=$c1; b=$c2; else a=$c2; b=$c1; fi
+    fm_pending_reply_mark_delivered "$state" "$a" || fail "fixture should deliver A"
+    fm_pending_reply_mark_delivered "$state" "$b" || fail "fixture should deliver B"
+    fm_write_secondmate_meta "$state/lights.meta" "$home/lights" "sess:fm-lights"
+    printf 'state=idle\nlatest=done [corr=%s]: answered\n' "$a" > "$state/lights.status"
+    # The A record sorts first and resolves during this tick, resetting B's
+    # evidence after the shared busy observation was already taken. The re-probe
+    # then reports idle, so B must not inherit the earlier busy.
+    fm_backend_busy_state() {
+      local n
+      n=$(cat "$home/probes" 2>/dev/null || printf 0)
+      n=$((n + 1))
+      printf '%s\n' "$n" > "$home/probes"
+      if [ "$n" -le 1 ]; then printf 'busy'; else printf 'idle'; fi
+    }
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20030
+    fm_pending_reply_tick "$state"
+    rec_a=$(fm_pending_reply_path "$state" "$a")
+    rec_b=$(fm_pending_reply_path "$state" "$b")
+    [ "$(fm_pending_reply_get "$rec_a" phase)" = resolved ] || fail "A should resolve"
+    [ "$(fm_pending_reply_get "$rec_b" sibling_resolved_epoch)" = 20030 ] \
+      || fail "B should be reset by A's resolution"
+    [ "$(fm_pending_reply_get "$rec_b" turn_seen_busy)" != 1 ] \
+      || fail "a busy observed before the sibling resolution must not count for B"
+    [ -z "$(fm_pending_reply_get "$rec_b" request_turn_completed_epoch)" ] \
+      || fail "B must not complete without a post-resolution busy"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    fm_pending_reply_tick "$state"
+    phase=$(fm_pending_reply_get "$rec_b" phase)
+    [ "$phase" = awaiting_report ] \
+      || fail "B must not repost over the sibling's answer, got $phase"
+    [ ! -s "$hook_log" ] || fail "no repost may be sent for the sibling's answer"
+  ) || fail "pre-resolution observation-cache regression failed"
+  pass "a cached busy taken before a sibling resolution never counts for the sibling"
 }
 
 test_correlations_reuse_only_for_matching_open_task() {
@@ -1504,6 +1561,1183 @@ test_failed_send_discards_undelivered_expectation() {
   pass "failed transport discards undelivered expectation only"
 }
 
+# --- matcher loop (captain incident 2026-11-19) ------------------------------
+#
+# Two records for one `lights` steer, 8 seconds apart; every answer carrying
+# one corr drew a REPOST REQUIRED for the other within a minute. The fixture
+# below is that shape: a Pi secondmate whose rendered tail reads idle between
+# answers, with no semantic busy record, so the only evidence the parent has is
+# the status channel and the idle observation that follows each answer.
+
+sibling_fixture() {  # <name> -> prints "home\tcorrA\tcorrB"
+  local home state a b
+  home=$(setup_parent "$1")
+  state="$home/state"
+  # shellcheck disable=SC2030,SC2031
+  export FM_PENDING_REPLY_GRACE_SECS=10
+  # shellcheck disable=SC2030,SC2031
+  export FM_PENDING_REPLY_NOW=20000
+  a=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix")
+  fm_pending_reply_mark_delivered "$state" "$a"
+  # shellcheck disable=SC2030,SC2031
+  export FM_PENDING_REPLY_NOW=20008
+  b=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix")
+  fm_pending_reply_mark_delivered "$state" "$b"
+  fm_write_secondmate_meta "$state/lights.meta" "$home/lights" "firstmate:fm-lights" "" pi
+  printf '%s\t%s\t%s\n' "$home" "$a" "$b"
+}
+
+test_one_answer_resolves_exactly_one_record() {
+  (
+    local home state a b hook_log rec
+    IFS=$'\t' read -r home a b <<< "$(sibling_fixture one-answer)"
+    state="$home/state"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # The mate works on both, then answers A on the parent channel and goes
+    # idle; the backend busy/idle read is the only observation available.
+    # shellcheck disable=SC2329
+    fm_backend_busy_state() { printf '%s' "${FM_PENDING_TEST_BUSY:-unknown}"; }
+    # shellcheck disable=SC2329
+    fm_backend_capture() { fail "native busy observations should not capture"; }
+    export FM_PENDING_TEST_BUSY=busy
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20020
+    fm_pending_reply_tick "$state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    printf 'done [corr=%s]: shipped via-helper\n' "$a" >> "$state/lights.status"
+    export FM_PENDING_TEST_BUSY=idle
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$a")" = resolved ] || fail "A must resolve from its own answer"
+    [ "$(phase_of "$state" "$b")" = awaiting_report ] \
+      || fail "B must stay open, got $(phase_of "$state" "$b")"
+    rec=$(fm_pending_reply_path "$state" "$b")
+    [ "$(fm_pending_reply_get "$rec" sibling_resolved_corr)" = "$a" ] \
+      || fail "B must record which sibling resolved"
+    # The minute that followed in the incident: idle keeps being observed.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20090
+    fm_pending_reply_tick "$state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20130
+    fm_pending_reply_tick "$state"
+    [ ! -s "$hook_log" ] || fail "answering A must not repost B:"$'\n'"$(cat "$hook_log")"
+    [ "$(phase_of "$state" "$b")" = awaiting_report ] || fail "B must still be open"
+    # B remains independently resolvable by its own answer.
+    printf 'done [corr=%s]: resend acknowledged\n' "$b" >> "$state/lights.status"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20140
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$b")" = resolved ] || fail "B must resolve from its own answer"
+    [ ! -s "$hook_log" ] || fail "no repost may ever have been sent"
+  ) || fail "one-answer-one-record regression failed"
+  pass "an answer carrying corr A resolves only A and never reposts sibling B"
+}
+
+test_sibling_answer_order_within_one_tick_is_irrelevant() {
+  (
+    local home state a b hook_log
+    IFS=$'\t' read -r home a b <<< "$(sibling_fixture tick-order)"
+    state="$home/state"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # B's turn evidence is complete before the tick even starts, A's answer is
+    # on the channel, and B happens to be visited first: the matcher must still
+    # read A's answer before judging B.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20020
+    fm_pending_reply_observe_busy "$state" "$b" busy
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    fm_pending_reply_observe_busy "$state" "$b" idle
+    printf 'done [corr=%s]: shipped\n' "$a" >> "$state/lights.status"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20075
+    if fm_pending_reply_send_recovery "$state" "$b" 2>/dev/null; then
+      fail "B must not repost while A's unread answer is on the channel"
+    fi
+    [ ! -s "$hook_log" ] || fail "no repost may be sent"
+    [ "$(phase_of "$state" "$a")" = resolved ] || fail "A must have been resolved on the way"
+    [ "$(phase_of "$state" "$b")" = awaiting_report ] || fail "B must stay open"
+  ) || fail "tick-order regression failed"
+  pass "a sibling answer is read before a repost regardless of record order"
+}
+
+test_sibling_still_gets_one_repost_after_a_fresh_turn() {
+  (
+    local home state a b hook_log lines
+    IFS=$'\t' read -r home a b <<< "$(sibling_fixture fresh-turn)"
+    state="$home/state"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    printf 'done [corr=%s]: shipped\n' "$a" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$a" || fail "A should resolve"
+    # Idle right after the answer is not evidence about B...
+    fm_pending_reply_observe_busy "$state" "$b" idle
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20100
+    if fm_pending_reply_send_recovery "$state" "$b" 2>/dev/null; then
+      fail "idle after a sibling answer must not repost"
+    fi
+    # ...but a genuine later turn that ends without B's answer still earns B
+    # its single recovery, so a distinct unanswered request is not forgotten.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20110
+    fm_pending_reply_observe_busy "$state" "$b" busy
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20130
+    fm_pending_reply_observe_busy "$state" "$b" idle
+    fm_pending_reply_send_recovery "$state" "$b" || fail "fresh busy->idle must allow one repost"
+    lines=$(wc -l < "$hook_log" | tr -d ' ')
+    [ "$lines" = 1 ] || fail "expected exactly one repost, got $lines"
+    [ "$(phase_of "$state" "$b")" = recovery_sent ] || fail "B should be recovery_sent"
+  ) || fail "fresh-turn regression failed"
+  pass "a sibling earns its one repost only from a turn observed after the answer"
+}
+
+test_sibling_marked_recovery_turn_completes_from_idle() {
+  (
+    local home state a b rec_b
+    IFS=$'\t' read -r home a b <<< "$(sibling_fixture recovery-sibling-idle)"
+    state="$home/state"
+    rec_b=$(fm_pending_reply_path "$state" "$b")
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    printf 'done [corr=%s]: shipped\n' "$a" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$a" || fail "A should resolve"
+    [ -n "$(fm_pending_reply_get "$rec_b" sibling_resolved_epoch)" ] \
+      || fail "B must be sibling-marked before its recovery turn"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20070
+    fm_pending_reply_set "$rec_b" recovery_attempted_epoch 20065 \
+      || fail "fixture should record the recovery attempt"
+    fm_pending_reply_set "$rec_b" recovery_sent_epoch 20070 \
+      || fail "fixture should record the recovery send"
+    fm_pending_reply_set "$rec_b" recovery_turn_seen_busy 0 \
+      || fail "fixture should leave the recovery turn unseen"
+    fm_pending_reply_set "$rec_b" recovery_turn_completed_epoch "" \
+      || fail "fixture should leave the recovery turn incomplete"
+    fm_pending_reply_set "$rec_b" phase recovery_sent \
+      || fail "fixture should put B in recovery_sent"
+    # The mate handles the repost entirely between polls: only idle is observed.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20130
+    fm_pending_reply_tick_one "$state" "$b" idle || fail "tick should succeed"
+    [ -n "$(fm_pending_reply_get "$rec_b" recovery_turn_completed_epoch)" ] \
+      || fail "a sibling-marked recovery turn must complete from idle after grace"
+    [ "$(phase_of "$state" "$b")" = escalated ] \
+      || fail "the missed recovery must escalate, got $(phase_of "$state" "$b")"
+    grep -q 'pending-reply-missed' "$state/lights.status" \
+      || fail "the escalation must reach the parent channel"
+  ) || fail "sibling-marked recovery-idle regression failed"
+  pass "a sibling-marked recovery turn completes from idle and escalates"
+}
+
+test_distinct_request_is_not_a_sibling() {
+  (
+    local home state a b rec hook_log out
+    home=$(setup_parent distinct-request)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=10
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20000
+    a=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix")
+    fm_pending_reply_mark_delivered "$state" "$a"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20008
+    b=$(fm_pending_reply_create "$home" "$state" lights "ruling: pause the credit-trust fix")
+    fm_pending_reply_mark_delivered "$state" "$b"
+    # A and B are two different requests to the same mate. A's answer must not
+    # erase B's turn evidence or brand B a superseded sibling.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    printf 'done [corr=%s]: shipped\n' "$a" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$a" || fail "A should resolve"
+    [ "$(phase_of "$state" "$b")" = awaiting_report ] \
+      || fail "a distinct request must stay open, got $(phase_of "$state" "$b")"
+    rec=$(fm_pending_reply_path "$state" "$b")
+    [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_corr)" ] \
+      || fail "a distinct request must not record a resolving sibling"
+    [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_epoch)" ] \
+      || fail "a distinct request must not record a sibling resolution epoch"
+    # Its ordinary turn evidence is untouched: the idle observation completes B.
+    fm_pending_reply_observe_busy "$state" "$b" idle
+    [ -n "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "a distinct request must keep the ordinary idle completion path"
+    # It must never be retired as superseded-by-sibling.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=106409
+    out=$(fm_pending_reply_sweep "$state")
+    case "$out" in
+      *"$b"*) fail "a distinct request must not be retired as a superseded sibling:"$'\n'"$out" ;;
+    esac
+    [ "$(phase_of "$state" "$b")" = awaiting_report ] \
+      || fail "a distinct request must stay open after the sweep"
+    # And it keeps its single ordinary repost.
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    fm_pending_reply_send_recovery "$state" "$b" \
+      || fail "a distinct request must earn its ordinary repost"
+    [ "$(phase_of "$state" "$b")" = recovery_sent ] \
+      || fail "B should be recovery_sent, got $(phase_of "$state" "$b")"
+    [ "$(wc -l < "$hook_log" | tr -d ' ')" = 1 ] || fail "expected exactly one repost"
+  ) || fail "distinct-request sibling regression failed"
+  pass "a distinct request body is not a sibling and keeps its own repost path"
+}
+
+# No body, no dedup. A legacy record stores only a 120-character
+# request_summary and no request_digest; two of them may share an identical
+# summary while being different requests. They must be UNCOMPARABLE: neither the
+# sibling reset nor the duplicate lookup may pair them with each other or with a
+# new request whose summary matches, and each keeps the ordinary
+# one-repost-then-escalate path. Empty bodies have no identity either.
+test_legacy_record_without_body_is_uncomparable() {
+  (
+    local home state l1 l2 rec hook_log out rc n summary e1 e2
+    home=$(setup_parent legacy-uncomparable)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=10
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=30000
+    # Two genuinely different requests whose first 120 characters are equal.
+    summary='My last message to you was recorded as MISSED, so here it is short and only the parts that matter, in the order I need them: '
+    l1=$(fm_pending_reply_create "$home" "$state" lights "${summary}(1) ship the credit-trust fix")
+    l2=$(fm_pending_reply_create "$home" "$state" lights "${summary}(1) pause the credit-trust fix")
+    for rec in "$(fm_pending_reply_path "$state" "$l1")" "$(fm_pending_reply_path "$state" "$l2")"; do
+      # Make each a legacy record: no request_digest line at all.
+      grep -v '^request_digest=' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
+    done
+    [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$l1")" request_summary)" \
+      = "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$l2")" request_summary)" ] \
+      || fail "fixture: the two legacy records must share an identical summary"
+    fm_pending_reply_request_identity "$(fm_pending_reply_path "$state" "$l1")" >/dev/null \
+      && fail "a legacy record with no body must have no request identity"
+    fm_pending_reply_mark_delivered "$state" "$l1"
+    fm_pending_reply_mark_delivered "$state" "$l2"
+    # Dedup refuses to guess: a new request whose summary matches a legacy
+    # record gets its own corr, never the legacy one.
+    rc=0
+    n=$(fm_pending_reply_create "$home" "$state" lights "${summary}(1) ship the credit-trust fix" dedup) || rc=$?
+    [ "$rc" = 0 ] || fail "a new request must not be deduped onto a legacy record (rc=$rc, corr=$n)"
+    [ "$n" != "$l1" ] && [ "$n" != "$l2" ] || fail "dedup reused a legacy corr"
+    # Answering one legacy record must not reset the other as a sibling, and
+    # answering the new comparable request must not reach either legacy record.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=30060
+    printf 'done [corr=%s]: answered\n' "$l1" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$l1" || fail "L1 should resolve"
+    fm_pending_reply_mark_delivered "$state" "$n"
+    printf 'done [corr=%s]: answered\n' "$n" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$n" || fail "the new request should resolve"
+    rec=$(fm_pending_reply_path "$state" "$l2")
+    [ "$(phase_of "$state" "$l2")" = awaiting_report ] \
+      || fail "an uncomparable legacy record must stay open, got $(phase_of "$state" "$l2")"
+    [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_corr)" ] \
+      || fail "an uncomparable legacy record must never be reset as a sibling"
+    fm_pending_reply_observe_busy "$state" "$l2" idle
+    [ -n "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "an uncomparable legacy record must keep the ordinary idle completion"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=116500
+    out=$(fm_pending_reply_sweep "$state")
+    case "$out" in
+      *"$l2"*) fail "an uncomparable legacy record must not be retired:"$'\n'"$out" ;;
+    esac
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    fm_pending_reply_send_recovery "$state" "$l2" \
+      || fail "an uncomparable legacy record must earn its ordinary repost"
+    [ "$(wc -l < "$hook_log" | tr -d ' ')" = 1 ] || fail "expected exactly one repost"
+    # Empty bodies have no identity: two of them are never duplicates.
+    [ -z "$(fm_pending_reply_request_digest "")" ] \
+      || fail "an empty body must have no request digest"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=116600
+    e1=$(fm_pending_reply_create "$home" "$state" lights "" dedup) || fail "empty create"
+    rc=0
+    e2=$(fm_pending_reply_create "$home" "$state" lights "" dedup) || rc=$?
+    [ "$rc" = 0 ] && [ "$e1" != "$e2" ] \
+      || fail "two empty bodies must never be deduped into one (rc=$rc)"
+  ) || fail "legacy uncomparable regression failed"
+  pass "a legacy record with no body is uncomparable: never deduped or reset as a sibling"
+}
+
+test_resolved_sibling_is_not_reopened_by_a_later_note() {
+  (
+    local home state a b rec hook_log epoch
+    IFS=$'\t' read -r home a b <<< "$(sibling_fixture resolved-sibling)"
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    printf 'done [corr=%s]: answered first\n' "$b" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$b" || fail "B should resolve"
+    rec=$(fm_pending_reply_path "$state" "$b")
+    epoch=$(fm_pending_reply_get "$rec" resolved_epoch)
+    # A resolves afterwards and its note looks at B, which is already terminal.
+    printf 'done [corr=%s]: answered second\n' "$a" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$a" || fail "A should resolve"
+    [ "$(phase_of "$state" "$b")" = resolved ] \
+      || fail "an already-resolved sibling must stay resolved"
+    [ "$(fm_pending_reply_get "$rec" resolved_via)" = status ] \
+      || fail "an already-resolved sibling must keep its resolution label"
+    [ "$(fm_pending_reply_get "$rec" resolved_epoch)" = "$epoch" ] \
+      || fail "an already-resolved sibling must keep its resolution epoch"
+    [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_corr)" ] \
+      || fail "a terminal record must not be marked a superseded sibling"
+    [ -z "$(fm_pending_reply_get "$rec" sibling_resolved_epoch)" ] \
+      || fail "a terminal record must not receive a sibling epoch"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20100
+    fm_pending_reply_observe_busy "$state" "$b" busy
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20130
+    fm_pending_reply_observe_busy "$state" "$b" idle
+    if fm_pending_reply_send_recovery "$state" "$b" 2>/dev/null; then
+      fail "a resolved sibling must never repost"
+    fi
+    [ ! -s "$hook_log" ] || fail "a resolved sibling must never repost:"$'\n'"$(cat "$hook_log")"
+  ) || fail "resolved-sibling regression failed"
+  pass "a sibling resolved before the note keeps its resolution and never reposts"
+}
+
+test_pending_reply_set_never_resurrects_a_vanished_record() {
+  (
+    local home state corr rec retired other rec2
+    home=$(setup_parent vanished-set)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=50000
+    corr=$(fm_pending_reply_create "$home" "$state" lights "the duplicated steer")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    retired=$(fm_pending_reply_retired_dir "$state")
+    mkdir -p "$retired"
+    mv "$rec" "$retired/$corr" || fail "fixture should retire the record"
+    if fm_pending_reply_set "$rec" phase resolved; then
+      fail "a vanished record must not accept an update"
+    fi
+    [ ! -e "$rec" ] || fail "a vanished record must not be recreated in the active directory"
+    [ -f "$retired/$corr" ] || fail "the retired record must stay retired"
+    # An unreadable record is the same failure boundary: the update must not
+    # replace the full record with a one-key file.
+    other=$(fm_pending_reply_create "$home" "$state" lights "another steer")
+    fm_pending_reply_mark_delivered "$state" "$other"
+    rec2=$(fm_pending_reply_path "$state" "$other")
+    chmod 000 "$rec2"
+    fm_pending_reply_set "$rec2" phase resolved
+    chmod 600 "$rec2"
+    [ "$(fm_pending_reply_get "$rec2" corr_id)" = "$other" ] \
+      || fail "a failed read must leave the record intact"
+    [ -n "$(fm_pending_reply_get "$rec2" task_id)" ] \
+      || fail "a failed read must not create a one-key orphan"
+  ) || fail "vanished-set regression failed"
+  pass "a pending-reply update never recreates a vanished or unreadable record"
+}
+
+test_resolved_corr_never_reposts() {
+  (
+    local home state a b hook_log rec
+    IFS=$'\t' read -r home a b <<< "$(sibling_fixture terminal)"
+    state="$home/state"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    printf 'done [corr=%s]: shipped\n' "$a" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$a" || fail "A should resolve"
+    # Every turn-evidence path on the resolved record is inert, with B open.
+    fm_pending_reply_observe_busy "$state" "$a" busy
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20100
+    fm_pending_reply_observe_busy "$state" "$a" idle
+    fm_pending_reply_mark_turn_completed "$state" "$a" request
+    if fm_pending_reply_send_recovery "$state" "$a" 2>/dev/null; then
+      fail "a resolved record must never send a recovery"
+    fi
+    if fm_pending_reply_maybe_escalate "$state" "$a" 2>/dev/null; then
+      fail "a resolved record must never escalate"
+    fi
+    rec=$(fm_pending_reply_path "$state" "$a")
+    [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || fail "A must stay resolved"
+    [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] \
+      || fail "A must carry no recovery attempt"
+    [ ! -s "$hook_log" ] || fail "nothing may be sent for a resolved corr"
+    fm_pending_reply_corr_reusable "$state" "$a" lights && fail "a resolved corr is not reusable"
+    # Even a whole tick with B open and the mate idle sends nothing for A.
+    # shellcheck disable=SC2329
+    fm_backend_busy_state() { printf 'idle'; }
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20200
+    fm_pending_reply_tick "$state"
+    [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || fail "A must stay resolved after tick"
+    ! grep -q "corr=$a" "$hook_log" || fail "a tick must never repost a resolved corr"
+    fm_pending_reply_corr_reusable "$state" "$b" lights || fail "the open sibling stays reusable"
+  ) || fail "terminal-resolution regression failed"
+  pass "a resolved corr is terminal and can never repost"
+}
+
+test_age_sweep_retires_with_recorded_reason() {
+  (
+    local home state undelivered elsewhere superseded fresh_open resolved_rec unanswered escalated
+    local out rec retired_dir
+    home=$(setup_parent sweep)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=10
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_RETIRE_HORIZON_SECS=86400
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_RESOLVED_RETAIN_SECS=3600
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=100000
+    # Never delivered, nothing on the channel.
+    undelivered=$(fm_pending_reply_create "$home" "$state" lights "never left the parent")
+    # Never delivered here, but the mate's answer still reached the channel.
+    elsewhere=$(fm_pending_reply_create "$home" "$state" lights "answered anyway")
+    printf 'done [corr=%s]: answered through another copy\n' "$elsewhere" >> "$state/lights.status"
+    # Delivered, recovery withheld because a sibling answered.
+    superseded=$(fm_pending_reply_create "$home" "$state" lights "the duplicated steer")
+    fm_pending_reply_mark_delivered "$state" "$superseded"
+    resolved_rec=$(fm_pending_reply_create "$home" "$state" lights "the duplicated steer")
+    fm_pending_reply_mark_delivered "$state" "$resolved_rec"
+    printf 'done [corr=%s]: original answered\n' "$resolved_rec" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$resolved_rec" || fail "original should resolve"
+    rec=$(fm_pending_reply_path "$state" "$superseded")
+    [ "$(fm_pending_reply_get "$rec" sibling_resolved_corr)" = "$resolved_rec" ] \
+      || fail "duplicate must record the resolving sibling"
+    # Delivered, unanswered, no sibling: must never age out.
+    unanswered=$(fm_pending_reply_create "$home" "$state" hibit "still genuinely open")
+    fm_pending_reply_mark_delivered "$state" "$unanswered"
+    # Escalated: a captain decision is open; must never age out.
+    escalated=$(fm_pending_reply_create "$home" "$state" hibit "escalated one")
+    fm_pending_reply_mark_delivered "$state" "$escalated"
+    fm_pending_reply_set "$(fm_pending_reply_path "$state" "$escalated")" phase escalated
+    # Below every horizon nothing moves.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=103000
+    out=$(fm_pending_reply_sweep "$state")
+    [ -z "$out" ] || fail "nothing is due yet:"$'\n'"$out"
+    # Past the resolved retention only the resolved record is archived.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=103700
+    fresh_open=$(fm_pending_reply_create "$home" "$state" other "created late, undelivered")
+    out=$(fm_pending_reply_sweep "$state")
+    [ "$out" = "$resolved_rec"$'\t'"resolved-closed" ] || fail "expected only the resolved archive, got:"$'\n'"$out"
+    # Past the retirement horizon the undelivered and superseded records go.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=186500
+    out=$(fm_pending_reply_sweep "$state" | sort)
+    [ "$out" = "$(printf '%s\t%s\n%s\t%s\n%s\t%s\n' \
+      "$undelivered" expired-undelivered \
+      "$elsewhere" resolved-elsewhere \
+      "$superseded" "superseded-by-sibling:$resolved_rec" | sort)" ] \
+      || fail "unexpected sweep result:"$'\n'"$out"
+    retired_dir=$(fm_pending_reply_retired_dir "$state")
+    for rec in "$undelivered" "$elsewhere" "$superseded" "$resolved_rec"; do
+      [ ! -e "$(fm_pending_reply_path "$state" "$rec")" ] || fail "$rec must leave the active directory"
+      [ -f "$retired_dir/$rec" ] || fail "$rec must be kept in .retired/ as audit trail"
+      [ "$(fm_pending_reply_get "$retired_dir/$rec" phase)" = retired ] || fail "$rec phase must be retired"
+      [ "$(fm_pending_reply_get "$retired_dir/$rec" retired_epoch)" = 186500 ] \
+        || [ "$(fm_pending_reply_get "$retired_dir/$rec" retired_epoch)" = 103700 ] \
+        || fail "$rec must state when it was retired"
+    done
+    [ "$(fm_pending_reply_get "$retired_dir/$undelivered" resolved_via)" = expired-undelivered ] \
+      || fail "undelivered record must carry its terminal via"
+    [ "$(fm_pending_reply_get "$retired_dir/$elsewhere" resolved_via)" = status ] \
+      || fail "elsewhere-resolved record must carry the line's via"
+    [ "$(fm_pending_reply_get "$retired_dir/$superseded" resolved_via)" = superseded-by-sibling ] \
+      || fail "superseded record must carry its terminal via"
+    [ "$(fm_pending_reply_get "$retired_dir/$resolved_rec" resolved_via)" = status ] \
+      || fail "archived resolved record keeps its original via"
+    for rec in "$unanswered" "$escalated" "$fresh_open"; do
+      [ -f "$(fm_pending_reply_path "$state" "$rec")" ] || fail "$rec must never age out"
+    done
+    [ "$(phase_of "$state" "$unanswered")" = awaiting_report ] || fail "unanswered stays open"
+    [ "$(phase_of "$state" "$escalated")" = escalated ] || fail "escalated stays open"
+    fm_pending_reply_task_has_open "$state" lights && fail "lights must have nothing open after the sweep"
+    fm_pending_reply_task_has_open "$state" hibit || fail "hibit still has open records"
+    # A retired corr is not reusable and the tick ignores the archive.
+    fm_pending_reply_corr_reusable "$state" "$undelivered" lights && fail "retired corr must not be reusable"
+    # shellcheck disable=SC2329
+    fm_backend_busy_state() { printf 'unknown'; }
+    fm_pending_reply_tick "$state"
+    [ -f "$retired_dir/$undelivered" ] || fail "tick must leave the archive alone"
+  ) || fail "age-sweep regression failed"
+  pass "age sweep retires undelivered, elsewhere-resolved, superseded, and aged resolved records with a reason"
+}
+
+test_sweep_runs_from_tick_on_its_interval() {
+  (
+    local home state corr stamp
+    home=$(setup_parent sweep-interval)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_RESOLVED_RETAIN_SECS=0
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SWEEP_INTERVAL_SECS=600
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=5000
+    corr=$(fm_pending_reply_create "$home" "$state" lights "swept by tick")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    printf 'done [corr=%s]: ok\n' "$corr" >> "$state/lights.status"
+    fm_pending_reply_tick "$state"
+    [ -f "$(fm_pending_reply_retired_path "$state" "$corr")" ] \
+      || fail "the first tick sweeps a due record"
+    stamp="$(fm_pending_reply_dir "$state")/.sweep-last"
+    [ "$(cat "$stamp")" = 5000 ] || fail "sweep stamp must record the sweep time"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=5100
+    corr=$(fm_pending_reply_create "$home" "$state" lights "inside the interval")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    printf 'done [corr=%s]: ok\n' "$corr" >> "$state/lights.status"
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$corr")" = resolved ] || fail "record resolves on tick"
+    [ ! -e "$(fm_pending_reply_retired_path "$state" "$corr")" ] \
+      || fail "a tick inside the sweep interval must not sweep"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=5600
+    fm_pending_reply_tick "$state"
+    [ -f "$(fm_pending_reply_retired_path "$state" "$corr")" ] \
+      || fail "the next tick past the interval sweeps"
+  ) || fail "sweep-interval regression failed"
+  pass "the tick sweeps at most once per interval"
+}
+
+test_same_request_within_window_reuses_corr() {
+  (
+    local home state a b c d rc
+    home=$(setup_parent dedup)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_DEDUP_WINDOW_SECS=300
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=30000
+    a=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship it" dedup) || fail "first create"
+    # Same body eight seconds later: no second record, the first corr is handed back.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=30008
+    rc=0
+    b=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship it" dedup) || rc=$?
+    expect_code 3 "$rc" "duplicate create"
+    [ "$b" = "$a" ] || fail "duplicate must hand back the open corr, got '$b' vs '$a'"
+    [ "$(find "$(fm_pending_reply_dir "$state")" -maxdepth 1 -type f ! -name '.*' | wc -l | tr -d ' ')" = 1 ] \
+      || fail "exactly one record may exist"
+    # A marked, corr-embedded resend of the same body hashes the same.
+    rc=0
+    b=$(fm_pending_reply_create "$home" "$state" lights "${FM_FROMFIRST_MARK}corr=$a ruling: ship it" dedup) || rc=$?
+    expect_code 3 "$rc" "marked duplicate create"
+    [ "$b" = "$a" ] || fail "marked duplicate must hand back the open corr"
+    # A different body, a different task, or an expired window mints anew.
+    c=$(fm_pending_reply_create "$home" "$state" lights "ruling: hold it" dedup) || fail "different body creates"
+    [ "$c" != "$a" ] || fail "a different body is a new request"
+    c=$(fm_pending_reply_create "$home" "$state" hibit "ruling: ship it" dedup) || fail "different task creates"
+    [ "$c" != "$a" ] || fail "a different task is a new request"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=30400
+    d=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship it" dedup) || fail "outside the window creates"
+    [ "$d" != "$a" ] || fail "outside the window the same body is a new request"
+    # Once the open record resolves, the same body is a new request again.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=30410
+    fm_pending_reply_mark_delivered "$state" "$d"
+    printf 'done [corr=%s]: ok\n' "$d" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$d" || fail "d should resolve"
+    c=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship it" dedup) || fail "after resolution creates"
+    [ "$c" != "$d" ] && [ "$c" != "$a" ] || fail "a resolved record is not a duplicate target"
+    # A creator that needs its own delivery proof per operation omits the flag.
+    d=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship it") || fail "flagless create"
+    [ "$d" != "$c" ] || fail "without the dedup flag every call mints its own record"
+  ) || fail "duplicate-create regression failed"
+  pass "the same request within the window reuses the open corr instead of minting a sibling"
+}
+
+test_fm_send_resend_of_same_body_points_at_existing_corr() {
+  local dir fb log home state first second n
+  dir="$TMP_ROOT/send-dedup"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_parent send-dedup)
+  state="$home/state"
+  fm_write_secondmate_meta "$state/hibit.meta" "$home/sm" "sess:fm-hibit"
+  unset FM_PENDING_REPLY_NOW
+  run_send "$fb" "$home" "$log" hibit "please report the ledger status" || fail "first send failed"
+  first=$(latest_record_body "$home" hibit) || fail "first record missing"
+  first=$(fm_pending_reply_extract_corr "$first")
+  [ -n "$first" ] || fail "first send must embed a corr"
+  run_send "$fb" "$home" "$log" hibit "please report the ledger status" || fail "resend failed"
+  second=$(latest_record_body "$home" hibit) || fail "second record missing"
+  second=$(fm_pending_reply_extract_corr "$second")
+  [ "$second" = "$first" ] || fail "resend must carry the existing corr ($first), got $second"
+  n=$(find "$(fm_pending_reply_dir "$state")" -maxdepth 1 -type f ! -name '.*' | wc -l | tr -d ' ')
+  [ "$n" = 1 ] || fail "resend must not mint a second record, found $n"
+  [ "$(phase_of "$state" "$first")" = awaiting_report ] || fail "record stays open after resend"
+  pass "fm-send resend of the same body points at the existing corr"
+}
+
+test_dedup_resend_restarts_turn_clock() {
+  (
+    local home state dir fb log corr body rec hook_log lines
+    dir="$TMP_ROOT/dedup-resend-clock"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); log="$dir/send.log"
+    home=$(setup_parent dedup-resend-clock)
+    state="$home/state"
+    fm_write_secondmate_meta "$state/hibit.meta" "$home/sm" "sess:fm-hibit"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1000
+    run_send "$fb" "$home" "$log" hibit "please report the ledger status" \
+      || fail "first send failed"
+    body=$(latest_record_body "$home" hibit) || fail "first record missing"
+    corr=$(fm_pending_reply_extract_corr "$body")
+    [ -n "$corr" ] || fail "first send must embed a corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_set "$rec" grace_secs 120 || fail "fixture should set the grace"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1010
+    fm_pending_reply_observe_busy "$state" "$corr" busy || fail "busy observation failed"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1121
+    fm_pending_reply_observe_busy "$state" "$corr" idle || fail "idle observation failed"
+    [ "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" = 1121 ] \
+      || fail "fixture should complete the first turn"
+    # The captain resends the identical body while the completed turn is past
+    # grace; delivery rides the dedup record and restarts that record's clock.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1130
+    run_send "$fb" "$home" "$log" hibit "please report the ledger status" \
+      || fail "identical resend failed"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "the dedup resend must keep the record open"
+    [ "$(fm_pending_reply_get "$rec" delivered_epoch)" = 1130 ] \
+      || fail "the resend must restart the delivered clock"
+    [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 0 ] \
+      || fail "the resend must clear the seen-busy flag"
+    [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "the resend must clear the completed turn"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1131
+    fm_pending_reply_tick_one "$state" "$corr" idle || fail "tick should succeed"
+    [ ! -s "$hook_log" ] \
+      || fail "a resend must not repost while its fresh grace is running"$'\n'"$(cat "$hook_log")"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "the record must stay open after the resend"
+    # A genuine later turn that ends unanswered still earns exactly one repost.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1140
+    fm_pending_reply_tick_one "$state" "$corr" busy || fail "busy tick failed"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1200
+    fm_pending_reply_tick_one "$state" "$corr" idle || fail "idle tick failed"
+    [ ! -s "$hook_log" ] \
+      || fail "the post-resend turn must wait out its own grace before reposting"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1260
+    fm_pending_reply_tick_one "$state" "$corr" idle || fail "final tick failed"
+    [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+      || fail "the later unanswered turn must earn its repost"
+    lines=$(wc -l < "$hook_log" | tr -d ' ')
+    [ "$lines" = 1 ] || fail "expected exactly one repost, got $lines"
+  ) || fail "dedup-resend clock regression failed"
+  pass "an identical resend restarts the turn clock and earns one later repost"
+}
+
+test_dedup_skips_unresolved_delivery_attempt() {
+  (
+    local home state dir fb log rec corr body new_corr
+    dir="$TMP_ROOT/dedup-unresolved"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); log="$dir/send.log"
+    home=$(setup_parent dedup-unresolved)
+    state="$home/state"
+    fm_write_secondmate_meta "$state/hibit.meta" "$home/sm" "sess:fm-hibit"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=3000
+    run_send "$fb" "$home" "$log" hibit "please report the ledger status" \
+      || fail "first send failed"
+    body=$(latest_record_body "$home" hibit) || fail "first record missing"
+    corr=$(fm_pending_reply_extract_corr "$body")
+    [ -n "$corr" ] || fail "first send must embed a corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    # Model an attempt whose submission was never confirmed: the delivery
+    # marker remains but the record has no delivered epoch.
+    fm_pending_reply_set "$rec" delivered_epoch "" || fail "fixture should clear delivery"
+    fm_pending_reply_write_delivery_confirmation "$state" "$corr" attempted 3000 \
+      || fail "fixture should write the attempted marker"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=3010
+    run_send "$fb" "$home" "$log" hibit "please report the ledger status" \
+      || fail "an identical resend must not be refused while an earlier attempt is unresolved"
+    body=$(latest_record_body "$home" hibit) || fail "resend body missing"
+    new_corr=$(fm_pending_reply_extract_corr "$body")
+    [ -n "$new_corr" ] || fail "resend must embed a corr"
+    [ "$new_corr" != "$corr" ] \
+      || fail "an unresolved delivery attempt must not be reused as the dedup target"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "the in-doubt record must stay tracked"
+    [ -z "$(fm_pending_reply_get "$rec" delivered_epoch)" ] \
+      || fail "the in-doubt record must stay undelivered"
+    [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$new_corr")" phase)" = awaiting_report ] \
+      || fail "the resent request must be tracked under its own record"
+  ) || fail "dedup unresolved-attempt regression failed"
+  pass "dedup never reuses a record with an unresolved delivery attempt"
+}
+
+test_rearmed_sibling_record_completes_from_idle() {
+  (
+    local home state dir fb log body a b rec_b hook_log lines
+    dir="$TMP_ROOT/rearmed-sibling-idle"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); log="$dir/send.log"
+    home=$(setup_parent rearmed-sibling-idle)
+    state="$home/state"
+    fm_write_secondmate_meta "$state/lights.meta" "$home/lights" "sess:fm-lights"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=10
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20000
+    b=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix") \
+      || fail "fixture should create the first record"
+    fm_pending_reply_mark_delivered "$state" "$b" || fail "fixture should deliver the first record"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20008
+    a=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix") \
+      || fail "fixture should create the sibling record"
+    fm_pending_reply_mark_delivered "$state" "$a" || fail "fixture should deliver the sibling"
+    printf 'state=idle\nlatest=done [corr=%s]\n' "$a" > "$state/lights.status"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20030
+    fm_pending_reply_try_resolve "$state" "$a" || true
+    [ "$(phase_of "$state" "$a")" = resolved ] || fail "the sibling should resolve"
+    rec_b=$(fm_pending_reply_path "$state" "$b")
+    [ "$(fm_pending_reply_get "$rec_b" sibling_resolved_corr)" = "$a" ] \
+      || fail "the open record should be marked by its sibling"
+    [ "$(fm_pending_reply_get "$rec_b" sibling_resolved_epoch)" = 20030 ] \
+      || fail "the sibling mark should record its epoch"
+    # The captain resends the identical body after the sibling answered; the
+    # resend rides the surviving record and restarts its turn clock.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    run_send "$fb" "$home" "$log" lights "ruling: ship the credit-trust fix" \
+      || fail "identical resend failed"
+    body=$(latest_record_body "$home" lights) || fail "resend body missing"
+    [ "$(fm_pending_reply_extract_corr "$body")" = "$b" ] \
+      || fail "the resend must reuse the surviving record"
+    [ "$(fm_pending_reply_get "$rec_b" delivered_epoch)" = 20060 ] \
+      || fail "the resend must restart the turn clock"
+    [ "$(fm_pending_reply_get "$rec_b" sibling_resolved_epoch)" = 20030 ] \
+      || fail "the resend must keep the sibling audit record"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20100
+    fm_pending_reply_tick_one "$state" "$b" idle || fail "idle tick failed"
+    [ "$(fm_pending_reply_get "$rec_b" request_turn_completed_epoch)" = 20100 ] \
+      || fail "the rearmed turn should complete from a pure idle"
+    [ "$(phase_of "$state" "$b")" = recovery_sent ] \
+      || fail "the rearmed record must earn its one repost"
+    lines=$(wc -l < "$hook_log" | tr -d ' ')
+    [ "$lines" = 1 ] || fail "expected exactly one repost, got $lines"
+  ) || fail "rearmed sibling idle regression failed"
+  pass "a rearmed sibling record completes from idle and earns one repost"
+}
+
+test_sweep_ignores_stale_sibling_evidence() {
+  (
+    local home state dir fb log body a b rec_b out
+    dir="$TMP_ROOT/sweep-stale-sibling"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); log="$dir/send.log"
+    home=$(setup_parent sweep-stale-sibling)
+    state="$home/state"
+    fm_write_secondmate_meta "$state/lights.meta" "$home/lights" "sess:fm-lights"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=10
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_RETIRE_HORIZON_SECS=86400
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20000
+    b=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix") \
+      || fail "fixture should create the first record"
+    fm_pending_reply_mark_delivered "$state" "$b" || fail "fixture should deliver the first record"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20008
+    a=$(fm_pending_reply_create "$home" "$state" lights "ruling: ship the credit-trust fix") \
+      || fail "fixture should create the sibling record"
+    fm_pending_reply_mark_delivered "$state" "$a" || fail "fixture should deliver the sibling"
+    printf 'state=idle\nlatest=done [corr=%s]\n' "$a" > "$state/lights.status"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20030
+    fm_pending_reply_try_resolve "$state" "$a" || true
+    rec_b=$(fm_pending_reply_path "$state" "$b")
+    [ "$(fm_pending_reply_get "$rec_b" sibling_resolved_corr)" = "$a" ] \
+      || fail "the open record should be marked by its sibling"
+    # A later identical resend re-delivers B, so its sibling evidence is older
+    # than its current turn and must not retire it as superseded.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    run_send "$fb" "$home" "$log" lights "ruling: ship the credit-trust fix" \
+      || fail "identical resend failed"
+    body=$(latest_record_body "$home" lights) || fail "resend body missing"
+    [ "$(fm_pending_reply_extract_corr "$body")" = "$b" ] \
+      || fail "the resend must reuse the surviving record"
+    [ "$(fm_pending_reply_get "$rec_b" delivered_epoch)" = 20060 ] \
+      || fail "the resend must restart the turn clock"
+    [ "$(fm_pending_reply_get "$rec_b" sibling_resolved_epoch)" = 20030 ] \
+      || fail "the resend must keep the sibling audit record"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=106500
+    out=$(fm_pending_reply_sweep "$state")
+    case "$out" in
+      *"$b"*) fail "a re-delivered record must not retire as a superseded sibling:"$'\n'"$out" ;;
+    esac
+    [ -f "$rec_b" ] || fail "the re-delivered record must stay in the active directory"
+    [ "$(fm_pending_reply_get "$rec_b" phase)" = awaiting_report ] \
+      || fail "the re-delivered record must stay awaiting its own answer"
+  ) || fail "sweep stale-sibling regression failed"
+  pass "the sweep never retires a re-delivered record as a superseded sibling"
+}
+
+test_semantic_busy_record_beats_rendered_tail() {
+  (
+    local home state corr gen hook_log
+    home=$(setup_parent semantic)
+    state="$home/state"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=10
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=40000
+    corr=$(fm_pending_reply_create "$home" "$state" lights "long ruling")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    fm_write_secondmate_meta "$state/lights.meta" "$home/lights" "firstmate:fm-lights" "" pi
+    gen=g1.2.3
+    printf '%s\n' "$gen" > "$state/lights.busy-gen"
+    printf 'v1 gen=%s seq=7 state=busy source=pi-ext event=agent-start ts=40000\n' "$gen" > "$state/lights.busy-state"
+    # The rendered tail looks idle for the whole grace window (a long Pi turn
+    # with no spinner on screen), which used to age into fallback-idle.
+    # shellcheck disable=SC2329
+    fm_backend_busy_state() { printf 'unknown'; }
+    # shellcheck disable=SC2329
+    fm_backend_capture() { printf '> '; }
+    [ "$(fm_pending_reply_semantic_observation "$state" lights pi)" = busy ] \
+      || fail "a valid trusted busy record must be observed as busy"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=40100
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "a mate whose semantic state is busy must not be reposted, got $(phase_of "$state" "$corr")"
+    [ ! -s "$hook_log" ] || fail "no repost while semantically busy"
+    # Untrusted source for the recorded harness and stale gen both fall back.
+    printf 'v1 gen=%s seq=8 state=busy source=claude-hook event=x ts=40100\n' "$gen" > "$state/lights.busy-state"
+    fm_pending_reply_semantic_observation "$state" lights pi >/dev/null && fail "untrusted source must fall back"
+    printf 'v1 gen=other seq=9 state=busy source=pi-ext event=x ts=40100\n' > "$state/lights.busy-state"
+    fm_pending_reply_semantic_observation "$state" lights pi >/dev/null && fail "stale gen must fall back"
+    # The settled turn then completes the request normally: one repost.
+    printf 'v1 gen=%s seq=10 state=idle source=pi-ext event=agent-settled ts=40200\n' "$gen" > "$state/lights.busy-state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=40200
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+      || fail "a semantic busy->idle with no answer earns the one repost, got $(phase_of "$state" "$corr")"
+  ) || fail "semantic-observation regression failed"
+  pass "a trusted semantic busy record beats the rendered-tail fallback"
+}
+
+test_semantic_idle_waits_for_the_grace_gate() {
+  (
+    local home state corr rec gen hook_log
+    home=$(setup_parent semantic-grace)
+    state="$home/state"
+    hook_log="$home/recovery.log"
+    : > "$hook_log"
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=120
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1000
+    corr=$(fm_pending_reply_create "$home" "$state" lights "long ruling")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    fm_write_secondmate_meta "$state/lights.meta" "$home/lights" "firstmate:fm-lights" "" pi
+    gen=g4.5.6
+    printf '%s\n' "$gen" > "$state/lights.busy-gen"
+    # shellcheck disable=SC2329
+    fm_backend_busy_state() { printf 'unknown'; }
+    # shellcheck disable=SC2329
+    fm_backend_capture() { printf '> '; }
+    # The mate is still idle from its previous turn when the steer lands.
+    printf 'v1 gen=%s seq=1 state=idle source=pi-ext event=agent-settled ts=1000\n' "$gen" > "$state/lights.busy-state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1010
+    fm_pending_reply_tick "$state"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "idle before grace must not complete the delivered turn"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "idle before grace must not repost, got $(phase_of "$state" "$corr")"
+    [ ! -s "$hook_log" ] || fail "idle before grace must not repost"
+    # The turn starts, and stays busy past the original grace window.
+    printf 'v1 gen=%s seq=2 state=busy source=pi-ext event=agent-start ts=1030\n' "$gen" > "$state/lights.busy-state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1030
+    fm_pending_reply_tick "$state"
+    [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] || fail "busy must be observed"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1120
+    fm_pending_reply_tick "$state"
+    [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "a busy mate must never be completed by an earlier idle"
+    [ ! -s "$hook_log" ] || fail "a busy mate must not be reposted mid-turn"
+    # The settled turn ends the request normally and earns its one repost.
+    printf 'v1 gen=%s seq=3 state=idle source=pi-ext event=agent-settled ts=1130\n' "$gen" > "$state/lights.busy-state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1130
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+      || fail "a completed busy turn earns the one repost, got $(phase_of "$state" "$corr")"
+    # An idle on the poll right after recovery_sent is not that turn ending.
+    printf 'v1 gen=%s seq=4 state=idle source=pi-ext event=agent-settled ts=1140\n' "$gen" > "$state/lights.busy-state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1140
+    fm_pending_reply_tick "$state"
+    [ -z "$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)" ] \
+      || fail "idle before grace must not complete the recovery turn"
+    [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+      || fail "idle before grace must not escalate, got $(phase_of "$state" "$corr")"
+    ! grep -q 'pending-reply-missed' "$state/lights.status" 2>/dev/null \
+      || fail "idle before grace must not write an escalation"
+    # After the grace window the same idle observation completes the turn.
+    printf 'v1 gen=%s seq=5 state=idle source=pi-ext event=agent-settled ts=1250\n' "$gen" > "$state/lights.busy-state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1250
+    fm_pending_reply_tick "$state"
+    [ -n "$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)" ] \
+      || fail "idle after grace must complete the recovery turn"
+  ) || fail "semantic grace-gate regression failed"
+  pass "a semantic idle waits for the grace gate before completing either turn"
+}
+
+test_retire_never_overwrites_a_race_resolution() {
+  (
+    local home state corr rec
+    home=$(setup_parent retire-race)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=50000
+    corr=$(fm_pending_reply_create "$home" "$state" lights "the duplicated steer")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_set "$rec" sibling_resolved_corr deadbeefdeadbeef
+    fm_pending_reply_set "$rec" sibling_resolved_epoch 40000
+    # A concurrent resolver wins between the sweep's check and its retire call.
+    printf 'done [corr=%s]: answered after all\n' "$corr" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$corr" || fail "the record should resolve"
+    if fm_pending_reply_retire "$state" "$corr" \
+      "superseded-by-sibling:deadbeefdeadbeef" superseded-by-sibling; then
+      fail "retire must not overwrite a record resolved under it"
+    fi
+    [ -f "$rec" ] || fail "the resolved record must stay in the active directory"
+    [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || fail "phase must stay resolved"
+    [ "$(fm_pending_reply_get "$rec" resolved_via)" = status ] \
+      || fail "the genuine resolution label must survive"
+    [ -z "$(fm_pending_reply_get "$rec" retired_reason)" ] || fail "must not be marked retired"
+  ) || fail "retire-race regression failed"
+  pass "retire never overwrites a resolution that raced it"
+}
+
+test_sweep_reclaims_crash_mid_retire() {
+  (
+    local home state corr rec retired dest other rec2 out
+    home=$(setup_parent crash-mid-retire)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=50000
+    corr=$(fm_pending_reply_create "$home" "$state" lights "half-retired steer")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_set "$rec" retired_reason expired-undelivered \
+      || fail "fixture should stamp the retirement reason"
+    fm_pending_reply_set "$rec" retired_epoch 49000 \
+      || fail "fixture should stamp the retirement epoch"
+    fm_pending_reply_set "$rec" phase retired \
+      || fail "fixture should stamp the terminal phase"
+    retired=$(fm_pending_reply_retired_dir "$state")
+    dest="$retired/$corr"
+    out=$(fm_pending_reply_sweep "$state")
+    [ ! -e "$rec" ] || fail "the sweep must finish a crashed retirement"
+    [ -f "$dest" ] || fail "the reclaimed record must land in .retired/"
+    [ "$out" = "$corr"$'\t'retired-reclaimed ] \
+      || fail "the sweep must account for the reclaimed record, got: $out"
+    [ "$(fm_pending_reply_get "$dest" retired_reason)" = expired-undelivered ] \
+      || fail "reclaim must not re-stamp the retirement reason"
+    [ "$(fm_pending_reply_get "$dest" retired_epoch)" = 49000 ] \
+      || fail "reclaim must not re-stamp the retirement epoch"
+    [ "$(fm_pending_reply_get "$dest" phase)" = retired ] \
+      || fail "reclaim must not re-stamp the terminal phase"
+    # An existing archive entry is never overwritten by a second leftover.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=60000
+    other=$(fm_pending_reply_create "$home" "$state" lights "another half-retired steer")
+    fm_pending_reply_mark_delivered "$state" "$other"
+    rec2=$(fm_pending_reply_path "$state" "$other")
+    fm_pending_reply_set "$rec2" retired_reason expired-undelivered \
+      || fail "second fixture should stamp the retirement reason"
+    fm_pending_reply_set "$rec2" retired_epoch 59000 \
+      || fail "second fixture should stamp the retirement epoch"
+    fm_pending_reply_set "$rec2" phase retired \
+      || fail "second fixture should stamp the terminal phase"
+    mkdir -p "$retired"
+    printf 'keep me\n' > "$retired/$other"
+    fm_pending_reply_sweep "$state" >/dev/null
+    [ -f "$rec2" ] || fail "an occupied archive path must leave the active record alone"
+    [ "$(cat "$retired/$other")" = 'keep me' ] \
+      || fail "an existing archive record must never be overwritten"
+  ) || fail "crash-mid-retire reclaim regression failed"
+  pass "the sweep reclaims a record left mid-retire without overwriting archives"
+}
+
+test_recovery_sent_sibling_still_escalates() {
+  (
+    local home state a b rec_b
+    IFS=$'\t' read -r home a b <<< "$(sibling_fixture recovery-sent-sibling)"
+    state="$home/state"
+    rec_b=$(fm_pending_reply_path "$state" "$b")
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20020
+    fm_pending_reply_set "$rec_b" recovery_attempted_epoch 20005 \
+      || fail "fixture should record the recovery attempt"
+    fm_pending_reply_set "$rec_b" recovery_sent_epoch 20010 \
+      || fail "fixture should record the recovery send"
+    fm_pending_reply_set "$rec_b" recovery_turn_seen_busy 1 \
+      || fail "fixture should record the recovery turn"
+    fm_pending_reply_set "$rec_b" recovery_turn_completed_epoch 20030 \
+      || fail "fixture should complete the recovery turn"
+    fm_pending_reply_set "$rec_b" phase recovery_sent \
+      || fail "fixture should put B in recovery_sent"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    printf 'done [corr=%s]: shipped\n' "$a" >> "$state/lights.status"
+    fm_pending_reply_try_resolve "$state" "$a" || fail "A should resolve"
+    [ "$(phase_of "$state" "$b")" = recovery_sent ] \
+      || fail "a recovery_sent sibling must stay on its own path, got $(phase_of "$state" "$b")"
+    [ "$(fm_pending_reply_get "$rec_b" recovery_turn_completed_epoch)" = 20030 ] \
+      || fail "a sibling answer must not erase the recovery turn completion"
+    [ -z "$(fm_pending_reply_get "$rec_b" sibling_resolved_corr)" ] \
+      || fail "a recovery_sent record is not sibling-reset"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20100
+    fm_pending_reply_maybe_escalate "$state" "$b" \
+      || fail "the unanswered recovery must still escalate"
+    [ "$(phase_of "$state" "$b")" = escalated ] \
+      || fail "B should escalate rather than stay recovery_sent forever"
+    grep -q 'pending-reply-missed' "$state/lights.status" \
+      || fail "the escalation must reach the parent channel"
+  ) || fail "recovery_sent sibling escalation regression failed"
+  pass "a recovery_sent sibling keeps its completed turn and still escalates"
+}
+
+test_nested_sibling_note_keeps_outer_lock() {
+  (
+    local home state a b rec_a lock_b pid
+    IFS=$'\t' read -r home a b <<< "$(sibling_fixture nested-lock)"
+    state="$home/state"
+    rec_a=$(fm_pending_reply_path "$state" "$a")
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20020
+    fm_pending_reply_set "$rec_a" recovery_attempted_epoch 20005 \
+      || fail "fixture should record the recovery attempt"
+    fm_pending_reply_set "$rec_a" recovery_sent_epoch 20010 \
+      || fail "fixture should record the recovery send"
+    fm_pending_reply_set "$rec_a" recovery_turn_seen_busy 1 \
+      || fail "fixture should record the recovery turn"
+    fm_pending_reply_set "$rec_a" recovery_turn_completed_epoch 20030 \
+      || fail "fixture should complete the recovery turn"
+    fm_pending_reply_set "$rec_a" phase recovery_sent \
+      || fail "fixture should put A in recovery_sent"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=20060
+    printf 'done [corr=%s]: shipped\n' "$b" >> "$state/lights.status"
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$ROOT/bin/fm-wake-lib.sh"
+    # shellcheck disable=SC2034
+    local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+    # shellcheck disable=SC2034
+    STATE=$state
+    lock_b="$state/.pending-reply-$b.lock"
+    fm_lock_acquire_wait "$lock_b" || fail "fixture should hold B's lock"
+    fm_pending_reply_maybe_escalate "$state" "$a" >/dev/null 2>&1 &
+    pid=$!
+    sleep 0.2
+    [ ! -e "$state/.pending-reply-$a.lock" ] \
+      || fail "A's lock must not be taken while another correlation lock is held"
+    fm_lock_release "$lock_b"
+    wait "$pid" || true
+    [ "$(phase_of "$state" "$b")" = resolved ] \
+      || fail "B should resolve once its lock is free"
+    [ ! -e "$state/.pending-reply-$a.lock" ] \
+      || fail "the outer frame must release A's lock after escalation"
+  ) || fail "nested sibling lock regression failed"
+  pass "a sibling note never takes a correlation lock under another correlation lock"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1533,6 +2767,7 @@ test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
+test_tick_ignores_pre_resolution_cached_busy
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
@@ -1544,5 +2779,28 @@ test_child_status_wrong_home_is_not_copied
 test_mechanical_helper_writes_parent_channel
 test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
+test_one_answer_resolves_exactly_one_record
+test_sibling_answer_order_within_one_tick_is_irrelevant
+test_sibling_still_gets_one_repost_after_a_fresh_turn
+test_sibling_marked_recovery_turn_completes_from_idle
+test_distinct_request_is_not_a_sibling
+test_legacy_record_without_body_is_uncomparable
+test_resolved_sibling_is_not_reopened_by_a_later_note
+test_pending_reply_set_never_resurrects_a_vanished_record
+test_resolved_corr_never_reposts
+test_age_sweep_retires_with_recorded_reason
+test_sweep_runs_from_tick_on_its_interval
+test_same_request_within_window_reuses_corr
+test_fm_send_resend_of_same_body_points_at_existing_corr
+test_dedup_resend_restarts_turn_clock
+test_dedup_skips_unresolved_delivery_attempt
+test_rearmed_sibling_record_completes_from_idle
+test_sweep_ignores_stale_sibling_evidence
+test_semantic_busy_record_beats_rendered_tail
+test_semantic_idle_waits_for_the_grace_gate
+test_retire_never_overwrites_a_race_resolution
+test_sweep_reclaims_crash_mid_retire
+test_recovery_sent_sibling_still_escalates
+test_nested_sibling_note_keeps_outer_lock
 
 printf 'ok - all pending-reply tests passed\n'
