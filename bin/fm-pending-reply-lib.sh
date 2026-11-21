@@ -310,6 +310,7 @@ fm_pending_reply_find_duplicate() {  # <state-dir> <task_id> <digest> <now>
     case "$created" in ''|*[!0-9]*) continue ;; esac
     [ "$created" -le "$now" ] && [ $((now - created)) -le "$window" ] || continue
     corr=$(fm_pending_reply_get "$rec" corr_id)
+    fm_pending_reply_delivery_attempt_unresolved "$state" "$corr" && continue
     fm_pending_reply_corr_reusable "$state" "$corr" "$task_id" || continue
     printf '%s' "$corr"
     return 0

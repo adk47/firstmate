@@ -2205,6 +2205,46 @@ test_dedup_resend_restarts_turn_clock() {
   pass "an identical resend restarts the turn clock and earns one later repost"
 }
 
+test_dedup_skips_unresolved_delivery_attempt() {
+  (
+    local home state dir fb log rec corr body new_corr
+    dir="$TMP_ROOT/dedup-unresolved"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); log="$dir/send.log"
+    home=$(setup_parent dedup-unresolved)
+    state="$home/state"
+    fm_write_secondmate_meta "$state/hibit.meta" "$home/sm" "sess:fm-hibit"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=3000
+    run_send "$fb" "$home" "$log" hibit "please report the ledger status" \
+      || fail "first send failed"
+    body=$(latest_record_body "$home" hibit) || fail "first record missing"
+    corr=$(fm_pending_reply_extract_corr "$body")
+    [ -n "$corr" ] || fail "first send must embed a corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    # Model an attempt whose submission was never confirmed: the delivery
+    # marker remains but the record has no delivered epoch.
+    fm_pending_reply_set "$rec" delivered_epoch "" || fail "fixture should clear delivery"
+    fm_pending_reply_write_delivery_confirmation "$state" "$corr" attempted 3000 \
+      || fail "fixture should write the attempted marker"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=3010
+    run_send "$fb" "$home" "$log" hibit "please report the ledger status" \
+      || fail "an identical resend must not be refused while an earlier attempt is unresolved"
+    body=$(latest_record_body "$home" hibit) || fail "resend body missing"
+    new_corr=$(fm_pending_reply_extract_corr "$body")
+    [ -n "$new_corr" ] || fail "resend must embed a corr"
+    [ "$new_corr" != "$corr" ] \
+      || fail "an unresolved delivery attempt must not be reused as the dedup target"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "the in-doubt record must stay tracked"
+    [ -z "$(fm_pending_reply_get "$rec" delivered_epoch)" ] \
+      || fail "the in-doubt record must stay undelivered"
+    [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$new_corr")" phase)" = awaiting_report ] \
+      || fail "the resent request must be tracked under its own record"
+  ) || fail "dedup unresolved-attempt regression failed"
+  pass "dedup never reuses a record with an unresolved delivery attempt"
+}
+
 test_rearmed_sibling_record_completes_from_idle() {
   (
     local home state dir fb log body a b rec_b hook_log lines
@@ -2669,6 +2709,7 @@ test_sweep_runs_from_tick_on_its_interval
 test_same_request_within_window_reuses_corr
 test_fm_send_resend_of_same_body_points_at_existing_corr
 test_dedup_resend_restarts_turn_clock
+test_dedup_skips_unresolved_delivery_attempt
 test_rearmed_sibling_record_completes_from_idle
 test_sweep_ignores_stale_sibling_evidence
 test_semantic_busy_record_beats_rendered_tail
