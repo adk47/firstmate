@@ -138,16 +138,19 @@
 # for an already-open expectation so a second record is not created. A plain
 # resend of the same body to the same secondmate inside the library's
 # duplicate window (FM_PENDING_REPLY_DEDUP_WINDOW_SECS) also reuses the open
-# record's corr instead of minting a sibling (fm_pending_reply_create exit 3);
-# when that reuse is confirmed delivered, the record's current turn is re-armed
-# (fm_pending_reply_rearm_turn) so the earlier delivery's completed turn cannot
-# draw a recovery repost over the request that was just re-delivered. Direct
-# unmarked captain input never creates one. A marked secondmate instruction
-# sent with --fire-and-forget <16-hex-delivery-id> uses the same inbox transport
-# without creating a reply expectation; its delivery id makes uncertain retries
-# idempotent while allowing a later identical instruction to be distinct. A
-# crewmate or scout target has no reply expectation to suppress, so the flag
-# there changes only the record's delivery mode and the same retry idempotence.
+# record's corr instead of minting a sibling (fm_pending_reply_create exit 3)
+# when that record's full request body compares equal and its delivery attempt
+# is not unresolved; a legacy summary-only record has no comparable body and is
+# never reused. When that reuse is confirmed delivered, the record's current
+# turn is re-armed (fm_pending_reply_rearm_turn) so the earlier delivery's
+# completed turn cannot draw a recovery repost over the request that was just
+# re-delivered. Direct unmarked captain input never creates one. A marked
+# secondmate instruction sent with --fire-and-forget <16-hex-delivery-id> uses
+# the same inbox transport without creating a reply expectation; its delivery id
+# makes uncertain retries idempotent while allowing a later identical
+# instruction to be distinct. A crewmate or scout target has no reply
+# expectation to suppress, so the flag there changes only the record's delivery
+# mode and the same retry idempotence.
 #
 # Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) that writes the message as a

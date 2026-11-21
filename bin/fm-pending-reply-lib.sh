@@ -53,15 +53,16 @@
 #     out.
 #   - No duplicate record for one request: a steer creator that passes the
 #     `dedup` flag to fm_pending_reply_create gets the existing open record's
-#     corr back (exit 3) when the same task already has an open record with
-#     the same request body created within FM_PENDING_REPLY_DEDUP_WINDOW_SECS,
-#     so a resend points at that corr instead of minting a sibling. fm-send is
-#     that creator; programmatic creators that need one delivery proof per
-#     operation (backlog handoff, secondmate restart) omit the flag. Once a
-#     reused resend is confirmed delivered, fm-send re-arms that record's
-#     current turn (fm_pending_reply_rearm_turn), so the fresh delivery is not
-#     judged by the earlier delivery's completed turn and the tick cannot repost
-#     over a request that was just re-delivered.
+#     corr back (exit 3) when the same task already has an open comparable
+#     record with the same request body created within
+#     FM_PENDING_REPLY_DEDUP_WINDOW_SECS and that record's delivery attempt is
+#     not unresolved, so a resend points at that corr instead of minting a
+#     sibling. fm-send is that creator; programmatic creators that need one
+#     delivery proof per operation (backlog handoff, secondmate restart) omit
+#     the flag. Once a reused resend is confirmed delivered, fm-send re-arms
+#     that record's current turn (fm_pending_reply_rearm_turn), so the fresh
+#     delivery is not judged by the earlier delivery's completed turn and the
+#     tick cannot repost over a request that was just re-delivered.
 #   - Semantic busy state wins over the rendered tail: when the mate's
 #     state/<task_id>.busy-state (bin/fm-busy-lib.sh) is valid and its source is
 #     trusted for the recorded harness, that record is the observation.
@@ -172,8 +173,10 @@
 #   FM_PENDING_REPLY_SEND_HOOK    optional command template for recovery delivery
 #                                 (tests); receives task_id and full message as args
 #   FM_PENDING_REPLY_NOW          optional fixed epoch for deterministic tests
-#   FM_PENDING_REPLY_DEDUP_WINDOW_SECS      default 300; same-body same-task
-#                                           records inside it reuse one corr
+#   FM_PENDING_REPLY_DEDUP_WINDOW_SECS      default 300; comparable same-body
+#                                           same-task records inside it reuse
+#                                           one corr when no delivery attempt
+#                                           is unresolved
 #   FM_PENDING_REPLY_RESOLVED_RETAIN_SECS   default 3600; see the age sweep
 #   FM_PENDING_REPLY_RETIRE_HORIZON_SECS    default 86400; see the age sweep
 #   FM_PENDING_REPLY_SWEEP_INTERVAL_SECS    default 600; 0 sweeps every tick
@@ -445,11 +448,11 @@ fm_pending_reply_embed_corr() {  # <message> <corr_id> <result-var>
 # Create a durable pending-reply expectation. Prints corr_id on success.
 # Does not deliver anything. Fails if parent paths cannot be prepared.
 # With the optional `dedup` flag, exit 3 (with the corr printed) means the
-# same task already holds an open record for this exact request body inside
-# the duplicate window: the caller must deliver under that corr rather than
-# treat the record as newly created. Without the flag every call mints its own
-# expectation, which is what a creator that needs one delivery proof per
-# operation relies on.
+# same task already holds an open comparable record for this exact request body
+# inside the duplicate window whose delivery attempt is not unresolved: the
+# caller must deliver under that corr rather than treat the record as newly
+# created. Without the flag every call mints its own expectation, which is what
+# a creator that needs one delivery proof per operation relies on.
 fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text> [dedup]
   local parent_home=$1 state=$2 task_id=$3 request_text=$4 dedup=${5:-}
   local dir rec corr now summary status_path tmp digest existing
