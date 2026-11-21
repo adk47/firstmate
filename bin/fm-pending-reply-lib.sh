@@ -1863,9 +1863,9 @@ fm_pending_reply_tick() {  # <state-dir>
         observation=
         found=0
         for ((i = 0; i < ${#observation_tasks[@]}; i++)); do
-          observation_task=${observation_tasks[$i]}
+          observation_task=${observation_tasks[i]}
           [ "$observation_task" = "$task_id" ] || continue
-          observation=${observation_values[$i]}
+          observation=${observation_values[i]}
           found=1
           break
         done
@@ -1884,7 +1884,7 @@ fm_pending_reply_tick() {  # <state-dir>
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
           fi
           if [ "$i" -lt "${#observation_tasks[@]}" ]; then
-            observation_values[$i]=$observation
+            observation_values[i]=$observation
           else
             observation_tasks+=("$task_id")
             observation_values+=("$observation")
