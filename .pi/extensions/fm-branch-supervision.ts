@@ -125,6 +125,12 @@ const afkFlag = join(state, ".afk");
 const sessionsDir = join(state, "branch-session");
 const sessionPointer = join(state, ".branch-session");
 const mirrorCursorFile = join(state, ".branch-mirror-cursor");
+// The branch's own durable liveness record and its latch reason, read by the
+// watcher's silence report (fm-primary-pi-watch.ts). Both are diagnostics a
+// silent branch cannot speak: once every wake falls back to main, nothing in
+// this process is ever asked again whether it is alive.
+const branchLiveFile = join(state, ".branch-live");
+const branchLatchFile = join(state, ".branch-latch");
 const promptScript = join(fmRoot, "bin", "fm-branch-prompt.sh");
 const outcomeScript = join(fmRoot, "bin", "fm-branch-outcome.sh");
 const leaseScript = join(fmRoot, "bin", "fm-lease.sh");
@@ -667,6 +673,63 @@ export default function (pi: ExtensionAPI) {
     else pi.sendMessage(message, {});
   }
 
+  // A latch is durable, not conversational. An unrecovered branch declines
+  // every later offer, the watcher delivers each of those wakes to main through
+  // a fallback that is silent by design, and main's model never learns the
+  // branch stopped - so this record is the only evidence anything can read
+  // afterwards, and the watcher's silence report names it.
+  function recordBranchLatch(reason: string): void {
+    branchBroken = reason;
+    if (lockOwnershipSync() !== "owned") return;
+    const normalized = reason.replace(/\s+/g, " ");
+    try {
+      const [at, ...existing] = readFileSync(branchLatchFile, "utf8").trim().split("\t");
+      if (/^[0-9]+$/.test(at) && existing.join("\t") === normalized) return;
+    } catch {
+      // No existing record to preserve.
+    }
+    try {
+      writeFileSync(branchLatchFile, `${Math.floor(Date.now() / 1000)}\t${normalized}\n`);
+    } catch {
+      // Diagnostic only: the latch itself is in-memory state.
+    }
+  }
+
+  function clearBranchLatch(): void {
+    branchBroken = "";
+    if (lockOwnershipSync() !== "owned") return;
+    try {
+      rmSync(branchLatchFile, { force: true });
+    } catch {
+      // Diagnostic only.
+    }
+  }
+
+  // The branch's last sign of life in one record, written when a main session
+  // arms this generation and on every durable report. The watcher's silence
+  // report measures from it, so it is never written speculatively.
+  function recordBranchLive(): void {
+    if (lockOwnershipSync() !== "owned") return;
+    try {
+      writeFileSync(branchLiveFile, `${Math.floor(Date.now() / 1000)}\n`);
+    } catch {
+      // Diagnostic only.
+    }
+  }
+
+  // The dispatch gate re-offers a wake only when a probe is due, so a latch
+  // with no schedule is a branch that can never be offered another wake for the
+  // life of this main session. Reusing the provider ladder's shape keeps one
+  // gate and one probe-finish path for every latch this generation can act on.
+  function ensureLatchProbeSchedule(): void {
+    if (providerRecovery) return;
+    providerRecovery = {
+      cooldownMs: PROVIDER_REPROBE_BASE_MS,
+      retryNotBefore: Date.now() + PROVIDER_REPROBE_BASE_MS,
+      probeInFlight: false,
+    };
+  }
+
   function recordSettledProviderError(detail: string): void {
     consecutiveProviderErrors += 1;
     if (consecutiveProviderErrors < PROVIDER_ERROR_LATCH_THRESHOLD && !providerRecovery) return;
@@ -675,7 +738,7 @@ export default function (pi: ExtensionAPI) {
     const cooldownMs = firstLatch
       ? PROVIDER_REPROBE_BASE_MS
       : Math.min(PROVIDER_REPROBE_MAX_MS, previousCooldownMs * 2);
-    branchBroken = detail;
+    recordBranchLatch(detail);
     providerRecovery = {
       cooldownMs,
       retryNotBefore: Date.now() + cooldownMs,
@@ -689,8 +752,9 @@ export default function (pi: ExtensionAPI) {
   function recordDurableBranchReport(reportGeneration: number, reportSelectionRevision: number): void {
     if (reportGeneration !== generation || reportSelectionRevision !== branchSelectionRevision) return;
     consecutiveProviderErrors = 0;
-    if (!providerRecovery) return;
-    branchBroken = "";
+    recordBranchLive();
+    if (!branchBroken && !providerRecovery) return;
+    clearBranchLatch();
     providerRecovery = null;
     deliverBranchHealthNote("Supervision branch recovered after a successful cooldown probe.");
   }
@@ -832,6 +896,8 @@ export default function (pi: ExtensionAPI) {
         return false;
       }
       markLoaded();
+      recordBranchLive();
+      clearBranchLatch();
       activatedGeneration = expectedGeneration;
     }
     return generationOwnsLock(expectedGeneration);
@@ -1280,7 +1346,8 @@ ${context.command}
       } catch (error) {
         if (buildRevision !== branchSelectionRevision) continue;
         if (expectedGeneration === generation && !shuttingDown) {
-          branchBroken = error instanceof Error ? error.message : String(error);
+          recordBranchLatch(error instanceof Error ? error.message : String(error));
+          ensureLatchProbeSchedule();
         }
         throw error;
       }
@@ -1322,7 +1389,8 @@ ${context.command}
         }
         if (!(await enqueueDelivery(() => reconcileUnreadOutcomes(acceptedGeneration)))) {
           if (acceptedGeneration === generation) {
-            branchBroken = "could not reconcile unread supervision outcomes into main";
+            recordBranchLatch("could not reconcile unread supervision outcomes into main");
+            ensureLatchProbeSchedule();
           }
           throw new Error("could not reconcile unread supervision outcomes into main");
         }
@@ -1404,7 +1472,7 @@ ${context.command}
   // the next wake reopens the same conversation under the new selection.
   // Clearing the broken latch is what lets a corrected pin recover in place.
   function releaseBranchForSelectionChange(): void {
-    branchBroken = "";
+    clearBranchLatch();
     consecutiveProviderErrors = 0;
     providerRecovery = null;
     const stale = branch;
@@ -1461,7 +1529,17 @@ ${context.command}
     // gets neither branch routing nor branch-owned state/lease cleanup side
     // effects.
     if (!offerEligible(offer)) return;
-    if (!generationOwnsLockSync(generation)) return; // cold start pre-lock, secondary session, or shutdown
+    if (!generationOwnsLockSync(generation)) {
+      // A branch that still owns the fleet lock but no longer owns this
+      // session's generation is dead until a new session starts, and declining
+      // silently is exactly how it stayed dead for a day: record the reason so
+      // the watcher can report it and a new session start can recover it. A
+      // secondary session or a cold start owns no lock and stays silent.
+      if (lockOwnershipSync() === "owned") {
+        recordBranchLatch("supervision session was replaced or lost lock ownership");
+      }
+      return;
+    }
     if (afkActive()) return; // the away daemon owns supervision while afk
     const recoveryProbe = Boolean(
       branchBroken &&
@@ -1547,7 +1625,8 @@ ${context.command}
     if (turnGeneration !== generation) return;
     if (reconciled === "not-owner") return;
     if (reconciled === "failed") {
-      branchBroken = "could not reconcile unread supervision outcomes into main";
+      recordBranchLatch("could not reconcile unread supervision outcomes into main");
+      ensureLatchProbeSchedule();
       return;
     }
     if (!collectCurrentMainDialog()) return;
@@ -1575,10 +1654,11 @@ ${context.command}
     // await, so anything already queued for the previous generation is
     // cancelled by its own recheck rather than racing this one.
     shuttingDown = false;
-    branchBroken = "";
+    clearBranchLatch();
     consecutiveProviderErrors = 0;
     providerRecovery = null;
     generation += 1;
+    recordBranchLive();
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
     mirrorCollection.stagedCaptain = null;
@@ -1589,7 +1669,8 @@ ${context.command}
         (await actingAsOwner(startedGeneration)) && !(await reconcileUnreadOutcomes(startedGeneration)),
     );
     if (failed && startedGeneration === generation) {
-      branchBroken = "could not reconcile unread supervision outcomes into main";
+      recordBranchLatch("could not reconcile unread supervision outcomes into main");
+      ensureLatchProbeSchedule();
     }
   });
 
